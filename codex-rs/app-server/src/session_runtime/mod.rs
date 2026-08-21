@@ -139,14 +139,27 @@ impl SessionRuntimeEngine {
         }
         if changed {
             state.sequence = state.sequence.saturating_add(1);
+            state.pages.clear();
         }
         let sequence = state.sequence;
+        if params.thread_id.is_none()
+            && let Some(response) = state.pages.first_page(
+                &self.instance_epoch,
+                sequence,
+                limit,
+                capabilities.clone(),
+            )?
+        {
+            return Ok(response);
+        }
         let cached = CachedSnapshot::new(sequence, snapshots);
         let response = cached.first_page(&self.instance_epoch, limit, capabilities)?;
-        if response.next_cursor.is_some() {
-            state.pages.insert(cached);
-        } else {
-            state.pages.clear();
+        if params.thread_id.is_none() {
+            if response.next_cursor.is_some() {
+                state.pages.insert(cached);
+            } else {
+                state.pages.clear();
+            }
         }
         Ok(response)
     }

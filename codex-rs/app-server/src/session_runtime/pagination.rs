@@ -41,6 +41,25 @@ impl SnapshotCache {
         self.snapshot = None;
     }
 
+    pub(super) fn first_page(
+        &self,
+        instance_epoch: &str,
+        current_sequence: u64,
+        limit: usize,
+        capabilities: Vec<SessionRuntimeCapability>,
+    ) -> Result<Option<SessionRuntimeListResponse>, JSONRPCErrorError> {
+        let Some(snapshot) = self
+            .snapshot
+            .as_ref()
+            .filter(|snapshot| snapshot.sequence == current_sequence)
+        else {
+            return Ok(None);
+        };
+        snapshot
+            .first_page(instance_epoch, limit, capabilities)
+            .map(Some)
+    }
+
     pub(super) fn page(
         &self,
         encoded_cursor: &str,

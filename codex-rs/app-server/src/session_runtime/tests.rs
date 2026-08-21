@@ -121,6 +121,40 @@ fn pagination_cursor_is_stable_and_restarts_after_sequence_change() {
 }
 
 #[test]
+fn cursorless_clients_reuse_the_same_snapshot_at_the_same_sequence() {
+    let snapshots = (0..3)
+        .map(|_index| snapshot(ThreadId::new()))
+        .collect::<Vec<_>>();
+    let cached = CachedSnapshot::new(7, snapshots);
+    let mut cache = SnapshotCache::default();
+    cache.insert(cached);
+
+    let first = cache
+        .first_page("epoch-a", 7, 1, Vec::new())
+        .expect("first client page")
+        .expect("cached snapshot");
+    let second = cache
+        .first_page("epoch-a", 7, 2, Vec::new())
+        .expect("second client page")
+        .expect("cached snapshot");
+    let first_cursor = first.next_cursor.expect("first client cursor");
+    let second_cursor = second.next_cursor.expect("second client cursor");
+
+    assert_eq!(first.data.len(), 1);
+    assert_eq!(second.data.len(), 2);
+    assert!(
+        cache
+            .page(&first_cursor, "epoch-a", 7, 1, Vec::new())
+            .is_ok()
+    );
+    assert!(
+        cache
+            .page(&second_cursor, "epoch-a", 7, 1, Vec::new())
+            .is_ok()
+    );
+}
+
+#[test]
 fn material_changes_advance_only_the_thread_revision() {
     let thread_id = ThreadId::default();
     let mut state = EngineState::default();
