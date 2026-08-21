@@ -84,6 +84,7 @@ struct ThreadRevertRuntimeSnapshot {
     config: Config,
     settings: CodexThreadSettingsOverrides,
     client_mcp_extensions: ClientMcpExtensions,
+    execution_account: Arc<codex_core::ExecutionAccountContext>,
 }
 
 fn collect_resume_override_mismatches(
@@ -2021,6 +2022,7 @@ impl ThreadRequestProcessor {
             config: thread.config().await.as_ref().clone(),
             settings: thread.restorable_thread_settings().await,
             client_mcp_extensions: thread.client_mcp_extensions(),
+            execution_account: thread.execution_account(),
         };
 
         // Subscribe before shutdown so a pending idle unload either rejects this request or can
@@ -2124,6 +2126,7 @@ impl ThreadRequestProcessor {
             config,
             settings,
             client_mcp_extensions,
+            execution_account,
         } = runtime_snapshot;
         let thread_id_string = thread_id.to_string();
         let stored_thread = self
@@ -2144,10 +2147,10 @@ impl ThreadRequestProcessor {
             ..
         } = self
             .thread_manager
-            .resume_thread_with_history(
+            .resume_thread_with_history_and_execution_account(
                 config,
                 thread_history,
-                self.auth_manager.clone(),
+                execution_account,
                 self.request_trace_context(request_id).await,
                 client_mcp_extensions,
             )

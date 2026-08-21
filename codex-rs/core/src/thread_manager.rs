@@ -7,6 +7,9 @@ use crate::config::ThreadStoreConfig;
 use crate::current_time::TimeProvider;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::environment_selection::default_thread_environment_selections;
+use crate::execution_account::DefaultExecutionAccountResolver;
+use crate::execution_account::ExecutionAccountContext;
+use crate::execution_account::ExecutionAccountResolver;
 use crate::mcp::McpManager;
 use crate::rollout::truncation;
 use crate::session::ForkPersistence;
@@ -55,6 +58,7 @@ use codex_protocol::mcp::OPENAI_STANDARD_FORM_INPUT_EXTENSION_ID;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::ExecutionAccountBinding;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionConfiguredEvent;
@@ -260,6 +264,7 @@ impl StartThreadOptions {
 struct ThreadSpawnRequest {
     options: StartThreadOptions,
     auth_manager: Arc<AuthManager>,
+    execution_account: Option<Arc<ExecutionAccountContext>>,
     agent_control: AgentControl,
     parent_thread_id: Option<ThreadId>,
     forked_from_thread_id: Option<ThreadId>,
@@ -278,6 +283,7 @@ impl ThreadSpawnRequest {
         Self {
             options,
             auth_manager,
+            execution_account: None,
             agent_control,
             parent_thread_id: None,
             forked_from_thread_id: None,
@@ -339,6 +345,7 @@ pub(crate) struct ThreadManagerState {
     thread_id_generator: ThreadIdGenerator,
     auth_manager: Arc<AuthManager>,
     models_manager: SharedModelsManager,
+    execution_account_resolver: Arc<dyn ExecutionAccountResolver>,
     environment_manager: Arc<EnvironmentManager>,
     starting_mcp_runtimes: std::sync::Mutex<Vec<std::sync::Weak<AtomicBool>>>,
     skills_service: Arc<HostSkillsService>,
@@ -460,12 +467,17 @@ impl ThreadManager {
             } else {
                 Arc::new(DisabledCodeModeSessionProvider)
             };
+        let execution_account_resolver = Arc::new(DefaultExecutionAccountResolver::new(
+            Arc::clone(&auth_manager),
+            Arc::clone(&models_manager),
+        ));
         Self {
             state: Arc::new(ThreadManagerState {
                 threads: Arc::new(RwLock::new(HashMap::new())),
                 thread_created_tx,
                 thread_id_generator: default_thread_id_generator(),
                 models_manager,
+                execution_account_resolver,
                 environment_manager,
                 starting_mcp_runtimes: std::sync::Mutex::new(Vec::new()),
                 skills_service,
@@ -498,6 +510,17 @@ impl ThreadManager {
             unreachable!("thread ID generator must be set before thread manager is shared");
         };
         state.thread_id_generator = Arc::new(generator);
+        self
+    }
+
+    pub fn with_execution_account_resolver(
+        mut self,
+        resolver: Arc<dyn ExecutionAccountResolver>,
+    ) -> Self {
+        let Some(state) = Arc::get_mut(&mut self.state) else {
+            unreachable!("execution account resolver must be set before thread manager is shared");
+        };
+        state.execution_account_resolver = resolver;
         self
     }
 
@@ -606,13 +629,19 @@ impl ThreadManager {
             state_db.clone(),
         ));
         let agent_graph_store = local_agent_graph_store_from_state_db(state_db.as_ref());
+        let models_manager = create_model_provider(provider, Some(auth_manager.clone()))
+            .models_manager(codex_home, /*config_model_catalog*/ None);
+        let execution_account_resolver = Arc::new(DefaultExecutionAccountResolver::new(
+            Arc::clone(&auth_manager),
+            Arc::clone(&models_manager),
+        ));
         Self {
             state: Arc::new(ThreadManagerState {
                 threads: Arc::new(RwLock::new(HashMap::new())),
                 thread_created_tx,
                 thread_id_generator: default_thread_id_generator(),
-                models_manager: create_model_provider(provider, Some(auth_manager.clone()))
-                    .models_manager(codex_home, /*config_model_catalog*/ None),
+                models_manager,
+                execution_account_resolver,
                 environment_manager,
                 starting_mcp_runtimes: std::sync::Mutex::new(Vec::new()),
                 skills_service,
@@ -754,6 +783,33 @@ impl ThreadManager {
 
     pub fn get_models_manager(&self) -> SharedModelsManager {
         self.state.models_manager.clone()
+    }
+
+    pub async fn execution_account_for_thread(
+        &self,
+        thread_id: ThreadId,
+    ) -> CodexResult<Arc<ExecutionAccountContext>> {
+        if let Ok(thread) = self.get_thread(thread_id).await {
+            return Ok(thread.session.execution_account());
+        }
+        let binding = match self
+            .state
+            .thread_store
+            .execution_account_binding(thread_id)
+            .await
+        {
+            Ok(Some(binding)) => binding,
+            Ok(None) | Err(ThreadStoreError::Unsupported { .. }) => ExecutionAccountBinding {
+                slot_id: "default".to_string(),
+                generation: 1,
+            },
+            Err(err) => {
+                return Err(CodexErr::Fatal(format!(
+                    "failed to read execution account for thread {thread_id}: {err}"
+                )));
+            }
+        };
+        self.state.execution_account_resolver.resolve(binding).await
     }
 
     pub async fn list_models(
@@ -906,6 +962,21 @@ impl ThreadManager {
         Box::pin(self.start_thread_inner(options, /*forked_from_thread_id*/ None)).await
     }
 
+    pub async fn start_thread_with_execution_account(
+        &self,
+        options: StartThreadOptions,
+        execution_account: Arc<ExecutionAccountContext>,
+    ) -> CodexResult<NewThread> {
+        let agent_control = self.agent_control_for_config(&options.config);
+        let mut request = ThreadSpawnRequest::new(
+            options,
+            Arc::clone(&execution_account.auth_manager),
+            agent_control,
+        );
+        request.execution_account = Some(execution_account);
+        Box::pin(self.state.spawn_thread(request)).await
+    }
+
     /// Allocates a thread ID before startup so a caller can associate host-owned state with it.
     pub fn reserve_thread_id(&self) -> ThreadId {
         self.state.thread_id_generator.as_ref()()
@@ -1025,6 +1096,44 @@ impl ThreadManager {
             agent_control,
         )))
         .await
+    }
+
+    #[instrument(level = "trace", skip_all)]
+    pub async fn resume_thread_with_history_and_execution_account(
+        &self,
+        config: Config,
+        initial_history: InitialHistory,
+        execution_account: Arc<ExecutionAccountContext>,
+        parent_trace: Option<W3cTraceContext>,
+        client_mcp_extensions: ClientMcpExtensions,
+    ) -> CodexResult<NewThread> {
+        let agent_control = self.agent_control_for_config(&config);
+        let (session_source, thread_source) = initial_history
+            .get_resumed_session_sources()
+            .unwrap_or_else(|| (self.state.session_source.clone(), None));
+        if let InitialHistory::Resumed(resumed) = &initial_history
+            && initial_history.get_multi_agent_version() == Some(MultiAgentVersion::V2)
+            && !session_source.is_non_root_agent()
+        {
+            agent_control
+                .restore_v2_agent_metadata(&config, resumed.conversation_id)
+                .await;
+        }
+        let options = StartThreadOptions {
+            initial_history,
+            session_source: Some(session_source),
+            thread_source,
+            parent_trace,
+            client_mcp_extensions,
+            ..StartThreadOptions::new(config)
+        };
+        let mut request = ThreadSpawnRequest::new(
+            options,
+            Arc::clone(&execution_account.auth_manager),
+            agent_control,
+        );
+        request.execution_account = Some(execution_account);
+        Box::pin(self.state.spawn_thread(request)).await
     }
 
     pub(crate) async fn start_thread_with_user_shell_override_for_tests(
@@ -1764,6 +1873,7 @@ impl ThreadManagerState {
         let ThreadSpawnRequest {
             options,
             auth_manager,
+            execution_account,
             agent_control,
             parent_thread_id,
             forked_from_thread_id,
@@ -1822,6 +1932,69 @@ impl ThreadManagerState {
                 threads.remove(&resumed.conversation_id);
             }
         }
+        let execution_account = if let Some(execution_account) = execution_account {
+            execution_account
+        } else if let Some(source_thread_id) = forked_from_thread_id.or(parent_thread_id) {
+            if let Some(source) = self.threads.read().await.get(&source_thread_id).cloned() {
+                source.session.execution_account()
+            } else {
+                match self
+                    .thread_store
+                    .execution_account_binding(source_thread_id)
+                    .await
+                {
+                    Ok(Some(binding)) => self.execution_account_resolver.resolve(binding).await?,
+                    Ok(None) | Err(ThreadStoreError::Unsupported { .. }) => {
+                        Arc::new(ExecutionAccountContext {
+                            binding: ExecutionAccountBinding {
+                                slot_id: "default".to_string(),
+                                generation: 1,
+                            },
+                            auth_manager: Arc::clone(&auth_manager),
+                            models_manager: Arc::clone(&self.models_manager),
+                        })
+                    }
+                    Err(err) => {
+                        return Err(CodexErr::Fatal(format!(
+                            "failed to read execution account for source thread {source_thread_id}: {err}"
+                        )));
+                    }
+                }
+            }
+        } else if let InitialHistory::Resumed(resumed) = &initial_history {
+            match self
+                .thread_store
+                .execution_account_binding(resumed.conversation_id)
+                .await
+            {
+                Ok(Some(binding)) => self.execution_account_resolver.resolve(binding).await?,
+                Ok(None) | Err(ThreadStoreError::Unsupported { .. }) => {
+                    Arc::new(ExecutionAccountContext {
+                        binding: ExecutionAccountBinding {
+                            slot_id: "default".to_string(),
+                            generation: 1,
+                        },
+                        auth_manager: Arc::clone(&auth_manager),
+                        models_manager: Arc::clone(&self.models_manager),
+                    })
+                }
+                Err(err) => {
+                    return Err(CodexErr::Fatal(format!(
+                        "failed to read execution account for thread {}: {err}",
+                        resumed.conversation_id
+                    )));
+                }
+            }
+        } else {
+            Arc::new(ExecutionAccountContext {
+                binding: ExecutionAccountBinding {
+                    slot_id: "default".to_string(),
+                    generation: 1,
+                },
+                auth_manager: Arc::clone(&auth_manager),
+                models_manager: Arc::clone(&self.models_manager),
+            })
+        };
         let user_instructions = self
             .user_instructions_for_spawn(&session_source, parent_thread_id, forked_from_thread_id)
             .await;
@@ -1860,8 +2033,9 @@ impl ThreadManagerState {
             allow_provider_model_fallback,
             user_instructions,
             installation_id: self.installation_id.clone(),
-            auth_manager,
-            models_manager: Arc::clone(&self.models_manager),
+            auth_manager: Arc::clone(&execution_account.auth_manager),
+            models_manager: Arc::clone(&execution_account.models_manager),
+            execution_account,
             environment_manager: Arc::clone(&self.environment_manager),
             skills_service: Arc::clone(&self.skills_service),
             plugins_manager: Arc::clone(&self.plugins_manager),

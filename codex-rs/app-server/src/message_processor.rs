@@ -361,6 +361,10 @@ impl MessageProcessor {
                     thread_state_manager.clone(),
                 )),
             );
+            let manager =
+                manager
+                    .with_execution_account_resolver(Arc::clone(&account_registry)
+                        as Arc<dyn codex_core::ExecutionAccountResolver>);
             match code_mode_session_provider {
                 Some(provider) => manager.with_code_mode_session_provider(provider),
                 None => manager,

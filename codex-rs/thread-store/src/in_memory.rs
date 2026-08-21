@@ -13,6 +13,7 @@ use chrono::Utc;
 use codex_protocol::ThreadId;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::ExecutionAccountBinding;
 use codex_protocol::protocol::SessionContextWindow;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
@@ -65,6 +66,49 @@ mod tests {
     use crate::ThreadSortKey;
     use codex_protocol::models::BaseInstructions;
     use codex_protocol::protocol::SessionSource;
+
+    #[tokio::test]
+    async fn execution_account_binding_uses_exact_cas_semantics() {
+        let store = InMemoryThreadStore::default();
+        let thread_id = ThreadId::default();
+        let initial = ExecutionAccountBinding {
+            slot_id: "default".to_string(),
+            generation: 1,
+        };
+
+        assert_eq!(
+            store
+                .initialize_execution_account_binding(thread_id, initial.clone())
+                .await
+                .expect("initialize binding"),
+            initial
+        );
+        assert_eq!(
+            store
+                .compare_and_swap_execution_account_binding(
+                    thread_id,
+                    initial.clone(),
+                    "secondary".to_string(),
+                )
+                .await
+                .expect("compare and swap"),
+            Some(ExecutionAccountBinding {
+                slot_id: "secondary".to_string(),
+                generation: 2,
+            })
+        );
+        assert_eq!(
+            store
+                .compare_and_swap_execution_account_binding(
+                    thread_id,
+                    initial,
+                    "stale".to_string(),
+                )
+                .await
+                .expect("stale compare and swap"),
+            None
+        );
+    }
 
     #[tokio::test]
     async fn default_turn_pagination_methods_return_unsupported() {
@@ -510,6 +554,8 @@ struct InMemoryThreadStoreState {
     section_entered_at: HashMap<ThreadId, DateTime<Utc>>,
     names: HashMap<ThreadId, Option<String>>,
     rollout_paths: HashMap<PathBuf, ThreadId>,
+    execution_accounts: HashMap<ThreadId, ExecutionAccountBinding>,
+    turn_execution_accounts: HashMap<(ThreadId, String), ExecutionAccountBinding>,
 }
 
 impl InMemoryThreadStore {
@@ -611,7 +657,25 @@ impl InMemoryThreadStore {
             .histories
             .entry(params.thread_id)
             .or_default()
-            .extend(persisted_items);
+            .extend(persisted_items.clone());
+        for item in persisted_items {
+            if let RolloutItem::TurnContext(context) = item
+                && let (Some(turn_id), Some(binding)) = (context.turn_id, context.execution_account)
+            {
+                let key = (params.thread_id, turn_id);
+                match state.turn_execution_accounts.get(&key) {
+                    Some(existing) if existing != &binding => {
+                        return Err(ThreadStoreError::Conflict {
+                            message: "turn execution account provenance is immutable".to_string(),
+                        });
+                    }
+                    Some(_) => {}
+                    None => {
+                        state.turn_execution_accounts.insert(key, binding);
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -830,6 +894,10 @@ impl InMemoryThreadStore {
         state.names.remove(&params.thread_id);
         state.metadata_updates.remove(&params.thread_id);
         state.sections.remove(&params.thread_id);
+        state.execution_accounts.remove(&params.thread_id);
+        state
+            .turn_execution_accounts
+            .retain(|(thread_id, _), _| *thread_id != params.thread_id);
         state.section_positions.remove(&params.thread_id);
         state.section_entered_at.remove(&params.thread_id);
         state
@@ -848,6 +916,79 @@ impl InMemoryThreadStore {
 impl ThreadStore for InMemoryThreadStore {
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn execution_account_binding(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
+        Box::pin(async move {
+            Ok(self
+                .state
+                .lock()
+                .await
+                .execution_accounts
+                .get(&thread_id)
+                .cloned())
+        })
+    }
+
+    fn initialize_execution_account_binding(
+        &self,
+        thread_id: ThreadId,
+        initial: ExecutionAccountBinding,
+    ) -> ThreadStoreFuture<'_, ExecutionAccountBinding> {
+        Box::pin(async move {
+            let mut state = self.state.lock().await;
+            Ok(state
+                .execution_accounts
+                .entry(thread_id)
+                .or_insert(initial)
+                .clone())
+        })
+    }
+
+    fn compare_and_swap_execution_account_binding(
+        &self,
+        thread_id: ThreadId,
+        expected: ExecutionAccountBinding,
+        next_slot_id: String,
+    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
+        Box::pin(async move {
+            let mut state = self.state.lock().await;
+            let Some(current) = state.execution_accounts.get_mut(&thread_id) else {
+                return Ok(None);
+            };
+            if current != &expected {
+                return Ok(None);
+            }
+            let Some(generation) = current.generation.checked_add(1) else {
+                return Err(ThreadStoreError::Internal {
+                    message: "execution account generation overflow".to_string(),
+                });
+            };
+            *current = ExecutionAccountBinding {
+                slot_id: next_slot_id,
+                generation,
+            };
+            Ok(Some(current.clone()))
+        })
+    }
+
+    fn turn_execution_account(
+        &self,
+        thread_id: ThreadId,
+        turn_id: String,
+    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
+        Box::pin(async move {
+            Ok(self
+                .state
+                .lock()
+                .await
+                .turn_execution_accounts
+                .get(&(thread_id, turn_id))
+                .cloned())
+        })
     }
 
     fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreFuture<'_, ()> {

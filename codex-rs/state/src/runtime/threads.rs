@@ -1047,6 +1047,17 @@ ON CONFLICT(id) DO UPDATE SET
             self.upsert_thread(&metadata).await
         };
         upsert_result?;
+        for item in items {
+            if let RolloutItem::TurnContext(context) = item
+                && let (Some(turn_id), Some(binding)) = (
+                    context.turn_id.as_deref(),
+                    context.execution_account.as_ref(),
+                )
+            {
+                self.record_turn_execution_account(builder.id, turn_id, binding)
+                    .await?;
+            }
+        }
         if let Some(memory_mode) = extract_memory_mode(items)
             && let Err(err) = self
                 .set_thread_memory_mode(builder.id, memory_mode.as_str())
@@ -1135,6 +1146,16 @@ ON CONFLICT(id) DO UPDATE SET
         let mut tx = self.pool.begin().await?;
         for thread_id_string in &thread_id_strings {
             sqlx::query("DELETE FROM thread_dynamic_tools WHERE thread_id = ?")
+                .bind(thread_id_string)
+                .execute(&mut *tx)
+                .await?;
+        }
+        for thread_id_string in &thread_id_strings {
+            sqlx::query("DELETE FROM thread_turn_execution_accounts WHERE thread_id = ?")
+                .bind(thread_id_string)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM thread_execution_account_bindings WHERE thread_id = ?")
                 .bind(thread_id_string)
                 .execute(&mut *tx)
                 .await?;

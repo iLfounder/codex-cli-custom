@@ -3019,6 +3019,18 @@ pub struct TurnContextNetworkItem {
     pub denied_domains: Vec<String>,
 }
 
+/// Durable account selection used to execute a thread or an individual turn.
+///
+/// `slot_id` is an opaque host-managed identifier. `generation` changes whenever the current
+/// thread binding is replaced, allowing callers to detect stale account snapshots.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct ExecutionAccountBinding {
+    pub slot_id: String,
+    pub generation: u64,
+}
+
 /// Persist once per real user turn after computing that turn's model-visible
 /// context updates, and again after mid-turn compaction when replacement
 /// history re-establishes full context, so resume/fork replay can recover the
@@ -3027,6 +3039,8 @@ pub struct TurnContextNetworkItem {
 pub struct TurnContextItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_account: Option<ExecutionAccountBinding>,
     pub cwd: AbsolutePathBuf,
     /// Effective workspace roots used to materialize symbolic
     /// `:workspace_roots` filesystem permissions in `permission_profile`.
@@ -5761,6 +5775,34 @@ mod tests {
         assert_eq!(item.network, None);
         assert_eq!(item.file_system_sandbox_policy, None);
         assert_eq!(item.comp_hash, None);
+        assert_eq!(item.execution_account, None);
+        Ok(())
+    }
+
+    #[test]
+    fn turn_context_item_round_trips_execution_account() -> Result<()> {
+        let value = json!({
+            "turn_id": "turn-1",
+            "execution_account": {"slotId": "secondary", "generation": 4},
+            "cwd": test_path_buf("/tmp"),
+            "approval_policy": "never",
+            "sandbox_policy": { "type": "danger-full-access" },
+            "model": "gpt-5",
+            "summary": "auto",
+        });
+
+        let item: TurnContextItem = serde_json::from_value(value.clone())?;
+        assert_eq!(
+            item.execution_account,
+            Some(ExecutionAccountBinding {
+                slot_id: "secondary".to_string(),
+                generation: 4,
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(item)?["execution_account"],
+            value["execution_account"]
+        );
         Ok(())
     }
 
@@ -5782,6 +5824,7 @@ mod tests {
     fn turn_context_item_serializes_network_when_present() -> Result<()> {
         let item = TurnContextItem {
             turn_id: None,
+            execution_account: None,
             cwd: test_path_buf("/tmp").abs(),
             workspace_roots: None,
             current_date: None,

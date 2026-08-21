@@ -1,4 +1,5 @@
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::ExecutionAccountBinding;
 use codex_protocol::protocol::ThreadHistoryMode;
 use std::any::Any;
 use std::future::Future;
@@ -75,6 +76,54 @@ pub trait ThreadStore: Any + Send + Sync {
     /// already paginated should override this instead of relying on core to infer storage behavior.
     fn default_history_mode(&self) -> ThreadHistoryMode {
         ThreadHistoryMode::Legacy
+    }
+
+    fn execution_account_binding(
+        &self,
+        _thread_id: ThreadId,
+    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "execution_account_binding",
+            })
+        })
+    }
+
+    fn initialize_execution_account_binding(
+        &self,
+        _thread_id: ThreadId,
+        _initial: ExecutionAccountBinding,
+    ) -> ThreadStoreFuture<'_, ExecutionAccountBinding> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "initialize_execution_account_binding",
+            })
+        })
+    }
+
+    fn compare_and_swap_execution_account_binding(
+        &self,
+        _thread_id: ThreadId,
+        _expected: ExecutionAccountBinding,
+        _next_slot_id: String,
+    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "compare_and_swap_execution_account_binding",
+            })
+        })
+    }
+
+    fn turn_execution_account(
+        &self,
+        _thread_id: ThreadId,
+        _turn_id: String,
+    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "turn_execution_account",
+            })
+        })
     }
 
     /// Creates a new live thread.

@@ -111,15 +111,23 @@ async fn custom_schema_bootstrap_serializes_concurrent_callers() {
     .expect("custom migration record should load");
     assert_eq!(
         applied,
-        vec![(
-            1,
-            "writer_authority".to_string(),
-            CUSTOM_SCHEMA_V1.definition.to_string(),
-        )]
+        vec![
+            (
+                1,
+                "writer_authority".to_string(),
+                CUSTOM_SCHEMA_V1.definition.to_string(),
+            ),
+            (
+                2,
+                "execution_account_bindings".to_string(),
+                CUSTOM_SCHEMA_V2.definition.to_string(),
+            ),
+        ]
     );
     let custom_tables = sqlx::query_scalar::<_, String>(
         "SELECT name FROM sqlite_master WHERE type = 'table' \
-         AND name IN ('writer_authority_store', 'thread_writer_generations') ORDER BY name",
+         AND name IN ('writer_authority_store', 'thread_writer_generations', \
+         'thread_execution_account_bindings', 'thread_turn_execution_accounts') ORDER BY name",
     )
     .fetch_all(&pool)
     .await
@@ -127,6 +135,8 @@ async fn custom_schema_bootstrap_serializes_concurrent_callers() {
     assert_eq!(
         custom_tables,
         vec![
+            "thread_execution_account_bindings".to_string(),
+            "thread_turn_execution_accounts".to_string(),
             "thread_writer_generations".to_string(),
             "writer_authority_store".to_string(),
         ]

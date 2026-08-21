@@ -59,6 +59,7 @@ mod environment_selection;
 pub mod exec;
 pub mod exec_env;
 mod exec_policy;
+pub mod execution_account;
 #[cfg(test)]
 mod git_info_tests;
 mod guardian;
@@ -109,6 +110,9 @@ pub use client::X_RESPONSESAPI_INCLUDE_TIMING_METRICS_HEADER;
 pub use codex_protocol::config_types::ModelProviderAuthInfo;
 mod event_mapping;
 pub use codex_prompts as review_prompts;
+pub use execution_account::ExecutionAccountContext;
+pub use execution_account::ExecutionAccountResolver;
+pub use execution_account::ExecutionAccountResolverFuture;
 mod thread_manager;
 pub(crate) mod web_search;
 pub(crate) mod windows_sandbox_read_grants;

@@ -49,8 +49,8 @@ use crate::session::completed_session_loop_termination;
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_codex_thread_interactive(
     mut config: Config,
-    auth_manager: Arc<AuthManager>,
-    models_manager: SharedModelsManager,
+    _auth_manager: Arc<AuthManager>,
+    _models_manager: SharedModelsManager,
     parent_session: Arc<Session>,
     parent_ctx: Arc<TurnContext>,
     parent_environments: TurnEnvironmentSnapshot,
@@ -90,8 +90,9 @@ pub(crate) async fn run_codex_thread_interactive(
         allow_provider_model_fallback: false,
         user_instructions,
         installation_id: parent_session.installation_id.clone(),
-        auth_manager,
-        models_manager,
+        auth_manager: Arc::clone(&parent_ctx.execution_account.auth_manager),
+        models_manager: Arc::clone(&parent_ctx.execution_account.models_manager),
+        execution_account: Arc::clone(&parent_ctx.execution_account),
         environment_manager: parent_session
             .services
             .turn_environments

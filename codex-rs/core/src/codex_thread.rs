@@ -196,6 +196,10 @@ impl CodexThread {
         self.session.services.session_telemetry.clone()
     }
 
+    pub fn execution_account(&self) -> Arc<crate::execution_account::ExecutionAccountContext> {
+        self.session.execution_account()
+    }
+
     /// Returns extension-owned data attached to this thread runtime.
     pub fn thread_extension_data(&self) -> &codex_extension_api::ExtensionData {
         &self.session.services.thread_extension_data

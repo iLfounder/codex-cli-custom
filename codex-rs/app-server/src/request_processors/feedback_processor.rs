@@ -701,6 +701,7 @@ mod tests {
                 ordinal: None,
                 item: RolloutItem::TurnContext(TurnContextItem {
                     turn_id: Some((*turn_id).to_string()),
+                    execution_account: None,
                     cwd: AbsolutePathBuf::from_absolute_path(tempdir.path())
                         .expect("absolute feedback rollout directory"),
                     workspace_roots: None,

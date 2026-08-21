@@ -147,6 +147,7 @@ pub struct TurnContext {
     /// Turn-scoped configuration. Read step-specific settings such as service tier and
     /// approvals reviewer from the corresponding `StepContext` fields instead.
     pub config: Arc<Config>,
+    pub(crate) execution_account: Arc<crate::execution_account::ExecutionAccountContext>,
     pub(crate) auth_manager: Option<Arc<AuthManager>>,
     /// Legacy turn model; step-scoped execution should use `StepContext::model_info`.
     pub(crate) model_info: Arc<ModelInfo>,
@@ -402,6 +403,7 @@ impl TurnContext {
             realtime_active: self.realtime_active,
             code_mode_available: self.code_mode_available,
             config: Arc::new(config),
+            execution_account: Arc::clone(&self.execution_account),
             auth_manager: self.auth_manager.clone(),
             model_info: Arc::clone(&model_info),
             session_telemetry: self
@@ -498,6 +500,7 @@ impl TurnContext {
         let cwd = self.cwd.clone();
         TurnContextItem {
             turn_id: Some(self.sub_id.clone()),
+            execution_account: Some(self.execution_account.binding.clone()),
             cwd,
             workspace_roots: (!workspace_roots.is_empty()).then_some(workspace_roots),
             current_date: self.current_date.clone(),
@@ -618,6 +621,7 @@ impl Session {
         thread_id: ThreadId,
         session_id: SessionId,
         auth_manager: Option<Arc<AuthManager>>,
+        execution_account: Arc<crate::execution_account::ExecutionAccountContext>,
         session_telemetry: &SessionTelemetry,
         provider: SharedModelProvider,
         session_configuration: &SessionConfiguration,
@@ -694,6 +698,7 @@ impl Session {
             realtime_active: false,
             code_mode_available: true,
             config: per_turn_config,
+            execution_account,
             auth_manager,
             model_info: Arc::new(model_info),
             session_telemetry: session_telemetry_for_context,
@@ -923,6 +928,7 @@ impl Session {
             self.thread_id(),
             self.session_id(),
             Some(Arc::clone(&self.services.auth_manager)),
+            self.execution_account(),
             &self.services.session_telemetry,
             session_configuration.provider.clone(),
             &session_configuration,

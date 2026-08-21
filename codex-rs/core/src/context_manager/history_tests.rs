@@ -296,6 +296,7 @@ fn developer_msg_with_fragments(texts: &[&str]) -> ResponseItem {
 fn reference_context_item() -> TurnContextItem {
     TurnContextItem {
         turn_id: Some("reference-turn".to_string()),
+        execution_account: None,
         cwd: AbsolutePathBuf::try_from(
             std::env::current_dir()
                 .expect("current directory")

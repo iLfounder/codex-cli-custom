@@ -132,7 +132,8 @@ CREATE TABLE thread_turn_execution_accounts (
     ],
 };
 
-const ACTIVE_CUSTOM_SCHEMA_MIGRATIONS: &[&CustomSchemaMigration] = &[&CUSTOM_SCHEMA_V1];
+const ACTIVE_CUSTOM_SCHEMA_MIGRATIONS: &[&CustomSchemaMigration] =
+    &[&CUSTOM_SCHEMA_V1, &CUSTOM_SCHEMA_V2];
 const LEGACY_CUSTOM_SCHEMA_MIGRATIONS: &[&CustomSchemaMigration] =
     &[&CUSTOM_SCHEMA_V1, &CUSTOM_SCHEMA_V2];
 

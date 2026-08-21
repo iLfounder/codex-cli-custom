@@ -328,8 +328,32 @@ async fn write_and_project(
         RolloutWriteOp::Persist => RolloutWriteOp::Persist,
         RolloutWriteOp::Flush => RolloutWriteOp::Flush,
     };
+    let turn_execution_accounts = match &write_op {
+        RolloutWriteOp::AppendItems(items) => items
+            .iter()
+            .filter_map(|item| {
+                let RolloutItem::TurnContext(context) = item else {
+                    return None;
+                };
+                Some((context.turn_id.clone()?, context.execution_account.clone()?))
+            })
+            .collect::<Vec<_>>(),
+        RolloutWriteOp::Persist | RolloutWriteOp::Flush => Vec::new(),
+    };
     if matches!(history_mode, ThreadHistoryMode::Legacy) {
         durable_write(&recorder, write_op).await?;
+        if let Some(state_db) = store.state_db().await {
+            for (turn_id, binding) in turn_execution_accounts {
+                state_db
+                    .record_turn_execution_account(thread_id, turn_id.as_str(), &binding)
+                    .await
+                    .map_err(|err| ThreadStoreError::Internal {
+                        message: format!(
+                            "failed to record execution account for thread {thread_id} turn {turn_id}: {err}"
+                        ),
+                    })?;
+            }
+        }
     } else {
         let rollout_path = recorder.rollout_path();
         // SQLite is a rebuildable view. The flush barrier must win before projection starts so it

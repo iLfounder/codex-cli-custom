@@ -61,6 +61,7 @@ fn turn_context_item(
 ) -> RolloutItem {
     RolloutItem::TurnContext(TurnContextItem {
         turn_id: Some(turn_id.to_string()),
+        execution_account: None,
         cwd: cwd(),
         workspace_roots: Some(vec![cwd()]),
         current_date: None,
