@@ -129,7 +129,7 @@ impl AccountRegistry {
         for (_binding_transition, slot_id, (status, error_code)) in &changed {
             if let Some(slot) = next_slots
                 .iter_mut()
-                .find(|slot| slot.manifest.account_slot_id == slot_id)
+                .find(|slot| slot.manifest.account_slot_id == *slot_id)
                 && slot.active_logout_operation_id.is_none()
             {
                 slot.manifest.status = *status;
