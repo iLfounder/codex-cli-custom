@@ -67,6 +67,11 @@ impl ChatWidget {
             InputResult::ServiceTierCommand(command) => {
                 self.handle_service_tier_command_dispatch(command);
             }
+            InputResult::PluginCommand(command) => {
+                self.app_event_tx.send(AppEvent::InvokePluginCommand {
+                    command_id: command.id,
+                });
+            }
             InputResult::CommandWithArgs(cmd, args, text_elements) => {
                 self.handle_slash_command_with_args_dispatch(cmd, args, text_elements);
             }

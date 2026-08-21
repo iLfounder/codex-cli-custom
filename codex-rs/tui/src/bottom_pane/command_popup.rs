@@ -11,6 +11,7 @@ use super::selection_popup_common::measure_rows_height_with_col_width_mode;
 use super::selection_popup_common::render_rows_with_col_width_mode;
 use super::slash_commands::BuiltinCommandFlags;
 use super::slash_commands::ServiceTierCommand;
+use super::slash_commands::PluginSlashCommand;
 use super::slash_commands::SlashCommandItem;
 use super::slash_commands::commands_for_input;
 use crate::render::Insets;
@@ -31,6 +32,7 @@ const COMMAND_COLUMN_WIDTH: ColumnWidthConfig = ColumnWidthConfig::new(
 pub(crate) enum CommandItem {
     Builtin(SlashCommand),
     ServiceTier(ServiceTierCommand),
+    Plugin(PluginSlashCommand),
 }
 
 pub(crate) struct CommandPopup {
@@ -73,14 +75,23 @@ impl CommandPopup {
         flags: CommandPopupFlags,
         service_tier_commands: Vec<ServiceTierCommand>,
     ) -> Self {
+        Self::new_with_plugins(flags, service_tier_commands, Vec::new())
+    }
+
+    pub(crate) fn new_with_plugins(
+        flags: CommandPopupFlags,
+        service_tier_commands: Vec<ServiceTierCommand>,
+        plugin_commands: Vec<PluginSlashCommand>,
+    ) -> Self {
         // Keep built-in availability in sync with the composer.
-        let commands = commands_for_input(flags.into(), &service_tier_commands)
+        let commands = commands_for_input(flags.into(), &service_tier_commands, &plugin_commands)
             .into_iter()
             .filter_map(|command| match command {
                 SlashCommandItem::Builtin(cmd) => (!cmd.command().starts_with("debug")
                     && cmd != SlashCommand::Apps)
                     .then_some(CommandItem::Builtin(cmd)),
                 SlashCommandItem::ServiceTier(command) => Some(CommandItem::ServiceTier(command)),
+                SlashCommandItem::Plugin(command) => Some(CommandItem::Plugin(command)),
             })
             .collect();
         Self {
@@ -214,8 +225,15 @@ impl CommandPopup {
                     description: Some(description),
                     category_tag: None,
                     wrap_indent: None,
-                    is_disabled: false,
-                    disabled_reason: None,
+                    disabled_reason: match &item {
+                        CommandItem::Plugin(command) if !command.available => {
+                            command.deny_reason.clone()
+                        }
+                        CommandItem::Builtin(_)
+                        | CommandItem::ServiceTier(_)
+                        | CommandItem::Plugin(_) => None,
+                    },
+                    is_disabled: matches!(&item, CommandItem::Plugin(command) if !command.available),
                 }
             })
             .collect()
@@ -250,6 +268,7 @@ impl CommandItem {
         match self {
             Self::Builtin(cmd) => cmd.command(),
             Self::ServiceTier(command) => &command.name,
+            Self::Plugin(command) => &command.name,
         }
     }
 
@@ -257,6 +276,7 @@ impl CommandItem {
         match self {
             Self::Builtin(cmd) => cmd.description(),
             Self::ServiceTier(command) => &command.description,
+            Self::Plugin(command) => &command.description,
         }
     }
 }
@@ -295,7 +315,7 @@ mod tests {
         let matches = popup.filtered_items();
         let has_init = matches.iter().any(|item| match item {
             CommandItem::Builtin(cmd) => cmd.command() == "init",
-            CommandItem::ServiceTier(_) => false,
+            CommandItem::ServiceTier(_) | CommandItem::Plugin(_) => false,
         });
         assert!(
             has_init,
@@ -316,6 +336,9 @@ mod tests {
             Some(CommandItem::ServiceTier(command)) => {
                 panic!("expected init command, got service tier {command:?}")
             }
+            Some(CommandItem::Plugin(command)) => {
+                panic!("expected init command, got plugin command {command:?}")
+            }
             None => panic!("expected a selected command for exact match"),
         }
     }
@@ -329,6 +352,9 @@ mod tests {
             Some(CommandItem::Builtin(cmd)) => assert_eq!(cmd.command(), "model"),
             Some(CommandItem::ServiceTier(command)) => {
                 panic!("expected model command, got service tier {command:?}")
+            }
+            Some(CommandItem::Plugin(command)) => {
+                panic!("expected model command, got plugin command {command:?}")
             }
             None => panic!("expected at least one match for '/mo'"),
         }
@@ -368,6 +394,52 @@ mod tests {
     }
 
     #[test]
+    fn plugin_command_popup_snapshot() {
+        let mut popup = CommandPopup::new_with_plugins(
+            CommandPopupFlags::default(),
+            Vec::new(),
+            vec![
+                PluginSlashCommand {
+                    id: "release:summary".to_string(),
+                    name: "release:summary".to_string(),
+                    description: "Show the release summary".to_string(),
+                    available: true,
+                    deny_reason: None,
+                    canonical: true,
+                },
+                PluginSlashCommand {
+                    id: "release:deploy".to_string(),
+                    name: "release:deploy".to_string(),
+                    description: "Deploy the release".to_string(),
+                    available: false,
+                    deny_reason: Some("No active release".to_string()),
+                    canonical: true,
+                },
+            ],
+        );
+        popup.on_composer_text_change("/release:".to_string());
+        let rows = popup
+            .rows_from_matches(popup.filtered())
+            .into_iter()
+            .map(|row| {
+                format!(
+                    "{} | {} | disabled={} | {}",
+                    row.name,
+                    row.description.unwrap_or_default(),
+                    row.is_disabled,
+                    row.disabled_reason.unwrap_or_else(|| "-".to_string())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        insta::assert_snapshot!(rows, @r#"
+        /release:summary | Show the release summary | disabled=false | -
+        /release:deploy | Deploy the release | disabled=true | No active release
+        "#);
+    }
+
+    #[test]
     fn filtered_commands_keep_presentation_order_for_prefix() {
         let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new());
         popup.on_composer_text_change("/m".to_string());
@@ -378,6 +450,7 @@ mod tests {
             .map(|item| match item {
                 CommandItem::Builtin(cmd) => cmd.command().to_string(),
                 CommandItem::ServiceTier(command) => command.name,
+                CommandItem::Plugin(command) => command.name,
             })
             .collect();
         assert_eq!(
@@ -441,6 +514,7 @@ mod tests {
             .map(|item| match item {
                 CommandItem::Builtin(cmd) => cmd.command().to_string(),
                 CommandItem::ServiceTier(command) => command.name,
+                CommandItem::Plugin(command) => command.name,
             })
             .collect();
         assert!(
@@ -516,6 +590,7 @@ mod tests {
             .map(|item| match item {
                 CommandItem::Builtin(cmd) => cmd.command().to_string(),
                 CommandItem::ServiceTier(command) => command.name,
+                CommandItem::Plugin(command) => command.name,
             })
             .collect();
         assert!(
@@ -575,6 +650,7 @@ mod tests {
             .map(|item| match item {
                 CommandItem::Builtin(cmd) => cmd.command().to_string(),
                 CommandItem::ServiceTier(command) => command.name,
+                CommandItem::Plugin(command) => command.name,
             })
             .collect();
         assert!(
@@ -619,6 +695,7 @@ mod tests {
             .map(|item| match item {
                 CommandItem::Builtin(cmd) => cmd.command().to_string(),
                 CommandItem::ServiceTier(command) => command.name,
+                CommandItem::Plugin(command) => command.name,
             })
             .collect();
 

@@ -320,6 +320,7 @@ impl App {
         self.backtrack = BacktrackState::default();
         self.backtrack_render_pending = false;
         self.skill_load_warnings.clear();
+        self.plugin_command_state.clear_presentations();
     }
 }
 

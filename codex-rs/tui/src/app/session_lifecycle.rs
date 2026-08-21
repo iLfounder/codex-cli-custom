@@ -577,6 +577,9 @@ impl App {
 
     pub(super) fn reset_for_thread_switch(&mut self, tui: &mut tui::Tui) -> Result<()> {
         self.reset_transcript_state_after_clear();
+        self.plugin_command_state.clear_projection();
+        self.chat_widget.set_plugin_commands(Vec::new());
+        self.app_event_tx.send(AppEvent::RefreshPluginCommands);
         tui.clear_pending_history_lines();
         Self::clear_terminal_for_thread_switch(&mut tui.terminal)?;
         Ok(())

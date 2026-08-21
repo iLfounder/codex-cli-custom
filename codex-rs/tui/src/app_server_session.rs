@@ -54,6 +54,10 @@ use codex_app_server_protocol::MemoryResetResponse;
 use codex_app_server_protocol::Model as ApiModel;
 use codex_app_server_protocol::ModelListParams;
 use codex_app_server_protocol::ModelListResponse;
+use codex_app_server_protocol::PluginCommandInvokeParams;
+use codex_app_server_protocol::PluginCommandInvokeResponse;
+use codex_app_server_protocol::PluginCommandListParams;
+use codex_app_server_protocol::PluginCommandListResponse;
 use codex_app_server_protocol::NewThreadModelDefaults;
 use codex_app_server_protocol::RateLimitSnapshot;
 use codex_app_server_protocol::RequestId;
@@ -166,6 +170,8 @@ pub(crate) const EXTERNAL_AGENT_CONFIG_IMPORT_IN_PROGRESS_MESSAGE: &str = "A pre
 const THREAD_SETTINGS_UPDATE_METHOD: &str = "thread/settings/update";
 const ACCOUNT_SLOT_PAGE_LIMIT: u32 = 100;
 const ACCOUNT_SLOT_MAX_PAGES: usize = 64;
+const PLUGIN_COMMAND_PAGE_LIMIT: u32 = 100;
+const PLUGIN_COMMAND_MAX_PAGES: usize = 64;
 
 #[derive(Debug)]
 pub(crate) struct AccountSlotsSnapshot {
@@ -1551,6 +1557,51 @@ pub(crate) async fn logout_account_slot(
         .request_typed(ClientRequest::AccountSlotLogout {
             request_id: RequestId::String(format!("tui-account-logout-{}", Uuid::new_v4())),
             params,
+        })
+        .await
+        .map_err(Into::into)
+}
+
+pub(crate) async fn list_plugin_commands(
+    request_handle: AppServerRequestHandle,
+    thread_id: ThreadId,
+) -> Result<Vec<codex_app_server_protocol::PluginCommand>> {
+    let mut cursor = None;
+    let mut commands = Vec::new();
+    for _ in 0..PLUGIN_COMMAND_MAX_PAGES {
+        let response: PluginCommandListResponse = request_handle
+            .request_typed(ClientRequest::PluginCommandList {
+                request_id: RequestId::String(format!("tui-plugin-command-list-{}", Uuid::new_v4())),
+                params: PluginCommandListParams {
+                    thread_id: thread_id.to_string(),
+                    cursor,
+                    limit: Some(PLUGIN_COMMAND_PAGE_LIMIT),
+                },
+            })
+            .await?;
+        commands.extend(response.data);
+        let Some(next_cursor) = response.next_cursor else {
+            return Ok(commands);
+        };
+        cursor = Some(next_cursor);
+    }
+    Err(color_eyre::eyre::eyre!(
+        "pluginCommand/list exceeded the TUI page bound"
+    ))
+}
+
+pub(crate) async fn invoke_plugin_command(
+    request_handle: AppServerRequestHandle,
+    thread_id: ThreadId,
+    command_id: String,
+) -> Result<PluginCommandInvokeResponse> {
+    request_handle
+        .request_typed(ClientRequest::PluginCommandInvoke {
+            request_id: RequestId::String(format!("tui-plugin-command-invoke-{}", Uuid::new_v4())),
+            params: PluginCommandInvokeParams {
+                thread_id: thread_id.to_string(),
+                command_id,
+            },
         })
         .await
         .map_err(Into::into)

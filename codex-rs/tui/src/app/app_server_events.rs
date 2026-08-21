@@ -110,6 +110,14 @@ impl App {
                     update.instance_epoch.clone(),
                     update.snapshot.clone(),
                 );
+                if update.snapshot.account.switch_state
+                    == codex_app_server_protocol::SessionRuntimeAccountSwitchState::Stable
+                    && ThreadId::from_string(&update.snapshot.thread_id).is_ok_and(|thread_id| {
+                        self.current_displayed_thread_id() == Some(thread_id)
+                    })
+                {
+                    self.refresh_plugin_commands(app_server_client);
+                }
             }
             ServerNotification::AccountSlotChanged(update) => {
                 self.handle_account_slot_changed(update.registry_revision, update.slot.clone());
@@ -122,6 +130,17 @@ impl App {
             }
             ServerNotification::ItemCompleted(update) => {
                 self.handle_dynamic_thread_control_completed(update);
+            }
+            ServerNotification::ThreadPresentationAppended(update) => {
+                if let Ok(thread_id) = ThreadId::from_string(&update.thread_id)
+                    && self.current_displayed_thread_id() == Some(thread_id)
+                {
+                    self.app_event_tx.send(AppEvent::UpsertThreadPresentation {
+                        thread_id,
+                        item: update.item.clone(),
+                    });
+                }
+                return;
             }
             _ => {}
         }

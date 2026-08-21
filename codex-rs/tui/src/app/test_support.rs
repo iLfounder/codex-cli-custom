@@ -66,6 +66,7 @@ pub(super) async fn make_test_app() -> App {
         account_request_generation: 0,
         pending_account_control: None,
         pending_dynamic_thread_control: None,
+        plugin_command_state: plugin_commands::PluginCommandState::default(),
         windows_sandbox: WindowsSandboxState::default(),
         thread_event_channels: HashMap::new(),
         thread_event_listener_tasks: HashMap::new(),

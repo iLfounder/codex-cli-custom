@@ -183,6 +183,9 @@ pub(super) fn server_notification_thread_target(
         ServerNotification::SessionRuntimeChanged(notification) => {
             Some(notification.snapshot.thread_id.as_str())
         }
+        ServerNotification::ThreadPresentationAppended(notification) => {
+            Some(notification.thread_id.as_str())
+        }
         ServerNotification::SessionRuntimeOperationUpdated(notification) => {
             notification.operation.thread_id.as_deref()
         }

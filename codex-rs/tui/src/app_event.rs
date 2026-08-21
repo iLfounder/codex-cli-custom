@@ -26,6 +26,8 @@ use codex_app_server_protocol::MarketplaceUpgradeResponse;
 use codex_app_server_protocol::McpServerStatus;
 use codex_app_server_protocol::McpServerStatusDetail;
 use codex_app_server_protocol::PluginInstallResponse;
+use codex_app_server_protocol::PluginCommand;
+use codex_app_server_protocol::PluginCommandInvokeResponse;
 use codex_app_server_protocol::PluginListResponse;
 use codex_app_server_protocol::PluginMarketplaceEntry;
 use codex_app_server_protocol::PluginReadParams;
@@ -34,6 +36,7 @@ use codex_app_server_protocol::PluginUninstallResponse;
 use codex_app_server_protocol::SessionRuntimeOperation;
 use codex_app_server_protocol::SkillsListResponse;
 use codex_app_server_protocol::Thread;
+use codex_app_server_protocol::ThreadPresentation;
 use codex_app_server_protocol::ThreadGoalStatus;
 use codex_app_server_protocol::ThreadItemsListResponse;
 use codex_connectors::AppInfo;
@@ -852,6 +855,31 @@ pub(crate) enum AppEvent {
     PluginMentionsLoaded {
         cwd: PathBuf,
         plugins: Option<Vec<PluginCapabilitySummary>>,
+    },
+
+    /// Refresh the exact displayed thread's plugin command catalog.
+    RefreshPluginCommands,
+
+    PluginCommandsLoaded {
+        thread_id: ThreadId,
+        request_generation: u64,
+        result: Result<Vec<PluginCommand>, String>,
+    },
+
+    InvokePluginCommand {
+        command_id: String,
+    },
+
+    PluginCommandInvoked {
+        thread_id: ThreadId,
+        request_generation: u64,
+        command_name: String,
+        result: Result<PluginCommandInvokeResponse, String>,
+    },
+
+    UpsertThreadPresentation {
+        thread_id: ThreadId,
+        item: ThreadPresentation,
     },
 
     /// Advance the post-install plugin app-auth flow.

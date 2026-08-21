@@ -23,6 +23,7 @@ use crate::app_event::HistoryLookupResponse;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::pending_input_preview::PendingInputPreview;
 use crate::bottom_pane::pending_thread_approvals::PendingThreadApprovals;
+use crate::bottom_pane::slash_commands::PluginSlashCommand;
 use crate::bottom_pane::unified_exec_footer::UnifiedExecFooter;
 use crate::key_hint;
 use crate::key_hint::KeyBinding;
@@ -474,6 +475,15 @@ impl BottomPane {
     pub fn set_service_tier_commands(&mut self, commands: Vec<ServiceTierCommand>) {
         self.composer.set_service_tier_commands(commands);
         self.request_redraw();
+    }
+
+    pub(crate) fn set_plugin_commands(&mut self, commands: Vec<PluginSlashCommand>) {
+        self.composer.set_plugin_commands(commands);
+        self.request_redraw();
+    }
+
+    pub(crate) fn plugin_command(&self, name: &str) -> Option<PluginSlashCommand> {
+        self.composer.plugin_command(name)
     }
 
     pub fn set_goal_command_enabled(&mut self, enabled: bool) {

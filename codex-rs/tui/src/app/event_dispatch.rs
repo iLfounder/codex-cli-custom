@@ -2129,6 +2129,36 @@ impl App {
                     plugins = None;
                 }
                 self.chat_widget.on_plugin_mentions_loaded(plugins);
+                self.refresh_plugin_commands(app_server);
+            }
+            AppEvent::RefreshPluginCommands => {
+                self.refresh_plugin_commands(app_server);
+            }
+            AppEvent::PluginCommandsLoaded {
+                thread_id,
+                request_generation,
+                result,
+            } => {
+                self.handle_plugin_commands_loaded(thread_id, request_generation, result);
+            }
+            AppEvent::InvokePluginCommand { command_id } => {
+                self.invoke_plugin_command(app_server, command_id);
+            }
+            AppEvent::PluginCommandInvoked {
+                thread_id,
+                request_generation,
+                command_name,
+                result,
+            } => {
+                self.handle_plugin_command_invoked(
+                    thread_id,
+                    request_generation,
+                    command_name,
+                    result,
+                );
+            }
+            AppEvent::UpsertThreadPresentation { thread_id, item } => {
+                self.upsert_thread_presentation(tui, thread_id, item);
             }
             AppEvent::PersistPersonalitySelection { personality } => {
                 match crate::config_update::write_config_batch(

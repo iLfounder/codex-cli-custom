@@ -235,6 +235,7 @@ mod pending_interactive_replay;
 mod pets;
 mod platform_actions;
 mod plugin_mentions;
+mod plugin_commands;
 mod replay_filter;
 mod resize_reflow;
 pub(crate) mod runtime_controls;
@@ -600,6 +601,7 @@ pub(crate) struct App {
     account_request_generation: u64,
     pending_account_control: Option<account_picker::PendingAccountControl>,
     pending_dynamic_thread_control: Option<dynamic_thread_controls::PendingDynamicThreadControl>,
+    plugin_command_state: plugin_commands::PluginCommandState,
 
     windows_sandbox: WindowsSandboxState,
 
