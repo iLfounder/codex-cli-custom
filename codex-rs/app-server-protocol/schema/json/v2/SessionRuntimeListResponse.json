@@ -1,0 +1,887 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "AbsolutePathBuf": {
+      "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
+      "type": "string"
+    },
+    "ActivePermissionProfile": {
+      "properties": {
+        "extends": {
+          "default": null,
+          "description": "Parent profile identifier from the selected permissions profile's `extends` setting, when present.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Identifier from `default_permissions` or the implicit built-in default, such as `:workspace` or a user-defined `[permissions.<id>]` profile.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "ApprovalsReviewer": {
+      "description": "Configures who approval requests are routed to for review. Examples include sandbox escapes, blocked network access, MCP approval prompts, and ARC escalations. Defaults to `user`. `auto_review` uses a carefully prompted subagent to gather relevant context and apply a risk-based decision framework before approving or denying the request. The legacy value `guardian_subagent` is accepted for compatibility.",
+      "enum": [
+        "user",
+        "auto_review",
+        "guardian_subagent"
+      ],
+      "type": "string"
+    },
+    "AskForApproval": {
+      "oneOf": [
+        {
+          "enum": [
+            "untrusted",
+            "on-request",
+            "never"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "granular": {
+              "properties": {
+                "mcp_elicitations": {
+                  "type": "boolean"
+                },
+                "request_permissions": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "rules": {
+                  "type": "boolean"
+                },
+                "sandbox_approval": {
+                  "type": "boolean"
+                },
+                "skill_approval": {
+                  "default": false,
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "mcp_elicitations",
+                "rules",
+                "sandbox_approval"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "granular"
+          ],
+          "title": "GranularAskForApproval",
+          "type": "object"
+        }
+      ]
+    },
+    "CollaborationMode": {
+      "description": "Collaboration mode for a Codex session.",
+      "properties": {
+        "mode": {
+          "$ref": "#/definitions/ModeKind"
+        },
+        "settings": {
+          "$ref": "#/definitions/Settings"
+        }
+      },
+      "required": [
+        "mode",
+        "settings"
+      ],
+      "type": "object"
+    },
+    "GitInfo": {
+      "properties": {
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "originUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sha": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ModeKind": {
+      "description": "Initial collaboration mode to use when the TUI starts.",
+      "enum": [
+        "plan",
+        "default"
+      ],
+      "type": "string"
+    },
+    "MultiAgentMode": {
+      "description": "Controls the effective multi-agent delegation instructions for a turn. `custom` means the configured mode hint defines the policy instead of a built-in policy.",
+      "oneOf": [
+        {
+          "enum": [
+            "explicitRequestOnly",
+            "proactive"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "custom": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "custom"
+          ],
+          "title": "CustomMultiAgentMode",
+          "type": "object"
+        }
+      ]
+    },
+    "NetworkAccess": {
+      "enum": [
+        "restricted",
+        "enabled"
+      ],
+      "type": "string"
+    },
+    "Personality": {
+      "enum": [
+        "none",
+        "friendly",
+        "pragmatic"
+      ],
+      "type": "string"
+    },
+    "ReasoningEffort": {
+      "description": "A non-empty reasoning effort value advertised by the model.",
+      "minLength": 1,
+      "type": "string"
+    },
+    "ReasoningSummary": {
+      "description": "A summary of the reasoning performed by the model. This can be useful for debugging and understanding the model's reasoning process. See https://platform.openai.com/docs/guides/reasoning?api-mode=responses#reasoning-summaries",
+      "oneOf": [
+        {
+          "enum": [
+            "auto",
+            "concise",
+            "detailed"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Option to disable reasoning summaries.",
+          "enum": [
+            "none"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "SandboxPolicy": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "dangerFullAccess"
+              ],
+              "title": "DangerFullAccessSandboxPolicyType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "DangerFullAccessSandboxPolicy",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "networkAccess": {
+              "default": false,
+              "type": "boolean"
+            },
+            "type": {
+              "enum": [
+                "readOnly"
+              ],
+              "title": "ReadOnlySandboxPolicyType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "ReadOnlySandboxPolicy",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "networkAccess": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/NetworkAccess"
+                }
+              ],
+              "default": "restricted"
+            },
+            "type": {
+              "enum": [
+                "externalSandbox"
+              ],
+              "title": "ExternalSandboxSandboxPolicyType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "ExternalSandboxSandboxPolicy",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "excludeSlashTmp": {
+              "default": false,
+              "type": "boolean"
+            },
+            "excludeTmpdirEnvVar": {
+              "default": false,
+              "type": "boolean"
+            },
+            "networkAccess": {
+              "default": false,
+              "type": "boolean"
+            },
+            "type": {
+              "enum": [
+                "workspaceWrite"
+              ],
+              "title": "WorkspaceWriteSandboxPolicyType",
+              "type": "string"
+            },
+            "writableRoots": {
+              "default": [],
+              "items": {
+                "$ref": "#/definitions/AbsolutePathBuf"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "WorkspaceWriteSandboxPolicy",
+          "type": "object"
+        }
+      ]
+    },
+    "SessionRuntimeAccountBinding": {
+      "description": "Current and active-turn account provenance for a thread.",
+      "properties": {
+        "activeTurn": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionRuntimeAccountRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "current": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionRuntimeAccountRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "denyReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "switchState": {
+          "$ref": "#/definitions/SessionRuntimeAccountSwitchState"
+        },
+        "switchTargetSlotId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "switchState"
+      ],
+      "type": "object"
+    },
+    "SessionRuntimeAccountRef": {
+      "properties": {
+        "accountSlotId": {
+          "type": "string"
+        },
+        "executionGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "accountSlotId",
+        "executionGeneration"
+      ],
+      "type": "object"
+    },
+    "SessionRuntimeAccountSwitchState": {
+      "enum": [
+        "stable",
+        "preparing",
+        "switching",
+        "unbound",
+        "degraded"
+      ],
+      "type": "string"
+    },
+    "SessionRuntimeAction": {
+      "enum": [
+        "relinquish",
+        "switchAccount"
+      ],
+      "type": "string"
+    },
+    "SessionRuntimeActionAvailability": {
+      "properties": {
+        "action": {
+          "$ref": "#/definitions/SessionRuntimeAction"
+        },
+        "allowed": {
+          "type": "boolean"
+        },
+        "denyReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "action",
+        "allowed"
+      ],
+      "type": "object"
+    },
+    "SessionRuntimeCapability": {
+      "description": "One named process capability and its current availability.",
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "denyReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Stable capability name, such as `ananke_session_identity_v1`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "available",
+        "name"
+      ],
+      "type": "object"
+    },
+    "SessionRuntimeIdentity": {
+      "description": "Sanitized identity and settings that remain useful outside the Codex process.",
+      "properties": {
+        "cwd": {
+          "type": "string"
+        },
+        "forkedFromId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "gitInfo": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GitInfo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parentThreadId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "settings": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadSettings"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Effective next-turn settings when the thread is loaded and they are available."
+        },
+        "source": {
+          "description": "Stable sanitized source name from the thread metadata.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cwd",
+        "sessionId",
+        "source"
+      ],
+      "type": "object"
+    },
+    "SessionRuntimeLifecycle": {
+      "description": "Current lifecycle, subscription, and activity state for a thread.",
+      "properties": {
+        "activeTurnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "clientIncarnations": {
+          "description": "Opaque client incarnation identifiers; raw process identifiers are never exposed.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "lastActivityAt": {
+          "description": "Unix timestamp in seconds of the most recent runtime activity.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/definitions/SessionRuntimeLifecycleState"
+        },
+        "subscriberCount": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "unloadAt": {
+          "description": "Unix timestamp in seconds when an idle unload is scheduled.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "waitingOn": {
+          "items": {
+            "$ref": "#/definitions/SessionRuntimeWaitingOn"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "clientIncarnations",
+        "state",
+        "subscriberCount",
+        "waitingOn"
+      ],
+      "type": "object"
+    },
+    "SessionRuntimeLifecycleState": {
+      "enum": [
+        "notLoaded",
+        "loaded",
+        "idle",
+        "active",
+        "closing"
+      ],
+      "type": "string"
+    },
+    "SessionRuntimePersistence": {
+      "description": "Durable JSONL/SQLite progress and health without exposing storage paths.",
+      "properties": {
+        "denyReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "flushHealth": {
+          "$ref": "#/definitions/SessionRuntimePersistenceHealth"
+        },
+        "flushedAt": {
+          "description": "Unix timestamp in seconds of the last successful recorder flush.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "jsonl": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionRuntimePersistencePosition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lag": {
+          "description": "Number of durable records by which SQLite trails JSONL, when known.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "materializeHealth": {
+          "$ref": "#/definitions/SessionRuntimePersistenceHealth"
+        },
+        "materializedAt": {
+          "description": "Unix timestamp in seconds of the last successful SQLite materialization.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sqlite": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionRuntimePersistencePosition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "flushHealth",
+        "materializeHealth"
+      ],
+      "type": "object"
+    },
+    "SessionRuntimePersistenceHealth": {
+      "enum": [
+        "unknown",
+        "healthy",
+        "degraded",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "SessionRuntimePersistencePosition": {
+      "properties": {
+        "offset": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "ordinal": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "offset",
+        "ordinal"
+      ],
+      "type": "object"
+    },
+    "SessionRuntimeSnapshot": {
+      "description": "Complete sanitized runtime state for one thread.",
+      "properties": {
+        "account": {
+          "$ref": "#/definitions/SessionRuntimeAccountBinding"
+        },
+        "actions": {
+          "items": {
+            "$ref": "#/definitions/SessionRuntimeActionAvailability"
+          },
+          "type": "array"
+        },
+        "identity": {
+          "$ref": "#/definitions/SessionRuntimeIdentity"
+        },
+        "lifecycle": {
+          "$ref": "#/definitions/SessionRuntimeLifecycle"
+        },
+        "persistence": {
+          "$ref": "#/definitions/SessionRuntimePersistence"
+        },
+        "stateRevision": {
+          "description": "Monotonic revision used by thread control compare-and-swap requests.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "threadId": {
+          "description": "Logical runtime entity key.",
+          "type": "string"
+        },
+        "writer": {
+          "$ref": "#/definitions/SessionRuntimeWriter"
+        }
+      },
+      "required": [
+        "account",
+        "actions",
+        "identity",
+        "lifecycle",
+        "persistence",
+        "stateRevision",
+        "threadId",
+        "writer"
+      ],
+      "type": "object"
+    },
+    "SessionRuntimeWaitingOn": {
+      "enum": [
+        "approval",
+        "userInput",
+        "serverRequest"
+      ],
+      "type": "string"
+    },
+    "SessionRuntimeWriter": {
+      "description": "Writer ownership and its durable lease fence.",
+      "properties": {
+        "denyReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/definitions/SessionRuntimeWriterState"
+        },
+        "storeId": {
+          "description": "Opaque store identity. This is not a filesystem path or process identifier.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "writerGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "type": "object"
+    },
+    "SessionRuntimeWriterState": {
+      "enum": [
+        "none",
+        "ownedHere",
+        "ownedElsewhere",
+        "unavailable"
+      ],
+      "type": "string"
+    },
+    "Settings": {
+      "description": "Settings for a collaboration mode.",
+      "properties": {
+        "developer_instructions": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "reasoning_effort": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReasoningEffort"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "model"
+      ],
+      "type": "object"
+    },
+    "ThreadSettings": {
+      "properties": {
+        "activePermissionProfile": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ActivePermissionProfile"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "approvalPolicy": {
+          "$ref": "#/definitions/AskForApproval"
+        },
+        "approvalsReviewer": {
+          "$ref": "#/definitions/ApprovalsReviewer"
+        },
+        "collaborationMode": {
+          "$ref": "#/definitions/CollaborationMode"
+        },
+        "cwd": {
+          "$ref": "#/definitions/AbsolutePathBuf"
+        },
+        "effort": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReasoningEffort"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "modelProvider": {
+          "type": "string"
+        },
+        "personality": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Personality"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sandboxPolicy": {
+          "$ref": "#/definitions/SandboxPolicy"
+        },
+        "serviceTier": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReasoningSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "approvalPolicy",
+        "approvalsReviewer",
+        "collaborationMode",
+        "cwd",
+        "model",
+        "modelProvider",
+        "sandboxPolicy"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "A revision-consistent page of complete session runtime snapshots.",
+  "properties": {
+    "capabilities": {
+      "description": "Process capabilities that external consumers may safely rely on.",
+      "items": {
+        "$ref": "#/definitions/SessionRuntimeCapability"
+      },
+      "type": "array"
+    },
+    "data": {
+      "items": {
+        "$ref": "#/definitions/SessionRuntimeSnapshot"
+      },
+      "type": "array"
+    },
+    "instanceEpoch": {
+      "description": "Opaque identifier for this app-server process incarnation.",
+      "type": "string"
+    },
+    "nextCursor": {
+      "description": "Opaque cursor bound to `instanceEpoch`, `snapshotSequence`, and a stable sort anchor. A stale-cursor error requires restarting from the first page.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "snapshotSequence": {
+      "description": "Event sequence captured for every page in this snapshot.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "capabilities",
+    "data",
+    "instanceEpoch",
+    "snapshotSequence"
+  ],
+  "title": "SessionRuntimeListResponse",
+  "type": "object"
+}

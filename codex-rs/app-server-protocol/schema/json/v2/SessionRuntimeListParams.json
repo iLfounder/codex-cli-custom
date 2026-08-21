@@ -1,0 +1,31 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Parameters for reading a revision-consistent page of session runtime snapshots.",
+  "properties": {
+    "cursor": {
+      "description": "Opaque cursor returned by a previous call. The server rejects it when the instance epoch or snapshot sequence no longer matches the source snapshot.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "limit": {
+      "description": "Optional page size; the server applies a bounded default and maximum.",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "threadId": {
+      "description": "Optional exact thread identifier filter.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "title": "SessionRuntimeListParams",
+  "type": "object"
+}

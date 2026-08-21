@@ -174,11 +174,18 @@ pub(super) fn server_notification_thread_target(
                 None => return ServerNotificationThreadTarget::AppScoped,
             }
         }
+        ServerNotification::SessionRuntimeChanged(notification) => {
+            Some(notification.snapshot.thread_id.as_str())
+        }
+        ServerNotification::SessionRuntimeOperationUpdated(notification) => {
+            notification.operation.thread_id.as_deref()
+        }
         ServerNotification::ProjectChanged(_)
         | ServerNotification::SkillsChanged(_)
         | ServerNotification::McpServerOauthLoginCompleted(_)
         | ServerNotification::AccountUpdated(_)
         | ServerNotification::AccountRateLimitsUpdated(_)
+        | ServerNotification::AccountSlotChanged(_)
         | ServerNotification::AppListUpdated(_)
         | ServerNotification::EnvironmentConnected(_)
         | ServerNotification::EnvironmentDisconnected(_)

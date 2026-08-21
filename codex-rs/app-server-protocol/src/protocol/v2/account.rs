@@ -1,3 +1,4 @@
+use super::SessionRuntimeOperation;
 use super::ThreadUsage;
 use crate::JsonSchema;
 use crate::TS;
@@ -247,6 +248,174 @@ pub struct AccountSessionWorkspace {
 pub enum AccountSessionWorkspaceKind {
     Personal,
     Workspace,
+}
+
+/// Parameters for reading a revision-consistent page of sanitized account slots.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AccountSlotListParams {
+    /// Opaque cursor returned by a previous call. It is bound to the registry
+    /// revision and becomes stale after any same-process registry mutation.
+    #[ts(optional = nullable)]
+    pub cursor: Option<String>,
+    /// Optional page size; the server applies a bounded default and maximum.
+    #[ts(optional = nullable)]
+    pub limit: Option<u32>,
+}
+
+/// A revision-consistent page of sanitized account slots.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AccountSlotListResponse {
+    pub data: Vec<AccountSlotSnapshot>,
+    /// Opaque cursor bound to `registryRevision` and a stable sort anchor. A stale-cursor
+    /// error requires restarting from the first page.
+    pub next_cursor: Option<String>,
+    #[ts(type = "number")]
+    pub registry_revision: u64,
+    pub multi_account: AccountSlotCapability,
+}
+
+/// Sanitized capability state for account-slot operations.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AccountSlotCapability {
+    pub available: bool,
+    pub deny_reason: Option<String>,
+}
+
+/// A host-managed account slot without credential paths, email addresses, or tokens.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AccountSlotSnapshot {
+    pub account_slot_id: String,
+    pub label: String,
+    pub is_default: bool,
+    pub status: AccountSlotStatus,
+    pub auth_mode: Option<AuthMode>,
+    #[ts(type = "number")]
+    pub attempt_generation: u64,
+    #[ts(type = "number")]
+    pub registry_revision: u64,
+    pub active_login_operation_id: Option<String>,
+    pub error_code: Option<String>,
+    pub actions: Vec<AccountSlotActionAvailability>,
+    /// Unix timestamp in seconds when the slot last changed.
+    #[ts(type = "number")]
+    pub updated_at: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum AccountSlotStatus {
+    LoginRequired,
+    Ready,
+    Failed,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum AccountSlotAction {
+    Login,
+    RetryLogin,
+    SwitchTo,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AccountSlotActionAvailability {
+    pub action: AccountSlotAction,
+    pub allowed: bool,
+    pub deny_reason: Option<String>,
+}
+
+/// Starts or retries login for a server-managed account slot.
+///
+/// Omitting `slotId` asks the server to allocate a private home and opaque slot id.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(tag = "type")]
+#[ts(tag = "type")]
+#[ts(export_to = "v2/")]
+pub enum AccountSlotLoginStartParams {
+    #[serde(rename = "apiKey", rename_all = "camelCase")]
+    #[ts(rename = "apiKey", rename_all = "camelCase")]
+    ApiKey {
+        #[ts(optional = nullable)]
+        slot_id: Option<String>,
+        api_key: String,
+    },
+    #[serde(rename = "chatgpt", rename_all = "camelCase")]
+    #[ts(rename = "chatgpt", rename_all = "camelCase")]
+    Chatgpt {
+        #[ts(optional = nullable)]
+        slot_id: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        codex_streamlined_login: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        use_hosted_login_success_page: bool,
+        #[ts(optional = nullable)]
+        app_brand: Option<LoginAppBrand>,
+    },
+    #[serde(rename = "chatgptDeviceCode", rename_all = "camelCase")]
+    #[ts(rename = "chatgptDeviceCode", rename_all = "camelCase")]
+    ChatgptDeviceCode {
+        #[ts(optional = nullable)]
+        slot_id: Option<String>,
+    },
+    /// [UNSTABLE] FOR OPENAI INTERNAL USE ONLY - DO NOT USE.
+    #[serde(rename = "chatgptAuthTokens", rename_all = "camelCase")]
+    #[ts(rename = "chatgptAuthTokens", rename_all = "camelCase")]
+    ChatgptAuthTokens {
+        #[ts(optional = nullable)]
+        slot_id: Option<String>,
+        access_token: String,
+        chatgpt_account_id: String,
+        #[ts(optional = nullable)]
+        chatgpt_plan_type: Option<String>,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AccountSlotLoginStartResponse {
+    pub slot: AccountSlotSnapshot,
+    pub operation: SessionRuntimeOperation,
+    pub challenge: Option<AccountSlotLoginChallenge>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(tag = "type", rename_all = "camelCase")]
+#[ts(tag = "type")]
+#[ts(export_to = "v2/")]
+pub enum AccountSlotLoginChallenge {
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    Browser { login_id: String, auth_url: String },
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    DeviceCode {
+        login_id: String,
+        verification_url: String,
+        user_code: String,
+    },
+}
+
+/// Full changed-slot snapshot at a new registry revision.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AccountSlotChangedNotification {
+    #[ts(type = "number")]
+    pub registry_revision: u64,
+    pub slot: AccountSlotSnapshot,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

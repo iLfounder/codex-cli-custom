@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Parameters for reading a revision-consistent page of sanitized account slots.",
+  "properties": {
+    "cursor": {
+      "description": "Opaque cursor returned by a previous call. It is bound to the registry revision and becomes stale after any same-process registry mutation.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "limit": {
+      "description": "Optional page size; the server applies a bounded default and maximum.",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "title": "AccountSlotListParams",
+  "type": "object"
+}

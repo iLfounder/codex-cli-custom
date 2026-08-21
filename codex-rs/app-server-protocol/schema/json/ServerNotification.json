@@ -50,6 +50,132 @@
       ],
       "type": "object"
     },
+    "AccountSlotAction": {
+      "enum": [
+        "login",
+        "retryLogin",
+        "switchTo"
+      ],
+      "type": "string"
+    },
+    "AccountSlotActionAvailability": {
+      "properties": {
+        "action": {
+          "$ref": "#/definitions/AccountSlotAction"
+        },
+        "allowed": {
+          "type": "boolean"
+        },
+        "denyReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "action",
+        "allowed"
+      ],
+      "type": "object"
+    },
+    "AccountSlotChangedNotification": {
+      "description": "Full changed-slot snapshot at a new registry revision.",
+      "properties": {
+        "registryRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "slot": {
+          "$ref": "#/definitions/AccountSlotSnapshot"
+        }
+      },
+      "required": [
+        "registryRevision",
+        "slot"
+      ],
+      "type": "object"
+    },
+    "AccountSlotSnapshot": {
+      "description": "A host-managed account slot without credential paths, email addresses, or tokens.",
+      "properties": {
+        "accountSlotId": {
+          "type": "string"
+        },
+        "actions": {
+          "items": {
+            "$ref": "#/definitions/AccountSlotActionAvailability"
+          },
+          "type": "array"
+        },
+        "activeLoginOperationId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "attemptGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "authMode": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AuthMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "errorCode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "isDefault": {
+          "type": "boolean"
+        },
+        "label": {
+          "type": "string"
+        },
+        "registryRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/definitions/AccountSlotStatus"
+        },
+        "updatedAt": {
+          "description": "Unix timestamp in seconds when the slot last changed.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "accountSlotId",
+        "actions",
+        "attemptGeneration",
+        "isDefault",
+        "label",
+        "registryRevision",
+        "status",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "AccountSlotStatus": {
+      "enum": [
+        "loginRequired",
+        "ready",
+        "failed"
+      ],
+      "type": "string"
+    },
     "AccountUpdatedNotification": {
       "properties": {
         "authMode": {
@@ -3521,6 +3647,577 @@
         "threadId"
       ],
       "type": "object"
+    },
+    "SessionRuntimeAccountBinding": {
+      "description": "Current and active-turn account provenance for a thread.",
+      "properties": {
+        "activeTurn": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionRuntimeAccountRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "current": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionRuntimeAccountRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "denyReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "switchState": {
+          "$ref": "#/definitions/SessionRuntimeAccountSwitchState"
+        },
+        "switchTargetSlotId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "switchState"
+      ],
+      "type": "object"
+    },
+    "SessionRuntimeAccountRef": {
+      "properties": {
+        "accountSlotId": {
+          "type": "string"
+        },
+        "executionGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "accountSlotId",
+        "executionGeneration"
+      ],
+      "type": "object"
+    },
+    "SessionRuntimeAccountSwitchState": {
+      "enum": [
+        "stable",
+        "preparing",
+        "switching",
+        "unbound",
+        "degraded"
+      ],
+      "type": "string"
+    },
+    "SessionRuntimeAction": {
+      "enum": [
+        "relinquish",
+        "switchAccount"
+      ],
+      "type": "string"
+    },
+    "SessionRuntimeActionAvailability": {
+      "properties": {
+        "action": {
+          "$ref": "#/definitions/SessionRuntimeAction"
+        },
+        "allowed": {
+          "type": "boolean"
+        },
+        "denyReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "action",
+        "allowed"
+      ],
+      "type": "object"
+    },
+    "SessionRuntimeChangedNotification": {
+      "description": "Full changed-thread snapshot on the process runtime event stream.",
+      "properties": {
+        "instanceEpoch": {
+          "type": "string"
+        },
+        "sequence": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "snapshot": {
+          "$ref": "#/definitions/SessionRuntimeSnapshot"
+        }
+      },
+      "required": [
+        "instanceEpoch",
+        "sequence",
+        "snapshot"
+      ],
+      "type": "object"
+    },
+    "SessionRuntimeIdentity": {
+      "description": "Sanitized identity and settings that remain useful outside the Codex process.",
+      "properties": {
+        "cwd": {
+          "type": "string"
+        },
+        "forkedFromId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "gitInfo": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GitInfo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parentThreadId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "settings": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadSettings"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Effective next-turn settings when the thread is loaded and they are available."
+        },
+        "source": {
+          "description": "Stable sanitized source name from the thread metadata.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cwd",
+        "sessionId",
+        "source"
+      ],
+      "type": "object"
+    },
+    "SessionRuntimeLifecycle": {
+      "description": "Current lifecycle, subscription, and activity state for a thread.",
+      "properties": {
+        "activeTurnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "clientIncarnations": {
+          "description": "Opaque client incarnation identifiers; raw process identifiers are never exposed.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "lastActivityAt": {
+          "description": "Unix timestamp in seconds of the most recent runtime activity.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/definitions/SessionRuntimeLifecycleState"
+        },
+        "subscriberCount": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "unloadAt": {
+          "description": "Unix timestamp in seconds when an idle unload is scheduled.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "waitingOn": {
+          "items": {
+            "$ref": "#/definitions/SessionRuntimeWaitingOn"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "clientIncarnations",
+        "state",
+        "subscriberCount",
+        "waitingOn"
+      ],
+      "type": "object"
+    },
+    "SessionRuntimeLifecycleState": {
+      "enum": [
+        "notLoaded",
+        "loaded",
+        "idle",
+        "active",
+        "closing"
+      ],
+      "type": "string"
+    },
+    "SessionRuntimeOperation": {
+      "description": "Common operation state returned by controls and published as progress changes.",
+      "properties": {
+        "accountSlotId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "action": {
+          "$ref": "#/definitions/SessionRuntimeOperationAction"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionRuntimeOperationError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "executionGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "operationId": {
+          "type": "string"
+        },
+        "requestFingerprint": {
+          "description": "Opaque digest of the normalized action and arguments. Reusing an operation id with a different fingerprint is an invalid request rather than an idempotent retry.",
+          "type": "string"
+        },
+        "stateRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/SessionRuntimeOperationStatus"
+        },
+        "threadId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updatedAt": {
+          "description": "Unix timestamp in seconds when this operation state was produced.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "writerGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "action",
+        "operationId",
+        "requestFingerprint",
+        "status",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "SessionRuntimeOperationAction": {
+      "enum": [
+        "accountSlotLogin",
+        "threadAccountSwitch",
+        "threadRelinquish"
+      ],
+      "type": "string"
+    },
+    "SessionRuntimeOperationError": {
+      "description": "Sanitized operation failure; it never contains tokens, paths, sockets, or raw PIDs.",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "SessionRuntimeOperationStatus": {
+      "enum": [
+        "accepted",
+        "running",
+        "released",
+        "ready",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "SessionRuntimeOperationUpdatedNotification": {
+      "description": "Progress or terminal state for a bounded process-local operation.",
+      "properties": {
+        "instanceEpoch": {
+          "type": "string"
+        },
+        "operation": {
+          "$ref": "#/definitions/SessionRuntimeOperation"
+        },
+        "sequence": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "instanceEpoch",
+        "operation",
+        "sequence"
+      ],
+      "type": "object"
+    },
+    "SessionRuntimePersistence": {
+      "description": "Durable JSONL/SQLite progress and health without exposing storage paths.",
+      "properties": {
+        "denyReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "flushHealth": {
+          "$ref": "#/definitions/SessionRuntimePersistenceHealth"
+        },
+        "flushedAt": {
+          "description": "Unix timestamp in seconds of the last successful recorder flush.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "jsonl": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionRuntimePersistencePosition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lag": {
+          "description": "Number of durable records by which SQLite trails JSONL, when known.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "materializeHealth": {
+          "$ref": "#/definitions/SessionRuntimePersistenceHealth"
+        },
+        "materializedAt": {
+          "description": "Unix timestamp in seconds of the last successful SQLite materialization.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sqlite": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionRuntimePersistencePosition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "flushHealth",
+        "materializeHealth"
+      ],
+      "type": "object"
+    },
+    "SessionRuntimePersistenceHealth": {
+      "enum": [
+        "unknown",
+        "healthy",
+        "degraded",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "SessionRuntimePersistencePosition": {
+      "properties": {
+        "offset": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "ordinal": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "offset",
+        "ordinal"
+      ],
+      "type": "object"
+    },
+    "SessionRuntimeSnapshot": {
+      "description": "Complete sanitized runtime state for one thread.",
+      "properties": {
+        "account": {
+          "$ref": "#/definitions/SessionRuntimeAccountBinding"
+        },
+        "actions": {
+          "items": {
+            "$ref": "#/definitions/SessionRuntimeActionAvailability"
+          },
+          "type": "array"
+        },
+        "identity": {
+          "$ref": "#/definitions/SessionRuntimeIdentity"
+        },
+        "lifecycle": {
+          "$ref": "#/definitions/SessionRuntimeLifecycle"
+        },
+        "persistence": {
+          "$ref": "#/definitions/SessionRuntimePersistence"
+        },
+        "stateRevision": {
+          "description": "Monotonic revision used by thread control compare-and-swap requests.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "threadId": {
+          "description": "Logical runtime entity key.",
+          "type": "string"
+        },
+        "writer": {
+          "$ref": "#/definitions/SessionRuntimeWriter"
+        }
+      },
+      "required": [
+        "account",
+        "actions",
+        "identity",
+        "lifecycle",
+        "persistence",
+        "stateRevision",
+        "threadId",
+        "writer"
+      ],
+      "type": "object"
+    },
+    "SessionRuntimeWaitingOn": {
+      "enum": [
+        "approval",
+        "userInput",
+        "serverRequest"
+      ],
+      "type": "string"
+    },
+    "SessionRuntimeWriter": {
+      "description": "Writer ownership and its durable lease fence.",
+      "properties": {
+        "denyReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/definitions/SessionRuntimeWriterState"
+        },
+        "storeId": {
+          "description": "Opaque store identity. This is not a filesystem path or process identifier.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "writerGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "type": "object"
+    },
+    "SessionRuntimeWriterState": {
+      "enum": [
+        "none",
+        "ownedHere",
+        "ownedElsewhere",
+        "unavailable"
+      ],
+      "type": "string"
     },
     "SessionSource": {
       "oneOf": [
@@ -7025,6 +7722,66 @@
         "params"
       ],
       "title": "Account/rateLimits/updatedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "accountSlot/changed"
+          ],
+          "title": "AccountSlot/changedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AccountSlotChangedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "AccountSlot/changedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "sessionRuntime/changed"
+          ],
+          "title": "SessionRuntime/changedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/SessionRuntimeChangedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "SessionRuntime/changedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "sessionRuntime/operation/updated"
+          ],
+          "title": "SessionRuntime/operation/updatedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/SessionRuntimeOperationUpdatedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "SessionRuntime/operation/updatedNotification",
       "type": "object"
     },
     {

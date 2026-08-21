@@ -10,6 +10,7 @@ use crate::connection_rpc_gate::ConnectionRpcGate;
 use crate::current_time::app_server_time_provider;
 use crate::error_code::invalid_params;
 use crate::error_code::invalid_request;
+use crate::error_code::method_not_found;
 use crate::extensions::ThreadExtensionDependencies;
 use crate::extensions::app_server_extension_event_sink;
 use crate::extensions::guardian_agent_spawner;
@@ -955,6 +956,21 @@ impl MessageProcessor {
                 panic!("Initialize should be handled before initialized request dispatch");
             }
             ClientRequest::ServerDiagnostics { .. } => Ok(Some(read_server_diagnostics().into())),
+            ClientRequest::SessionRuntimeList { .. } => Err(method_not_found(
+                "sessionRuntime/list is not implemented yet",
+            )),
+            ClientRequest::AccountSlotList { .. } => {
+                Err(method_not_found("accountSlot/list is not implemented yet"))
+            }
+            ClientRequest::AccountSlotLoginStart { .. } => Err(method_not_found(
+                "accountSlot/login/start is not implemented yet",
+            )),
+            ClientRequest::ThreadAccountSwitch { .. } => Err(method_not_found(
+                "thread/account/switch is not implemented yet",
+            )),
+            ClientRequest::ThreadRelinquish { .. } => {
+                Err(method_not_found("thread/relinquish is not implemented yet"))
+            }
             ClientRequest::ConfigRead { params, .. } => self
                 .config_processor
                 .read(params)

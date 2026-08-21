@@ -5,6 +5,156 @@
       "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
       "type": "string"
     },
+    "AccountSlotListParams": {
+      "description": "Parameters for reading a revision-consistent page of sanitized account slots.",
+      "properties": {
+        "cursor": {
+          "description": "Opaque cursor returned by a previous call. It is bound to the registry revision and becomes stale after any same-process registry mutation.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "description": "Optional page size; the server applies a bounded default and maximum.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "AccountSlotLoginStartParams": {
+      "description": "Starts or retries login for a server-managed account slot.\n\nOmitting `slotId` asks the server to allocate a private home and opaque slot id.",
+      "oneOf": [
+        {
+          "properties": {
+            "apiKey": {
+              "type": "string"
+            },
+            "slotId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "apiKey"
+              ],
+              "title": "ApiKeyAccountSlotLoginStartParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "apiKey",
+            "type"
+          ],
+          "title": "ApiKeyAccountSlotLoginStartParams",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "appBrand": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/LoginAppBrand"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "codexStreamlinedLogin": {
+              "type": "boolean"
+            },
+            "slotId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "chatgpt"
+              ],
+              "title": "ChatgptAccountSlotLoginStartParamsType",
+              "type": "string"
+            },
+            "useHostedLoginSuccessPage": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "ChatgptAccountSlotLoginStartParams",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "slotId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "chatgptDeviceCode"
+              ],
+              "title": "ChatgptDeviceCodeAccountSlotLoginStartParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "ChatgptDeviceCodeAccountSlotLoginStartParams",
+          "type": "object"
+        },
+        {
+          "description": "[UNSTABLE] FOR OPENAI INTERNAL USE ONLY - DO NOT USE.",
+          "properties": {
+            "accessToken": {
+              "type": "string"
+            },
+            "chatgptAccountId": {
+              "type": "string"
+            },
+            "chatgptPlanType": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "slotId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "chatgptAuthTokens"
+              ],
+              "title": "ChatgptAuthTokensAccountSlotLoginStartParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "accessToken",
+            "chatgptAccountId",
+            "type"
+          ],
+          "title": "ChatgptAuthTokensAccountSlotLoginStartParams",
+          "type": "object"
+        }
+      ]
+    },
     "AddCreditsNudgeCreditType": {
       "enum": [
         "credits",
@@ -3830,6 +3980,35 @@
       ],
       "type": "object"
     },
+    "SessionRuntimeListParams": {
+      "description": "Parameters for reading a revision-consistent page of session runtime snapshots.",
+      "properties": {
+        "cursor": {
+          "description": "Opaque cursor returned by a previous call. The server rejects it when the instance epoch or snapshot sequence no longer matches the source snapshot.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "description": "Optional page size; the server applies a bounded default and maximum.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "threadId": {
+          "description": "Optional exact thread identifier filter.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "Settings": {
       "description": "Settings for a collaboration mode.",
       "properties": {
@@ -3966,6 +4145,42 @@
       },
       "required": [
         "byteRange"
+      ],
+      "type": "object"
+    },
+    "ThreadAccountSwitchParams": {
+      "description": "Compare-and-swap parameters for switching a thread's next-turn account.",
+      "properties": {
+        "expectedExecutionGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "expectedInstanceEpoch": {
+          "type": "string"
+        },
+        "expectedStateRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "operationId": {
+          "type": "string"
+        },
+        "targetAccountSlotId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expectedExecutionGeneration",
+        "expectedInstanceEpoch",
+        "expectedStateRevision",
+        "operationId",
+        "targetAccountSlotId",
+        "threadId"
       ],
       "type": "object"
     },
@@ -4514,6 +4729,38 @@
           "type": "object"
         }
       ]
+    },
+    "ThreadRelinquishParams": {
+      "description": "Compare-and-swap parameters for a strict durable writer release.",
+      "properties": {
+        "expectedInstanceEpoch": {
+          "type": "string"
+        },
+        "expectedStateRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "expectedWriterGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "operationId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expectedInstanceEpoch",
+        "expectedStateRevision",
+        "expectedWriterGeneration",
+        "operationId",
+        "threadId"
+      ],
+      "type": "object"
     },
     "ThreadResumeInitialTurnsPageParams": {
       "properties": {
@@ -5615,6 +5862,54 @@
         },
         "method": {
           "enum": [
+            "thread/account/switch"
+          ],
+          "title": "Thread/account/switchRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadAccountSwitchParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Thread/account/switchRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "thread/relinquish"
+          ],
+          "title": "Thread/relinquishRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadRelinquishParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Thread/relinquishRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
             "thread/name/set"
           ],
           "title": "Thread/name/setRequestMethod",
@@ -6014,6 +6309,30 @@
         "params"
       ],
       "title": "Thread/loaded/listRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "sessionRuntime/list"
+          ],
+          "title": "SessionRuntime/listRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/SessionRuntimeListParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "SessionRuntime/listRequest",
       "type": "object"
     },
     {
@@ -7165,6 +7484,54 @@
         "method"
       ],
       "title": "WindowsSandbox/readinessRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "accountSlot/list"
+          ],
+          "title": "AccountSlot/listRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AccountSlotListParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "AccountSlot/listRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "accountSlot/login/start"
+          ],
+          "title": "AccountSlot/login/startRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AccountSlotLoginStartParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "AccountSlot/login/startRequest",
       "type": "object"
     },
     {

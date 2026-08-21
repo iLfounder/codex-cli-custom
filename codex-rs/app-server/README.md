@@ -173,6 +173,7 @@ Example with notification opt-out:
 - `threadSection/update` — rename an existing custom section and optionally replace its `appearance`; omit appearance to preserve it or pass `null` to clear it. The built-in pinned section cannot be updated.
 - `threadSection/delete` — delete an existing custom section and atomically return its member threads to the unsectioned list; returns `{}`. The built-in pinned section cannot be deleted.
 - `thread/loaded/list` — list the thread ids currently loaded in memory.
+- `sessionRuntime/list` — page through sanitized full runtime snapshots, optionally filtered by one exact `threadId`. Every page carries the same `instanceEpoch` and `snapshotSequence`; its opaque `nextCursor` is also bound to that pair and a stable sort anchor. If the sequence changes between pages, the server returns a stale-cursor error and the client must restart from the first page.
 - `thread/read` — read a stored thread by id without resuming it; optionally include turns via `includeTurns`. The returned `thread` includes `status` (`ThreadStatus`), defaulting to `notLoaded` when the thread is not currently loaded. For loaded threads, experimental clients can use `canAcceptDirectInput` to determine whether `turn/start` and `turn/steer` are accepted; unloaded stored threads report `null` when that capability is unavailable.
 - `thread/turns/list` — experimental; page through a stored thread’s turn history without resuming it; supports cursor-based pagination with `sortDirection`, `itemsView`, `nextCursor`, and `backwardsCursor`.
 - `thread/items/list` — experimental; page through persisted thread items without resuming the thread. Pass `turnId` to restrict results to one turn, or omit it to page items across the thread. The active thread store must support item pagination.
@@ -199,6 +200,8 @@ Example with notification opt-out:
 - `thread/archive` — move a thread’s rollout file into the archived directory and attempt to move any spawned descendant thread rollout files; returns `{}` on success and emits `thread/archived` for each archived thread.
 - `thread/delete` — hard-delete an active or archived thread and any spawned descendant threads; returns `{}` on success and emits `thread/deleted` for each deleted thread.
 - `thread/unsubscribe` — unsubscribe this connection from thread turn/item events. If this was the last subscriber, the server keeps the thread loaded and unloads it only after it has had no subscribers and no thread activity for 30 minutes, runs `SessionEnd` hooks, then emits `thread/closed`.
+- `thread/account/switch` — request an idle next-turn account switch with an `operationId`, target slot, expected process epoch, state revision, and execution generation.
+- `thread/relinquish` — request a strict durable writer release with an `operationId`, expected process epoch, state revision, and writer generation.
 - `thread/name/set` — set or update a thread’s user-facing name for either a loaded thread or a persisted rollout; returns `{}` on success and emits `thread/name/updated` to initialized, opted-in clients. Thread names are not required to be unique; name lookups resolve to the most recently updated thread.
 - `thread/unarchive` — move an archived rollout file back into the sessions directory; returns the restored `thread` on success and emits `thread/unarchived`.
 - `thread/compact/start` — trigger conversation history compaction for a thread; returns `{}` immediately while progress streams through standard turn/item notifications.
@@ -2241,6 +2244,9 @@ Codex supports these authentication modes. The current mode is surfaced in `acco
 
 ### API Overview
 
+- `accountSlot/list` — page through sanitized account slots. Responses never include email addresses, tokens, credential homes, or credential paths. The opaque cursor is bound to `registryRevision` and a stable sort anchor; any intervening registry mutation makes it stale and requires a first-page restart.
+- `accountSlot/login/start` — create a server-managed private account slot when `slotId` is omitted, or retry the same failed/login-required slot when it is supplied. The response includes the sanitized slot, operation state, and an optional browser or device-code challenge.
+- `accountSlot/changed` (notify) — emits the complete sanitized changed slot and its new `registryRevision`.
 - `account/read` — fetch current account info; optionally refresh tokens.
 - `account/login/start` — begin login (`apiKey`, `chatgpt`, `chatgptDeviceCode`, `amazonBedrock`).
 - `account/login/completed` (notify) — emitted when a login attempt finishes (success or error).
@@ -2256,6 +2262,10 @@ Codex supports these authentication modes. The current mode is surfaced in `acco
 - `account/sendAddCreditsNudgeEmail` — ask ChatGPT to email the workspace owner about depleted credits or a reached usage limit.
 - `mcpServer/oauthLogin/completed` (notify) — emitted after a `mcpServer/oauth/login` flow finishes for a server; payload includes `{ name, threadId, success, error? }`.
 - `mcpServer/startupStatus/updated` (notify) — emitted when a configured MCP server's startup status changes; payload includes `{ threadId, name, status, error, failureReason }`, where `threadId` is the owning thread when startup is thread-scoped and `null` when it is app-scoped, and `status` is `starting`, `ready`, `failed`, or `cancelled`. `failureReason` is `reauthenticationRequired` when stored OAuth credentials have expired and cannot be refreshed, so clients can prompt the user to reconnect the named server.
+
+The session-runtime control contract is operation-based. `thread/account/switch` and `thread/relinquish` return an operation whose status distinguishes acknowledgement (`accepted` or `running`) from terminal completion (`ready`, `released`, or `failed`). `sessionRuntime/operation/updated` publishes later operation states, while `sessionRuntime/changed` publishes a complete changed-thread snapshot with an `instanceEpoch` and monotonic `sequence`. Operation ids are idempotent only within the same process epoch and only when the normalized request fingerprint is identical; reusing an id with a different thread, action, or arguments is invalid.
+
+`thread/relinquish` validates the process epoch, thread state revision, writer generation, idle/wait state, and subscriber ownership before entering `running`. A failed precondition or durability step returns a terminal `failed` operation without dropping the current writer or subscription. `released` means strict persistence completed, the old writer was released, and the terminal runtime snapshot was published. `thread/account/switch` validates the process epoch, state and execution revisions, writer ownership, idle/wait state, and subscriber ownership, then prepares the target account runtime before atomically changing the durable next-turn binding. A terminal `ready` operation preserves the thread id, writer, listener, and subscriptions; later turns use the target slot while an already-running turn cannot be switched.
 
 ### 1) Check auth state
 
