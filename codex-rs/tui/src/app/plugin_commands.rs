@@ -10,6 +10,9 @@ use codex_app_server_protocol::PluginCommand;
 use codex_app_server_protocol::PluginCommandInvokeResponse;
 use codex_app_server_protocol::ThreadPresentation;
 use std::collections::HashMap;
+use std::collections::VecDeque;
+
+const MAX_PRESENTATIONS: usize = 128;
 
 #[derive(Debug, Default)]
 pub(super) struct PluginCommandState {
@@ -17,6 +20,7 @@ pub(super) struct PluginCommandState {
     thread_id: Option<ThreadId>,
     commands: Vec<PluginSlashCommand>,
     presentations: HashMap<String, Arc<dyn HistoryCell>>,
+    presentation_order: VecDeque<String>,
 }
 
 impl PluginCommandState {
@@ -24,11 +28,13 @@ impl PluginCommandState {
         self.thread_id = None;
         self.commands.clear();
         self.presentations.clear();
+        self.presentation_order.clear();
         self.request_generation = self.request_generation.wrapping_add(1);
     }
 
     pub(super) fn clear_presentations(&mut self) {
         self.presentations.clear();
+        self.presentation_order.clear();
     }
 }
 
@@ -282,6 +288,7 @@ impl App {
         let cell = Arc::new(ThreadPresentationHistoryCell::new(item));
         let id = cell.id().to_string();
         let cell: Arc<dyn HistoryCell> = cell;
+        let is_replacement = self.plugin_command_state.presentations.contains_key(&id);
         if let Some(previous) = self.plugin_command_state.presentations.get(&id)
             && let Some(index) = self
                 .transcript_cells
@@ -292,7 +299,23 @@ impl App {
         } else {
             self.transcript_cells.push(cell.clone());
         }
-        self.plugin_command_state.presentations.insert(id, cell);
+        self.plugin_command_state
+            .presentations
+            .insert(id.clone(), cell);
+        if !is_replacement {
+            self.plugin_command_state.presentation_order.push_back(id);
+            if self.plugin_command_state.presentation_order.len() > MAX_PRESENTATIONS
+                && let Some(oldest_id) = self.plugin_command_state.presentation_order.pop_front()
+                && let Some(oldest_cell) =
+                    self.plugin_command_state.presentations.remove(&oldest_id)
+                && let Some(index) = self
+                    .transcript_cells
+                    .iter()
+                    .position(|candidate| Arc::ptr_eq(candidate, &oldest_cell))
+            {
+                self.transcript_cells.remove(index);
+            }
+        }
         if let Some(Overlay::Transcript(overlay)) = &mut self.overlay {
             overlay.replace_cells(self.transcript_cells.clone());
         }
