@@ -19,6 +19,7 @@ use codex_app_server_protocol::SessionRuntimeListResponse;
 use codex_app_server_protocol::SessionRuntimeSnapshot;
 use codex_core::ThreadManager;
 use codex_protocol::ThreadId;
+use codex_thread_store::LocalThreadStore;
 use codex_thread_store::ThreadStore;
 use tokio::sync::Mutex;
 use tokio::sync::Semaphore;
@@ -196,6 +197,17 @@ impl SessionRuntimeEngine {
         &self,
         account_slot_id: &str,
     ) -> Result<bool, JSONRPCErrorError> {
+        if let Some(local_store) = self
+            .thread_store
+            .as_any()
+            .downcast_ref::<LocalThreadStore>()
+            && local_store
+                .durable_execution_account_slot_in_use(account_slot_id)
+                .await
+                .map_err(|_| internal_error("execution account binding store is unavailable"))?
+        {
+            return Ok(true);
+        }
         let _build_guard = self
             .build_lock
             .acquire()

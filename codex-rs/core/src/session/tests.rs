@@ -6401,6 +6401,27 @@ async fn resumed_root_session_uses_thread_id_as_session_id() {
 }
 
 #[tokio::test]
+async fn ephemeral_session_does_not_create_durable_execution_account_binding() {
+    let (session, _rx_event) = make_session_with_history_source_and_agent_control_and_rx(
+        InitialHistory::New,
+        SessionSource::Exec,
+        AgentControl::default(),
+    )
+    .await
+    .expect("ephemeral session should start");
+
+    assert_eq!(
+        session
+            .services
+            .thread_store
+            .execution_account_binding(session.thread_id())
+            .await
+            .expect("read durable binding"),
+        None
+    );
+}
+
+#[tokio::test]
 async fn resumed_subagent_session_restores_persisted_session_id() {
     let parent_thread_id = ThreadId::new();
     let parent_session_id = SessionId::from(parent_thread_id);

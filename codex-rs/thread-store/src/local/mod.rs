@@ -271,6 +271,35 @@ impl LocalThreadStore {
         self.state_db.clone()
     }
 
+    /// Check the durable thread binding authority for an account slot.
+    pub async fn durable_execution_account_slot_in_use(
+        &self,
+        account_slot_id: &str,
+    ) -> ThreadStoreResult<bool> {
+        if self.state_db.is_none() {
+            return Ok(false);
+        }
+        let pool = self
+            .config
+            .sqlite
+            .open_read_only_pool(&self.config.sqlite.state_db_path())
+            .await
+            .map_err(|err| ThreadStoreError::Internal {
+                message: format!("failed to open execution account binding store: {err}"),
+            })?;
+        let result = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM thread_execution_account_bindings WHERE slot_id = ?)",
+        )
+        .bind(account_slot_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|err| ThreadStoreError::Internal {
+            message: format!("failed to scan execution account bindings: {err}"),
+        });
+        pool.close().await;
+        result
+    }
+
     /// Probe current writer ownership and persistent control metadata without
     /// creating, deleting, or taking ownership of a thread lock.
     pub async fn probe_writer_authority(
@@ -1126,6 +1155,44 @@ mod tests {
                 .await
                 .expect("read turn binding"),
             Some(binding)
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_execution_account_slot_scan_reads_binding_authority() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = LocalThreadStore::new(config, Some(runtime));
+        let thread_id = ThreadId::default();
+
+        store
+            .initialize_execution_account_binding(
+                thread_id,
+                ExecutionAccountBinding {
+                    slot_id: "secondary".to_string(),
+                    generation: 1,
+                },
+            )
+            .await
+            .expect("initialize durable binding");
+
+        assert!(
+            store
+                .durable_execution_account_slot_in_use("secondary")
+                .await
+                .expect("scan durable bindings")
+        );
+        assert!(
+            !store
+                .durable_execution_account_slot_in_use("unused")
+                .await
+                .expect("scan durable bindings")
         );
     }
 

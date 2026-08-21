@@ -43,6 +43,7 @@ use crate::error_code::internal_error;
 use crate::external_auth::ExternalAuthBridge;
 
 const SLOT_RETRY_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
+const ERROR_SLOT_BOUND: &str = "accountSlotBound";
 
 mod transport;
 
@@ -138,6 +139,12 @@ impl AccountRequestProcessor {
         let (requested_slot, kind) = slot_request_identity(&params);
         if let Some(slot_id) = requested_slot.as_deref() {
             self.await_previous_slot_login(slot_id).await?;
+            if self.session_runtime.account_slot_in_use(slot_id).await? {
+                return Err(structured_invalid_request(
+                    ERROR_SLOT_BOUND,
+                    "account slot is bound to a thread",
+                ));
+            }
         }
 
         let operation_id = Uuid::new_v4().to_string();

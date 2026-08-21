@@ -1960,16 +1960,18 @@ impl Session {
                 sess.try_ensure_rollout_materialized(PersistContext::Standard)
                     .await?;
             }
-            let persisted_binding = thread_store
-                .initialize_execution_account_binding(
-                    thread_id,
-                    execution_account.binding.clone(),
-                )
-                .await?;
-            if persisted_binding != execution_account.binding {
-                anyhow::bail!(
-                    "thread {thread_id} execution account changed during session startup"
-                );
+            if !config.ephemeral {
+                let persisted_binding = thread_store
+                    .initialize_execution_account_binding(
+                        thread_id,
+                        execution_account.binding.clone(),
+                    )
+                    .await?;
+                if persisted_binding != execution_account.binding {
+                    anyhow::bail!(
+                        "thread {thread_id} execution account changed during session startup"
+                    );
+                }
             }
             {
                 let mut state = sess.state.lock().await;
