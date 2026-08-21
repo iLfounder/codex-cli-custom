@@ -3,6 +3,7 @@
 use super::account_picker::AccountControlIntent;
 use super::account_picker::AccountPickerSnapshot;
 use super::account_picker::PendingAccountControl;
+use super::account_validation::revision_meets_lower_bound;
 use super::*;
 use crate::app_server_session::list_account_slots;
 use crate::app_server_session::logout_account_slot;
@@ -213,7 +214,7 @@ impl App {
             thread_id,
             target_slot_id: slot_id.clone(),
             instance_epoch,
-            prior_registry_revision: self.account_registry_revision,
+            minimum_registry_revision: self.account_registry_revision.saturating_add(1),
             prior_generation,
             validation_in_flight: false,
         });
@@ -310,10 +311,10 @@ impl App {
     ) {
         let Some(PendingAccountControl::Logout {
             target_slot_id,
-            prior_registry_revision,
+            minimum_registry_revision,
             prior_generation,
             ..
-        }) = self.pending_account_control.as_ref()
+        }) = self.pending_account_control.as_mut()
         else {
             return;
         };
@@ -324,10 +325,13 @@ impl App {
             Ok(response)
                 if response.slot.account_slot_id == slot_id
                     && response.slot.status == AccountSlotStatus::LoginRequired
-                    && response.slot.registry_revision
-                        == prior_registry_revision.saturating_add(1)
+                    && revision_meets_lower_bound(
+                        response.slot.registry_revision,
+                        *minimum_registry_revision,
+                    )
                     && response.slot.attempt_generation == prior_generation.saturating_add(1) =>
             {
+                *minimum_registry_revision = response.slot.registry_revision;
                 self.begin_account_control_validation(
                     app_server, /*state_revision*/ None, /*execution_generation*/ None,
                 );
@@ -383,7 +387,9 @@ impl App {
                     );
                     return;
                 };
-                if ready_state_revision.is_some_and(|ready| ready != revision) {
+                if ready_state_revision
+                    .is_some_and(|ready| !revision_meets_lower_bound(revision, ready))
+                {
                     self.pending_account_control = None;
                     self.chat_widget.add_error_message(
                         "The account switch returned inconsistent revisions.".to_string(),

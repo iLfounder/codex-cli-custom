@@ -7,6 +7,10 @@ use codex_app_server_protocol::AccountSlotStatus;
 use codex_app_server_protocol::SessionRuntimeAccountSwitchState;
 use codex_app_server_protocol::SessionRuntimeSnapshot;
 
+pub(super) fn revision_meets_lower_bound(actual: u64, minimum: u64) -> bool {
+    actual >= minimum
+}
+
 impl App {
     pub(super) fn finish_account_control_validation(&mut self) {
         let Some(pending) = self.pending_account_control.take() else {
@@ -28,7 +32,10 @@ impl App {
                             epoch == &instance_epoch && runtime.thread_id == thread_id.to_string()
                         });
                 runtime_matches
-                    && self.account_registry_revision >= minimum_registry_revision
+                    && revision_meets_lower_bound(
+                        self.account_registry_revision,
+                        minimum_registry_revision,
+                    )
                     && self.account_slots.iter().any(|slot| {
                         slot.account_slot_id == target_slot_id
                             && slot.status == AccountSlotStatus::Ready
@@ -48,7 +55,9 @@ impl App {
                 .is_some_and(|(epoch, runtime)| {
                     epoch == &instance_epoch
                         && runtime.thread_id == thread_id.to_string()
-                        && Some(runtime.state_revision) == ready_state_revision
+                        && ready_state_revision.is_some_and(|minimum| {
+                            revision_meets_lower_bound(runtime.state_revision, minimum)
+                        })
                         && runtime.account.switch_state == SessionRuntimeAccountSwitchState::Stable
                         && runtime.account.current.as_ref().is_some_and(|current| {
                             current.account_slot_id == target_slot_id
@@ -59,7 +68,7 @@ impl App {
                 thread_id,
                 target_slot_id,
                 instance_epoch,
-                prior_registry_revision,
+                minimum_registry_revision,
                 prior_generation,
                 ..
             } => {
@@ -70,7 +79,10 @@ impl App {
                             epoch == &instance_epoch && runtime.thread_id == thread_id.to_string()
                         });
                 runtime_matches
-                    && self.account_registry_revision == prior_registry_revision.saturating_add(1)
+                    && revision_meets_lower_bound(
+                        self.account_registry_revision,
+                        minimum_registry_revision,
+                    )
                     && self.account_slots.iter().any(|slot| {
                         slot.account_slot_id == target_slot_id
                             && slot.status == AccountSlotStatus::LoginRequired
@@ -118,3 +130,7 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "account_validation_tests.rs"]
+mod tests;

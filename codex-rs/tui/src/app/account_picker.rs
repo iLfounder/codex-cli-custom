@@ -58,7 +58,7 @@ pub(super) enum PendingAccountControl {
         thread_id: ThreadId,
         target_slot_id: String,
         instance_epoch: String,
-        prior_registry_revision: u64,
+        minimum_registry_revision: u64,
         prior_generation: u64,
         validation_in_flight: bool,
     },
