@@ -26,6 +26,14 @@ use codex_app_server_client::AppServerPath;
 use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::Account;
+use codex_app_server_protocol::AccountSlotCapability;
+use codex_app_server_protocol::AccountSlotListParams;
+use codex_app_server_protocol::AccountSlotListResponse;
+use codex_app_server_protocol::AccountSlotLoginStartParams;
+use codex_app_server_protocol::AccountSlotLoginStartResponse;
+use codex_app_server_protocol::AccountSlotLogoutParams;
+use codex_app_server_protocol::AccountSlotLogoutResponse;
+use codex_app_server_protocol::AccountSlotSnapshot;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::AuthMode;
 use codex_app_server_protocol::ClientRequest;
@@ -53,10 +61,15 @@ use codex_app_server_protocol::ReviewDelivery;
 use codex_app_server_protocol::ReviewStartParams;
 use codex_app_server_protocol::ReviewStartResponse;
 use codex_app_server_protocol::ReviewTarget;
+use codex_app_server_protocol::SessionRuntimeListParams;
+use codex_app_server_protocol::SessionRuntimeListResponse;
+use codex_app_server_protocol::SessionRuntimeSnapshot;
 use codex_app_server_protocol::SessionSource;
 use codex_app_server_protocol::SkillsListParams;
 use codex_app_server_protocol::SkillsListResponse;
 use codex_app_server_protocol::Thread;
+use codex_app_server_protocol::ThreadAccountSwitchParams;
+use codex_app_server_protocol::ThreadAccountSwitchResponse;
 use codex_app_server_protocol::ThreadApproveGuardianDeniedActionParams;
 use codex_app_server_protocol::ThreadApproveGuardianDeniedActionResponse;
 use codex_app_server_protocol::ThreadArchiveParams;
@@ -91,6 +104,8 @@ use codex_app_server_protocol::ThreadMetadataUpdateParams;
 use codex_app_server_protocol::ThreadMetadataUpdateResponse;
 use codex_app_server_protocol::ThreadReadParams;
 use codex_app_server_protocol::ThreadReadResponse;
+use codex_app_server_protocol::ThreadRelinquishParams;
+use codex_app_server_protocol::ThreadRelinquishResponse;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadSetNameParams;
@@ -119,6 +134,8 @@ use codex_otel::TelemetryAuthMode;
 use codex_protocol::ThreadId;
 use codex_protocol::approvals::GuardianAssessmentEvent;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
+use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
+use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::BaseInstructionsProvenance;
 use codex_protocol::models::PermissionProfile;
@@ -147,6 +164,21 @@ const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 const JSONRPC_INVALID_PARAMS: i64 = -32602;
 pub(crate) const EXTERNAL_AGENT_CONFIG_IMPORT_IN_PROGRESS_MESSAGE: &str = "A previous external agent import is still running. Wait for it to finish before importing again.";
 const THREAD_SETTINGS_UPDATE_METHOD: &str = "thread/settings/update";
+const ACCOUNT_SLOT_PAGE_LIMIT: u32 = 100;
+const ACCOUNT_SLOT_MAX_PAGES: usize = 64;
+
+#[derive(Debug)]
+pub(crate) struct AccountSlotsSnapshot {
+    pub(crate) data: Vec<AccountSlotSnapshot>,
+    pub(crate) registry_revision: u64,
+    pub(crate) multi_account: AccountSlotCapability,
+}
+
+#[derive(Debug)]
+pub(crate) struct ThreadRuntimeSnapshot {
+    pub(crate) instance_epoch: String,
+    pub(crate) snapshot: SessionRuntimeSnapshot,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ForkGoalContinuation {
@@ -1423,6 +1455,157 @@ impl AppServerSession {
     }
 }
 
+pub(crate) async fn session_runtime_for_thread(
+    request_handle: AppServerRequestHandle,
+    thread_id: ThreadId,
+) -> Result<ThreadRuntimeSnapshot> {
+    let response: SessionRuntimeListResponse = request_handle
+        .request_typed(ClientRequest::SessionRuntimeList {
+            request_id: RequestId::String(format!("tui-session-runtime-{}", Uuid::new_v4())),
+            params: SessionRuntimeListParams {
+                cursor: None,
+                limit: Some(2),
+                thread_id: Some(thread_id.to_string()),
+            },
+        })
+        .await?;
+    let mut matching = response
+        .data
+        .into_iter()
+        .filter(|snapshot| snapshot.thread_id == thread_id.to_string());
+    let snapshot = matching.next().ok_or_else(|| {
+        color_eyre::eyre::eyre!("sessionRuntime/list omitted the requested thread")
+    })?;
+    if matching.next().is_some() || response.next_cursor.is_some() {
+        return Err(color_eyre::eyre::eyre!(
+            "sessionRuntime/list returned an ambiguous exact-thread result"
+        ));
+    }
+    Ok(ThreadRuntimeSnapshot {
+        instance_epoch: response.instance_epoch,
+        snapshot,
+    })
+}
+
+pub(crate) async fn list_account_slots(
+    request_handle: AppServerRequestHandle,
+) -> Result<AccountSlotsSnapshot> {
+    let mut cursor = None;
+    let mut data = Vec::new();
+    let mut expected_revision = None;
+    let mut expected_capability = None;
+    for _ in 0..ACCOUNT_SLOT_MAX_PAGES {
+        let response: AccountSlotListResponse = request_handle
+            .request_typed(ClientRequest::AccountSlotList {
+                request_id: RequestId::String(format!("tui-account-slots-{}", Uuid::new_v4())),
+                params: AccountSlotListParams {
+                    cursor,
+                    limit: Some(ACCOUNT_SLOT_PAGE_LIMIT),
+                },
+            })
+            .await?;
+        if expected_revision.is_some_and(|revision| revision != response.registry_revision)
+            || expected_capability
+                .as_ref()
+                .is_some_and(|capability| capability != &response.multi_account)
+        {
+            return Err(color_eyre::eyre::eyre!(
+                "accountSlot/list changed while reading a revision-consistent snapshot"
+            ));
+        }
+        expected_revision = Some(response.registry_revision);
+        expected_capability = Some(response.multi_account.clone());
+        data.extend(response.data);
+        let Some(next_cursor) = response.next_cursor else {
+            return Ok(AccountSlotsSnapshot {
+                data,
+                registry_revision: response.registry_revision,
+                multi_account: response.multi_account,
+            });
+        };
+        cursor = Some(next_cursor);
+    }
+    Err(color_eyre::eyre::eyre!(
+        "accountSlot/list exceeded the TUI page bound"
+    ))
+}
+
+pub(crate) async fn start_account_slot_login(
+    request_handle: AppServerRequestHandle,
+    params: AccountSlotLoginStartParams,
+) -> Result<AccountSlotLoginStartResponse> {
+    request_handle
+        .request_typed(ClientRequest::AccountSlotLoginStart {
+            request_id: RequestId::String(format!("tui-account-login-{}", Uuid::new_v4())),
+            params,
+        })
+        .await
+        .map_err(Into::into)
+}
+
+pub(crate) async fn logout_account_slot(
+    request_handle: AppServerRequestHandle,
+    params: AccountSlotLogoutParams,
+) -> Result<AccountSlotLogoutResponse> {
+    request_handle
+        .request_typed(ClientRequest::AccountSlotLogout {
+            request_id: RequestId::String(format!("tui-account-logout-{}", Uuid::new_v4())),
+            params,
+        })
+        .await
+        .map_err(Into::into)
+}
+
+pub(crate) async fn switch_thread_account(
+    request_handle: AppServerRequestHandle,
+    params: ThreadAccountSwitchParams,
+) -> Result<ThreadAccountSwitchResponse> {
+    request_handle
+        .request_typed(ClientRequest::ThreadAccountSwitch {
+            request_id: RequestId::String(format!("tui-account-switch-{}", Uuid::new_v4())),
+            params,
+        })
+        .await
+        .map_err(Into::into)
+}
+
+pub(crate) async fn relinquish_thread(
+    request_handle: AppServerRequestHandle,
+    params: ThreadRelinquishParams,
+) -> Result<ThreadRelinquishResponse> {
+    request_handle
+        .request_typed(ClientRequest::ThreadRelinquish {
+            request_id: RequestId::String(format!("tui-thread-relinquish-{}", Uuid::new_v4())),
+            params,
+        })
+        .await
+        .map_err(Into::into)
+}
+
+pub(crate) fn thread_control_dynamic_tools() -> Vec<DynamicToolSpec> {
+    [
+        (
+            "threadClear",
+            "Clear this thread and start with an empty conversation.",
+        ),
+        ("threadNew", "Start a new thread in this TUI."),
+    ]
+    .into_iter()
+    .map(|(name, description)| {
+        DynamicToolSpec::Function(DynamicToolFunctionSpec {
+            name: name.to_string(),
+            description: description.to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            defer_loading: false,
+        })
+    })
+    .collect()
+}
+
 pub(crate) async fn start_thread_with_request_handle(
     request_handle: AppServerRequestHandle,
     config: Config,
@@ -1692,6 +1875,7 @@ fn thread_start_params_from_config(
         developer_instructions: with_terminal_visualization_instructions(
             config, /*control_instructions*/ None,
         ),
+        dynamic_tools: Some(thread_control_dynamic_tools()),
         ..ThreadStartParams::default()
     }
 }
@@ -1706,6 +1890,7 @@ fn thread_resume_params_from_config(
     if model_settings == ResumeModelSettings::PreserveExistingThread {
         return ThreadResumeParams {
             thread_id: thread_id.to_string(),
+            dynamic_tools: Some(thread_control_dynamic_tools()),
             ..ThreadResumeParams::default()
         };
     }
@@ -1752,6 +1937,7 @@ fn thread_resume_params_from_config(
         developer_instructions: with_terminal_visualization_instructions(
             &config, /*control_instructions*/ None,
         ),
+        dynamic_tools: Some(thread_control_dynamic_tools()),
         ..ThreadResumeParams::default()
     }
 }
@@ -3604,5 +3790,20 @@ mod tests {
                 plan: Some(ref plan),
             }) if plan == "Business"
         ));
+    }
+
+    #[tokio::test]
+    async fn thread_start_injects_typed_tui_controls() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let config = build_config(&temp_dir).await;
+
+        let params = thread_start_params_from_config(
+            &config,
+            ThreadParamsMode::Embedded,
+            /*remote_cwd_override*/ None,
+            /*session_start_source*/ None,
+        );
+
+        assert_eq!(params.dynamic_tools, Some(thread_control_dynamic_tools()));
     }
 }

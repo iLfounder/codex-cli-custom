@@ -361,7 +361,7 @@ Start a fresh thread when you need a new Codex conversation.
 
 Valid `personality` values are `"friendly"`, `"pragmatic"`, and `"none"`. When `"none"` is selected, the personality placeholder is replaced with an empty string.
 
-To continue a stored session, call `thread/resume` with the `thread.id` you previously recorded. The response shape matches `thread/start`. When the stored session includes persisted token usage, the server emits `thread/tokenUsage/updated` immediately after the response so clients can render restored usage before the next turn starts. You can also pass the same configuration overrides supported by `thread/start`, including `approvalsReviewer`. On cold resume, approval policy and the active permission-profile ID select a source in this order: request override, latest persisted thread setting, current configured default. The persisted profile ID is resolved through the same config and requirements path as a `permissions` override. Threads without an active profile ID use current config instead of restoring their concrete historical permissions.
+To continue a stored session, call `thread/resume` with the `thread.id` you previously recorded. The response shape matches `thread/start`. When the stored session includes persisted token usage, the server emits `thread/tokenUsage/updated` immediately after the response so clients can render restored usage before the next turn starts. You can also pass the same configuration overrides supported by `thread/start`, including `approvalsReviewer`. Experimental clients can pass `dynamicTools`; a non-empty list replaces tools restored from the rollout, including for legacy threads that did not persist them. On cold resume, approval policy and the active permission-profile ID select a source in this order: request override, latest persisted thread setting, current configured default. The persisted profile ID is resolved through the same config and requirements path as a `permissions` override. Threads without an active profile ID use current config instead of restoring their concrete historical permissions.
 
 By default, `thread/resume` includes the reconstructed turn history in `thread.turns`. Experimental clients can pass `excludeTurns: true` to return only thread metadata and live resume state, then call `thread/turns/list` separately if they want to page the turn history over the network. A cold paginated resume can still replay persisted `thread/tokenUsage/updated` when it can identify the corresponding stored turn; resuming an already-loaded thread waits for the next live update.
 
@@ -1798,7 +1798,7 @@ If the session approval policy uses `Granular` with `request_permissions: false`
 
 ### Dynamic tool calls (experimental)
 
-`dynamicTools` on `thread/start` and the corresponding `item/tool/call` request/response flow are experimental APIs. To enable them, set `initialize.params.capabilities.experimentalApi = true`.
+`dynamicTools` on `thread/start` and `thread/resume`, and the corresponding `item/tool/call` request/response flow, are experimental APIs. To enable them, set `initialize.params.capabilities.experimentalApi = true`.
 
 Each entry in `dynamicTools` is either a top-level function or a namespace containing function tools. Dynamic tool identifiers follow the same constraints as Responses tools:
 

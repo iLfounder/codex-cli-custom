@@ -17,8 +17,6 @@ use codex_app_server_protocol::ThreadGoalStatus;
 #[cfg(target_os = "windows")]
 use codex_config::types::WindowsSandboxModeToml;
 
-const SHUTDOWN_FIRST_EXIT_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 2);
-
 impl App {
     pub(super) async fn handle_event(
         &mut self,
@@ -45,6 +43,62 @@ impl App {
         }
 
         match event {
+            AppEvent::OpenAccountPicker => self.open_account_picker(app_server),
+            AppEvent::AccountPickerLoaded {
+                thread_id,
+                request_generation,
+                result,
+            } => self.handle_account_picker_loaded(thread_id, request_generation, result),
+            AppEvent::OpenAccountLoginMethods { slot_id } => {
+                self.show_account_login_methods(slot_id)
+            }
+            AppEvent::PrepareAccountControl { intent } => {
+                self.prepare_account_control(app_server, intent)
+            }
+            AppEvent::AccountControlPrepared {
+                thread_id,
+                request_generation,
+                intent,
+                result,
+            } => self.handle_account_control_prepared(
+                app_server,
+                thread_id,
+                request_generation,
+                intent,
+                result,
+            ),
+            AppEvent::AccountSlotLoginStarted {
+                thread_id,
+                instance_epoch,
+                result,
+            } => self.handle_account_slot_login_started(
+                app_server,
+                thread_id,
+                instance_epoch,
+                result,
+            ),
+            AppEvent::AccountSwitchFinished {
+                operation_id,
+                result,
+            } => self.handle_account_switch_finished(app_server, &operation_id, result),
+            AppEvent::AccountSlotLogoutFinished { slot_id, result } => {
+                self.handle_account_slot_logout_finished(app_server, &slot_id, result)
+            }
+            AppEvent::ShutdownRuntimeLoaded {
+                thread_id,
+                intent,
+                result,
+            } => self.handle_shutdown_runtime_loaded(app_server, thread_id, intent, result),
+            AppEvent::ShutdownRelinquishFinished {
+                operation_id,
+                result,
+            } => self.handle_shutdown_relinquish_finished(&operation_id, result),
+            AppEvent::LogoutAfterRelease => match app_server.logout_account().await {
+                Ok(()) => return Ok(AppRunControl::Exit(ExitReason::UserRequested)),
+                Err(error) => self
+                    .chat_widget
+                    .add_error_message(format!("Logout failed after session release: {error}")),
+            },
             AppEvent::SkillsListLoaded { ref cwd, .. }
             | AppEvent::PluginMentionsLoaded { ref cwd, .. }
                 if cwds_differ(cwd, self.config.cwd.as_path()) => {}
@@ -658,19 +712,13 @@ impl App {
                     }
                 }
             },
-            AppEvent::Logout => match app_server.logout_account().await {
-                Ok(()) => {
-                    self.show_shutdown_feedback(tui)?;
-                    return Ok(self
-                        .handle_exit_mode(app_server, ExitMode::ShutdownFirst)
-                        .await);
-                }
-                Err(err) => {
-                    tracing::error!("failed to logout: {err}");
-                    self.chat_widget
-                        .add_error_message(format!("Logout failed: {err}"));
-                }
-            },
+            AppEvent::Logout => {
+                self.show_shutdown_feedback(tui)?;
+                self.begin_release_aware_shutdown(
+                    app_server,
+                    super::runtime_controls::ShutdownIntent::LogoutDefault,
+                );
+            }
             AppEvent::FatalExitRequest(message) => {
                 return Ok(AppRunControl::Exit(ExitReason::Fatal(message)));
             }
@@ -2899,31 +2947,14 @@ impl App {
     ) -> AppRunControl {
         match mode {
             ExitMode::ShutdownFirst => {
-                // Mark the thread we are explicitly shutting down for exit so
-                // its shutdown completion does not trigger agent failover.
-                self.pending_shutdown_exit_thread_id =
-                    self.active_thread_id.or(self.chat_widget.thread_id());
-                if self.pending_shutdown_exit_thread_id.is_some() {
-                    // This is a UI escape-hatch budget, not a protocol
-                    // deadline. A healthy local thread/unsubscribe round trip
-                    // should finish comfortably inside two seconds, while a
-                    // longer wait makes Ctrl+C feel broken when the app-server
-                    // is already wedged.
-                    if tokio::time::timeout(
-                        SHUTDOWN_FIRST_EXIT_TIMEOUT,
-                        self.shutdown_current_thread(app_server),
-                    )
-                    .await
-                    .is_err()
-                    {
-                        tracing::warn!("timed out waiting for app-server thread shutdown");
-                    }
-                }
-                self.pending_shutdown_exit_thread_id = None;
-                AppRunControl::Exit(ExitReason::UserRequested)
+                self.begin_release_aware_shutdown(
+                    app_server,
+                    super::runtime_controls::ShutdownIntent::Exit,
+                );
+                AppRunControl::Continue
             }
             ExitMode::Immediate => {
-                self.pending_shutdown_exit_thread_id = None;
+                self.pending_shutdown = None;
                 AppRunControl::Exit(ExitReason::UserRequested)
             }
         }

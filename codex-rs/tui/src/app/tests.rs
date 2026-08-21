@@ -5037,7 +5037,16 @@ async fn active_non_primary_shutdown_target_returns_none_when_shutdown_exit_is_p
     let primary_thread_id = ThreadId::new();
     app.active_thread_id = Some(active_thread_id);
     app.primary_thread_id = Some(primary_thread_id);
-    app.pending_shutdown_exit_thread_id = Some(active_thread_id);
+    app.pending_shutdown = Some(runtime_controls::PendingShutdown {
+        intent: runtime_controls::ShutdownIntent::Exit,
+        thread_id: active_thread_id,
+        operation_id: "test-operation".to_string(),
+        instance_epoch: "test-epoch".to_string(),
+        state_revision: 1,
+        writer_generation: 1,
+        released: false,
+        thread_closed: false,
+    });
 
     assert_eq!(
         app.active_non_primary_shutdown_target(&thread_closed_notification(active_thread_id)),
@@ -5054,7 +5063,16 @@ async fn active_non_primary_shutdown_target_still_switches_for_other_pending_exi
     let primary_thread_id = ThreadId::new();
     app.active_thread_id = Some(active_thread_id);
     app.primary_thread_id = Some(primary_thread_id);
-    app.pending_shutdown_exit_thread_id = Some(ThreadId::new());
+    app.pending_shutdown = Some(runtime_controls::PendingShutdown {
+        intent: runtime_controls::ShutdownIntent::Exit,
+        thread_id: ThreadId::new(),
+        operation_id: "test-operation".to_string(),
+        instance_epoch: "test-epoch".to_string(),
+        state_revision: 1,
+        writer_generation: 1,
+        released: false,
+        thread_closed: false,
+    });
 
     assert_eq!(
         app.active_non_primary_shutdown_target(&thread_closed_notification(active_thread_id)),
@@ -5282,7 +5300,15 @@ async fn make_test_app() -> App {
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         app_server_target: crate::AppServerTarget::Embedded,
         pending_update_action: None,
-        pending_shutdown_exit_thread_id: None,
+        pending_shutdown: None,
+        shutdown_lookup_in_flight: false,
+        account_slots: Vec::new(),
+        account_slot_capability: None,
+        account_registry_revision: 0,
+        account_runtime: None,
+        account_request_generation: 0,
+        pending_account_control: None,
+        pending_dynamic_thread_control: None,
         windows_sandbox: WindowsSandboxState::default(),
         thread_event_channels: HashMap::new(),
         thread_event_listener_tasks: HashMap::new(),
@@ -5359,7 +5385,15 @@ async fn make_test_app_with_channels() -> (
             environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
             app_server_target: crate::AppServerTarget::Embedded,
             pending_update_action: None,
-            pending_shutdown_exit_thread_id: None,
+            pending_shutdown: None,
+            shutdown_lookup_in_flight: false,
+            account_slots: Vec::new(),
+            account_slot_capability: None,
+            account_registry_revision: 0,
+            account_runtime: None,
+            account_request_generation: 0,
+            pending_account_control: None,
+            pending_dynamic_thread_control: None,
             windows_sandbox: WindowsSandboxState::default(),
             thread_event_channels: HashMap::new(),
             thread_event_listener_tasks: HashMap::new(),
@@ -7552,7 +7586,7 @@ async fn new_session_requests_shutdown_for_previous_conversation() {
 }
 
 #[tokio::test]
-async fn shutdown_first_exit_returns_immediate_exit_when_shutdown_submit_fails() {
+async fn shutdown_first_exit_waits_for_runtime_release() {
     let mut app = make_test_app().await;
     let thread_id = ThreadId::new();
     app.active_thread_id = Some(thread_id);
@@ -7564,15 +7598,13 @@ async fn shutdown_first_exit_returns_immediate_exit_when_shutdown_submit_fails()
     .expect("embedded app server");
     let control = Box::pin(app.handle_exit_mode(&mut app_server, ExitMode::ShutdownFirst)).await;
 
-    assert_eq!(app.pending_shutdown_exit_thread_id, None);
-    assert!(matches!(
-        control,
-        AppRunControl::Exit(ExitReason::UserRequested)
-    ));
+    assert!(app.pending_shutdown.is_none());
+    assert!(app.shutdown_lookup_in_flight);
+    assert!(matches!(control, AppRunControl::Continue));
 }
 
 #[tokio::test]
-async fn shutdown_first_exit_uses_app_server_shutdown_without_submitting_op() {
+async fn shutdown_first_exit_does_not_submit_legacy_shutdown_op() {
     let (mut app, _app_event_rx, mut op_rx) = Box::pin(make_test_app_with_channels()).await;
     let thread_id = ThreadId::new();
     app.active_thread_id = Some(thread_id);
@@ -7584,11 +7616,9 @@ async fn shutdown_first_exit_uses_app_server_shutdown_without_submitting_op() {
     .expect("embedded app server");
     let control = Box::pin(app.handle_exit_mode(&mut app_server, ExitMode::ShutdownFirst)).await;
 
-    assert_eq!(app.pending_shutdown_exit_thread_id, None);
-    assert!(matches!(
-        control,
-        AppRunControl::Exit(ExitReason::UserRequested)
-    ));
+    assert!(app.pending_shutdown.is_none());
+    assert!(app.shutdown_lookup_in_flight);
+    assert!(matches!(control, AppRunControl::Continue));
     assert!(
         op_rx.try_recv().is_err(),
         "shutdown should not submit Op::Shutdown"

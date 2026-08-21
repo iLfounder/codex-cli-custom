@@ -242,6 +242,38 @@ fn thread_resume_params_accept_turns_page_bootstrap() {
 }
 
 #[test]
+fn thread_resume_params_accept_dynamic_tools_override() {
+    let params = serde_json::from_value::<ThreadResumeParams>(json!({
+        "threadId": "thr_123",
+        "dynamicTools": [{
+            "type": "function",
+            "name": "threadClear",
+            "description": "Clear the current thread",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }
+        }]
+    }))
+    .expect("thread resume dynamic tools should deserialize");
+
+    assert_eq!(
+        params.dynamic_tools,
+        Some(vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {
+            name: "threadClear".to_string(),
+            description: "Clear the current thread".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            defer_loading: false,
+        })])
+    );
+}
+
+#[test]
 fn thread_resume_response_round_trips_initial_turns_page() {
     let response = ThreadResumeResponse {
         thread: Thread {

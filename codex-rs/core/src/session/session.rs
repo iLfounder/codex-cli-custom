@@ -243,6 +243,7 @@ impl SessionConfiguration {
             reasoning_effort: self.collaboration_mode.reasoning_effort(),
             reasoning_summary: self.model_reasoning_summary,
             personality: self.personality,
+            dynamic_tools: self.dynamic_tools.clone(),
             collaboration_mode: self.collaboration_mode.clone(),
             session_source: self.session_source.clone(),
             history_mode: self.history_mode,

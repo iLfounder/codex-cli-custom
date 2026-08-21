@@ -88,6 +88,43 @@ impl App {
         app_server_client: &AppServerSession,
         notification: ServerNotification,
     ) {
+        match &notification {
+            ServerNotification::SessionRuntimeOperationUpdated(update)
+                if (self.handle_shutdown_operation(
+                    Some(&update.instance_epoch),
+                    &update.operation,
+                ) || self.handle_account_login_operation(
+                    app_server_client,
+                    &update.instance_epoch,
+                    &update.operation,
+                ) || self.handle_account_switch_operation(
+                    app_server_client,
+                    Some(&update.instance_epoch),
+                    &update.operation,
+                )) =>
+            {
+                return;
+            }
+            ServerNotification::SessionRuntimeChanged(update) => {
+                self.handle_account_runtime_changed(
+                    update.instance_epoch.clone(),
+                    update.snapshot.clone(),
+                );
+            }
+            ServerNotification::AccountSlotChanged(update) => {
+                self.handle_account_slot_changed(update.registry_revision, update.slot.clone());
+                return;
+            }
+            ServerNotification::ThreadClosed(update)
+                if self.handle_pending_shutdown_thread_closed(&update.thread_id) =>
+            {
+                return;
+            }
+            ServerNotification::ItemCompleted(update) => {
+                self.handle_dynamic_thread_control_completed(update);
+            }
+            _ => {}
+        }
         if let ServerNotification::ThreadStarted(started) = &notification
             && let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id, ..
@@ -310,6 +347,12 @@ impl App {
             {
                 tracing::warn!("{err}");
             }
+            return;
+        }
+        if self
+            .handle_dynamic_thread_control_request(app_server_client, &request)
+            .await
+        {
             return;
         }
         if thread_id.is_some()

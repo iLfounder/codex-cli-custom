@@ -191,6 +191,18 @@ fn collect_resume_override_mismatches(
             config_snapshot.personality
         ));
     }
+    if let Some(requested_dynamic_tools) = request
+        .dynamic_tools
+        .as_ref()
+        .filter(|tools| !tools.is_empty())
+        && requested_dynamic_tools != &config_snapshot.dynamic_tools
+    {
+        mismatch_details.push(format!(
+            "dynamic_tools requested_count={} active_count={}",
+            requested_dynamic_tools.len(),
+            config_snapshot.dynamic_tools.len()
+        ));
+    }
 
     if request.config.is_some() {
         mismatch_details
@@ -2151,6 +2163,7 @@ impl ThreadRequestProcessor {
                 config,
                 thread_history,
                 execution_account,
+                Vec::new(),
                 self.request_trace_context(request_id).await,
                 client_mcp_extensions,
             )
@@ -3514,6 +3527,14 @@ impl ThreadRequestProcessor {
                 .await;
             return Ok(());
         }
+        if let Some(dynamic_tools) = params.dynamic_tools.as_ref()
+            && let Err(error) = validate_dynamic_tools(dynamic_tools)
+        {
+            self.outgoing
+                .send_error(request_id, invalid_request(error))
+                .await;
+            return Ok(());
+        }
         let redact_resume_payloads =
             should_redact_thread_resume_payloads(app_server_client_name.as_deref());
 
@@ -3558,6 +3579,7 @@ impl ThreadRequestProcessor {
             base_instructions,
             developer_instructions,
             personality,
+            dynamic_tools,
             exclude_turns,
             initial_turns_page,
         } = params;
@@ -3668,6 +3690,7 @@ impl ThreadRequestProcessor {
         }
 
         let response_history = thread_history.clone();
+        let dynamic_tools = dynamic_tools.unwrap_or_default();
 
         match self
             .thread_manager
@@ -3675,6 +3698,7 @@ impl ThreadRequestProcessor {
                 config,
                 thread_history,
                 self.auth_manager.clone(),
+                dynamic_tools,
                 self.request_trace_context(&request_id).await,
                 client_mcp_extensions,
             )
@@ -4007,6 +4031,10 @@ impl ThreadRequestProcessor {
                 )));
             }
             let config_snapshot = existing_thread.config_snapshot().await;
+            let dynamic_tools_mismatch = params
+                .dynamic_tools
+                .as_ref()
+                .is_some_and(|tools| !tools.is_empty() && tools != &config_snapshot.dynamic_tools);
             let mismatch_details = collect_resume_override_mismatches(params, &config_snapshot);
             if !mismatch_details.is_empty() {
                 let has_subscribers = !self
@@ -4040,6 +4068,12 @@ impl ThreadRequestProcessor {
                             warn!("thread {existing_thread_id} shutdown timed out");
                         }
                     }
+                }
+
+                if dynamic_tools_mismatch {
+                    return Err(invalid_request(format!(
+                        "cannot resume loaded thread {existing_thread_id} with different dynamic tools while it is active, subscribed, or could not be shut down"
+                    )));
                 }
 
                 // Preserve rejoin semantics when another client can still observe

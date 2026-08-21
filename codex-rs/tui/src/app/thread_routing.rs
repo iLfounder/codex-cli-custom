@@ -1469,7 +1469,7 @@ impl App {
     /// thread has died and we should fail over to the primary thread.
     ///
     /// A user-requested shutdown (`ExitMode::ShutdownFirst`) sets
-    /// `pending_shutdown_exit_thread_id`; matching shutdown completions are ignored
+    /// `pending_shutdown`; matching shutdown completions are ignored
     /// here so Ctrl+C-like exits don't accidentally resurrect the main thread.
     ///
     /// Failover is only eligible when all of these are true:
@@ -1485,7 +1485,11 @@ impl App {
         }
         let active_thread_id = self.active_thread_id?;
         let primary_thread_id = self.primary_thread_id?;
-        if self.pending_shutdown_exit_thread_id == Some(active_thread_id) {
+        if self
+            .pending_shutdown
+            .as_ref()
+            .is_some_and(|pending| pending.thread_id == active_thread_id)
+        {
             return None;
         }
         (active_thread_id != primary_thread_id).then_some((active_thread_id, primary_thread_id))
@@ -1718,15 +1722,6 @@ impl App {
         app_server: &mut AppServerSession,
         event: ThreadBufferedEvent,
     ) -> Result<()> {
-        // Capture this before any potential thread switch: we only want to clear
-        // the exit marker when the currently active thread acknowledges shutdown.
-        let pending_shutdown_exit_completed = matches!(
-            &event,
-            ThreadBufferedEvent::Notification(notification)
-                if matches!(notification.as_ref(), ServerNotification::ThreadClosed(_))
-        ) && self.pending_shutdown_exit_thread_id
-            == self.active_thread_id;
-
         // Processing order matters:
         //
         // 1. handle unexpected non-primary shutdown failover first;
@@ -1764,11 +1759,6 @@ impl App {
             return Ok(());
         }
 
-        if pending_shutdown_exit_completed {
-            // Clear only after seeing the shutdown completion for the tracked
-            // thread, so unrelated shutdowns cannot consume this marker.
-            self.pending_shutdown_exit_thread_id = None;
-        }
         let had_active_view = self.chat_widget.has_active_view();
         self.handle_thread_event_now_recovering_file_changes(event)
             .await;

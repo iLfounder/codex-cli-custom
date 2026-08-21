@@ -1414,6 +1414,11 @@ impl ChatWidget {
         self.bottom_pane.show_shutdown_in_progress();
     }
 
+    pub(crate) fn restore_after_shutdown_failure(&mut self) {
+        self.bottom_pane
+            .set_composer_input_enabled(/*enabled*/ true, /*placeholder*/ None);
+    }
+
     fn request_redraw(&mut self) {
         self.frame_requester.schedule_frame();
     }

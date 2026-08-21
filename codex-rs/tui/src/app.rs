@@ -91,6 +91,8 @@ use crate::workspace_command::WorkspaceCommandRunner;
 use codex_ansi_escape::ansi_escape_line;
 use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_client::TypedRequestError;
+use codex_app_server_protocol::AccountSlotCapability;
+use codex_app_server_protocol::AccountSlotSnapshot;
 use codex_app_server_protocol::AddCreditsNudgeCreditType;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ClientRequest;
@@ -124,6 +126,7 @@ use codex_app_server_protocol::SandboxMode as AppServerSandboxMode;
 use codex_app_server_protocol::SendAddCreditsNudgeEmailParams;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
+use codex_app_server_protocol::SessionRuntimeSnapshot;
 use codex_app_server_protocol::SkillErrorInfo;
 use codex_app_server_protocol::SkillsListParams;
 use codex_app_server_protocol::SkillsListResponse;
@@ -203,6 +206,11 @@ use tokio::sync::mpsc::unbounded_channel;
 use tokio::task::JoinHandle;
 use toml::Value as TomlValue;
 use uuid::Uuid;
+mod account_controls;
+mod account_login;
+pub(crate) mod account_picker;
+mod account_picker_view;
+mod account_validation;
 mod agent_message_consolidation;
 mod agent_navigation;
 mod agent_picker;
@@ -216,6 +224,7 @@ pub(crate) mod app_server_requests;
 mod background_requests;
 mod config_persistence;
 mod connector_mentions;
+mod dynamic_thread_controls;
 mod event_dispatch;
 mod file_change_approvals;
 mod history_pagination;
@@ -228,6 +237,7 @@ mod platform_actions;
 mod plugin_mentions;
 mod replay_filter;
 mod resize_reflow;
+pub(crate) mod runtime_controls;
 mod safety_buffering;
 mod session_lifecycle;
 mod side;
@@ -581,15 +591,15 @@ pub(crate) struct App {
     /// Set when the user confirms an update; propagated on exit.
     pub(crate) pending_update_action: Option<UpdateAction>,
 
-    /// Tracks the thread we intentionally shut down while exiting the app.
-    ///
-    /// When this matches the active thread, its `ShutdownComplete` should lead to
-    /// process exit instead of being treated as an unexpected sub-agent death that
-    /// triggers failover to the primary thread.
-    ///
-    /// This is thread-scoped state (`Option<ThreadId>`) instead of a global bool
-    /// so shutdown events from other threads still take the normal failover path.
-    pending_shutdown_exit_thread_id: Option<ThreadId>,
+    pending_shutdown: Option<runtime_controls::PendingShutdown>,
+    shutdown_lookup_in_flight: bool,
+    account_slots: Vec<AccountSlotSnapshot>,
+    account_slot_capability: Option<AccountSlotCapability>,
+    account_registry_revision: u64,
+    account_runtime: Option<(String, SessionRuntimeSnapshot)>,
+    account_request_generation: u64,
+    pending_account_control: Option<account_picker::PendingAccountControl>,
+    pending_dynamic_thread_control: Option<dynamic_thread_controls::PendingDynamicThreadControl>,
 
     windows_sandbox: WindowsSandboxState,
 

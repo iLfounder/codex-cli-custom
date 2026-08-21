@@ -17,6 +17,7 @@ use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::WindowsSandboxLevel;
+use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::mcp::CallToolResult;
@@ -85,6 +86,7 @@ pub struct ThreadConfigSnapshot {
     pub reasoning_effort: Option<ReasoningEffort>,
     pub reasoning_summary: Option<ReasoningSummary>,
     pub personality: Option<Personality>,
+    pub dynamic_tools: Vec<DynamicToolSpec>,
     pub collaboration_mode: CollaborationMode,
     pub session_source: SessionSource,
     pub history_mode: ThreadHistoryMode,

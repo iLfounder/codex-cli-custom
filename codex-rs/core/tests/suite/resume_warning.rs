@@ -118,6 +118,7 @@ async fn emits_warning_when_resumed_model_differs() {
             config.clone(),
             initial_history,
             auth_manager,
+            Vec::new(),
             /*parent_trace*/ None,
             ClientMcpExtensions::default(),
         )

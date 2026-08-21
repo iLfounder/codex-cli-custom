@@ -1164,6 +1164,7 @@ impl ThreadManager {
             config,
             initial_history,
             auth_manager,
+            Vec::new(),
             parent_trace,
             client_mcp_extensions,
         ))
@@ -1176,6 +1177,7 @@ impl ThreadManager {
         config: Config,
         initial_history: InitialHistory,
         auth_manager: Arc<AuthManager>,
+        dynamic_tools: Vec<codex_protocol::dynamic_tools::DynamicToolSpec>,
         parent_trace: Option<W3cTraceContext>,
         client_mcp_extensions: ClientMcpExtensions,
     ) -> CodexResult<NewThread> {
@@ -1195,6 +1197,7 @@ impl ThreadManager {
             initial_history,
             session_source: Some(session_source),
             thread_source,
+            dynamic_tools,
             parent_trace,
             client_mcp_extensions,
             ..StartThreadOptions::new(config)
@@ -1213,6 +1216,7 @@ impl ThreadManager {
         config: Config,
         initial_history: InitialHistory,
         execution_account: Arc<ExecutionAccountContext>,
+        dynamic_tools: Vec<codex_protocol::dynamic_tools::DynamicToolSpec>,
         parent_trace: Option<W3cTraceContext>,
         client_mcp_extensions: ClientMcpExtensions,
     ) -> CodexResult<NewThread> {
@@ -1232,6 +1236,7 @@ impl ThreadManager {
             initial_history,
             session_source: Some(session_source),
             thread_source,
+            dynamic_tools,
             parent_trace,
             client_mcp_extensions,
             ..StartThreadOptions::new(config)

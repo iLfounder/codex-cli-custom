@@ -2802,6 +2802,7 @@ async fn resume_agent_restores_closed_agent_and_accepts_send_input() {
                 .into(),
             )]),
             AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy")),
+            Vec::new(),
             /*parent_trace*/ None,
             ClientMcpExtensions::default(),
         )

@@ -263,6 +263,7 @@ async fn assert_copied_fork_persists_inherited_history(history_mode: ThreadHisto
                 codex_core::test_support::auth_manager_from_auth(
                     codex_login::CodexAuth::from_api_key("dummy"),
                 ),
+                Vec::new(),
                 /*parent_trace*/ None,
                 ClientMcpExtensions::default(),
             )
