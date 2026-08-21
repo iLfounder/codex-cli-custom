@@ -1,55 +1,406 @@
-From c390c478f802ef0d7f32b07b2fc38c49fda64217 Mon Sep 17 00:00:00 2001
+From f21a56a53555cd03256a67336ab9f5e5e5803da7 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 19:13:43 +0900
-Subject: [PATCH 09/11] feat(custom): switch thread accounts without restart
- for 0.149
+Subject: [PATCH] feat(custom): switch thread accounts without restart for
+ 0.149
 
 ---
+ codex-rs/app-server/src/account_registry.rs   | 182 ++++---
+ .../src/account_registry/live_registration.rs |  32 +-
+ .../app-server/src/account_registry_tests.rs  |  42 ++
  codex-rs/app-server/src/message_processor.rs  |   9 +-
  .../app-server/src/session_runtime/mod.rs     |   2 +
  .../src/session_runtime/relinquish.rs         |  10 +-
  .../src/session_runtime/snapshot.rs           |  51 +-
- .../src/session_runtime/switch_account.rs     | 289 ++++++++++++
+ .../src/session_runtime/switch_account.rs     | 289 +++++++++++
  codex-rs/app-server/src/thread_state.rs       |  15 +
  codex-rs/app-server/tests/suite/v2/mod.rs     |   1 +
- .../tests/suite/v2/thread_account_switch.rs   | 284 ++++++++++++
+ .../tests/suite/v2/thread_account_switch.rs   | 284 +++++++++++
  codex-rs/codex-mcp/src/runtime.rs             |   6 +
- codex-rs/core/src/codex_thread.rs             |  18 +-
+ codex-rs/core/src/codex_thread.rs             |  31 +-
+ codex-rs/core/src/compact.rs                  |   6 +-
+ codex-rs/core/src/compact_remote.rs           |   2 +-
+ codex-rs/core/src/compact_remote_v2.rs        |   2 +-
  .../src/config/network_proxy_spec_tests.rs    |   2 +-
  codex-rs/core/src/environment_selection.rs    |  10 +-
- codex-rs/core/src/execution_account.rs        |  34 ++
+ codex-rs/core/src/execution_account.rs        |  78 +++
  codex-rs/core/src/guardian/review.rs          |   7 +-
  codex-rs/core/src/guardian/tests.rs           |   4 +-
  codex-rs/core/src/hook_mcp_executor.rs        |   6 +-
+ codex-rs/core/src/hook_runtime.rs             |   2 +-
  codex-rs/core/src/realtime_conversation.rs    |  11 +-
  codex-rs/core/src/session/handlers.rs         |   6 +-
  codex-rs/core/src/session/mcp.rs              |  57 ++-
  codex-rs/core/src/session/mcp_prewarm.rs      |  13 +-
  codex-rs/core/src/session/mcp_runtime.rs      |  86 +++-
- codex-rs/core/src/session/mod.rs              |  14 +-
- codex-rs/core/src/session/session.rs          | 437 ++++++++++++++++--
+ codex-rs/core/src/session/mod.rs              |  35 +-
+ codex-rs/core/src/session/session.rs          | 454 ++++++++++++++++--
  codex-rs/core/src/session/tests.rs            |  62 ++-
+ codex-rs/core/src/session/turn.rs             |  18 +-
  codex-rs/core/src/session/turn_context.rs     |  29 +-
  codex-rs/core/src/session_startup_prewarm.rs  |  16 +-
+ codex-rs/core/src/skills.rs                   |   5 +-
  codex-rs/core/src/state/service.rs            |   2 +
- codex-rs/core/src/thread_manager.rs           |  43 +-
+ codex-rs/core/src/tasks/compact.rs            |  18 +-
+ codex-rs/core/src/tasks/mod.rs                |  26 +-
+ codex-rs/core/src/tasks/review.rs             |   4 +-
+ codex-rs/core/src/tasks/user_shell.rs         |   3 +-
+ codex-rs/core/src/thread_manager.rs           |  45 +-
+ codex-rs/core/src/tools/approvals.rs          |  41 +-
+ .../src/tools/code_mode/execute_handler.rs    |  18 +-
+ codex-rs/core/src/tools/code_mode/mod.rs      |   9 +-
+ .../core/src/tools/code_mode/wait_handler.rs  |  17 +-
+ .../core/src/tools/control_tool_analytics.rs  |   3 +-
+ codex-rs/core/src/tools/events.rs             |  45 +-
+ .../tools/handlers/request_plugin_install.rs  |  39 +-
+ codex-rs/core/src/tools/sandboxing.rs         |   4 +-
  .../ext/extension-api/src/contributors.rs     |   4 +
  .../src/contributors/execution_account.rs     |  35 ++
  codex-rs/ext/extension-api/src/lib.rs         |   3 +
  codex-rs/ext/extension-api/src/registry.rs    |  20 +
  codex-rs/ext/goal/src/extension.rs            |  61 +++
- codex-rs/ext/goal/src/runtime.rs              |  53 ++-
- .../guardian-v2/src/async_scorer/extension.rs | 129 ++++++
+ codex-rs/ext/goal/src/runtime.rs              |  53 +-
+ .../guardian-v2/src/async_scorer/extension.rs | 129 +++++
  .../guardian-v2/src/async_scorer/sampler.rs   |  20 +
  codex-rs/ext/skills/src/extension.rs          |  39 ++
  codex-rs/network-proxy/src/proxy.rs           |   6 +-
  .../network-proxy/src/remote_config_tests.rs  |  24 +-
  codex-rs/network-proxy/src/runtime.rs         |  21 +-
- 40 files changed, 1768 insertions(+), 171 deletions(-)
+ 61 files changed, 2154 insertions(+), 400 deletions(-)
  create mode 100644 codex-rs/app-server/src/session_runtime/switch_account.rs
  create mode 100644 codex-rs/app-server/tests/suite/v2/thread_account_switch.rs
  create mode 100644 codex-rs/ext/extension-api/src/contributors/execution_account.rs
 
+diff --git a/codex-rs/app-server/src/account_registry.rs b/codex-rs/app-server/src/account_registry.rs
+index 43f1a06c2..94df2ca4f 100644
+--- a/codex-rs/app-server/src/account_registry.rs
++++ b/codex-rs/app-server/src/account_registry.rs
+@@ -18,6 +18,8 @@ use codex_core::ExecutionAccountContext;
+ use codex_core::ExecutionAccountResolver;
+ use codex_core::ExecutionAccountResolverFuture;
+ use codex_core::config::Config;
++use codex_core::execution_account::ExecutionAccountTransitionResolverFuture;
++use codex_core::execution_account::ResolvedExecutionAccountTransition;
+ use codex_core::path_utils::write_atomically;
+ use codex_login::AuthConfig;
+ use codex_login::AuthManager;
+@@ -531,90 +533,124 @@ impl AccountRegistry {
+                     .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
+             })
+     }
+-}
+-
+-pub(crate) mod live_registration;
+ 
+-impl ExecutionAccountResolver for AccountRegistry {
+-    fn resolve(&self, binding: ExecutionAccountBinding) -> ExecutionAccountResolverFuture<'_> {
+-        Box::pin(async move {
+-            self.reconcile().await.map_err(|error| {
+-                CodexErr::Fatal(format!(
+-                    "account slot reconciliation failed: {}",
+-                    error.message
+-                ))
+-            })?;
+-            let slot = {
+-                let state = self.state.read().map_err(|_| {
+-                    CodexErr::Fatal("account slot registry is unavailable".to_string())
++    async fn resolve_execution_account(
++        &self,
++        binding: ExecutionAccountBinding,
++    ) -> Result<(Arc<ExecutionAccountContext>, OwnedMutexGuard<()>), CodexErr> {
++        self.reconcile().await.map_err(|error| {
++            CodexErr::Fatal(format!(
++                "account slot reconciliation failed: {}",
++                error.message
++            ))
++        })?;
++        let binding_transition = {
++            let state = self
++                .state
++                .read()
++                .map_err(|_| CodexErr::Fatal("account slot registry is unavailable".to_string()))?;
++            let slot = state
++                .slots
++                .iter()
++                .find(|slot| slot.manifest.account_slot_id == binding.slot_id)
++                .ok_or_else(|| {
++                    CodexErr::InvalidRequest(format!(
++                        "execution account slot `{}` is unavailable",
++                        binding.slot_id
++                    ))
+                 })?;
+-                state
+-                    .slots
+-                    .iter()
+-                    .find(|slot| slot.manifest.account_slot_id == binding.slot_id)
+-                    .cloned()
+-            };
+-            let slot = slot.ok_or_else(|| {
+-                CodexErr::InvalidRequest(format!(
+-                    "execution account slot `{}` is unavailable",
+-                    binding.slot_id
+-                ))
+-            })?;
+             if slot.active_logout_operation_id.is_some() {
+                 return Err(CodexErr::InvalidRequest(format!(
+                     "execution account slot `{}` is being logged out",
+                     binding.slot_id
+                 )));
+             }
+-            let _binding_transition = Arc::clone(&slot.binding_transition).lock_owned().await;
+-            let (slot, manifest_error) = {
+-                let state = self.state.read().map_err(|_| {
+-                    CodexErr::Fatal("account slot registry is unavailable".to_string())
+-                })?;
+-                (
+-                    state
+-                        .slots
+-                        .iter()
+-                        .find(|slot| slot.manifest.account_slot_id == binding.slot_id)
+-                        .cloned(),
+-                    state.manifest_error,
+-                )
+-            };
+-            let slot = slot.ok_or_else(|| {
+-                CodexErr::InvalidRequest(format!(
+-                    "execution account slot `{}` is unavailable",
+-                    binding.slot_id
+-                ))
+-            })?;
+-            let capability = self.capability(manifest_error);
+-            if !slot.manifest.is_default && !capability.available {
+-                return Err(CodexErr::InvalidRequest(format!(
+-                    "execution account slot `{}` is unavailable: {}",
+-                    binding.slot_id,
+-                    capability
+-                        .deny_reason
+-                        .as_deref()
+-                        .unwrap_or("multi_account_unavailable")
+-                )));
+-            }
+-            if !slot.manifest.is_default && slot.manifest.status != ManifestSlotStatus::Ready {
+-                return Err(CodexErr::InvalidRequest(format!(
+-                    "execution account slot `{}` is not ready",
+-                    binding.slot_id
+-                )));
+-            }
+-            if slot.active_logout_operation_id.is_some() {
+-                return Err(CodexErr::InvalidRequest(format!(
+-                    "execution account slot `{}` is being logged out",
+-                    binding.slot_id
+-                )));
+-            }
+-            let runtime = self.runtime(&slot).await;
+-            Ok(Arc::new(ExecutionAccountContext {
++            Arc::clone(&slot.binding_transition)
++        };
++        let binding_transition = binding_transition.lock_owned().await;
++        let (slot, manifest_error) = {
++            let state = self
++                .state
++                .read()
++                .map_err(|_| CodexErr::Fatal("account slot registry is unavailable".to_string()))?;
++            (
++                state
++                    .slots
++                    .iter()
++                    .find(|slot| slot.manifest.account_slot_id == binding.slot_id)
++                    .cloned(),
++                state.manifest_error,
++            )
++        };
++        let slot = slot.ok_or_else(|| {
++            CodexErr::InvalidRequest(format!(
++                "execution account slot `{}` is unavailable",
++                binding.slot_id
++            ))
++        })?;
++        let capability = self.capability(manifest_error);
++        if !slot.manifest.is_default && !capability.available {
++            return Err(CodexErr::InvalidRequest(format!(
++                "execution account slot `{}` is unavailable: {}",
++                binding.slot_id,
++                capability
++                    .deny_reason
++                    .as_deref()
++                    .unwrap_or("multi_account_unavailable")
++            )));
++        }
++        if !slot.manifest.is_default && slot.manifest.status != ManifestSlotStatus::Ready {
++            return Err(CodexErr::InvalidRequest(format!(
++                "execution account slot `{}` is not ready",
++                binding.slot_id
++            )));
++        }
++        if slot.active_logout_operation_id.is_some() {
++            return Err(CodexErr::InvalidRequest(format!(
++                "execution account slot `{}` is being logged out",
++                binding.slot_id
++            )));
++        }
++        let runtime = self.runtime(&slot).await;
++        if !slot.manifest.is_default && runtime.auth_manager.auth().await.is_none() {
++            return Err(CodexErr::InvalidRequest(format!(
++                "execution account slot `{}` is not ready",
++                binding.slot_id
++            )));
++        }
++        Ok((
++            Arc::new(ExecutionAccountContext {
+                 binding,
+                 auth_manager: Arc::clone(&runtime.auth_manager),
+                 models_manager: Arc::clone(&runtime.models_manager),
+-            }))
++            }),
++            binding_transition,
++        ))
++    }
++}
++
++pub(crate) mod live_registration;
++
++impl ExecutionAccountResolver for AccountRegistry {
++    fn resolve(&self, binding: ExecutionAccountBinding) -> ExecutionAccountResolverFuture<'_> {
++        Box::pin(async move {
++            let (execution_account, _binding_transition) =
++                self.resolve_execution_account(binding).await?;
++            Ok(execution_account)
++        })
++    }
++
++    fn resolve_for_transition(
++        &self,
++        binding: ExecutionAccountBinding,
++    ) -> ExecutionAccountTransitionResolverFuture<'_> {
++        Box::pin(async move {
++            let (execution_account, binding_transition) =
++                self.resolve_execution_account(binding).await?;
++            Ok(ResolvedExecutionAccountTransition::with_readiness_lease(
++                execution_account,
++                binding_transition,
++            ))
+         })
+     }
+ }
+diff --git a/codex-rs/app-server/src/account_registry/live_registration.rs b/codex-rs/app-server/src/account_registry/live_registration.rs
+index 07e7308bf..4d6c64c9d 100644
+--- a/codex-rs/app-server/src/account_registry/live_registration.rs
++++ b/codex-rs/app-server/src/account_registry/live_registration.rs
+@@ -84,6 +84,10 @@ impl AccountRegistry {
+             {
+                 continue;
+             }
++            let Ok(binding_transition) = Arc::clone(&slot.binding_transition).try_lock_owned()
++            else {
++                continue;
++            };
+             let runtime = self.runtime(slot).await;
+             let has_auth = runtime.auth_manager.auth().await.is_some();
+             let next = match (slot.manifest.status, has_auth) {
+@@ -97,7 +101,11 @@ impl AccountRegistry {
+                 _ => None,
+             };
+             if let Some(next) = next {
+-                changed.push((slot.manifest.account_slot_id.clone(), next));
++                changed.push((
++                    binding_transition,
++                    slot.manifest.account_slot_id.clone(),
++                    next,
++                ));
+             }
+         }
+         if changed.is_empty() {
+@@ -118,14 +126,14 @@ impl AccountRegistry {
+         let next_revision = revision.saturating_add(1);
+         let now = Utc::now().timestamp();
+         let mut applied = false;
+-        for (slot_id, (status, error_code)) in changed {
++        for (_binding_transition, slot_id, (status, error_code)) in &changed {
+             if let Some(slot) = next_slots
+                 .iter_mut()
+                 .find(|slot| slot.manifest.account_slot_id == slot_id)
+                 && slot.active_logout_operation_id.is_none()
+             {
+-                slot.manifest.status = status;
+-                slot.manifest.error_code = error_code;
++                slot.manifest.status = *status;
++                slot.manifest.error_code = error_code.clone();
+                 slot.manifest.updated_at = now;
+                 slot.active_login_operation_id = None;
+                 slot.completed_login_operation_id = None;
+@@ -499,6 +507,22 @@ impl AccountRegistry {
+         prepared: &PreparedSlotLogin,
+         error_code: &'static str,
+     ) -> Result<Option<AccountSlotChangedNotification>, JSONRPCErrorError> {
++        let binding_transition = {
++            let state = self
++                .state
++                .read()
++                .map_err(|_| internal_error("account slot registry is unavailable"))?;
++            let Some(slot) = state.slots.iter().find(|slot| {
++                slot.manifest.account_slot_id == prepared.account_slot_id
++                    && slot.manifest.attempt_generation == prepared.attempt_generation
++                    && slot.manifest.status == ManifestSlotStatus::Ready
++                    && slot.completed_login_operation_id.as_deref() == Some(&prepared.operation_id)
++            }) else {
++                return Ok(None);
++            };
++            Arc::clone(&slot.binding_transition)
++        };
++        let _binding_transition = binding_transition.lock_owned().await;
+         let mutation = self.mutation_lock.lock().await;
+         let (revision, mut slots) = {
+             let state = self
+diff --git a/codex-rs/app-server/src/account_registry_tests.rs b/codex-rs/app-server/src/account_registry_tests.rs
+index f3a1c75a6..11fc3c3c1 100644
+--- a/codex-rs/app-server/src/account_registry_tests.rs
++++ b/codex-rs/app-server/src/account_registry_tests.rs
+@@ -505,3 +505,45 @@ async fn logout_reservation_blocks_only_the_target_slot_resolver() {
+         .await
+         .expect("clear reservation");
+ }
++
++#[tokio::test]
++async fn transition_resolution_holds_target_readiness_lease() {
++    let process_home = tempdir().expect("temp process home");
++    let mut slots = manifest(process_home.path(), 7);
++    slots.slots[1].status = ManifestSlotStatus::Ready;
++    slots
++        .persist(&process_home.path().join(MANIFEST_FILE))
++        .expect("persist manifest");
++    let registry = registry_for_home(process_home.path()).await;
++    let slot_auth = AuthManager::from_auth_for_testing_with_home(
++        CodexAuth::from_api_key("slot-key"),
++        slots.slots[1].auth_home.clone(),
++    );
++    let slot_models = codex_core::build_models_manager(registry.config.as_ref(), slot_auth.clone());
++    let runtime = Arc::new(AccountRuntimeBundle {
++        auth_manager: slot_auth,
++        models_manager: slot_models,
++    });
++    let binding_transition = {
++        let state = registry.state.read().expect("registry state");
++        let slot = state
++            .slots
++            .iter()
++            .find(|slot| slot.manifest.account_slot_id == SECOND_SLOT_ID)
++            .expect("secondary slot");
++        assert!(slot.runtime.set(runtime).is_ok());
++        Arc::clone(&slot.binding_transition)
++    };
++
++    let transition = registry
++        .resolve_for_transition(ExecutionAccountBinding {
++            slot_id: SECOND_SLOT_ID.to_string(),
++            generation: 1,
++        })
++        .await
++        .expect("resolve transition");
++
++    assert!(Arc::clone(&binding_transition).try_lock_owned().is_err());
++    drop(transition);
++    assert!(binding_transition.try_lock_owned().is_ok());
++}
 diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
 index 25f068b6d..688bacc85 100644
 --- a/codex-rs/app-server/src/message_processor.rs
@@ -78,7 +429,7 @@ index 25f068b6d..688bacc85 100644
                  .session_runtime
                  .relinquish(connection_id, params)
 diff --git a/codex-rs/app-server/src/session_runtime/mod.rs b/codex-rs/app-server/src/session_runtime/mod.rs
-index 2117f40e3..8845590c7 100644
+index 75243382c..dcdde0a7b 100644
 --- a/codex-rs/app-server/src/session_runtime/mod.rs
 +++ b/codex-rs/app-server/src/session_runtime/mod.rs
 @@ -3,6 +3,7 @@ mod operations;
@@ -98,7 +449,7 @@ index 2117f40e3..8845590c7 100644
  
  #[derive(Default)]
 diff --git a/codex-rs/app-server/src/session_runtime/relinquish.rs b/codex-rs/app-server/src/session_runtime/relinquish.rs
-index 4620d169b..cd2b48e63 100644
+index 9ee43c056..c5ecd43b5 100644
 --- a/codex-rs/app-server/src/session_runtime/relinquish.rs
 +++ b/codex-rs/app-server/src/session_runtime/relinquish.rs
 @@ -228,7 +228,7 @@ impl SessionRuntimeEngine {
@@ -110,7 +461,7 @@ index 4620d169b..cd2b48e63 100644
          &self,
          thread_id: ThreadId,
      ) -> Result<codex_app_server_protocol::SessionRuntimeSnapshot, JSONRPCErrorError> {
-@@ -276,6 +276,7 @@ impl SessionRuntimeEngine {
+@@ -277,6 +277,7 @@ impl SessionRuntimeEngine {
              .await
              .map_err(|_| internal_error("session runtime publisher is unavailable"))?;
          let store_runtime = self.thread_store.runtime_snapshot(thread_id).await;
@@ -118,7 +469,7 @@ index 4620d169b..cd2b48e63 100644
          let (runtime_notification, operation_notification, operation) = {
              let mut state = self.state.lock().await;
              let mut snapshot = state
-@@ -304,7 +305,12 @@ impl SessionRuntimeEngine {
+@@ -305,7 +306,12 @@ impl SessionRuntimeEngine {
                          Some("released_persistence_snapshot_unavailable".to_string());
                  }
              }
@@ -131,7 +482,7 @@ index 4620d169b..cd2b48e63 100644
 +            );
              Self::apply_runtime_state(&mut state, &mut snapshot, RuntimeActivity::Activity);
              state.sequence = state.sequence.saturating_add(1);
-             let runtime_notification = SessionRuntimeChangedNotification {
+             state.pages.clear();
 diff --git a/codex-rs/app-server/src/session_runtime/snapshot.rs b/codex-rs/app-server/src/session_runtime/snapshot.rs
 index eeafa1711..6ef11b03e 100644
 --- a/codex-rs/app-server/src/session_runtime/snapshot.rs
@@ -871,7 +1222,7 @@ index ca85a0350..8ea98a455 100644
  
  #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
-index 6d12dd0a9..6db2528b2 100644
+index 6d12dd0a9..b98b170df 100644
 --- a/codex-rs/core/src/codex_thread.rs
 +++ b/codex-rs/core/src/codex_thread.rs
 @@ -200,13 +200,27 @@ impl CodexThread {
@@ -912,6 +1263,98 @@ index 6d12dd0a9..6db2528b2 100644
              .trunk_rollout_path()
              .await
      }
+@@ -762,6 +776,10 @@ impl CodexThread {
+         Ok(serde_json::to_value(result)?)
+     }
+ 
++    #[expect(
++        clippy::await_holding_invalid_type,
++        reason = "out-of-turn MCP calls and execution control share one transition fence"
++    )]
+     pub async fn call_mcp_tool(
+         &self,
+         server: &str,
+@@ -769,10 +787,13 @@ impl CodexThread {
+         arguments: Option<serde_json::Value>,
+         meta: Option<serde_json::Value>,
+     ) -> anyhow::Result<CallToolResult> {
++        let _transition = self.session.execution_runtime_transition_lock.lock().await;
++        if self.session.execution_control_is_closing() {
++            anyhow::bail!("thread runtime is closing");
++        }
+         self.session.refresh_mcp_if_dirty().await;
+-        self.session
+-            .services
+-            .mcp_runtime
++        let mcp_runtime = Arc::clone(&self.session.execution_account_runtime().mcp_runtime);
++        mcp_runtime
+             .latest_call_tool(
+                 server, tool, arguments, meta, /*requested_timeout*/ None,
+                 /*wait_for_server*/ true,
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index 08ed026c1..8f2a041f4 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -20,6 +20,7 @@ use crate::session::turn::get_last_assistant_message_from_turn;
+ use crate::session::turn_context::TurnContext;
+ use crate::state::AutoCompactWindowIds;
+ use crate::util::backoff;
++use codex_analytics::AnalyticsEventsClient;
+ use codex_analytics::CodexCompactionEvent;
+ use codex_analytics::CompactionImplementation;
+ use codex_analytics::CompactionPhase;
+@@ -394,6 +395,7 @@ async fn run_compact_task_inner_impl(
+ }
+ 
+ pub(crate) struct CompactionAnalyticsAttempt {
++    analytics_events_client: AnalyticsEventsClient,
+     thread_id: String,
+     turn_id: String,
+     trigger: CompactionTrigger,
+@@ -425,6 +427,7 @@ impl CompactionAnalyticsAttempt {
+     ) -> Self {
+         let active_context_tokens_before = sess.get_total_token_usage().await;
+         Self {
++            analytics_events_client: turn_context.analytics_events_client.clone(),
+             thread_id: sess.thread_id.to_string(),
+             turn_id: turn_context.sub_id.clone(),
+             trigger,
+@@ -454,8 +457,7 @@ impl CompactionAnalyticsAttempt {
+         let active_context_tokens_before =
+             active_context_tokens_before.unwrap_or(self.active_context_tokens_before);
+         let active_context_tokens_after = sess.get_total_token_usage().await;
+-        sess.services
+-            .analytics_events_client
++        self.analytics_events_client
+             .track_compaction(CodexCompactionEvent {
+                 thread_id: self.thread_id,
+                 turn_id: self.turn_id,
+diff --git a/codex-rs/core/src/compact_remote.rs b/codex-rs/core/src/compact_remote.rs
+index 392fb991c..4143d8aad 100644
+--- a/codex-rs/core/src/compact_remote.rs
++++ b/codex-rs/core/src/compact_remote.rs
+@@ -248,7 +248,7 @@ async fn run_remote_compact_task_inner_impl(
+             )
+             .await;
+             record_model_fallback(
+-                &sess.services.session_telemetry,
++                &fallback_step_context.session_telemetry,
+                 turn_context.model_info.slug.as_str(),
+                 fallback_turn_context.model_info.slug.as_str(),
+                 compaction_metadata.reason(),
+diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
+index 02738a34a..fa997255f 100644
+--- a/codex-rs/core/src/compact_remote_v2.rs
++++ b/codex-rs/core/src/compact_remote_v2.rs
+@@ -266,7 +266,7 @@ async fn run_remote_compact_task_inner_impl(
+             )
+             .await;
+             record_model_fallback(
+-                &sess.services.session_telemetry,
++                &fallback_step_context.session_telemetry,
+                 turn_context.model_info.slug.as_str(),
+                 fallback_turn_context.model_info.slug.as_str(),
+                 compaction_metadata.reason(),
 diff --git a/codex-rs/core/src/config/network_proxy_spec_tests.rs b/codex-rs/core/src/config/network_proxy_spec_tests.rs
 index ff90af0c7..8051f5a38 100644
 --- a/codex-rs/core/src/config/network_proxy_spec_tests.rs
@@ -968,7 +1411,7 @@ index 39a598bff..cc8068dc0 100644
      pub(crate) fn selections(&self) -> Vec<TurnEnvironmentSelection> {
          self.environments
 diff --git a/codex-rs/core/src/execution_account.rs b/codex-rs/core/src/execution_account.rs
-index 3cb564486..a7536fbac 100644
+index 3cb564486..13aa26a16 100644
 --- a/codex-rs/core/src/execution_account.rs
 +++ b/codex-rs/core/src/execution_account.rs
 @@ -2,9 +2,11 @@ use std::future::Future;
@@ -1022,6 +1465,60 @@ index 3cb564486..a7536fbac 100644
  impl std::fmt::Debug for ExecutionAccountServices {
      fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
          formatter
+@@ -45,9 +79,53 @@ impl std::fmt::Debug for ExecutionAccountContext {
+ pub type ExecutionAccountResolverFuture<'a> =
+     Pin<Box<dyn Future<Output = CodexResult<Arc<ExecutionAccountContext>>> + Send + 'a>>;
+ 
++/// Resolved execution resources whose readiness remains valid for an account transition.
++///
++/// Host-managed resolvers can attach an opaque lease that prevents the target slot from becoming
++/// unavailable while the thread prepares and durably commits its new account binding.
++pub struct ResolvedExecutionAccountTransition {
++    execution_account: Arc<ExecutionAccountContext>,
++    _readiness_lease: Option<Box<dyn Send + 'static>>,
++}
++
++impl ResolvedExecutionAccountTransition {
++    pub fn new(execution_account: Arc<ExecutionAccountContext>) -> Self {
++        Self {
++            execution_account,
++            _readiness_lease: None,
++        }
++    }
++
++    pub fn with_readiness_lease(
++        execution_account: Arc<ExecutionAccountContext>,
++        readiness_lease: impl Send + 'static,
++    ) -> Self {
++        Self {
++            execution_account,
++            _readiness_lease: Some(Box::new(readiness_lease)),
++        }
++    }
++
++    pub fn execution_account(&self) -> &Arc<ExecutionAccountContext> {
++        &self.execution_account
++    }
++}
++
++/// Future returned by [`ExecutionAccountResolver::resolve_for_transition`].
++pub type ExecutionAccountTransitionResolverFuture<'a> =
++    Pin<Box<dyn Future<Output = CodexResult<ResolvedExecutionAccountTransition>> + Send + 'a>>;
++
+ /// Resolves host-managed account slots into immutable execution resources.
+ pub trait ExecutionAccountResolver: Send + Sync {
+     fn resolve(&self, binding: ExecutionAccountBinding) -> ExecutionAccountResolverFuture<'_>;
++
++    fn resolve_for_transition(
++        &self,
++        binding: ExecutionAccountBinding,
++    ) -> ExecutionAccountTransitionResolverFuture<'_> {
++        let resolved = self.resolve(binding);
++        Box::pin(async move { resolved.await.map(ResolvedExecutionAccountTransition::new) })
++    }
+ }
+ 
+ pub(crate) struct DefaultExecutionAccountResolver {
 diff --git a/codex-rs/core/src/guardian/review.rs b/codex-rs/core/src/guardian/review.rs
 index 93d36c52a..ae9b57ff5 100644
 --- a/codex-rs/core/src/guardian/review.rs
@@ -1099,6 +1596,19 @@ index ea1252f93..9edfbb2cf 100644
                  .latest_call_tool(
                      &call.server,
                      &call.tool,
+diff --git a/codex-rs/core/src/hook_runtime.rs b/codex-rs/core/src/hook_runtime.rs
+index af2a31e94..c2506f886 100644
+--- a/codex-rs/core/src/hook_runtime.rs
++++ b/codex-rs/core/src/hook_runtime.rs
+@@ -776,7 +776,7 @@ fn track_hook_completed_analytics(
+ ) {
+     let (tracking, hook) =
+         hook_run_analytics_payload(sess.thread_id.to_string(), turn_context, completed);
+-    sess.services
++    turn_context
+         .analytics_events_client
+         .track_hook_run(tracking, hook);
+ }
 diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
 index 6b76b7be0..3c0e050e3 100644
 --- a/codex-rs/core/src/realtime_conversation.rs
@@ -1537,7 +2047,7 @@ index 3c1bebb4d..674a173db 100644
 +    }
  }
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 6fe06e2f9..849624d78 100644
+index 6fe06e2f9..a87eaa634 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -1177,7 +1177,9 @@ impl Session {
@@ -1551,7 +2061,66 @@ index 6fe06e2f9..849624d78 100644
          )
          .await
          {
-@@ -3554,8 +3556,7 @@ impl Session {
+@@ -1785,9 +1787,10 @@ impl Session {
+ 
+     pub(crate) async fn refresh_hooks(&self, config: Arc<Config>) {
+         let environments = self.services.turn_environments.snapshot().await;
++        let account_runtime = self.execution_account_runtime();
+         let hooks_config = build_hooks_config(
+             config.as_ref(),
+-            self.services.plugins_manager.as_ref(),
++            account_runtime.services.plugins_manager.as_ref(),
+             environments.single_local_environment(),
+         )
+         .await;
+@@ -1798,7 +1801,8 @@ impl Session {
+         if Arc::ptr_eq(
+             &state.session_configuration.original_config_do_not_use,
+             &config,
+-        ) {
++        ) && Arc::ptr_eq(&self.execution_account_runtime(), &account_runtime)
++        {
+             let hooks = self.hooks().reconfigured(hooks_config);
+             self.services.hooks.store(Arc::new(hooks));
+         }
+@@ -1917,19 +1921,22 @@ impl Session {
+             config
+         };
+         self.services.skills_service.clear_cache();
+-        self.services.plugins_manager.clear_cache();
++        self.execution_account_runtime()
++            .services
++            .plugins_manager
++            .clear_cache();
+         self.refresh_runtime_config(next_config).await;
+     }
+ 
+     /// Record a terminal CodexErr before the app-server completion notification is reduced.
+     pub(crate) fn track_turn_codex_error(&self, turn_context: &TurnContext, error: &CodexErr) {
+-        self.services
+-            .analytics_events_client
+-            .track_turn_codex_error(TurnCodexErrorFact::from_codex_err(
++        turn_context.analytics_events_client.track_turn_codex_error(
++            TurnCodexErrorFact::from_codex_err(
+                 self.thread_id.to_string(),
+                 turn_context.sub_id.clone(),
+                 error,
+-            ));
++            ),
++        );
+     }
+ 
+     /// Persist the event to rollout and send it to clients.
+@@ -3099,7 +3106,7 @@ impl Session {
+                 .record_annotated_items(&items, turn_context.model_info.truncation_policy.into());
+         }
+         for image in image_preparations {
+-            self.services
++            turn_context
+                 .analytics_events_client
+                 .track_image_preparation(ImagePreparationFact {
+                     turn_id: turn_context.sub_id.clone(),
+@@ -3554,8 +3561,7 @@ impl Session {
          {
              developer_sections.push(developer_instructions.to_string());
          }
@@ -1561,7 +2130,7 @@ index 6fe06e2f9..849624d78 100644
              .plugins_manager
              .plugins_for_config(&turn_context.config.plugins_config_input())
              .await;
-@@ -3565,9 +3566,12 @@ impl Session {
+@@ -3565,9 +3571,12 @@ impl Session {
              && (features.enabled(Feature::ToolSuggest)
                  || features.enabled(Feature::RecommendedPlugins))
          {
@@ -1577,7 +2146,7 @@ index 6fe06e2f9..849624d78 100644
                  .recommended_plugin_candidates_for_config(RecommendedPluginCandidatesInput {
                      plugins_config: &plugins_config,
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
-index fdd096e50..152851387 100644
+index fdd096e50..614c3339a 100644
 --- a/codex-rs/core/src/session/session.rs
 +++ b/codex-rs/core/src/session/session.rs
 @@ -39,7 +39,8 @@ use tokio::sync::Semaphore;
@@ -1600,7 +2169,7 @@ index fdd096e50..152851387 100644
      pub(super) mcp_prewarm_task: std::sync::Mutex<Option<JoinHandle<()>>>,
      pub(crate) conversation: Arc<RealtimeConversationManager>,
      pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
-@@ -66,7 +68,6 @@ pub(crate) struct Session {
+@@ -66,13 +68,17 @@ pub(crate) struct Session {
      pub(crate) execution_control_closing: AtomicBool,
      pub(crate) async_hook_results: async_channel::Receiver<HookCompletedEvent>,
      pub(crate) input_queue: InputQueue,
@@ -1608,7 +2177,18 @@ index fdd096e50..152851387 100644
      pub(crate) services: SessionServices,
      pub(super) git_enrichment_policy: GitEnrichmentPolicy,
      pub(super) fork_persistence: ForkPersistence,
-@@ -647,7 +648,349 @@ impl Session {
+     pub(super) next_internal_sub_id: AtomicU64,
+ }
+ 
++struct PreparedExecutionAccountRuntime {
++    runtime: Arc<crate::execution_account::ExecutionAccountRuntime>,
++    hooks_config: HooksConfig,
++}
++
+ #[derive(Clone)]
+ pub(crate) struct SessionConfiguration {
+     /// Runtime provider and its provider-specific execution policy.
+@@ -647,7 +653,361 @@ impl Session {
      pub(crate) fn execution_account(
          &self,
      ) -> Arc<crate::execution_account::ExecutionAccountContext> {
@@ -1646,7 +2226,7 @@ index fdd096e50..152851387 100644
 +        execution_account: Arc<crate::execution_account::ExecutionAccountContext>,
 +        services: crate::execution_account::ExecutionAccountServices,
 +    ) -> Result<
-+        Arc<crate::execution_account::ExecutionAccountRuntime>,
++        PreparedExecutionAccountRuntime,
 +        crate::execution_account::ExecutionAccountSwitchError,
 +    > {
 +        let session_configuration = self.state.lock().await.session_configuration.clone();
@@ -1657,6 +2237,12 @@ index fdd096e50..152851387 100644
 +            Arc::clone(&services.plugins_manager),
 +            Arc::clone(&self.services.skills_service),
 +            &environments,
++        )
++        .await;
++        let hooks_config = build_hooks_config(
++            config.as_ref(),
++            services.plugins_manager.as_ref(),
++            environments.single_local_environment(),
 +        )
 +        .await;
 +        let auth = execution_account.auth_manager.auth().await;
@@ -1781,8 +2367,8 @@ index fdd096e50..152851387 100644
 +                })?;
 +            extension_runtimes.push(prepared);
 +        }
-+        Ok(Arc::new(
-+            crate::execution_account::ExecutionAccountRuntime {
++        Ok(PreparedExecutionAccountRuntime {
++            runtime: Arc::new(crate::execution_account::ExecutionAccountRuntime {
 +                execution_account,
 +                services,
 +                mcp_runtime,
@@ -1793,8 +2379,9 @@ index fdd096e50..152851387 100644
 +                shell_snapshot,
 +                extension_runtimes,
 +                guardian_review_session: Arc::new(GuardianReviewSessionManager::default()),
-+            },
-+        ))
++            }),
++            hooks_config,
++        })
 +    }
 +
 +    #[expect(
@@ -1819,7 +2406,10 @@ index fdd096e50..152851387 100644
 +        {
 +            return Err(crate::execution_account::ExecutionAccountSwitchError::ThreadBusy);
 +        }
-+        let prepared = self
++        let PreparedExecutionAccountRuntime {
++            runtime: prepared,
++            hooks_config: prepared_hooks_config,
++        } = self
 +            .prepare_execution_account_runtime(Arc::clone(&target), services)
 +            .await?;
 +        if self.execution_account().binding != expected
@@ -1929,6 +2519,8 @@ index fdd096e50..152851387 100644
 +                    &self.services.thread_extension_data,
 +                );
 +            }
++            let hooks = self.hooks().reconfigured(prepared_hooks_config);
++            self.services.hooks.store(Arc::new(hooks));
 +            self.execution_account_runtime.store(Arc::clone(&prepared));
 +            self.start_mcp_prewarm_worker(target_auth_changes);
 +            self.schedule_mcp_prewarm();
@@ -1959,7 +2551,7 @@ index fdd096e50..152851387 100644
      }
  
      /// Close the idle input boundary immediately before a writer-control commit.
-@@ -1199,7 +1542,7 @@ impl Session {
+@@ -1199,7 +1559,7 @@ impl Session {
                  environment_manager,
                  default_shell.clone(),
                  session_configuration.inferred_environment_config(),
@@ -1968,7 +2560,7 @@ index fdd096e50..152851387 100644
                  inherited_environments.unwrap_or_default(),
                  config.features.enabled(Feature::DeferredExecutor),
              ));
-@@ -1308,6 +1651,7 @@ impl Session {
+@@ -1308,6 +1668,7 @@ impl Session {
              let mcp_runtime = Arc::new(McpRuntime::empty(
                  mcp_projection.config.prefix_mcp_tool_names,
              ));
@@ -1976,7 +2568,7 @@ index fdd096e50..152851387 100644
              let hooks_config = build_hooks_config(
                  &config,
                  plugins_manager.as_ref(),
-@@ -1318,7 +1662,7 @@ impl Session {
+@@ -1318,7 +1679,7 @@ impl Session {
                  hooks_config,
                  thread_id,
                  Arc::new(CoreHookMcpExecutor {
@@ -1985,7 +2577,7 @@ index fdd096e50..152851387 100644
                      thread_id,
                  }),
              )?;
-@@ -1380,6 +1724,50 @@ impl Session {
+@@ -1380,6 +1741,50 @@ impl Session {
                  .features
                  .enabled(Feature::ExecutedToolCallMetadata)
                  .then(|| Arc::new(crate::state::ExecutedToolCallRecorder::default()));
@@ -2036,7 +2628,7 @@ index fdd096e50..152851387 100644
              let services = SessionServices {
                  // Start with an empty connection set. The initialized set is
                  // published after SessionConfigured so MCP events follow it.
-@@ -1393,6 +1781,7 @@ impl Session {
+@@ -1393,6 +1798,7 @@ impl Session {
                  main_execve_wrapper_exe: config.main_execve_wrapper_exe.clone(),
                  analytics_events_client,
                  hooks: arc_swap::ArcSwap::from_pointee(hooks),
@@ -2044,7 +2636,7 @@ index fdd096e50..152851387 100644
                  rollout_thread_trace,
                  user_shell: Arc::new(default_shell),
                  show_raw_agent_reasoning: config.show_raw_agent_reasoning,
-@@ -1429,33 +1818,7 @@ impl Session {
+@@ -1429,33 +1835,7 @@ impl Session {
                  thread_store: Arc::clone(&thread_store),
                  attestation_provider: attestation_provider.clone(),
                  time_provider,
@@ -2079,7 +2671,7 @@ index fdd096e50..152851387 100644
                  executed_tool_calls,
                  code_mode_service: crate::tools::code_mode::CodeModeService::new(
                      Arc::clone(&code_mode_session_provider),
-@@ -1467,7 +1830,7 @@ impl Session {
+@@ -1467,7 +1847,7 @@ impl Session {
              let (mcp_prewarm_tx, mcp_prewarm_rx) = async_channel::bounded(1);
              let sess = Arc::new(Session {
                  thread_id,
@@ -2088,7 +2680,7 @@ index fdd096e50..152851387 100644
                  installation_id,
                  tx_event: tx_event.clone(),
                  agent_status,
-@@ -1480,7 +1843,8 @@ impl Session {
+@@ -1480,7 +1860,8 @@ impl Session {
                  mcp_elicitation_reviewer_handle: OnceLock::new(),
                  mcp_elicitation_lifecycle_handle: OnceLock::new(),
                  mcp_prewarm_tx,
@@ -2098,7 +2690,7 @@ index fdd096e50..152851387 100644
                  mcp_prewarm_task: std::sync::Mutex::new(None),
                  conversation: Arc::new(RealtimeConversationManager::new()),
                  active_turn: Mutex::new(None),
-@@ -1488,7 +1852,6 @@ impl Session {
+@@ -1488,7 +1869,6 @@ impl Session {
                  execution_control_closing: AtomicBool::new(false),
                  async_hook_results,
                  input_queue: InputQueue::new(),
@@ -2106,7 +2698,7 @@ index fdd096e50..152851387 100644
                  services,
                  git_enrichment_policy,
                  fork_persistence,
-@@ -1572,7 +1935,7 @@ impl Session {
+@@ -1572,7 +1952,7 @@ impl Session {
                  mcp_runtime_cwd,
              )
              .await?;
@@ -2305,6 +2897,83 @@ index 4e584db22..0a55d0b02 100644
          services,
          git_enrichment_policy: GitEnrichmentPolicy::Fresh,
          fork_persistence: ForkPersistence::Copied,
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index ac1dfaad8..7abb3b5e4 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -829,7 +829,6 @@ async fn build_skills_and_plugins(
+         warnings: host_skill_warnings,
+     } = skills_snapshot.load_skill_prompts(&mentioned_skills).await;
+     emit_explicit_skill_invocations(
+-        sess,
+         turn_context,
+         &mentioned_skills,
+         &injected_host_skills,
+@@ -865,16 +864,15 @@ async fn build_skills_and_plugins(
+             invocation_type: Some(InvocationType::Explicit),
+         })
+         .collect::<Vec<_>>();
+-    sess.services
++    turn_context
+         .analytics_events_client
+         .track_app_mentioned(tracking.clone(), mentioned_app_invocations);
+     for summary in mentioned_plugins {
+-        if let Some(plugin) = sess
+-            .services
++        if let Some(plugin) = turn_context
+             .plugins_manager
+             .telemetry_metadata_for_capability_summary(summary)
+         {
+-            sess.services
++            turn_context
+                 .analytics_events_client
+                 .track_plugin_used(tracking.clone(), plugin);
+         }
+@@ -971,7 +969,7 @@ async fn track_turn_resolved_config_analytics(
+         let mut state = sess.state.lock().await;
+         state.take_next_turn_is_first()
+     };
+-    sess.services
++    turn_context
+         .analytics_events_client
+         .track_turn_resolved_config(TurnResolvedConfigFact {
+             turn_id: turn_context.sub_id.clone(),
+@@ -1213,7 +1211,7 @@ async fn run_auto_compact(
+                 .enabled(Feature::RemoteCompactionV2) =>
+         {
+             emit_compact_metric(
+-                &sess.services.session_telemetry,
++                &step_context.session_telemetry,
+                 "remote_v2",
+                 /*manual*/ false,
+             );
+@@ -1230,7 +1228,7 @@ async fn run_auto_compact(
+         }
+         RemoteCompactionSupport::V1 | RemoteCompactionSupport::V2 => {
+             emit_compact_metric(
+-                &sess.services.session_telemetry,
++                &step_context.session_telemetry,
+                 "remote",
+                 /*manual*/ false,
+             );
+@@ -1247,7 +1245,7 @@ async fn run_auto_compact(
+         }
+         RemoteCompactionSupport::Unsupported => {
+             emit_compact_metric(
+-                &sess.services.session_telemetry,
++                &step_context.session_telemetry,
+                 "local",
+                 /*manual*/ false,
+             );
+@@ -2290,7 +2288,7 @@ async fn try_run_sampling_request(
+             }
+         };
+ 
+-        sess.services
++        step_context
+             .session_telemetry
+             .record_responses(&handle_responses, &event);
+         record_turn_ttft_metric(&turn_context, &event).await;
 diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
 index 60baf0d91..243db9ea6 100644
 --- a/codex-rs/core/src/session/turn_context.rs
@@ -2457,6 +3126,36 @@ index 4d63cc8c7..c17dae2c5 100644
      let websocket_warmup_started_at = Instant::now();
      client_session
          .prewarm_websocket(
+diff --git a/codex-rs/core/src/skills.rs b/codex-rs/core/src/skills.rs
+index abe8f4667..b0d77d011 100644
+--- a/codex-rs/core/src/skills.rs
++++ b/codex-rs/core/src/skills.rs
+@@ -34,7 +34,6 @@ pub(crate) fn skills_load_input_from_config(
+ }
+ 
+ pub(crate) fn emit_explicit_skill_invocations(
+-    sess: &Session,
+     turn_context: &TurnContext,
+     mentioned_skills: &[SkillMetadata],
+     injected_skills: &[SkillMetadata],
+@@ -75,7 +74,7 @@ pub(crate) fn emit_explicit_skill_invocations(
+             invocation_type: InvocationType::Explicit,
+         })
+         .collect();
+-    sess.services
++    turn_context
+         .analytics_events_client
+         .track_skill_invocations(tracking, invocations);
+ }
+@@ -146,7 +145,7 @@ pub(crate) async fn maybe_emit_implicit_skill_invocation(
+             ("invoke_type", "implicit"),
+         ],
+     );
+-    sess.services
++    turn_context
+         .analytics_events_client
+         .track_skill_invocations(
+             build_track_events_context(
 diff --git a/codex-rs/core/src/state/service.rs b/codex-rs/core/src/state/service.rs
 index 0ef84c9b9..261f88f0b 100644
 --- a/codex-rs/core/src/state/service.rs
@@ -2470,8 +3169,169 @@ index 0ef84c9b9..261f88f0b 100644
      pub(crate) rollout_thread_trace: ThreadTraceContext,
      pub(crate) user_shell: Arc<crate::shell::Shell>,
      pub(crate) show_raw_agent_reasoning: bool,
+diff --git a/codex-rs/core/src/tasks/compact.rs b/codex-rs/core/src/tasks/compact.rs
+index 1c7de737e..1f3184fb1 100644
+--- a/codex-rs/core/src/tasks/compact.rs
++++ b/codex-rs/core/src/tasks/compact.rs
+@@ -42,27 +42,15 @@ impl SessionTask for CompactTask {
+             RemoteCompactionSupport::V2
+                 if ctx.config.features.enabled(Feature::RemoteCompactionV2) =>
+             {
+-                emit_compact_metric(
+-                    &session.services.session_telemetry,
+-                    "remote_v2",
+-                    /*manual*/ true,
+-                );
++                emit_compact_metric(&ctx.session_telemetry, "remote_v2", /*manual*/ true);
+                 crate::compact_remote_v2::run_remote_compact_task(session.clone(), ctx).await
+             }
+             RemoteCompactionSupport::V1 | RemoteCompactionSupport::V2 => {
+-                emit_compact_metric(
+-                    &session.services.session_telemetry,
+-                    "remote",
+-                    /*manual*/ true,
+-                );
++                emit_compact_metric(&ctx.session_telemetry, "remote", /*manual*/ true);
+                 crate::compact_remote::run_remote_compact_task(session.clone(), ctx).await
+             }
+             RemoteCompactionSupport::Unsupported => {
+-                emit_compact_metric(
+-                    &session.services.session_telemetry,
+-                    "local",
+-                    /*manual*/ true,
+-                );
++                emit_compact_metric(&ctx.session_telemetry, "local", /*manual*/ true);
+                 let input = vec![UserInput::Text {
+                     text: ctx
+                         .config
+diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
+index 0c4f1bbfd..028a4b946 100644
+--- a/codex-rs/core/src/tasks/mod.rs
++++ b/codex-rs/core/src/tasks/mod.rs
+@@ -663,11 +663,11 @@ impl Session {
+                 None => false,
+             };
+             emit_turn_network_proxy_metric(
+-                &self.services.session_telemetry,
++                &turn_context.session_telemetry,
+                 network_proxy_active,
+                 tmp_mem,
+             );
+-            self.services.session_telemetry.histogram(
++            turn_context.session_telemetry.histogram(
+                 TURN_TOOL_CALL_METRIC,
+                 i64::try_from(turn_tool_calls).unwrap_or(i64::MAX),
+                 &[tmp_mem],
+@@ -723,51 +723,51 @@ impl Session {
+                 "codex.turn.token_usage.total_tokens",
+                 turn_token_usage.total_tokens,
+             );
+-            self.services
++            turn_context
+                 .analytics_events_client
+                 .track_turn_token_usage(TurnTokenUsageFact {
+                     turn_id: turn_context.sub_id.clone(),
+                     thread_id: self.thread_id.to_string(),
+                     token_usage: turn_token_usage.clone(),
+                 });
+-            self.services.session_telemetry.histogram(
++            turn_context.session_telemetry.histogram(
+                 TURN_TOKEN_USAGE_METRIC,
+                 turn_token_usage.total_tokens,
+                 &[("token_type", "total"), tmp_mem],
+             );
+-            self.services.session_telemetry.histogram(
++            turn_context.session_telemetry.histogram(
+                 TURN_TOKEN_USAGE_METRIC,
+                 turn_token_usage.input_tokens,
+                 &[("token_type", "input"), tmp_mem],
+             );
+-            self.services.session_telemetry.histogram(
++            turn_context.session_telemetry.histogram(
+                 TURN_TOKEN_USAGE_METRIC,
+                 turn_token_usage.cached_input(),
+                 &[("token_type", "cached_input"), tmp_mem],
+             );
+-            self.services.session_telemetry.histogram(
++            turn_context.session_telemetry.histogram(
+                 TURN_TOKEN_USAGE_METRIC,
+                 turn_token_usage.cache_write_input_tokens,
+                 &[("token_type", "cache_write_input"), tmp_mem],
+             );
+-            self.services.session_telemetry.histogram(
++            turn_context.session_telemetry.histogram(
+                 TURN_TOKEN_USAGE_METRIC,
+                 turn_token_usage.output_tokens,
+                 &[("token_type", "output"), tmp_mem],
+             );
+-            self.services.session_telemetry.histogram(
++            turn_context.session_telemetry.histogram(
+                 TURN_TOKEN_USAGE_METRIC,
+                 turn_token_usage.reasoning_output_tokens,
+                 &[("token_type", "reasoning_output"), tmp_mem],
+             );
+         }
+         emit_turn_memory_metric(
+-            &self.services.session_telemetry,
++            &turn_context.session_telemetry,
+             turn_context.config.features.enabled(Feature::MemoryTool),
+             turn_context.config.memories.use_memories,
+             turn_had_memory_citation,
+         );
+-        self.services.session_telemetry.counter(
++        turn_context.session_telemetry.counter(
+             TURN_UNIFIED_EXEC_RUNNING_PROCESSES_METRIC,
+             i64::try_from(self.list_background_terminals().await.len()).unwrap_or(i64::MAX),
+             &[],
+@@ -777,7 +777,7 @@ impl Session {
+             .turn_timing_state
+             .complete_profile_and_duration_ms()
+             .await;
+-        self.services
++        turn_context
+             .analytics_events_client
+             .track_turn_profile(TurnProfileFact {
+                 turn_id: turn_context.sub_id.clone(),
+@@ -954,7 +954,7 @@ impl Session {
+             .turn_timing_state
+             .complete_profile_and_duration_ms()
+             .await;
+-        self.services
++        task.turn_context
+             .analytics_events_client
+             .track_turn_profile(TurnProfileFact {
+                 turn_id: task.turn_context.sub_id.clone(),
+diff --git a/codex-rs/core/src/tasks/review.rs b/codex-rs/core/src/tasks/review.rs
+index d2871071c..54e54b99a 100644
+--- a/codex-rs/core/src/tasks/review.rs
++++ b/codex-rs/core/src/tasks/review.rs
+@@ -58,9 +58,7 @@ impl SessionTask for ReviewTask {
+         input: Vec<TurnInput>,
+         cancellation_token: CancellationToken,
+     ) -> SessionTaskResult {
+-        session
+-            .services
+-            .session_telemetry
++        ctx.session_telemetry
+             .counter("codex.task.review", /*inc*/ 1, &[]);
+ 
+         let mut user_input = Vec::new();
+diff --git a/codex-rs/core/src/tasks/user_shell.rs b/codex-rs/core/src/tasks/user_shell.rs
+index f34008097..7164fb8d4 100644
+--- a/codex-rs/core/src/tasks/user_shell.rs
++++ b/codex-rs/core/src/tasks/user_shell.rs
+@@ -104,8 +104,7 @@ pub(crate) async fn execute_user_shell_command(
+     cancellation_token: CancellationToken,
+     mode: UserShellCommandMode,
+ ) {
+-    session
+-        .services
++    turn_context
+         .session_telemetry
+         .counter("codex.task.user_shell", /*inc*/ 1, &[]);
+ 
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 47d18a7dd..61ef39aaa 100644
+index 47d18a7dd..8667b197e 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -373,6 +373,7 @@ pub(crate) struct ThreadManagerState {
@@ -2513,7 +3373,7 @@ index 47d18a7dd..61ef39aaa 100644
          let execution_account_resolver = Arc::new(DefaultExecutionAccountResolver::new(
              Arc::clone(&auth_manager),
              Arc::clone(&models_manager),
-@@ -829,6 +832,39 @@ impl ThreadManager {
+@@ -829,6 +832,41 @@ impl ThreadManager {
          self.state.execution_account_services(execution_account)
      }
  
@@ -2535,25 +3395,27 @@ index 47d18a7dd..61ef39aaa 100644
 +        let target = self
 +            .state
 +            .execution_account_resolver
-+            .resolve(target_binding)
++            .resolve_for_transition(target_binding)
 +            .await
 +            .map_err(|_| {
 +                crate::execution_account::ExecutionAccountSwitchError::TargetUnavailable
 +            })?;
-+        let services = self.execution_account_services(&target);
++        let services = self.execution_account_services(target.execution_account());
 +        let thread = self
 +            .get_thread(thread_id)
 +            .await
 +            .map_err(|_| crate::execution_account::ExecutionAccountSwitchError::StaleGeneration)?;
-+        thread
-+            .switch_execution_account(expected, target, services)
-+            .await
++        let result = thread
++            .switch_execution_account(expected, Arc::clone(target.execution_account()), services)
++            .await;
++        drop(target);
++        result
 +    }
 +
      pub fn clear_all_account_plugin_caches(&self) {
          let services = self
              .state
-@@ -1540,6 +1576,7 @@ impl ThreadManagerState {
+@@ -1540,6 +1578,7 @@ impl ThreadManagerState {
              .get(slot_id)
              .cloned()
              && Arc::ptr_eq(&entry.auth_manager, &execution_account.auth_manager)
@@ -2561,7 +3423,7 @@ index 47d18a7dd..61ef39aaa 100644
          {
              return entry.services;
          }
-@@ -1550,6 +1587,7 @@ impl ThreadManagerState {
+@@ -1550,6 +1589,7 @@ impl ThreadManagerState {
              .unwrap_or_else(std::sync::PoisonError::into_inner);
          if let Some(entry) = account_services.get(slot_id)
              && Arc::ptr_eq(&entry.auth_manager, &execution_account.auth_manager)
@@ -2569,7 +3431,7 @@ index 47d18a7dd..61ef39aaa 100644
          {
              return entry.services.clone();
          }
-@@ -1572,6 +1610,7 @@ impl ThreadManagerState {
+@@ -1572,6 +1612,7 @@ impl ThreadManagerState {
              slot_id.to_string(),
              AccountServiceEntry {
                  auth_manager: Arc::clone(&execution_account.auth_manager),
@@ -2577,6 +3439,309 @@ index 47d18a7dd..61ef39aaa 100644
                  services: services.clone(),
              },
          );
+diff --git a/codex-rs/core/src/tools/approvals.rs b/codex-rs/core/src/tools/approvals.rs
+index 37a3481fe..c7a68b250 100644
+--- a/codex-rs/core/src/tools/approvals.rs
++++ b/codex-rs/core/src/tools/approvals.rs
+@@ -716,23 +716,29 @@ impl Session {
+                     .into_iter()
+                     .map(|key| (key, &policy_fingerprint))
+                     .collect();
+-                with_cached_approval(&self.services, tool_name, cache_keys, || async {
+-                    self.request_command_approval(
+-                        ctx.review_context.turn(),
+-                        ctx.call_id.clone(),
+-                        /*approval_id*/ None,
+-                        Some(environment_id.clone()),
+-                        command.clone(),
+-                        cwd,
+-                        reason,
+-                        ctx.network_approval_context.clone(),
+-                        proposed_execpolicy_amendment.clone(),
+-                        additional_permissions.clone(),
+-                        /*available_decisions*/ None,
+-                        /*plugin_attribution_override*/ None,
+-                    )
+-                    .await
+-                })
++                with_cached_approval(
++                    &self.services,
++                    &ctx.review_context.turn().session_telemetry,
++                    tool_name,
++                    cache_keys,
++                    || async {
++                        self.request_command_approval(
++                            ctx.review_context.turn(),
++                            ctx.call_id.clone(),
++                            /*approval_id*/ None,
++                            Some(environment_id.clone()),
++                            command.clone(),
++                            cwd,
++                            reason,
++                            ctx.network_approval_context.clone(),
++                            proposed_execpolicy_amendment.clone(),
++                            additional_permissions.clone(),
++                            /*available_decisions*/ None,
++                            /*plugin_attribution_override*/ None,
++                        )
++                        .await
++                    },
++                )
+                 .await
+             }
+             #[cfg(unix)]
+@@ -785,6 +791,7 @@ impl Session {
+                 }
+                 with_cached_approval(
+                     &self.services,
++                    &ctx.review_context.turn().session_telemetry,
+                     "apply_patch",
+                     action.cache_keys(),
+                     || async {
+diff --git a/codex-rs/core/src/tools/code_mode/execute_handler.rs b/codex-rs/core/src/tools/code_mode/execute_handler.rs
+index 525c01daa..1ef7260ef 100644
+--- a/codex-rs/core/src/tools/code_mode/execute_handler.rs
++++ b/codex-rs/core/src/tools/code_mode/execute_handler.rs
+@@ -77,15 +77,14 @@ impl CodeModeExecuteHandler {
+             .map_err(FunctionCallError::RespondToModel)?;
+         let cell_id = started_cell.cell_id.clone();
+         telemetry.cell_id = Some(cell_id.to_string());
+-        exec.session
+-            .services
+-            .analytics_events_client
+-            .track_code_mode_tool_call(codex_analytics::CodeModeToolCallFact::CellStarted {
++        exec.turn.analytics_events_client.track_code_mode_tool_call(
++            codex_analytics::CodeModeToolCallFact::CellStarted {
+                 thread_id: exec.session.thread_id.to_string(),
+                 turn_id: exec.turn.sub_id.clone(),
+                 call_id: call_id.clone(),
+                 cell_id: cell_id.to_string(),
+-            });
++            },
++        );
+         if let Some(executed_tool_calls) = exec.session.services.executed_tool_calls.as_ref() {
+             executed_tool_calls.register_cell(&cell_id, &call_id);
+         }
+@@ -120,14 +119,13 @@ impl CodeModeExecuteHandler {
+                 .services
+                 .code_mode_service
+                 .finish_cell_dispatch(&cell_id);
+-            exec.session
+-                .services
+-                .analytics_events_client
+-                .track_code_mode_tool_call(codex_analytics::CodeModeToolCallFact::CellClosed {
++            exec.turn.analytics_events_client.track_code_mode_tool_call(
++                codex_analytics::CodeModeToolCallFact::CellClosed {
+                     thread_id: exec.session.thread_id.to_string(),
+                     turn_id: exec.turn.sub_id.clone(),
+                     cell_id: cell_id.to_string(),
+-                });
++                },
++            );
+         }
+         exec.session.services.elicitations.wait_until_clear().await;
+         handle_runtime_response(&exec, response, args.max_output_tokens, started_at)
+diff --git a/codex-rs/core/src/tools/code_mode/mod.rs b/codex-rs/core/src/tools/code_mode/mod.rs
+index 0ce1e66b9..3a31011f8 100644
+--- a/codex-rs/core/src/tools/code_mode/mod.rs
++++ b/codex-rs/core/src/tools/code_mode/mod.rs
+@@ -354,15 +354,14 @@ async fn call_nested_tool(
+         payload,
+         encrypted_function_args: None,
+     };
+-    exec.session
+-        .services
+-        .analytics_events_client
+-        .track_code_mode_tool_call(codex_analytics::CodeModeToolCallFact::ChildStarted {
++    exec.turn.analytics_events_client.track_code_mode_tool_call(
++        codex_analytics::CodeModeToolCallFact::ChildStarted {
+             thread_id: exec.session.thread_id.to_string(),
+             turn_id: exec.turn.sub_id.clone(),
+             call_id: call.call_id.clone(),
+             cell_id: cell_id.to_string(),
+-        });
++        },
++    );
+     let result = tool_runtime
+         .handle_tool_call_with_source(
+             call,
+diff --git a/codex-rs/core/src/tools/code_mode/wait_handler.rs b/codex-rs/core/src/tools/code_mode/wait_handler.rs
+index 802ee5572..00c73dd69 100644
+--- a/codex-rs/core/src/tools/code_mode/wait_handler.rs
++++ b/codex-rs/core/src/tools/code_mode/wait_handler.rs
+@@ -136,16 +136,13 @@ impl CodeModeWaitHandler {
+                             .services
+                             .code_mode_service
+                             .finish_cell_dispatch(runtime_cell_id);
+-                        exec.session
+-                            .services
+-                            .analytics_events_client
+-                            .track_code_mode_tool_call(
+-                                codex_analytics::CodeModeToolCallFact::CellClosed {
+-                                    thread_id: exec.session.thread_id.to_string(),
+-                                    turn_id: exec.turn.sub_id.clone(),
+-                                    cell_id: runtime_cell_id.to_string(),
+-                                },
+-                            );
++                        exec.turn.analytics_events_client.track_code_mode_tool_call(
++                            codex_analytics::CodeModeToolCallFact::CellClosed {
++                                thread_id: exec.session.thread_id.to_string(),
++                                turn_id: exec.turn.sub_id.clone(),
++                                cell_id: runtime_cell_id.to_string(),
++                            },
++                        );
+                     }
+                 }
+                 exec.session.services.elicitations.wait_until_clear().await;
+diff --git a/codex-rs/core/src/tools/control_tool_analytics.rs b/codex-rs/core/src/tools/control_tool_analytics.rs
+index 46719201e..5afe745bc 100644
+--- a/codex-rs/core/src/tools/control_tool_analytics.rs
++++ b/codex-rs/core/src/tools/control_tool_analytics.rs
+@@ -30,8 +30,7 @@ impl Drop for ControlToolCallGuard<'_> {
+     fn drop(&mut self) {
+         let invocation = self.invocation;
+         invocation
+-            .session
+-            .services
++            .turn
+             .analytics_events_client
+             .track_control_tool_call(ControlToolCallFact {
+                 thread_id: invocation.session.thread_id.to_string(),
+diff --git a/codex-rs/core/src/tools/events.rs b/codex-rs/core/src/tools/events.rs
+index f98d44b1b..62fc7ee23 100644
+--- a/codex-rs/core/src/tools/events.rs
++++ b/codex-rs/core/src/tools/events.rs
+@@ -128,30 +128,27 @@ async fn emit_exec_command_begin(ctx: ToolEventCtx<'_>, exec_input: &ExecCommand
+             i64::from(operation.expected_output_count),
+             &metric_tags,
+         );
+-        ctx.session
+-            .services
+-            .analytics_events_client
+-            .track_artifact_operation(
+-                build_track_events_context(
+-                    ctx.turn.model_info.slug.clone(),
+-                    ctx.session.thread_id.to_string(),
+-                    ctx.turn.sub_id.clone(),
+-                    ctx.turn.originator.clone(),
+-                ),
+-                ArtifactOperation {
+-                    item_id: ctx.call_id.to_string(),
+-                    lifecycle: ArtifactOperationLifecycle::Started,
+-                    occurred_at_ms: codex_analytics::now_unix_millis(),
+-                    plugin_id: attribution.plugin_id.as_key(),
+-                    script_path: operation.script_path.to_string(),
+-                    skill: operation.plugin_name.to_string(),
+-                    artifact_type: operation.artifact_type.to_string(),
+-                    operation_kind: operation.operation_kind.to_string(),
+-                    expected_output_count: operation.expected_output_count,
+-                    output_format: operation.output_format.to_string(),
+-                    execution_backend: "unified_exec".to_string(),
+-                },
+-            );
++        ctx.turn.analytics_events_client.track_artifact_operation(
++            build_track_events_context(
++                ctx.turn.model_info.slug.clone(),
++                ctx.session.thread_id.to_string(),
++                ctx.turn.sub_id.clone(),
++                ctx.turn.originator.clone(),
++            ),
++            ArtifactOperation {
++                item_id: ctx.call_id.to_string(),
++                lifecycle: ArtifactOperationLifecycle::Started,
++                occurred_at_ms: codex_analytics::now_unix_millis(),
++                plugin_id: attribution.plugin_id.as_key(),
++                script_path: operation.script_path.to_string(),
++                skill: operation.plugin_name.to_string(),
++                artifact_type: operation.artifact_type.to_string(),
++                operation_kind: operation.operation_kind.to_string(),
++                expected_output_count: operation.expected_output_count,
++                output_format: operation.output_format.to_string(),
++                execution_backend: "unified_exec".to_string(),
++            },
++        );
+     }
+     let (plugin_id, script_path) = plugin_attribution_fields(exec_input.plugin_attribution);
+     ctx.session
+diff --git a/codex-rs/core/src/tools/handlers/request_plugin_install.rs b/codex-rs/core/src/tools/handlers/request_plugin_install.rs
+index 02d37430c..1143303e8 100644
+--- a/codex-rs/core/src/tools/handlers/request_plugin_install.rs
++++ b/codex-rs/core/src/tools/handlers/request_plugin_install.rs
+@@ -212,27 +212,24 @@ impl RequestPluginInstallHandler {
+                     PluginInstallRequestSource::EndpointRecommendation
+                 }
+             };
+-            session
+-                .services
+-                .analytics_events_client
+-                .track_plugin_install_requested(
+-                    build_track_events_context(
+-                        turn.model_info.slug.clone(),
+-                        session.thread_id.to_string(),
+-                        turn.sub_id.clone(),
+-                        turn.originator.clone(),
+-                    ),
+-                    PluginInstallRequested {
+-                        suggestion_id: suggestion_id.clone(),
+-                        plugins: vec![PluginInstallRequestedPlugin {
+-                            plugin_id: plugin.id.clone(),
+-                            remote_plugin_id: plugin.remote_plugin_id.clone(),
+-                            plugin_name: plugin.name.clone(),
+-                            connector_ids: plugin.app_connector_ids.clone(),
+-                        }],
+-                        source,
+-                    },
+-                );
++            turn.analytics_events_client.track_plugin_install_requested(
++                build_track_events_context(
++                    turn.model_info.slug.clone(),
++                    session.thread_id.to_string(),
++                    turn.sub_id.clone(),
++                    turn.originator.clone(),
++                ),
++                PluginInstallRequested {
++                    suggestion_id: suggestion_id.clone(),
++                    plugins: vec![PluginInstallRequestedPlugin {
++                        plugin_id: plugin.id.clone(),
++                        remote_plugin_id: plugin.remote_plugin_id.clone(),
++                        plugin_name: plugin.name.clone(),
++                        connector_ids: plugin.app_connector_ids.clone(),
++                    }],
++                    source,
++                },
++            );
+         }
+ 
+         let request_id = RequestId::String(suggestion_id.into());
+diff --git a/codex-rs/core/src/tools/sandboxing.rs b/codex-rs/core/src/tools/sandboxing.rs
+index 6d5d89a6c..3f1a2464f 100644
+--- a/codex-rs/core/src/tools/sandboxing.rs
++++ b/codex-rs/core/src/tools/sandboxing.rs
+@@ -14,6 +14,7 @@ use crate::tools::hook_names::HookToolName;
+ use crate::tools::network_approval::NetworkApprovalSpec;
+ use codex_file_system::FileSystemSandboxContext;
+ use codex_network_proxy::NetworkProxy;
++use codex_otel::SessionTelemetry;
+ use codex_protocol::approvals::ExecPolicyAmendment;
+ use codex_protocol::config_types::WindowsSandboxLevel;
+ use codex_protocol::error::CodexErr;
+@@ -69,6 +70,7 @@ impl ApprovalStore {
+ ///   so future requests touching any subset can also skip prompting.
+ pub(crate) async fn with_cached_approval<K, F, Fut>(
+     services: &SessionServices,
++    session_telemetry: &SessionTelemetry,
+     // Name of the tool, used for metrics collection.
+     tool_name: &str,
+     keys: Vec<K>,
+@@ -96,7 +98,7 @@ where
+ 
+     let decision = fetch().await;
+ 
+-    services.session_telemetry.counter(
++    session_telemetry.counter(
+         "codex.approval.requested",
+         /*inc*/ 1,
+         &[
 diff --git a/codex-rs/ext/extension-api/src/contributors.rs b/codex-rs/ext/extension-api/src/contributors.rs
 index d51ee6597..67830b63d 100644
 --- a/codex-rs/ext/extension-api/src/contributors.rs

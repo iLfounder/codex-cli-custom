@@ -28,7 +28,7 @@ The target is upstream [`rust-v0.149.0`](https://github.com/openai/codex/release
 | Area | Current status |
 |---|---|
 | P001–P011 implementation and focused checks | Complete |
-| Ordered 0.149 patch export and clean-apply verification | Complete; 11 patches reproduce tree `e76aa7e4e7b0ec0902d525e939baf9d34ffdccf1` |
+| Ordered 0.149 patch export and clean-apply verification | Complete; 11 patches reproduce tree `9f3fe8a00dbbcab59a69d0719b9def1930ef0bff` |
 | macOS arm64 release build and artifacts | Final review fixes pending rebuild; [run 32485937374](https://github.com/iLfounder/codex-cli-custom/actions/runs/32485937374) proves the superseded pre-review tree |
 | Final independent reviews | Pending |
 | 0.149 publication | Pending |
@@ -128,7 +128,7 @@ git checkout 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
 /path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD"
 ```
 
-The applier rejects a dirty or wrong-base worktree, verifies every patch digest, applies P001–P011 in order, and requires final tree `e76aa7e4e7b0ec0902d525e939baf9d34ffdccf1`.
+The applier rejects a dirty or wrong-base worktree, verifies every patch digest, applies P001–P011 in order, and requires final tree `9f3fe8a00dbbcab59a69d0719b9def1930ef0bff`.
 
 This separation is the maintenance strategy: when upstream advances, each P-number can be inspected, adapted, and verified against its own feature boundary.
 

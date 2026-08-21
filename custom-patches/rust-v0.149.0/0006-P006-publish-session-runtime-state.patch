@@ -1,18 +1,18 @@
-From df60f1c5cb64680b6d41a332077f070cb04f3f0f Mon Sep 17 00:00:00 2001
+From 5d89643bd8efdedae980c604ec6edb45d77f8778 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 16:46:40 +0900
-Subject: [PATCH 06/11] feat(custom): publish session runtime state for 0.149
+Subject: [PATCH] feat(custom): publish session runtime state for 0.149
 
 ---
  codex-rs/app-server/src/lib.rs                |   1 +
  codex-rs/app-server/src/message_processor.rs  |  23 +-
  .../request_processors/thread_lifecycle.rs    | 159 ++++--
  .../thread_lifecycle_tests.rs                 |  19 +
- .../app-server/src/session_runtime/mod.rs     | 254 +++++++++
- .../src/session_runtime/operations.rs         | 233 ++++++++
- .../src/session_runtime/pagination.rs         | 147 +++++
+ .../app-server/src/session_runtime/mod.rs     | 259 +++++++++
+ .../src/session_runtime/operations.rs         | 235 ++++++++
+ .../src/session_runtime/pagination.rs         | 141 +++++
  .../src/session_runtime/snapshot.rs           | 509 ++++++++++++++++++
- .../app-server/src/session_runtime/tests.rs   | 190 +++++++
+ .../app-server/src/session_runtime/tests.rs   | 194 +++++++
  codex-rs/app-server/src/thread_state.rs       | 283 +++++++++-
  codex-rs/app-server/src/thread_status.rs      |  36 ++
  codex-rs/rollout/src/lib.rs                   |   1 +
@@ -23,7 +23,7 @@ Subject: [PATCH 06/11] feat(custom): publish session runtime state for 0.149
  codex-rs/thread-store/src/local/mod.rs        | 122 +++++
  .../src/local/runtime_snapshot_tests.rs       | 107 ++++
  codex-rs/thread-store/src/store.rs            |  81 +++
- 19 files changed, 2247 insertions(+), 79 deletions(-)
+ 19 files changed, 2252 insertions(+), 79 deletions(-)
  create mode 100644 codex-rs/app-server/src/request_processors/thread_lifecycle_tests.rs
  create mode 100644 codex-rs/app-server/src/session_runtime/mod.rs
  create mode 100644 codex-rs/app-server/src/session_runtime/operations.rs
@@ -472,10 +472,10 @@ index 000000000..efb9a2590
 +}
 diff --git a/codex-rs/app-server/src/session_runtime/mod.rs b/codex-rs/app-server/src/session_runtime/mod.rs
 new file mode 100644
-index 000000000..3e36cbd67
+index 000000000..f91e3c88e
 --- /dev/null
 +++ b/codex-rs/app-server/src/session_runtime/mod.rs
-@@ -0,0 +1,254 @@
+@@ -0,0 +1,259 @@
 +#[allow(dead_code)]
 +mod operations;
 +mod pagination;
@@ -614,7 +614,11 @@ index 000000000..3e36cbd67
 +        let sequence = state.sequence;
 +        let cached = CachedSnapshot::new(sequence, snapshots);
 +        let response = cached.first_page(&self.instance_epoch, limit, capabilities)?;
-+        state.pages.insert(cached);
++        if response.next_cursor.is_some() {
++            state.pages.insert(cached);
++        } else {
++            state.pages.clear();
++        }
 +        Ok(response)
 +    }
 +
@@ -653,6 +657,7 @@ index 000000000..3e36cbd67
 +            let mut state = self.state.lock().await;
 +            Self::apply_runtime_state(&mut state, &mut snapshot, RuntimeActivity::Activity);
 +            state.sequence = state.sequence.saturating_add(1);
++            state.pages.clear();
 +            SessionRuntimeChangedNotification {
 +                instance_epoch: self.instance_epoch.clone(),
 +                sequence: state.sequence,
@@ -732,10 +737,10 @@ index 000000000..3e36cbd67
 +mod tests;
 diff --git a/codex-rs/app-server/src/session_runtime/operations.rs b/codex-rs/app-server/src/session_runtime/operations.rs
 new file mode 100644
-index 000000000..732ad7c58
+index 000000000..ddf861d02
 --- /dev/null
 +++ b/codex-rs/app-server/src/session_runtime/operations.rs
-@@ -0,0 +1,233 @@
+@@ -0,0 +1,235 @@
 +use std::collections::HashMap;
 +use std::collections::VecDeque;
 +
@@ -808,6 +813,7 @@ index 000000000..732ad7c58
 +                ));
 +            }
 +            state.sequence = state.sequence.saturating_add(1);
++            state.pages.clear();
 +            state
 +                .operations
 +                .operations
@@ -851,6 +857,7 @@ index 000000000..732ad7c58
 +                return Ok(existing);
 +            }
 +            state.sequence = state.sequence.saturating_add(1);
++            state.pages.clear();
 +            if !is_terminal(existing.status) && is_terminal(operation.status) {
 +                state
 +                    .operations
@@ -971,12 +978,10 @@ index 000000000..732ad7c58
 +}
 diff --git a/codex-rs/app-server/src/session_runtime/pagination.rs b/codex-rs/app-server/src/session_runtime/pagination.rs
 new file mode 100644
-index 000000000..f592a683e
+index 000000000..b1b5c4ee4
 --- /dev/null
 +++ b/codex-rs/app-server/src/session_runtime/pagination.rs
-@@ -0,0 +1,147 @@
-+use std::collections::VecDeque;
-+
+@@ -0,0 +1,141 @@
 +use base64::Engine;
 +use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 +use codex_app_server_protocol::JSONRPCErrorError;
@@ -991,11 +996,9 @@ index 000000000..f592a683e
 +
 +const DEFAULT_LIMIT: usize = 50;
 +const MAX_LIMIT: usize = 100;
-+const MAX_CACHED_SNAPSHOTS: usize = 16;
-+
 +#[derive(Default)]
 +pub(super) struct SnapshotCache {
-+    snapshots: VecDeque<CachedSnapshot>,
++    snapshot: Option<CachedSnapshot>,
 +}
 +
 +pub(super) struct CachedSnapshot {
@@ -1015,10 +1018,11 @@ index 000000000..f592a683e
 +
 +impl SnapshotCache {
 +    pub(super) fn insert(&mut self, snapshot: CachedSnapshot) {
-+        self.snapshots.push_back(snapshot);
-+        while self.snapshots.len() > MAX_CACHED_SNAPSHOTS {
-+            self.snapshots.pop_front();
-+        }
++        self.snapshot = Some(snapshot);
++    }
++
++    pub(super) fn clear(&mut self) {
++        self.snapshot = None;
 +    }
 +
 +    pub(super) fn page(
@@ -1033,13 +1037,10 @@ index 000000000..f592a683e
 +        if cursor.instance_epoch != instance_epoch || cursor.snapshot_sequence != current_sequence {
 +            return Err(stale_cursor());
 +        }
-+        let snapshot = self
-+            .snapshots
-+            .iter()
-+            .find(|snapshot| {
-+                snapshot.id == cursor.snapshot_id && snapshot.sequence == cursor.snapshot_sequence
-+            })
-+            .ok_or_else(stale_cursor)?;
++        let snapshot = self.snapshot.as_ref().ok_or_else(stale_cursor)?;
++        if snapshot.id != cursor.snapshot_id || snapshot.sequence != cursor.snapshot_sequence {
++            return Err(stale_cursor());
++        }
 +        let start = snapshot
 +            .snapshots
 +            .iter()
@@ -1639,10 +1640,10 @@ index 000000000..96be01563
 +}
 diff --git a/codex-rs/app-server/src/session_runtime/tests.rs b/codex-rs/app-server/src/session_runtime/tests.rs
 new file mode 100644
-index 000000000..20e4dd4a4
+index 000000000..09edc7a69
 --- /dev/null
 +++ b/codex-rs/app-server/src/session_runtime/tests.rs
-@@ -0,0 +1,190 @@
+@@ -0,0 +1,194 @@
 +use std::collections::VecDeque;
 +
 +use codex_app_server_protocol::SessionRuntimeAccountBinding;
@@ -1759,6 +1760,10 @@ index 000000000..20e4dd4a4
 +    assert_eq!(second.data.len(), 1);
 +    assert!(cache.page(&cursor, "epoch-a", 8, 1, Vec::new()).is_err());
 +    assert!(cache.page(&cursor, "epoch-b", 7, 1, Vec::new()).is_err());
++
++    let replacement = CachedSnapshot::new(7, vec![snapshot(ThreadId::new())]);
++    cache.insert(replacement);
++    assert!(cache.page(&cursor, "epoch-a", 7, 1, Vec::new()).is_err());
 +}
 +
 +#[test]

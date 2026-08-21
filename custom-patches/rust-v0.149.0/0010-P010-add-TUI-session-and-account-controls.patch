@@ -1,7 +1,7 @@
-From 36f691fbe9397532283fc13d4d033b4110e5d3c1 Mon Sep 17 00:00:00 2001
+From 8ecf82a1abf82647e9070a5f8a0870ba46eba01e Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 19:45:26 +0900
-Subject: [PATCH 10/11] feat(custom): add release-aware TUI controls for 0.149
+Subject: [PATCH] feat(custom): add release-aware TUI controls for 0.149
 
 ---
  .../schema/json/v2/ThreadResumeParams.json    |  97 ++++
@@ -5275,7 +5275,7 @@ index 349f4573d..c1223a2b4 100644
  async fn thread_start_rejects_hidden_dynamic_tools_without_namespace() -> Result<()> {
      let server = MockServer::start().await;
 diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
-index 6db2528b2..9cb3d05af 100644
+index b98b170df..96ae73825 100644
 --- a/codex-rs/core/src/codex_thread.rs
 +++ b/codex-rs/core/src/codex_thread.rs
 @@ -17,6 +17,7 @@ use codex_protocol::config_types::CollaborationMode;
@@ -5295,10 +5295,10 @@ index 6db2528b2..9cb3d05af 100644
      pub session_source: SessionSource,
      pub history_mode: ThreadHistoryMode,
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
-index 152851387..86792745b 100644
+index 614c3339a..cb089431d 100644
 --- a/codex-rs/core/src/session/session.rs
 +++ b/codex-rs/core/src/session/session.rs
-@@ -243,6 +243,7 @@ impl SessionConfiguration {
+@@ -248,6 +248,7 @@ impl SessionConfiguration {
              reasoning_effort: self.collaboration_mode.reasoning_effort(),
              reasoning_summary: self.model_reasoning_summary,
              personality: self.personality,
@@ -5307,10 +5307,10 @@ index 152851387..86792745b 100644
              session_source: self.session_source.clone(),
              history_mode: self.history_mode,
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 61ef39aaa..6cf42abed 100644
+index 8667b197e..49aa5df26 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
-@@ -1164,6 +1164,7 @@ impl ThreadManager {
+@@ -1166,6 +1166,7 @@ impl ThreadManager {
              config,
              initial_history,
              auth_manager,
@@ -5318,7 +5318,7 @@ index 61ef39aaa..6cf42abed 100644
              parent_trace,
              client_mcp_extensions,
          ))
-@@ -1176,6 +1177,7 @@ impl ThreadManager {
+@@ -1178,6 +1179,7 @@ impl ThreadManager {
          config: Config,
          initial_history: InitialHistory,
          auth_manager: Arc<AuthManager>,
@@ -5326,7 +5326,7 @@ index 61ef39aaa..6cf42abed 100644
          parent_trace: Option<W3cTraceContext>,
          client_mcp_extensions: ClientMcpExtensions,
      ) -> CodexResult<NewThread> {
-@@ -1195,6 +1197,7 @@ impl ThreadManager {
+@@ -1197,6 +1199,7 @@ impl ThreadManager {
              initial_history,
              session_source: Some(session_source),
              thread_source,
@@ -5334,7 +5334,7 @@ index 61ef39aaa..6cf42abed 100644
              parent_trace,
              client_mcp_extensions,
              ..StartThreadOptions::new(config)
-@@ -1213,6 +1216,7 @@ impl ThreadManager {
+@@ -1215,6 +1218,7 @@ impl ThreadManager {
          config: Config,
          initial_history: InitialHistory,
          execution_account: Arc<ExecutionAccountContext>,
@@ -5342,7 +5342,7 @@ index 61ef39aaa..6cf42abed 100644
          parent_trace: Option<W3cTraceContext>,
          client_mcp_extensions: ClientMcpExtensions,
      ) -> CodexResult<NewThread> {
-@@ -1232,6 +1236,7 @@ impl ThreadManager {
+@@ -1234,6 +1238,7 @@ impl ThreadManager {
              initial_history,
              session_source: Some(session_source),
              thread_source,

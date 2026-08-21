@@ -1,7 +1,7 @@
 From 77f4bb23fbc09c7708a5195d86221de30363aeeb Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 14:30:42 +0900
-Subject: [PATCH 02/11] feat(custom): add session runtime protocol for 0.149
+Subject: [PATCH] feat(custom): add session runtime protocol for 0.149
 
 ---
  .../schema/json/ClientRequest.json            |  367 ++

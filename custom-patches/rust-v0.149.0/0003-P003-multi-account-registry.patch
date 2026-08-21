@@ -1,7 +1,7 @@
 From 6a06834ed05c293aa758fa05ad30f3b360500149 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 14:37:11 +0900
-Subject: [PATCH 03/11] feat(custom): add multi-account registry for 0.149
+Subject: [PATCH] feat(custom): add multi-account registry for 0.149
 
 ---
  codex-rs/app-server/src/account_registry.rs   | 570 ++++++++++++++++++

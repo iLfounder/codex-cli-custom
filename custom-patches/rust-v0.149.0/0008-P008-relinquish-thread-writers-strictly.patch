@@ -1,13 +1,12 @@
-From e4883cfa1509156da1affa1aad2cffa42e2311bb Mon Sep 17 00:00:00 2001
+From c575d3ff23a1ba98c7da20e8430751734cf71aa1 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 18:06:29 +0900
-Subject: [PATCH 08/11] feat(custom): relinquish thread writers strictly for
- 0.149
+Subject: [PATCH] feat(custom): relinquish thread writers strictly for 0.149
 
 ---
  codex-rs/app-server/src/message_processor.rs  |  11 +-
  .../app-server/src/session_runtime/mod.rs     |   4 +
- .../src/session_runtime/relinquish.rs         | 384 ++++++++++++++++++
+ .../src/session_runtime/relinquish.rs         | 387 ++++++++++++++++++
  .../src/session_runtime/snapshot.rs           |  47 ++-
  codex-rs/app-server/src/thread_state.rs       |  36 ++
  codex-rs/app-server/tests/suite/v2/mod.rs     |   1 +
@@ -29,7 +28,7 @@ Subject: [PATCH 08/11] feat(custom): relinquish thread writers strictly for
  .../src/local/tests/relinquish_tests.rs       | 127 ++++++
  .../thread-store/src/local/writer_lock.rs     |  12 +-
  codex-rs/thread-store/src/store.rs            |  23 ++
- 24 files changed, 1120 insertions(+), 25 deletions(-)
+ 24 files changed, 1123 insertions(+), 25 deletions(-)
  create mode 100644 codex-rs/app-server/src/session_runtime/relinquish.rs
  create mode 100644 codex-rs/app-server/tests/suite/v2/thread_relinquish.rs
  create mode 100644 codex-rs/thread-store/src/local/tests/relinquish_tests.rs
@@ -76,7 +75,7 @@ index e58c9df42..25f068b6d 100644
                  .config_processor
                  .read(params)
 diff --git a/codex-rs/app-server/src/session_runtime/mod.rs b/codex-rs/app-server/src/session_runtime/mod.rs
-index 77f8e29b2..2117f40e3 100644
+index ff783100c..75243382c 100644
 --- a/codex-rs/app-server/src/session_runtime/mod.rs
 +++ b/codex-rs/app-server/src/session_runtime/mod.rs
 @@ -1,6 +1,7 @@
@@ -113,10 +112,10 @@ index 77f8e29b2..2117f40e3 100644
          }
 diff --git a/codex-rs/app-server/src/session_runtime/relinquish.rs b/codex-rs/app-server/src/session_runtime/relinquish.rs
 new file mode 100644
-index 000000000..4620d169b
+index 000000000..9ee43c056
 --- /dev/null
 +++ b/codex-rs/app-server/src/session_runtime/relinquish.rs
-@@ -0,0 +1,384 @@
+@@ -0,0 +1,387 @@
 +use codex_app_server_protocol::JSONRPCErrorError;
 +use codex_app_server_protocol::ServerNotification;
 +use codex_app_server_protocol::SessionRuntimeChangedNotification;
@@ -369,6 +368,7 @@ index 000000000..4620d169b
 +                Self::apply_runtime_state(&mut state, &mut snapshot, RuntimeActivity::Observe);
 +            changed.then(|| {
 +                state.sequence = state.sequence.saturating_add(1);
++                state.pages.clear();
 +                SessionRuntimeChangedNotification {
 +                    instance_epoch: self.instance_epoch.clone(),
 +                    sequence: state.sequence,
@@ -426,6 +426,7 @@ index 000000000..4620d169b
 +            snapshot.actions = action_snapshot(&snapshot.lifecycle, &snapshot.writer);
 +            Self::apply_runtime_state(&mut state, &mut snapshot, RuntimeActivity::Activity);
 +            state.sequence = state.sequence.saturating_add(1);
++            state.pages.clear();
 +            let runtime_notification = SessionRuntimeChangedNotification {
 +                instance_epoch: self.instance_epoch.clone(),
 +                sequence: state.sequence,
@@ -443,6 +444,7 @@ index 000000000..4620d169b
 +            operation.error = None;
 +            operation.updated_at = unix_timestamp();
 +            state.sequence = state.sequence.saturating_add(1);
++            state.pages.clear();
 +            state
 +                .operations
 +                .terminal_order

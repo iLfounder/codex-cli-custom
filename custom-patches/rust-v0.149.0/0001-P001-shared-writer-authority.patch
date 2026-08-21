@@ -1,7 +1,7 @@
 From 431337a11f882eb46c7371773287cec8febb38f1 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 14:30:28 +0900
-Subject: [PATCH 01/11] feat(custom): add shared writer authority for 0.149
+Subject: [PATCH] feat(custom): add shared writer authority for 0.149
 
 ---
  codex-rs/state/src/lib.rs                     |   1 +
