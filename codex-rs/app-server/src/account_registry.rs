@@ -3,11 +3,11 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::RwLock;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use codex_app_server_protocol::AccountSlotActionAvailability;
 use codex_app_server_protocol::AccountSlotCapability;
 use codex_app_server_protocol::AccountSlotListParams;
 use codex_app_server_protocol::AccountSlotListResponse;
@@ -28,6 +28,7 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::protocol::ExecutionAccountBinding;
 use serde::Deserialize;
 use serde::Serialize;
+use tokio::sync::Mutex;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
@@ -245,6 +246,9 @@ fn valid_manifest_token(value: &str) -> bool {
 struct AccountSlotRecord {
     manifest: AccountSlotManifest,
     runtime: Arc<OnceCell<Arc<AccountRuntimeBundle>>>,
+    active_login_operation_id: Option<String>,
+    active_logout_operation_id: Option<String>,
+    completed_login_operation_id: Option<String>,
 }
 
 pub(crate) struct AccountRuntimeBundle {
@@ -256,12 +260,21 @@ struct AccountRegistryState {
     revision: u64,
     slots: Vec<AccountSlotRecord>,
     manifest_error: Option<&'static str>,
+    manifest_present: bool,
 }
 
 pub(crate) struct AccountRegistry {
     config: Arc<Config>,
     auth_config_template: AuthConfig,
     state: RwLock<AccountRegistryState>,
+    mutation_lock: Mutex<()>,
+    browser_login: StdMutex<Option<BrowserLoginOwner>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum BrowserLoginOwner {
+    Default(String),
+    Slot(String),
 }
 
 impl AccountRegistry {
@@ -271,13 +284,14 @@ impl AccountRegistry {
         default_models_manager: SharedModelsManager,
     ) -> Self {
         let manifest_path = config.codex_home.join(MANIFEST_FILE);
-        let (manifest, manifest_error) =
+        let (manifest, manifest_error, manifest_present) =
             match AccountSlotsManifest::load(&manifest_path, &config.codex_home) {
-                Ok(Some(manifest)) => (manifest, None),
-                Ok(None) => (virtual_default_manifest(&config.codex_home), None),
+                Ok(Some(manifest)) => (manifest, None, true),
+                Ok(None) => (virtual_default_manifest(&config.codex_home), None, false),
                 Err(_) => (
                     virtual_default_manifest(&config.codex_home),
                     Some(DENY_MANIFEST_INVALID),
+                    false,
                 ),
             };
         let default_runtime = Arc::new(AccountRuntimeBundle {
@@ -292,7 +306,13 @@ impl AccountRegistry {
                 if manifest.is_default {
                     let _ = runtime.set(Arc::clone(&default_runtime));
                 }
-                AccountSlotRecord { manifest, runtime }
+                AccountSlotRecord {
+                    manifest,
+                    runtime,
+                    active_login_operation_id: None,
+                    active_logout_operation_id: None,
+                    completed_login_operation_id: None,
+                }
             })
             .collect::<Vec<_>>();
         slots.sort_by(|left, right| {
@@ -308,7 +328,10 @@ impl AccountRegistry {
                 revision: manifest.revision,
                 slots,
                 manifest_error,
+                manifest_present,
             }),
+            mutation_lock: Mutex::new(()),
+            browser_login: StdMutex::new(None),
         }
     }
 
@@ -316,6 +339,7 @@ impl AccountRegistry {
         &self,
         params: AccountSlotListParams,
     ) -> Result<AccountSlotListResponse, JSONRPCErrorError> {
+        self.reconcile().await?;
         let (revision, slots, manifest_error) = {
             let state = self
                 .state
@@ -358,33 +382,13 @@ impl AccountRegistry {
     pub(crate) async fn runtime_capability(
         &self,
     ) -> Result<AccountSlotCapability, JSONRPCErrorError> {
+        self.reconcile().await?;
         let manifest_error = self
             .state
             .read()
             .map_err(|_| internal_error("account slot registry is unavailable"))?
             .manifest_error;
         Ok(self.capability(manifest_error))
-    }
-
-    pub(crate) async fn slot_snapshot(
-        &self,
-        account_slot_id: &str,
-    ) -> Result<AccountSlotSnapshot, JSONRPCErrorError> {
-        let (slot, revision, manifest_error) = {
-            let state = self
-                .state
-                .read()
-                .map_err(|_| internal_error("account slot registry is unavailable"))?;
-            let slot = state
-                .slots
-                .iter()
-                .find(|slot| slot.manifest.account_slot_id == account_slot_id)
-                .cloned()
-                .ok_or_else(|| invalid_params("account slot is unavailable"))?;
-            (slot, state.revision, state.manifest_error)
-        };
-        let capability = self.capability(manifest_error);
-        Ok(self.snapshot(&slot, revision, &capability).await)
     }
 
     async fn snapshot(
@@ -418,9 +422,15 @@ impl AccountRegistry {
             auth_mode,
             attempt_generation: slot.manifest.attempt_generation,
             registry_revision: revision,
-            active_login_operation_id: None,
+            active_login_operation_id: slot.active_login_operation_id.clone(),
             error_code,
-            actions: Vec::<AccountSlotActionAvailability>::new(),
+            actions: live_registration::available_actions(
+                slot.manifest.status,
+                capability,
+                slot.manifest.is_default,
+                slot.active_login_operation_id.is_some()
+                    || slot.active_logout_operation_id.is_some(),
+            ),
             updated_at: slot.manifest.updated_at,
         }
     }
@@ -498,9 +508,17 @@ impl AccountRegistry {
     }
 }
 
+pub(crate) mod live_registration;
+
 impl ExecutionAccountResolver for AccountRegistry {
     fn resolve(&self, binding: ExecutionAccountBinding) -> ExecutionAccountResolverFuture<'_> {
         Box::pin(async move {
+            self.reconcile().await.map_err(|error| {
+                CodexErr::Fatal(format!(
+                    "account slot reconciliation failed: {}",
+                    error.message
+                ))
+            })?;
             let (slot, manifest_error) = {
                 let state = self.state.read().map_err(|_| {
                     CodexErr::Fatal("account slot registry is unavailable".to_string())

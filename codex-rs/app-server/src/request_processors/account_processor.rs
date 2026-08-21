@@ -2,14 +2,20 @@ use super::bedrock_auth::clear_user_model_provider_if_bedrock;
 use super::bedrock_auth::set_user_model_provider_to_bedrock;
 use super::*;
 use crate::account_registry::AccountRegistry;
+use crate::account_registry::BrowserLoginOwner;
+use crate::account_registry::live_registration::ERROR_BROWSER_LOGIN_BUSY;
+use crate::account_registry::live_registration::structured_invalid_request;
 use crate::auth_mode::auth_mode_to_api;
 use crate::external_auth::ExternalAuthBridge;
+use crate::session_runtime::SessionRuntimeEngine;
 use chrono::DateTime;
 use codex_app_server_protocol::DesktopOnboardingEntrypoint;
 use codex_login::LoginOnboardingEntrypoint;
 use codex_model_provider::is_supported_amazon_bedrock_region;
 
 mod rate_limit_resets;
+mod slot_login;
+mod slot_logout;
 
 // Duration before a browser ChatGPT login attempt is abandoned.
 const LOGIN_CHATGPT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -79,6 +85,8 @@ pub(crate) struct AccountRequestProcessor {
     config: Arc<Config>,
     config_manager: ConfigManager,
     active_login: Arc<Mutex<Option<ActiveLogin>>>,
+    slot_logins: Arc<slot_login::SlotLoginCoordinator>,
+    session_runtime: Arc<SessionRuntimeEngine>,
 }
 
 impl AccountRequestProcessor {
@@ -89,6 +97,7 @@ impl AccountRequestProcessor {
         outgoing: Arc<OutgoingMessageSender>,
         config: Arc<Config>,
         config_manager: ConfigManager,
+        session_runtime: Arc<SessionRuntimeEngine>,
     ) -> Self {
         Self {
             auth_manager,
@@ -98,6 +107,8 @@ impl AccountRequestProcessor {
             config,
             config_manager,
             active_login: Arc::new(Mutex::new(None)),
+            slot_logins: Arc::new(slot_login::SlotLoginCoordinator::default()),
+            session_runtime,
         }
     }
 
@@ -127,6 +138,14 @@ impl AccountRequestProcessor {
         &self,
         params: CancelLoginAccountParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        if self.cancel_slot_login(&params.login_id).await? {
+            return Ok(Some(
+                CancelLoginAccountResponse {
+                    status: CancelLoginAccountStatus::Canceled,
+                }
+                .into(),
+            ));
+        }
         self.cancel_login_response(params)
             .await
             .map(|response| Some(response.into()))
@@ -185,6 +204,7 @@ impl AccountRequestProcessor {
     }
 
     pub(crate) async fn cancel_active_login(&self) {
+        self.cancel_all_slot_logins().await;
         let mut guard = self.active_login.lock().await;
         if let Some(active_login) = guard.take() {
             drop(active_login);
@@ -554,9 +574,26 @@ impl AccountRequestProcessor {
         let opts = self
             .login_chatgpt_common(codex_streamlined_login, login_success_page)
             .await?;
-        let server = run_login_server(opts)
-            .map_err(|err| internal_error(format!("failed to start login server: {err}")))?;
         let login_id = Uuid::new_v4();
+        let browser_owner = BrowserLoginOwner::Default(login_id.to_string());
+        self.account_registry
+            .try_begin_browser_login(browser_owner.clone())
+            .await?;
+        let server = match run_login_server_fail_if_busy(opts) {
+            Ok(server) => server,
+            Err(err) => {
+                self.account_registry
+                    .finish_browser_login(&browser_owner)
+                    .await;
+                if err.kind() == std::io::ErrorKind::AddrInUse {
+                    return Err(structured_invalid_request(
+                        ERROR_BROWSER_LOGIN_BUSY,
+                        "browser login callback is unavailable",
+                    ));
+                }
+                return Err(internal_error("failed to start login server"));
+            }
+        };
         let shutdown_handle = server.cancel_handle();
 
         // Replace active login if present.
@@ -576,6 +613,7 @@ impl AccountRequestProcessor {
         let thread_manager = Arc::clone(&self.thread_manager);
         let config = Arc::clone(&self.config);
         let active_login = self.active_login.clone();
+        let account_registry = Arc::clone(&self.account_registry);
         let auth_url = server.auth_url.clone();
         tokio::spawn(async move {
             let (success, error_msg, onboarding_entrypoint) = match tokio::time::timeout(
@@ -615,10 +653,13 @@ impl AccountRequestProcessor {
             .await;
 
             // Clear the active login if it matches this attempt. It may have been replaced or cancelled.
-            let mut guard = active_login.lock().await;
-            if guard.as_ref().map(ActiveLogin::login_id) == Some(login_id) {
-                *guard = None;
+            {
+                let mut guard = active_login.lock().await;
+                if guard.as_ref().map(ActiveLogin::login_id) == Some(login_id) {
+                    *guard = None;
+                }
             }
+            account_registry.finish_browser_login(&browser_owner).await;
         });
 
         Ok(LoginAccountResponse::Chatgpt {

@@ -122,6 +122,7 @@ pub(crate) struct ThreadScopedOutgoingMessageSender {
 struct PendingCallbackEntry {
     callback: oneshot::Sender<ClientRequestResult>,
     thread_id: Option<ThreadId>,
+    expected_responder: Option<ConnectionId>,
     request: ServerRequest,
     _diagnostics_guard: GaugeGuard,
 }
@@ -240,8 +241,22 @@ impl OutgoingMessageSender {
     }
 
     pub(crate) async fn connection_closed(&self, connection_id: ConnectionId) {
-        let mut request_contexts = self.request_contexts.lock().await;
-        request_contexts.retain(|request_id, _| request_id.connection_id != connection_id);
+        {
+            let mut request_contexts = self.request_contexts.lock().await;
+            request_contexts.retain(|request_id, _| request_id.connection_id != connection_id);
+        }
+        let callbacks = {
+            let mut callbacks = self.request_id_to_callback.lock().await;
+            callbacks
+                .extract_if(|_, entry| entry.expected_responder == Some(connection_id))
+                .map(|(_, entry)| entry)
+                .collect::<Vec<_>>()
+        };
+        for entry in callbacks {
+            let _ = entry.callback.send(Err(internal_error(
+                "client connection closed before responding to server request",
+            )));
+        }
     }
 
     pub(crate) async fn request_trace_context(
@@ -310,6 +325,10 @@ impl OutgoingMessageSender {
                 PendingCallbackEntry {
                     callback: tx_approve,
                     thread_id,
+                    expected_responder: connection_ids.and_then(|ids| match ids {
+                        [connection_id] => Some(*connection_id),
+                        _ => None,
+                    }),
                     request: request.clone(),
                     _diagnostics_guard: PENDING_SERVER_REQUESTS.track(),
                 },
@@ -380,8 +399,13 @@ impl OutgoingMessageSender {
         }
     }
 
-    pub(crate) async fn notify_client_response(&self, id: RequestId, result: Result) {
-        let entry = self.take_request_callback(&id).await;
+    pub(crate) async fn notify_client_response(
+        &self,
+        connection_id: ConnectionId,
+        id: RequestId,
+        result: Result,
+    ) {
+        let entry = self.take_request_callback(&id, Some(connection_id)).await;
 
         match entry {
             Some((id, entry)) => {
@@ -403,8 +427,13 @@ impl OutgoingMessageSender {
         }
     }
 
-    pub(crate) async fn notify_client_error(&self, id: RequestId, error: JSONRPCErrorError) {
-        let entry = self.take_request_callback(&id).await;
+    pub(crate) async fn notify_client_error(
+        &self,
+        connection_id: ConnectionId,
+        id: RequestId,
+        error: JSONRPCErrorError,
+    ) {
+        let entry = self.take_request_callback(&id, Some(connection_id)).await;
 
         match entry {
             Some((id, entry)) => {
@@ -422,7 +451,7 @@ impl OutgoingMessageSender {
     }
 
     pub(crate) async fn cancel_request(&self, id: &RequestId) -> bool {
-        let entry = self.take_request_callback(id).await;
+        let entry = self.take_request_callback(id, None).await;
         if let Some((request_id, _entry)) = entry {
             self.analytics_events_client
                 .track_server_request_aborted(now_unix_timestamp_ms(), request_id);
@@ -456,8 +485,20 @@ impl OutgoingMessageSender {
     async fn take_request_callback(
         &self,
         id: &RequestId,
+        responder: Option<ConnectionId>,
     ) -> Option<(RequestId, PendingCallbackEntry)> {
         let mut request_id_to_callback = self.request_id_to_callback.lock().await;
+        if let Some(entry) = request_id_to_callback.get(id)
+            && entry.expected_responder.is_some()
+            && entry.expected_responder != responder
+        {
+            warn!(
+                ?id,
+                ?responder,
+                "ignored response from unexpected connection"
+            );
+            return None;
+        }
         request_id_to_callback.remove_entry(id)
     }
 
@@ -1312,7 +1353,7 @@ mod tests {
         let error = internal_error("refresh failed");
 
         outgoing
-            .notify_client_error(request_id, error.clone())
+            .notify_client_error(ConnectionId(0), request_id, error.clone())
             .await;
 
         let result = timeout(Duration::from_secs(1), wait_for_result)
@@ -1320,6 +1361,70 @@ mod tests {
             .expect("wait should not time out")
             .expect("waiter should receive a callback");
         assert_eq!(result, Err(error));
+    }
+
+    #[tokio::test]
+    async fn targeted_request_ignores_wrong_responder_then_accepts_owner() {
+        let (tx, _rx) = mpsc::channel::<OutgoingEnvelope>(4);
+        let outgoing =
+            OutgoingMessageSender::new(tx, codex_analytics::AnalyticsEventsClient::disabled());
+        let (request_id, wait_for_result) = outgoing
+            .send_request_to_connections(
+                Some(&[ConnectionId(7)]),
+                ServerRequestPayload::ApplyPatchApproval(ApplyPatchApprovalParams {
+                    conversation_id: ThreadId::new(),
+                    call_id: "call-id".to_string(),
+                    file_changes: HashMap::new(),
+                    reason: None,
+                    grant_root: None,
+                }),
+                /*thread_id*/ None,
+            )
+            .await;
+
+        outgoing
+            .notify_client_response(
+                ConnectionId(8),
+                request_id.clone(),
+                serde_json::json!({"decision":"denied"}),
+            )
+            .await;
+        outgoing
+            .notify_client_response(
+                ConnectionId(7),
+                request_id,
+                serde_json::json!({"decision":"approved"}),
+            )
+            .await;
+
+        assert_eq!(
+            wait_for_result.await.expect("owner response"),
+            Ok(serde_json::json!({"decision":"approved"}))
+        );
+    }
+
+    #[tokio::test]
+    async fn targeted_request_fails_when_owner_disconnects() {
+        let (tx, _rx) = mpsc::channel::<OutgoingEnvelope>(4);
+        let outgoing =
+            OutgoingMessageSender::new(tx, codex_analytics::AnalyticsEventsClient::disabled());
+        let (_request_id, wait_for_result) = outgoing
+            .send_request_to_connections(
+                Some(&[ConnectionId(7)]),
+                ServerRequestPayload::ApplyPatchApproval(ApplyPatchApprovalParams {
+                    conversation_id: ThreadId::new(),
+                    call_id: "call-id".to_string(),
+                    file_changes: HashMap::new(),
+                    reason: None,
+                    grant_root: None,
+                }),
+                /*thread_id*/ None,
+            )
+            .await;
+
+        outgoing.connection_closed(ConnectionId(7)).await;
+
+        assert!(wait_for_result.await.expect("disconnect response").is_err());
     }
 
     #[tokio::test]

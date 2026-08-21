@@ -2250,6 +2250,7 @@ Codex supports these authentication modes. The current mode is surfaced in `acco
 
 - `accountSlot/list` — page through sanitized account slots. Responses never include email addresses, tokens, credential homes, or credential paths. The opaque cursor is bound to `registryRevision` and a stable sort anchor; any intervening registry mutation makes it stale and requires a first-page restart.
 - `accountSlot/login/start` — create a server-managed private account slot when `slotId` is omitted, or retry the same failed/login-required slot when it is supplied. The response includes the sanitized slot, operation state, and an optional browser or device-code challenge.
+- `accountSlot/logout` — revoke and remove credentials from one ready secondary slot using the latest `registryRevision` and `attemptGeneration`. The default slot must use `account/logout`; bound slots, active logins, and stale compare-and-swap values are rejected.
 - `accountSlot/changed` (notify) — emits the complete sanitized changed slot and its new `registryRevision`.
 - `account/read` — fetch current account info; optionally refresh tokens.
 - `account/login/start` — begin login (`apiKey`, `chatgpt`, `chatgptDeviceCode`, `amazonBedrock`).
@@ -2268,6 +2269,24 @@ Codex supports these authentication modes. The current mode is surfaced in `acco
 - `mcpServer/startupStatus/updated` (notify) — emitted when a configured MCP server's startup status changes; payload includes `{ threadId, name, status, error, failureReason }`, where `threadId` is the owning thread when startup is thread-scoped and `null` when it is app-scoped, and `status` is `starting`, `ready`, `failed`, or `cancelled`. `failureReason` is `reauthenticationRequired` when stored OAuth credentials have expired and cannot be refreshed, so clients can prompt the user to reconnect the named server.
 
 The session-runtime control contract is operation-based. `thread/account/switch` and `thread/relinquish` return an operation whose status distinguishes acknowledgement (`accepted` or `running`) from terminal completion (`ready`, `released`, or `failed`). `sessionRuntime/operation/updated` publishes later operation states, while `sessionRuntime/changed` publishes a complete changed-thread snapshot with an `instanceEpoch` and monotonic `sequence`. Operation ids are idempotent only within the same process epoch and only when the normalized request fingerprint is identical; reusing an id with a different thread, action, or arguments is invalid.
+
+Account-slot login uses the same bounded operation stream. API-key and externally supplied ChatGPT-token logins complete synchronously as `ready`; browser and device-code logins return a challenge in `running` state and later publish `ready` or `failed`. Browser login returns a busy error instead of cancelling another callback listener. External token refresh requests are accepted only from the connection that registered that slot, and disconnecting that owner makes the slot unavailable.
+
+Example secondary-slot logout:
+
+```json
+{
+  "method": "accountSlot/logout",
+  "id": 12,
+  "params": {
+    "accountSlotId": "0123456789ab4def8123456789abcdef",
+    "expectedRegistryRevision": 9,
+    "expectedAttemptGeneration": 2
+  }
+}
+```
+
+On success the response contains the complete sanitized slot in `loginRequired` state with both revisions advanced, followed by `accountSlot/changed`. A slot is considered bound when it is the current account, active-turn account, or pending switch target of any thread.
 
 `thread/relinquish` validates the process epoch, thread state revision, writer generation, idle/wait state, and subscriber ownership before entering `running`. A failed precondition or durability step returns a terminal `failed` operation without dropping the current writer or subscription. `released` means strict persistence completed, the old writer was released, and the terminal runtime snapshot was published. `thread/account/switch` validates the process epoch, state and execution revisions, writer ownership, idle/wait state, and subscriber ownership, then prepares the target account runtime before atomically changing the durable next-turn binding. A terminal `ready` operation preserves the thread id, writer, listener, and subscriptions; later turns use the target slot while an already-running turn cannot be switched.
 

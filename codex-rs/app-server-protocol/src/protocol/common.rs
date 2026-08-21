@@ -1188,6 +1188,12 @@ client_request_definitions! {
         response: v2::AccountSlotLoginStartResponse,
     },
 
+    AccountSlotLogout => "accountSlot/logout" {
+        params: v2::AccountSlotLogoutParams,
+        serialization: global("account-slots"),
+        response: v2::AccountSlotLogoutResponse,
+    },
+
     LoginAccount => "account/login/start" {
         params: v2::LoginAccountParams,
         inspect_params: true,

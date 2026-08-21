@@ -12,7 +12,9 @@ use codex_login::auth::ExternalAuthRefreshContext;
 use codex_login::auth::ExternalAuthRefreshReason;
 use tokio::time::Duration;
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 
+use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::OutgoingMessageSender;
 
 const EXTERNAL_AUTH_REFRESH_TIMEOUT: Duration = Duration::from_secs(10);
@@ -20,6 +22,8 @@ const EXTERNAL_AUTH_REFRESH_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) struct ExternalAuthBridge {
     outgoing: Arc<OutgoingMessageSender>,
     auth: RwLock<CodexAuth>,
+    owner_connection: Option<ConnectionId>,
+    refresh_unavailable: Option<CancellationToken>,
 }
 
 impl ExternalAuthBridge {
@@ -27,10 +31,39 @@ impl ExternalAuthBridge {
         Self {
             outgoing,
             auth: RwLock::new(auth),
+            owner_connection: None,
+            refresh_unavailable: None,
+        }
+    }
+
+    pub(crate) fn new_for_connection(
+        outgoing: Arc<OutgoingMessageSender>,
+        auth: CodexAuth,
+        owner_connection: ConnectionId,
+        refresh_unavailable: CancellationToken,
+    ) -> Self {
+        Self {
+            outgoing,
+            auth: RwLock::new(auth),
+            owner_connection: Some(owner_connection),
+            refresh_unavailable: Some(refresh_unavailable),
         }
     }
 
     async fn refresh(&self, context: ExternalAuthRefreshContext) -> std::io::Result<CodexAuth> {
+        let result = self.refresh_inner(context).await;
+        if result.is_err()
+            && let Some(refresh_unavailable) = self.refresh_unavailable.as_ref()
+        {
+            refresh_unavailable.cancel();
+        }
+        result
+    }
+
+    async fn refresh_inner(
+        &self,
+        context: ExternalAuthRefreshContext,
+    ) -> std::io::Result<CodexAuth> {
         let reason = match context.reason {
             ExternalAuthRefreshReason::Unauthorized => ChatgptAuthTokensRefreshReason::Unauthorized,
         };
@@ -39,10 +72,19 @@ impl ExternalAuthBridge {
             previous_account_id: context.previous_account_id,
         };
 
-        let (request_id, rx) = self
-            .outgoing
-            .send_request(ServerRequestPayload::ChatgptAuthTokensRefresh(params))
-            .await;
+        let payload = ServerRequestPayload::ChatgptAuthTokensRefresh(params);
+        let (request_id, rx) = match self.owner_connection {
+            Some(connection_id) => {
+                self.outgoing
+                    .send_request_to_connections(
+                        Some(&[connection_id]),
+                        payload,
+                        /*thread_id*/ None,
+                    )
+                    .await
+            }
+            None => self.outgoing.send_request(payload).await,
+        };
         let result = match timeout(EXTERNAL_AUTH_REFRESH_TIMEOUT, rx).await {
             Ok(result) => {
                 let result = result.map_err(|err| {

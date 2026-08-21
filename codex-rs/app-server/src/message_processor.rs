@@ -314,6 +314,15 @@ impl MessageProcessor {
             Arc::clone(&auth_manager),
             Arc::clone(&default_models_manager),
         ));
+        let startup_account_registry = Arc::clone(&account_registry);
+        tokio::spawn(async move {
+            if let Err(error) = startup_account_registry.reconcile().await {
+                tracing::warn!(
+                    "failed to reconcile account slots during startup: {}",
+                    error.message
+                );
+            }
+        });
         let mut queue_service = None;
         let thread_manager = Arc::new_cyclic(|thread_manager| {
             queue_service = queue_store.map(|queue| {
@@ -421,6 +430,7 @@ impl MessageProcessor {
             outgoing.clone(),
             Arc::clone(&config),
             config_manager.clone(),
+            Arc::clone(&session_runtime),
         );
         let apps_processor = AppsRequestProcessor::new(
             auth_manager.clone(),
@@ -822,6 +832,9 @@ impl MessageProcessor {
                 "timed out waiting for connection RPCs to drain"
             );
         }
+        self.account_processor
+            .slot_login_connection_closed(connection_id)
+            .await;
         self.outgoing.connection_closed(connection_id).await;
         self.fs_processor.connection_closed(connection_id).await;
         self.command_exec_processor
@@ -839,15 +852,23 @@ impl MessageProcessor {
     }
 
     /// Handle a standalone JSON-RPC response originating from the peer.
-    pub(crate) async fn process_response(&self, response: JSONRPCResponse) {
+    pub(crate) async fn process_response(
+        &self,
+        connection_id: ConnectionId,
+        response: JSONRPCResponse,
+    ) {
         let JSONRPCResponse { id, result, .. } = response;
-        self.outgoing.notify_client_response(id, result).await
+        self.outgoing
+            .notify_client_response(connection_id, id, result)
+            .await
     }
 
     /// Handle an error object received from the peer.
-    pub(crate) async fn process_error(&self, err: JSONRPCError) {
+    pub(crate) async fn process_error(&self, connection_id: ConnectionId, err: JSONRPCError) {
         tracing::error!("<- error: {:?}", err);
-        self.outgoing.notify_client_error(err.id, err.error).await;
+        self.outgoing
+            .notify_client_error(connection_id, err.id, err.error)
+            .await;
     }
 
     async fn handle_client_request(
@@ -990,9 +1011,14 @@ impl MessageProcessor {
                 .list_account_slots(params)
                 .await
                 .map(|response| Some(response.into())),
-            ClientRequest::AccountSlotLoginStart { .. } => Err(method_not_found(
-                "accountSlot/login/start is not implemented yet",
-            )),
+            ClientRequest::AccountSlotLoginStart { params, .. } => {
+                self.account_processor
+                    .login_account_slot(request_id.clone(), params)
+                    .await
+            }
+            ClientRequest::AccountSlotLogout { params, .. } => {
+                self.account_processor.logout_account_slot(params).await
+            }
             ClientRequest::ThreadAccountSwitch { .. } => Err(method_not_found(
                 "thread/account/switch is not implemented yet",
             )),

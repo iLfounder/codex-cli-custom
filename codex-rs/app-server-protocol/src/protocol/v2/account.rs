@@ -325,6 +325,7 @@ pub enum AccountSlotAction {
     Login,
     RetryLogin,
     SwitchTo,
+    Logout,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -415,6 +416,25 @@ pub enum AccountSlotLoginChallenge {
 pub struct AccountSlotChangedNotification {
     #[ts(type = "number")]
     pub registry_revision: u64,
+    pub slot: AccountSlotSnapshot,
+}
+
+/// Compare-and-swap parameters for logging out a secondary account slot.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AccountSlotLogoutParams {
+    pub account_slot_id: String,
+    #[ts(type = "number")]
+    pub expected_registry_revision: u64,
+    #[ts(type = "number")]
+    pub expected_attempt_generation: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AccountSlotLogoutResponse {
     pub slot: AccountSlotSnapshot,
 }
 

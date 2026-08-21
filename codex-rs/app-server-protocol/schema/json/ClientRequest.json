@@ -155,6 +155,30 @@
         }
       ]
     },
+    "AccountSlotLogoutParams": {
+      "description": "Compare-and-swap parameters for logging out a secondary account slot.",
+      "properties": {
+        "accountSlotId": {
+          "type": "string"
+        },
+        "expectedAttemptGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "expectedRegistryRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "accountSlotId",
+        "expectedAttemptGeneration",
+        "expectedRegistryRevision"
+      ],
+      "type": "object"
+    },
     "AddCreditsNudgeCreditType": {
       "enum": [
         "credits",
@@ -7539,6 +7563,30 @@
         "params"
       ],
       "title": "AccountSlot/login/startRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "accountSlot/logout"
+          ],
+          "title": "AccountSlot/logoutRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AccountSlotLogoutParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "AccountSlot/logoutRequest",
       "type": "object"
     },
     {

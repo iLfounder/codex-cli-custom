@@ -158,10 +158,31 @@ impl ShutdownHandle {
 
 /// Starts a local callback server and returns the browser auth URL.
 pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
+    run_login_server_with_bind_mode(opts, LoginServerBindMode::CancelExisting)
+}
+
+/// Starts a local callback server without sending `/cancel` to an existing listener.
+pub fn run_login_server_fail_if_busy(opts: ServerOptions) -> io::Result<LoginServer> {
+    run_login_server_with_bind_mode(opts, LoginServerBindMode::FailIfBusy)
+}
+
+#[derive(Clone, Copy)]
+enum LoginServerBindMode {
+    CancelExisting,
+    FailIfBusy,
+}
+
+fn run_login_server_with_bind_mode(
+    opts: ServerOptions,
+    bind_mode: LoginServerBindMode,
+) -> io::Result<LoginServer> {
     let pkce = generate_pkce();
     let state = opts.force_state.clone().unwrap_or_else(generate_state);
 
-    let server = bind_server(opts.port)?;
+    let server = match bind_mode {
+        LoginServerBindMode::CancelExisting => bind_server(opts.port)?,
+        LoginServerBindMode::FailIfBusy => bind_server_fail_if_busy(opts.port)?,
+    };
     let actual_port = match server.server_addr().to_ip() {
         Some(addr) => addr.port(),
         None => {
@@ -303,6 +324,28 @@ pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
         server_handle,
         shutdown_handle: ShutdownHandle { shutdown_notify },
     })
+}
+
+fn bind_server_fail_if_busy(port: u16) -> io::Result<Server> {
+    match Server::http(format!("127.0.0.1:{port}")) {
+        Ok(server) => Ok(server),
+        Err(err) if port == DEFAULT_PORT && is_addr_in_use(err.as_ref()) => {
+            Server::http(format!("127.0.0.1:{FALLBACK_PORT}")).map_err(tiny_http_error_to_io)
+        }
+        Err(err) => Err(tiny_http_error_to_io(err)),
+    }
+}
+
+fn tiny_http_error_to_io(err: Box<dyn std::error::Error + Send + Sync>) -> io::Error {
+    match err.downcast::<io::Error>() {
+        Ok(err) => *err,
+        Err(err) => io::Error::other(err),
+    }
+}
+
+fn is_addr_in_use(err: &(dyn std::error::Error + Send + Sync + 'static)) -> bool {
+    err.downcast_ref::<io::Error>()
+        .is_some_and(|err| err.kind() == io::ErrorKind::AddrInUse)
 }
 
 /// Internal callback handling outcome.
@@ -649,10 +692,7 @@ fn bind_server(port: u16) -> io::Result<Server> {
             Ok(server) => return Ok(server),
             Err(err) => {
                 attempts += 1;
-                let is_addr_in_use = err
-                    .downcast_ref::<io::Error>()
-                    .map(|io_err| io_err.kind() == io::ErrorKind::AddrInUse)
-                    .unwrap_or(false);
+                let is_addr_in_use = is_addr_in_use(err.as_ref());
 
                 // If the address is in use, there may be another instance of the login server
                 // running. Attempt to cancel it and retry before falling back.
@@ -1171,9 +1211,12 @@ pub(crate) async fn obtain_api_key(
 }
 #[cfg(test)]
 mod tests {
+    use std::io;
+
     use pretty_assertions::assert_eq;
 
     use super::TokenEndpointErrorDetail;
+    use super::bind_server_fail_if_busy;
     use super::html_escape;
     use super::is_missing_codex_entitlement_error;
     use super::parse_token_endpoint_error;
@@ -1181,6 +1224,23 @@ mod tests {
     use super::redact_sensitive_url_parts;
     use super::render_login_error_page;
     use super::sanitize_url_for_logging;
+
+    #[test]
+    fn fail_if_busy_bind_does_not_cancel_existing_listener() {
+        let first = bind_server_fail_if_busy(/*port*/ 0).expect("bind first listener");
+        let port = first.server_addr().to_ip().expect("TCP listener").port();
+
+        let error = match bind_server_fail_if_busy(port) {
+            Ok(_) => panic!("busy port must fail"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
+        assert_eq!(
+            first.server_addr().to_ip().expect("first listener").port(),
+            port
+        );
+    }
 
     #[test]
     fn parse_token_endpoint_error_prefers_error_description() {

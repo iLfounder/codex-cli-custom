@@ -843,6 +843,21 @@ impl ThreadManager {
         }
     }
 
+    /// Clears a slot plugin cache only when it still belongs to the exact auth runtime.
+    pub fn clear_account_plugin_cache(&self, slot_id: &str, auth_manager: &Arc<AuthManager>) {
+        let plugins_manager = self
+            .state
+            .account_services
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(slot_id)
+            .filter(|entry| Arc::ptr_eq(&entry.auth_manager, auth_manager))
+            .map(|entry| Arc::clone(&entry.services.plugins_manager));
+        if let Some(plugins_manager) = plugins_manager {
+            plugins_manager.clear_cache();
+        }
+    }
+
     pub async fn execution_account_for_thread(
         &self,
         thread_id: ThreadId,

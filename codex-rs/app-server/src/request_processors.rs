@@ -416,7 +416,7 @@ use codex_login::login_with_api_key;
 use codex_login::login_with_bedrock_api_key;
 use codex_login::oauth_client_id;
 use codex_login::request_device_code;
-use codex_login::run_login_server;
+use codex_login::run_login_server_fail_if_busy;
 use codex_mcp::McpRuntimeContext;
 use codex_mcp::McpServerStatusSnapshot;
 use codex_mcp::McpSnapshotDetail;

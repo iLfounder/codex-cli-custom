@@ -54,7 +54,8 @@
       "enum": [
         "login",
         "retryLogin",
-        "switchTo"
+        "switchTo",
+        "logout"
       ],
       "type": "string"
     },

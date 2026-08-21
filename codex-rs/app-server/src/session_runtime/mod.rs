@@ -186,6 +186,31 @@ impl SessionRuntimeEngine {
             .await;
     }
 
+    pub(crate) async fn account_slot_in_use(
+        &self,
+        account_slot_id: &str,
+    ) -> Result<bool, JSONRPCErrorError> {
+        let _build_guard = self
+            .build_lock
+            .acquire()
+            .await
+            .map_err(|_| internal_error("session runtime publisher is unavailable"))?;
+        let snapshots = self.build_consistent_snapshots(/*thread_id*/ None).await?;
+        Ok(snapshots.iter().any(|snapshot| {
+            snapshot
+                .account
+                .current
+                .as_ref()
+                .is_some_and(|account| account.account_slot_id == account_slot_id)
+                || snapshot
+                    .account
+                    .active_turn
+                    .as_ref()
+                    .is_some_and(|account| account.account_slot_id == account_slot_id)
+                || snapshot.account.switch_target_slot_id.as_deref() == Some(account_slot_id)
+        }))
+    }
+
     async fn build_consistent_snapshots(
         &self,
         thread_id: Option<&str>,

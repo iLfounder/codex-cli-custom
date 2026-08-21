@@ -165,21 +165,14 @@
       ]
     }
   },
-  "description": "Full changed-slot snapshot at a new registry revision.",
   "properties": {
-    "registryRevision": {
-      "format": "uint64",
-      "minimum": 0.0,
-      "type": "integer"
-    },
     "slot": {
       "$ref": "#/definitions/AccountSlotSnapshot"
     }
   },
   "required": [
-    "registryRevision",
     "slot"
   ],
-  "title": "AccountSlotChangedNotification",
+  "title": "AccountSlotLogoutResponse",
   "type": "object"
 }

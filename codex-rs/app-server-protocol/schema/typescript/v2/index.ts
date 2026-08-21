@@ -12,6 +12,8 @@ export type { AccountSlotListResponse } from "./AccountSlotListResponse";
 export type { AccountSlotLoginChallenge } from "./AccountSlotLoginChallenge";
 export type { AccountSlotLoginStartParams } from "./AccountSlotLoginStartParams";
 export type { AccountSlotLoginStartResponse } from "./AccountSlotLoginStartResponse";
+export type { AccountSlotLogoutParams } from "./AccountSlotLogoutParams";
+export type { AccountSlotLogoutResponse } from "./AccountSlotLogoutResponse";
 export type { AccountSlotSnapshot } from "./AccountSlotSnapshot";
 export type { AccountSlotStatus } from "./AccountSlotStatus";
 export type { AccountTokenUsageDailyBucket } from "./AccountTokenUsageDailyBucket";
