@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 
+use sqlx::SqliteConnection;
 use sqlx::SqlitePool;
 use sqlx::migrate::Migrator;
 
@@ -10,12 +11,12 @@ pub(crate) static MEMORIES_MIGRATOR: Migrator = sqlx::migrate!("./memory_migrati
 pub(crate) static QUEUE_MIGRATOR: Migrator = sqlx::migrate!("./queue_migrations");
 pub(crate) static THREAD_HISTORY_MIGRATOR: Migrator = sqlx::migrate!("./thread_history_migrations");
 
-/// Allow an older Codex binary to open a database that has already been
-/// migrated by a newer binary running in parallel.
+/// Allow a Codex binary to ignore migration versions newer than its embedded
+/// migration set.
 ///
-/// We intentionally ignore applied migration versions that are newer than the
-/// embedded migration set. Known migration versions are still validated by
-/// checksum, so this only relaxes the "database is ahead of me" case.
+/// Known versions are still validated by checksum. This therefore does not
+/// make binaries compatible when they assign different migrations to the same
+/// version number.
 fn runtime_migrator(base: &'static Migrator) -> Migrator {
     Migrator {
         migrations: Cow::Borrowed(base.migrations.as_ref()),
@@ -137,6 +138,13 @@ const ACTIVE_CUSTOM_SCHEMA_MIGRATIONS: &[&CustomSchemaMigration] =
 const LEGACY_CUSTOM_SCHEMA_MIGRATIONS: &[&CustomSchemaMigration] =
     &[&CUSTOM_SCHEMA_V1, &CUSTOM_SCHEMA_V2];
 
+pub(crate) const LEGACY_MIGRATION_CUTOVER_ENV: &str = "CODEX_STATE_LEGACY_MIGRATION_CUTOVER";
+
+pub(crate) enum LegacyMigrationCutover {
+    Disabled,
+    Enabled,
+}
+
 pub(crate) async fn apply_custom_schema_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query(
         r#"
@@ -187,113 +195,35 @@ CREATE TABLE IF NOT EXISTS codex_custom_schema_migrations (
     Ok(())
 }
 
-pub(crate) async fn adopt_legacy_custom_schema_migrations(
+/// Reject legacy custom migrations unless this process was explicitly started
+/// for a one-time cutover after all older writers were stopped.
+pub(crate) async fn migrate_legacy_custom_schema_migrations(
     pool: &SqlitePool,
     official_migrator: &Migrator,
+    cutover: LegacyMigrationCutover,
 ) -> anyhow::Result<()> {
-    let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let upstream_registry_exists = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
-    )
-    .fetch_optional(&mut *transaction)
-    .await?
-    .is_some();
-    if !upstream_registry_exists {
-        transaction.commit().await?;
-        return Ok(());
-    }
-
-    let upstream_rows = sqlx::query_as::<_, (i64, String, bool, String)>(
-        "SELECT version, description, success, lower(hex(checksum)) FROM _sqlx_migrations \
-         WHERE version IN (49, 50) ORDER BY version",
-    )
-    .fetch_all(&mut *transaction)
-    .await?;
-    let mut legacy_to_adopt = Vec::new();
-    for migration in LEGACY_CUSTOM_SCHEMA_MIGRATIONS {
-        let Some((_, description, success, checksum)) = upstream_rows
-            .iter()
-            .find(|(version, _, _, _)| *version == migration.legacy_upstream_version)
-        else {
-            continue;
-        };
-        if !success {
-            anyhow::bail!(
-                "state migration {} is not marked successful",
-                migration.legacy_upstream_version
-            );
-        }
-        let official = official_migrator
-            .migrations
-            .iter()
-            .find(|official| official.version == migration.legacy_upstream_version)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "official state migration {} is unavailable",
+    match cutover {
+        LegacyMigrationCutover::Disabled => {
+            let mut connection = pool.acquire().await?;
+            let legacy_to_adopt =
+                legacy_custom_schema_migrations_to_adopt(&mut connection, official_migrator)
+                    .await?;
+            if let Some(migration) = legacy_to_adopt.first() {
+                anyhow::bail!(
+                    "legacy custom state migration {} conflicts with the official migration; \
+                     stop all older Codex app-server and TUI processes sharing this state store, \
+                     then restart once with {LEGACY_MIGRATION_CUTOVER_ENV}=1",
                     migration.legacy_upstream_version
-                )
-            })?;
-        let official_checksum = checksum_hex(official.checksum.as_ref());
-        if checksum == &official_checksum && description == official.description.as_ref() {
-            continue;
-        }
-        if checksum != migration.legacy_checksum || description != migration.legacy_description {
-            anyhow::bail!(
-                "state migration {} has an unknown checksum",
-                migration.legacy_upstream_version
-            );
-        }
-        legacy_to_adopt.push(*migration);
-    }
-
-    for migration in &legacy_to_adopt {
-        for table in migration.required_tables {
-            let definition = sqlx::query_scalar::<_, String>(
-                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
-            )
-            .bind(table.name)
-            .fetch_optional(&mut *transaction)
-            .await?;
-            if definition.as_deref() != Some(table.definition) {
-                anyhow::bail!(
-                    "legacy custom migration {} table {} is missing or does not match",
-                    migration.legacy_upstream_version,
-                    table.name
                 );
             }
+            return Ok(());
         }
+        LegacyMigrationCutover::Enabled => {}
     }
 
-    let custom_registry_exists = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' \
-         AND name = 'codex_custom_schema_migrations'",
-    )
-    .fetch_optional(&mut *transaction)
-    .await?
-    .is_some();
-    if custom_registry_exists {
-        let custom_rows = sqlx::query_as::<_, (i64, String, String)>(
-            "SELECT version, name, definition FROM codex_custom_schema_migrations \
-             WHERE version IN (1, 2)",
-        )
-        .fetch_all(&mut *transaction)
-        .await?;
-        for migration in &legacy_to_adopt {
-            let Some((_, name, definition)) = custom_rows
-                .iter()
-                .find(|(version, _, _)| *version == migration.version)
-            else {
-                continue;
-            };
-            if name != migration.name || definition != migration.definition {
-                anyhow::bail!(
-                    "custom schema migration {} does not match legacy adoption metadata",
-                    migration.version
-                );
-            }
-        }
-    }
-
+    let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let legacy_to_adopt =
+        legacy_custom_schema_migrations_to_adopt(&mut transaction, official_migrator).await?;
     if legacy_to_adopt.is_empty() {
         transaction.commit().await?;
         return Ok(());
@@ -339,6 +269,115 @@ CREATE TABLE IF NOT EXISTS codex_custom_schema_migrations (
     }
     transaction.commit().await?;
     Ok(())
+}
+
+async fn legacy_custom_schema_migrations_to_adopt(
+    connection: &mut SqliteConnection,
+    official_migrator: &Migrator,
+) -> anyhow::Result<Vec<&'static CustomSchemaMigration>> {
+    let upstream_registry_exists = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_optional(&mut *connection)
+    .await?
+    .is_some();
+    if !upstream_registry_exists {
+        return Ok(Vec::new());
+    }
+
+    let upstream_rows = sqlx::query_as::<_, (i64, String, bool, String)>(
+        "SELECT version, description, success, lower(hex(checksum)) FROM _sqlx_migrations \
+         WHERE version IN (49, 50) ORDER BY version",
+    )
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut legacy_to_adopt = Vec::new();
+    for migration in LEGACY_CUSTOM_SCHEMA_MIGRATIONS {
+        let Some((_, description, success, checksum)) = upstream_rows
+            .iter()
+            .find(|(version, _, _, _)| *version == migration.legacy_upstream_version)
+        else {
+            continue;
+        };
+        if !success {
+            anyhow::bail!(
+                "state migration {} is not marked successful",
+                migration.legacy_upstream_version
+            );
+        }
+        let official = official_migrator
+            .migrations
+            .iter()
+            .find(|official| official.version == migration.legacy_upstream_version)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "official state migration {} is unavailable",
+                    migration.legacy_upstream_version
+                )
+            })?;
+        let official_checksum = checksum_hex(official.checksum.as_ref());
+        if checksum == &official_checksum && description == official.description.as_ref() {
+            continue;
+        }
+        if checksum == migration.legacy_checksum && description == migration.legacy_description {
+            legacy_to_adopt.push(*migration);
+            continue;
+        }
+        anyhow::bail!(
+            "state migration {} has an unknown checksum",
+            migration.legacy_upstream_version
+        );
+    }
+
+    for migration in &legacy_to_adopt {
+        for table in migration.required_tables {
+            let definition = sqlx::query_scalar::<_, String>(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            )
+            .bind(table.name)
+            .fetch_optional(&mut *connection)
+            .await?;
+            if definition.as_deref() != Some(table.definition) {
+                anyhow::bail!(
+                    "legacy custom migration {} table {} is missing or does not match",
+                    migration.legacy_upstream_version,
+                    table.name
+                );
+            }
+        }
+    }
+
+    let custom_registry_exists = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' \
+         AND name = 'codex_custom_schema_migrations'",
+    )
+    .fetch_optional(&mut *connection)
+    .await?
+    .is_some();
+    if custom_registry_exists {
+        let custom_rows = sqlx::query_as::<_, (i64, String, String)>(
+            "SELECT version, name, definition FROM codex_custom_schema_migrations \
+             WHERE version IN (1, 2)",
+        )
+        .fetch_all(&mut *connection)
+        .await?;
+        for migration in &legacy_to_adopt {
+            let Some((_, name, definition)) = custom_rows
+                .iter()
+                .find(|(version, _, _)| *version == migration.version)
+            else {
+                continue;
+            };
+            if name != migration.name || definition != migration.definition {
+                anyhow::bail!(
+                    "custom schema migration {} does not match legacy adoption metadata",
+                    migration.version
+                );
+            }
+        }
+    }
+
+    Ok(legacy_to_adopt)
 }
 
 fn checksum_hex(checksum: &[u8]) -> String {

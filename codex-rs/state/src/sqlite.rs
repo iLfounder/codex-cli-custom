@@ -6,7 +6,9 @@
 )]
 
 use crate::DbTelemetry;
-use crate::migrations::adopt_legacy_custom_schema_migrations;
+use crate::migrations::LEGACY_MIGRATION_CUTOVER_ENV;
+use crate::migrations::LegacyMigrationCutover;
+use crate::migrations::migrate_legacy_custom_schema_migrations;
 use crate::migrations::repair_legacy_recency_migration_version;
 use crate::runtime::RuntimeDbInitError;
 use crate::telemetry;
@@ -254,7 +256,11 @@ impl SqliteConfig {
         let started = Instant::now();
         let migrate_result = async {
             if matches!(spec.kind, DbKind::State) {
-                adopt_legacy_custom_schema_migrations(&pool, migrator).await?;
+                let cutover = match std::env::var(LEGACY_MIGRATION_CUTOVER_ENV).as_deref() {
+                    Ok("1") => LegacyMigrationCutover::Enabled,
+                    _ => LegacyMigrationCutover::Disabled,
+                };
+                migrate_legacy_custom_schema_migrations(&pool, migrator, cutover).await?;
                 repair_legacy_recency_migration_version(&pool, migrator).await?;
             }
             migrator.run(&pool).await.map_err(anyhow::Error::from)
