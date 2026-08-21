@@ -1,4 +1,4 @@
-From 1fd207b11588056234a007c6b27bb8ca56c25fe6 Mon Sep 17 00:00:00 2001
+From df60f1c5cb64680b6d41a332077f070cb04f3f0f Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 16:46:40 +0900
 Subject: [PATCH 06/11] feat(custom): publish session runtime state for 0.149
@@ -9,7 +9,7 @@ Subject: [PATCH 06/11] feat(custom): publish session runtime state for 0.149
  .../request_processors/thread_lifecycle.rs    | 159 ++++--
  .../thread_lifecycle_tests.rs                 |  19 +
  .../app-server/src/session_runtime/mod.rs     | 254 +++++++++
- .../src/session_runtime/operations.rs         | 212 ++++++++
+ .../src/session_runtime/operations.rs         | 233 ++++++++
  .../src/session_runtime/pagination.rs         | 147 +++++
  .../src/session_runtime/snapshot.rs           | 509 ++++++++++++++++++
  .../app-server/src/session_runtime/tests.rs   | 190 +++++++
@@ -23,7 +23,7 @@ Subject: [PATCH 06/11] feat(custom): publish session runtime state for 0.149
  codex-rs/thread-store/src/local/mod.rs        | 122 +++++
  .../src/local/runtime_snapshot_tests.rs       | 107 ++++
  codex-rs/thread-store/src/store.rs            |  81 +++
- 19 files changed, 2226 insertions(+), 79 deletions(-)
+ 19 files changed, 2247 insertions(+), 79 deletions(-)
  create mode 100644 codex-rs/app-server/src/request_processors/thread_lifecycle_tests.rs
  create mode 100644 codex-rs/app-server/src/session_runtime/mod.rs
  create mode 100644 codex-rs/app-server/src/session_runtime/operations.rs
@@ -33,7 +33,7 @@ Subject: [PATCH 06/11] feat(custom): publish session runtime state for 0.149
  create mode 100644 codex-rs/thread-store/src/local/runtime_snapshot_tests.rs
 
 diff --git a/codex-rs/app-server/src/lib.rs b/codex-rs/app-server/src/lib.rs
-index 0c67d18e0e920b7c275ab07acce9582768aaf87f..77b0bea6593488545729b30b5d9eea9156ebf579 100644
+index 0c67d18e0..77b0bea65 100644
 --- a/codex-rs/app-server/src/lib.rs
 +++ b/codex-rs/app-server/src/lib.rs
 @@ -117,6 +117,7 @@ mod outgoing_message;
@@ -45,7 +45,7 @@ index 0c67d18e0e920b7c275ab07acce9582768aaf87f..77b0bea6593488545729b30b5d9eea91
  mod thread_state;
  mod thread_status;
 diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
-index e49547d5d2e9eb56ca36faad363e79df6ce8d34d..f5101a991134023aaac5a7ed4ef080360972e61b 100644
+index e49547d5d..f5101a991 100644
 --- a/codex-rs/app-server/src/message_processor.rs
 +++ b/codex-rs/app-server/src/message_processor.rs
 @@ -160,6 +160,7 @@ pub(crate) struct MessageProcessor {
@@ -107,7 +107,7 @@ index e49547d5d2e9eb56ca36faad363e79df6ce8d34d..f5101a991134023aaac5a7ed4ef08036
                  .account_processor
                  .list_account_slots(params)
 diff --git a/codex-rs/app-server/src/request_processors/thread_lifecycle.rs b/codex-rs/app-server/src/request_processors/thread_lifecycle.rs
-index 86fedbe945166f7fffeda8309734f15a09228ebc..c892f6c39c67a29db6aacb989d8dd4084ac829e2 100644
+index 86fedbe94..c892f6c39 100644
 --- a/codex-rs/app-server/src/request_processors/thread_lifecycle.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_lifecycle.rs
 @@ -1,5 +1,6 @@
@@ -447,7 +447,7 @@ index 86fedbe945166f7fffeda8309734f15a09228ebc..c892f6c39c67a29db6aacb989d8dd408
      let (turns_backwards_cursor, items_backwards_cursor) = if let Some(thread_store) =
 diff --git a/codex-rs/app-server/src/request_processors/thread_lifecycle_tests.rs b/codex-rs/app-server/src/request_processors/thread_lifecycle_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..efb9a25901da69f4dbb2f7090b5e8faba23f3b0e
+index 000000000..efb9a2590
 --- /dev/null
 +++ b/codex-rs/app-server/src/request_processors/thread_lifecycle_tests.rs
 @@ -0,0 +1,19 @@
@@ -472,7 +472,7 @@ index 0000000000000000000000000000000000000000..efb9a25901da69f4dbb2f7090b5e8fab
 +}
 diff --git a/codex-rs/app-server/src/session_runtime/mod.rs b/codex-rs/app-server/src/session_runtime/mod.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..3e36cbd67bdd38b4d5eb701bac5202c8be6e3886
+index 000000000..3e36cbd67
 --- /dev/null
 +++ b/codex-rs/app-server/src/session_runtime/mod.rs
 @@ -0,0 +1,254 @@
@@ -732,10 +732,10 @@ index 0000000000000000000000000000000000000000..3e36cbd67bdd38b4d5eb701bac5202c8
 +mod tests;
 diff --git a/codex-rs/app-server/src/session_runtime/operations.rs b/codex-rs/app-server/src/session_runtime/operations.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..65f8adb49dc789a66a88d5a33e9357ede9363742
+index 000000000..732ad7c58
 --- /dev/null
 +++ b/codex-rs/app-server/src/session_runtime/operations.rs
-@@ -0,0 +1,212 @@
+@@ -0,0 +1,233 @@
 +use std::collections::HashMap;
 +use std::collections::VecDeque;
 +
@@ -754,6 +754,8 @@ index 0000000000000000000000000000000000000000..65f8adb49dc789a66a88d5a33e9357ed
 +use crate::error_code::invalid_params;
 +
 +const MAX_TERMINAL_OPERATIONS: usize = 128;
++const MAX_ACTIVE_OPERATIONS: usize = 128;
++const MAX_OPERATION_ID_BYTES: usize = 128;
 +
 +#[derive(Default)]
 +pub(super) struct OperationCache {
@@ -766,6 +768,13 @@ index 0000000000000000000000000000000000000000..65f8adb49dc789a66a88d5a33e9357ed
 +        &self,
 +        operation: SessionRuntimeOperation,
 +    ) -> Result<SessionRuntimeOperation, JSONRPCErrorError> {
++        if operation.operation_id.is_empty()
++            || operation.operation_id.len() > MAX_OPERATION_ID_BYTES
++        {
++            return Err(invalid_params(
++                "operationId must contain between 1 and 128 bytes",
++            ));
++        }
 +        let _build_guard = self
 +            .build_lock
 +            .acquire()
@@ -784,6 +793,18 @@ index 0000000000000000000000000000000000000000..65f8adb49dc789a66a88d5a33e9357ed
 +            if !valid_initial_status(operation.status) {
 +                return Err(invalid_params(
 +                    "new runtime operations must start in accepted status",
++                ));
++            }
++            if state
++                .operations
++                .operations
++                .values()
++                .filter(|operation| !is_terminal(operation.status))
++                .count()
++                >= MAX_ACTIVE_OPERATIONS
++            {
++                return Err(invalid_params(
++                    "too many runtime operations are still active",
 +                ));
 +            }
 +            state.sequence = state.sequence.saturating_add(1);
@@ -950,7 +971,7 @@ index 0000000000000000000000000000000000000000..65f8adb49dc789a66a88d5a33e9357ed
 +}
 diff --git a/codex-rs/app-server/src/session_runtime/pagination.rs b/codex-rs/app-server/src/session_runtime/pagination.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..f592a683ecc7f9b61d21235d29faa73f2ec2df8e
+index 000000000..f592a683e
 --- /dev/null
 +++ b/codex-rs/app-server/src/session_runtime/pagination.rs
 @@ -0,0 +1,147 @@
@@ -1103,7 +1124,7 @@ index 0000000000000000000000000000000000000000..f592a683ecc7f9b61d21235d29faa73f
 +}
 diff --git a/codex-rs/app-server/src/session_runtime/snapshot.rs b/codex-rs/app-server/src/session_runtime/snapshot.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..96be01563386fd49ef21caeb486929cb8b632d71
+index 000000000..96be01563
 --- /dev/null
 +++ b/codex-rs/app-server/src/session_runtime/snapshot.rs
 @@ -0,0 +1,509 @@
@@ -1618,7 +1639,7 @@ index 0000000000000000000000000000000000000000..96be01563386fd49ef21caeb486929cb
 +}
 diff --git a/codex-rs/app-server/src/session_runtime/tests.rs b/codex-rs/app-server/src/session_runtime/tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..20e4dd4a4ec4a8beb67c68ec58b6a40c354f02cf
+index 000000000..20e4dd4a4
 --- /dev/null
 +++ b/codex-rs/app-server/src/session_runtime/tests.rs
 @@ -0,0 +1,190 @@
@@ -1813,7 +1834,7 @@ index 0000000000000000000000000000000000000000..20e4dd4a4ec4a8beb67c68ec58b6a40c
 +    ));
 +}
 diff --git a/codex-rs/app-server/src/thread_state.rs b/codex-rs/app-server/src/thread_state.rs
-index 46dc35a36b0b6cf892fa6265e249998442757347..13580f9d784df9e3bd374f1d7d3caa3948dc35b8 100644
+index 46dc35a36..13580f9d7 100644
 --- a/codex-rs/app-server/src/thread_state.rs
 +++ b/codex-rs/app-server/src/thread_state.rs
 @@ -22,6 +22,7 @@ use codex_rollout::state_db::StateDbHandle;
@@ -2266,7 +2287,7 @@ index 46dc35a36b0b6cf892fa6265e249998442757347..13580f9d784df9e3bd374f1d7d3caa39
  
      pub(crate) async fn subscribe_to_has_connections(
 diff --git a/codex-rs/app-server/src/thread_status.rs b/codex-rs/app-server/src/thread_status.rs
-index 4f0a83e7056b987b52ae372a49ade989a5c527e6..01f993704aefe51c81f9537b1a9d247b89a84633 100644
+index 4f0a83e70..01f993704 100644
 --- a/codex-rs/app-server/src/thread_status.rs
 +++ b/codex-rs/app-server/src/thread_status.rs
 @@ -10,6 +10,8 @@ use codex_app_server_protocol::ThreadStatusChangedNotification;
@@ -2358,7 +2379,7 @@ index 4f0a83e7056b987b52ae372a49ade989a5c527e6..01f993704aefe51c81f9537b1a9d247b
  
      pub(crate) async fn subscribe(
 diff --git a/codex-rs/rollout/src/lib.rs b/codex-rs/rollout/src/lib.rs
-index 9f38cd569af6a1bc0cd1e0475df882a900caa13b..70bae262ff7f65a5ee01cb02e909ef47cc3326ec 100644
+index 9f38cd569..70bae262f 100644
 --- a/codex-rs/rollout/src/lib.rs
 +++ b/codex-rs/rollout/src/lib.rs
 @@ -122,6 +122,7 @@ pub use persistence_metrics::measure_and_filter_rollout_items;
@@ -2370,7 +2391,7 @@ index 9f38cd569af6a1bc0cd1e0475df882a900caa13b..70bae262ff7f65a5ee01cb02e909ef47
  pub use recorder::RolloutRecorderParams;
  pub use recorder::append_rollout_item_to_path;
 diff --git a/codex-rs/rollout/src/recorder.rs b/codex-rs/rollout/src/recorder.rs
-index 6be4356c9978ede3be7d406fbe7bf6809d46dac6..2ccbfe075b9e63263e60ea57924b87d4b7f3afd1 100644
+index 6be4356c9..2ccbfe075 100644
 --- a/codex-rs/rollout/src/recorder.rs
 +++ b/codex-rs/rollout/src/recorder.rs
 @@ -89,6 +89,13 @@ pub struct RolloutRecorder {
@@ -2512,7 +2533,7 @@ index 6be4356c9978ede3be7d406fbe7bf6809d46dac6..2ccbfe075b9e63263e60ea57924b87d4
                      let _ = ack.send(Err(err));
                  }
 diff --git a/codex-rs/rollout/src/recorder_tests.rs b/codex-rs/rollout/src/recorder_tests.rs
-index 8bb8d54e49456fb64fef183f4ab3463f2ba7f347..89ba3b2c9ade83dc465bb9e7fa0630b280be15f5 100644
+index 8bb8d54e4..89ba3b2c9 100644
 --- a/codex-rs/rollout/src/recorder_tests.rs
 +++ b/codex-rs/rollout/src/recorder_tests.rs
 @@ -711,6 +711,42 @@ async fn recorder_materializes_on_flush_with_pending_items() -> std::io::Result<
@@ -2559,7 +2580,7 @@ index 8bb8d54e49456fb64fef183f4ab3463f2ba7f347..89ba3b2c9ade83dc465bb9e7fa0630b2
  async fn referenced_paginated_rollout_starts_at_history_cutoff_and_resumes() -> std::io::Result<()>
  {
 diff --git a/codex-rs/thread-store/src/in_memory.rs b/codex-rs/thread-store/src/in_memory.rs
-index 0724a465526226df187f6b6d86a6ecb6cc0a2d7c..4529e319e1abf80e29f296be6235b35222327ed5 100644
+index 0724a4655..4529e319e 100644
 --- a/codex-rs/thread-store/src/in_memory.rs
 +++ b/codex-rs/thread-store/src/in_memory.rs
 @@ -33,6 +33,8 @@ use crate::PersistContext;
@@ -2626,7 +2647,7 @@ index 0724a465526226df187f6b6d86a6ecb6cc0a2d7c..4529e319e1abf80e29f296be6235b352
          &self,
          thread_id: ThreadId,
 diff --git a/codex-rs/thread-store/src/lib.rs b/codex-rs/thread-store/src/lib.rs
-index f63f60b997c4cf4c85489eebee59dadc0f82e5b3..09abeb2cb87a86bf597e5af2712f43ad52b7c740 100644
+index f63f60b99..09abeb2cb 100644
 --- a/codex-rs/thread-store/src/lib.rs
 +++ b/codex-rs/thread-store/src/lib.rs
 @@ -48,8 +48,12 @@ pub use projects::UpdatedProject;
@@ -2643,7 +2664,7 @@ index f63f60b997c4cf4c85489eebee59dadc0f82e5b3..09abeb2cb87a86bf597e5af2712f43ad
  pub use thread_sections::DeleteThreadSectionParams;
  pub use thread_sections::ListThreadSectionsParams;
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index 187201709c38431f9f99ecae0a3bd0d869105763..76ff169d6e18cbcc4de799a7008c569f425ae82c 100644
+index 97b04a0b0..c89d30761 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
 @@ -28,6 +28,9 @@ mod writer_lock;
@@ -2689,7 +2710,7 @@ index 187201709c38431f9f99ecae0a3bd0d869105763..76ff169d6e18cbcc4de799a7008c569f
  
  /// Local filesystem/SQLite-backed implementation of [`ThreadStore`].
  ///
-@@ -467,6 +482,113 @@ impl ThreadStore for LocalThreadStore {
+@@ -496,6 +511,113 @@ impl ThreadStore for LocalThreadStore {
          self
      }
  
@@ -2805,7 +2826,7 @@ index 187201709c38431f9f99ecae0a3bd0d869105763..76ff169d6e18cbcc4de799a7008c569f
          thread_id: ThreadId,
 diff --git a/codex-rs/thread-store/src/local/runtime_snapshot_tests.rs b/codex-rs/thread-store/src/local/runtime_snapshot_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..8f79753cb25ade464f8eff8229de7f2caa251ed0
+index 000000000..8f79753cb
 --- /dev/null
 +++ b/codex-rs/thread-store/src/local/runtime_snapshot_tests.rs
 @@ -0,0 +1,107 @@
@@ -2917,7 +2938,7 @@ index 0000000000000000000000000000000000000000..8f79753cb25ade464f8eff8229de7f2c
 +    )
 +}
 diff --git a/codex-rs/thread-store/src/store.rs b/codex-rs/thread-store/src/store.rs
-index f8f00b9915304a0afb2aab60955bfe59877eeeba..e4510eabde80e7c2bf18e552af49d65430bc2f3c 100644
+index f8f00b991..e4510eabd 100644
 --- a/codex-rs/thread-store/src/store.rs
 +++ b/codex-rs/thread-store/src/store.rs
 @@ -52,6 +52,7 @@ use crate::TurnPage;
@@ -3022,3 +3043,6 @@ index f8f00b9915304a0afb2aab60955bfe59877eeeba..e4510eabde80e7c2bf18e552af49d654
      fn execution_account_binding(
          &self,
          _thread_id: ThreadId,
+-- 
+2.50.1 (Apple Git-155)
+

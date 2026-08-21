@@ -1,16 +1,16 @@
-From df8f71dddda97cd2f83e62a034599e830aa37145 Mon Sep 17 00:00:00 2001
+From 431337a11f882eb46c7371773287cec8febb38f1 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 14:30:28 +0900
 Subject: [PATCH 01/11] feat(custom): add shared writer authority for 0.149
 
 ---
  codex-rs/state/src/lib.rs                     |   1 +
- codex-rs/state/src/migrations.rs              | 317 ++++++++++++++
- codex-rs/state/src/migrations_tests.rs        | 386 ++++++++++++++++++
+ codex-rs/state/src/migrations.rs              | 366 +++++++++++++++++-
+ codex-rs/state/src/migrations_tests.rs        | 343 ++++++++++++++++
  codex-rs/state/src/runtime.rs                 |  15 +
- .../state/src/runtime/writer_authority.rs     |  87 ++++
+ .../state/src/runtime/writer_authority.rs     |  87 +++++
  .../src/runtime/writer_authority_tests.rs     |  60 +++
- codex-rs/state/src/sqlite.rs                  |   2 +
+ codex-rs/state/src/sqlite.rs                  |   8 +
  codex-rs/thread-store/src/lib.rs              |   3 +
  .../thread-store/src/local/live_writer.rs     |   4 +-
  codex-rs/thread-store/src/local/mod.rs        |  54 ++-
@@ -18,13 +18,13 @@ Subject: [PATCH 01/11] feat(custom): add shared writer authority for 0.149
  .../src/local/rollout_migration.rs            |   4 +-
  .../src/local/unarchive_thread.rs             |   2 +-
  .../thread-store/src/local/writer_lock.rs     |  84 +++-
- .../src/local/writer_lock_tests.rs            | 194 +++++++++
- 15 files changed, 1205 insertions(+), 10 deletions(-)
+ .../src/local/writer_lock_tests.rs            | 194 ++++++++++
+ 15 files changed, 1212 insertions(+), 15 deletions(-)
  create mode 100644 codex-rs/state/src/runtime/writer_authority.rs
  create mode 100644 codex-rs/state/src/runtime/writer_authority_tests.rs
 
 diff --git a/codex-rs/state/src/lib.rs b/codex-rs/state/src/lib.rs
-index 0352333a97a3446d213fa5b0872fb23e64a9687d..64bda434bb890d7b8262284f4c90c17438089419 100644
+index 0352333a9..64bda434b 100644
 --- a/codex-rs/state/src/lib.rs
 +++ b/codex-rs/state/src/lib.rs
 @@ -76,6 +76,7 @@ pub use runtime::RemoteControlEnrollmentRecord;
@@ -36,10 +36,35 @@ index 0352333a97a3446d213fa5b0872fb23e64a9687d..64bda434bb890d7b8262284f4c90c174
  pub use runtime::is_sqlite_corruption_error;
  pub use runtime::open_thread_history_db;
 diff --git a/codex-rs/state/src/migrations.rs b/codex-rs/state/src/migrations.rs
-index 07d36588f0c5ac90e2e2b6085c0d52a611b7b854..646cc4f8caba05b4f603b3960dcd58dfec4851c7 100644
+index 07d36588f..9d14b7997 100644
 --- a/codex-rs/state/src/migrations.rs
 +++ b/codex-rs/state/src/migrations.rs
-@@ -35,6 +35,323 @@ pub(crate) fn runtime_logs_migrator() -> Migrator {
+@@ -1,5 +1,6 @@
+ use std::borrow::Cow;
+ 
++use sqlx::SqliteConnection;
+ use sqlx::SqlitePool;
+ use sqlx::migrate::Migrator;
+ 
+@@ -10,12 +11,12 @@ pub(crate) static MEMORIES_MIGRATOR: Migrator = sqlx::migrate!("./memory_migrati
+ pub(crate) static QUEUE_MIGRATOR: Migrator = sqlx::migrate!("./queue_migrations");
+ pub(crate) static THREAD_HISTORY_MIGRATOR: Migrator = sqlx::migrate!("./thread_history_migrations");
+ 
+-/// Allow an older Codex binary to open a database that has already been
+-/// migrated by a newer binary running in parallel.
++/// Allow a Codex binary to ignore migration versions newer than its embedded
++/// migration set.
+ ///
+-/// We intentionally ignore applied migration versions that are newer than the
+-/// embedded migration set. Known migration versions are still validated by
+-/// checksum, so this only relaxes the "database is ahead of me" case.
++/// Known versions are still validated by checksum. This therefore does not
++/// make binaries compatible when they assign different migrations to the same
++/// version number.
+ fn runtime_migrator(base: &'static Migrator) -> Migrator {
+     Migrator {
+         migrations: Cow::Borrowed(base.migrations.as_ref()),
+@@ -35,6 +36,361 @@ pub(crate) fn runtime_logs_migrator() -> Migrator {
      runtime_migrator(&LOGS_MIGRATOR)
  }
  
@@ -144,6 +169,13 @@ index 07d36588f0c5ac90e2e2b6085c0d52a611b7b854..646cc4f8caba05b4f603b3960dcd58df
 +const LEGACY_CUSTOM_SCHEMA_MIGRATIONS: &[&CustomSchemaMigration] =
 +    &[&CUSTOM_SCHEMA_V1, &CUSTOM_SCHEMA_V2];
 +
++pub(crate) const LEGACY_MIGRATION_CUTOVER_ENV: &str = "CODEX_STATE_LEGACY_MIGRATION_CUTOVER";
++
++pub(crate) enum LegacyMigrationCutover {
++    Disabled,
++    Enabled,
++}
++
 +pub(crate) async fn apply_custom_schema_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
 +    sqlx::query(
 +        r#"
@@ -194,113 +226,35 @@ index 07d36588f0c5ac90e2e2b6085c0d52a611b7b854..646cc4f8caba05b4f603b3960dcd58df
 +    Ok(())
 +}
 +
-+pub(crate) async fn adopt_legacy_custom_schema_migrations(
++/// Reject legacy custom migrations unless this process was explicitly started
++/// for a one-time cutover after all older writers were stopped.
++pub(crate) async fn migrate_legacy_custom_schema_migrations(
 +    pool: &SqlitePool,
 +    official_migrator: &Migrator,
++    cutover: LegacyMigrationCutover,
 +) -> anyhow::Result<()> {
-+    let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
-+    let upstream_registry_exists = sqlx::query_scalar::<_, i64>(
-+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
-+    )
-+    .fetch_optional(&mut *transaction)
-+    .await?
-+    .is_some();
-+    if !upstream_registry_exists {
-+        transaction.commit().await?;
-+        return Ok(());
-+    }
-+
-+    let upstream_rows = sqlx::query_as::<_, (i64, String, bool, String)>(
-+        "SELECT version, description, success, lower(hex(checksum)) FROM _sqlx_migrations \
-+         WHERE version IN (49, 50) ORDER BY version",
-+    )
-+    .fetch_all(&mut *transaction)
-+    .await?;
-+    let mut legacy_to_adopt = Vec::new();
-+    for migration in LEGACY_CUSTOM_SCHEMA_MIGRATIONS {
-+        let Some((_, description, success, checksum)) = upstream_rows
-+            .iter()
-+            .find(|(version, _, _, _)| *version == migration.legacy_upstream_version)
-+        else {
-+            continue;
-+        };
-+        if !success {
-+            anyhow::bail!(
-+                "state migration {} is not marked successful",
-+                migration.legacy_upstream_version
-+            );
-+        }
-+        let official = official_migrator
-+            .migrations
-+            .iter()
-+            .find(|official| official.version == migration.legacy_upstream_version)
-+            .ok_or_else(|| {
-+                anyhow::anyhow!(
-+                    "official state migration {} is unavailable",
++    match cutover {
++        LegacyMigrationCutover::Disabled => {
++            let mut connection = pool.acquire().await?;
++            let legacy_to_adopt =
++                legacy_custom_schema_migrations_to_adopt(&mut connection, official_migrator)
++                    .await?;
++            if let Some(migration) = legacy_to_adopt.first() {
++                anyhow::bail!(
++                    "legacy custom state migration {} conflicts with the official migration; \
++                     stop all older Codex app-server and TUI processes sharing this state store, \
++                     then restart once with {LEGACY_MIGRATION_CUTOVER_ENV}=1",
 +                    migration.legacy_upstream_version
-+                )
-+            })?;
-+        let official_checksum = checksum_hex(official.checksum.as_ref());
-+        if checksum == &official_checksum && description == official.description.as_ref() {
-+            continue;
-+        }
-+        if checksum != migration.legacy_checksum || description != migration.legacy_description {
-+            anyhow::bail!(
-+                "state migration {} has an unknown checksum",
-+                migration.legacy_upstream_version
-+            );
-+        }
-+        legacy_to_adopt.push(*migration);
-+    }
-+
-+    for migration in &legacy_to_adopt {
-+        for table in migration.required_tables {
-+            let definition = sqlx::query_scalar::<_, String>(
-+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
-+            )
-+            .bind(table.name)
-+            .fetch_optional(&mut *transaction)
-+            .await?;
-+            if definition.as_deref() != Some(table.definition) {
-+                anyhow::bail!(
-+                    "legacy custom migration {} table {} is missing or does not match",
-+                    migration.legacy_upstream_version,
-+                    table.name
 +                );
 +            }
++            return Ok(());
 +        }
++        LegacyMigrationCutover::Enabled => {}
 +    }
 +
-+    let custom_registry_exists = sqlx::query_scalar::<_, i64>(
-+        "SELECT 1 FROM sqlite_master WHERE type = 'table' \
-+         AND name = 'codex_custom_schema_migrations'",
-+    )
-+    .fetch_optional(&mut *transaction)
-+    .await?
-+    .is_some();
-+    if custom_registry_exists {
-+        let custom_rows = sqlx::query_as::<_, (i64, String, String)>(
-+            "SELECT version, name, definition FROM codex_custom_schema_migrations \
-+             WHERE version IN (1, 2)",
-+        )
-+        .fetch_all(&mut *transaction)
-+        .await?;
-+        for migration in &legacy_to_adopt {
-+            let Some((_, name, definition)) = custom_rows
-+                .iter()
-+                .find(|(version, _, _)| *version == migration.version)
-+            else {
-+                continue;
-+            };
-+            if name != migration.name || definition != migration.definition {
-+                anyhow::bail!(
-+                    "custom schema migration {} does not match legacy adoption metadata",
-+                    migration.version
-+                );
-+            }
-+        }
-+    }
-+
++    let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
++    let legacy_to_adopt =
++        legacy_custom_schema_migrations_to_adopt(&mut transaction, official_migrator).await?;
 +    if legacy_to_adopt.is_empty() {
 +        transaction.commit().await?;
 +        return Ok(());
@@ -348,6 +302,115 @@ index 07d36588f0c5ac90e2e2b6085c0d52a611b7b854..646cc4f8caba05b4f603b3960dcd58df
 +    Ok(())
 +}
 +
++async fn legacy_custom_schema_migrations_to_adopt(
++    connection: &mut SqliteConnection,
++    official_migrator: &Migrator,
++) -> anyhow::Result<Vec<&'static CustomSchemaMigration>> {
++    let upstream_registry_exists = sqlx::query_scalar::<_, i64>(
++        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
++    )
++    .fetch_optional(&mut *connection)
++    .await?
++    .is_some();
++    if !upstream_registry_exists {
++        return Ok(Vec::new());
++    }
++
++    let upstream_rows = sqlx::query_as::<_, (i64, String, bool, String)>(
++        "SELECT version, description, success, lower(hex(checksum)) FROM _sqlx_migrations \
++         WHERE version IN (49, 50) ORDER BY version",
++    )
++    .fetch_all(&mut *connection)
++    .await?;
++    let mut legacy_to_adopt = Vec::new();
++    for migration in LEGACY_CUSTOM_SCHEMA_MIGRATIONS {
++        let Some((_, description, success, checksum)) = upstream_rows
++            .iter()
++            .find(|(version, _, _, _)| *version == migration.legacy_upstream_version)
++        else {
++            continue;
++        };
++        if !success {
++            anyhow::bail!(
++                "state migration {} is not marked successful",
++                migration.legacy_upstream_version
++            );
++        }
++        let official = official_migrator
++            .migrations
++            .iter()
++            .find(|official| official.version == migration.legacy_upstream_version)
++            .ok_or_else(|| {
++                anyhow::anyhow!(
++                    "official state migration {} is unavailable",
++                    migration.legacy_upstream_version
++                )
++            })?;
++        let official_checksum = checksum_hex(official.checksum.as_ref());
++        if checksum == &official_checksum && description == official.description.as_ref() {
++            continue;
++        }
++        if checksum == migration.legacy_checksum && description == migration.legacy_description {
++            legacy_to_adopt.push(*migration);
++            continue;
++        }
++        anyhow::bail!(
++            "state migration {} has an unknown checksum",
++            migration.legacy_upstream_version
++        );
++    }
++
++    for migration in &legacy_to_adopt {
++        for table in migration.required_tables {
++            let definition = sqlx::query_scalar::<_, String>(
++                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
++            )
++            .bind(table.name)
++            .fetch_optional(&mut *connection)
++            .await?;
++            if definition.as_deref() != Some(table.definition) {
++                anyhow::bail!(
++                    "legacy custom migration {} table {} is missing or does not match",
++                    migration.legacy_upstream_version,
++                    table.name
++                );
++            }
++        }
++    }
++
++    let custom_registry_exists = sqlx::query_scalar::<_, i64>(
++        "SELECT 1 FROM sqlite_master WHERE type = 'table' \
++         AND name = 'codex_custom_schema_migrations'",
++    )
++    .fetch_optional(&mut *connection)
++    .await?
++    .is_some();
++    if custom_registry_exists {
++        let custom_rows = sqlx::query_as::<_, (i64, String, String)>(
++            "SELECT version, name, definition FROM codex_custom_schema_migrations \
++             WHERE version IN (1, 2)",
++        )
++        .fetch_all(&mut *connection)
++        .await?;
++        for migration in &legacy_to_adopt {
++            let Some((_, name, definition)) = custom_rows
++                .iter()
++                .find(|(version, _, _)| *version == migration.version)
++            else {
++                continue;
++            };
++            if name != migration.name || definition != migration.definition {
++                anyhow::bail!(
++                    "custom schema migration {} does not match legacy adoption metadata",
++                    migration.version
++                );
++            }
++        }
++    }
++
++    Ok(legacy_to_adopt)
++}
++
 +fn checksum_hex(checksum: &[u8]) -> String {
 +    use std::fmt::Write;
 +
@@ -364,24 +427,26 @@ index 07d36588f0c5ac90e2e2b6085c0d52a611b7b854..646cc4f8caba05b4f603b3960dcd58df
      runtime_migrator(&GOALS_MIGRATOR)
  }
 diff --git a/codex-rs/state/src/migrations_tests.rs b/codex-rs/state/src/migrations_tests.rs
-index fea8878d36c7f8601879b380d7880a00b0c27a7a..fb99021eb1aeaa6c8e05b12a25bc03b6840f48e5 100644
+index fea8878d3..4b667dd57 100644
 --- a/codex-rs/state/src/migrations_tests.rs
 +++ b/codex-rs/state/src/migrations_tests.rs
-@@ -6,9 +6,13 @@ use sqlx::migrate::Migration;
+@@ -6,9 +6,15 @@ use sqlx::migrate::Migration;
  use sqlx::migrate::Migrator;
  use std::borrow::Cow;
  
 +use super::CUSTOM_SCHEMA_V1;
 +use super::CUSTOM_SCHEMA_V2;
++use super::LegacyMigrationCutover;
  use super::STATE_MIGRATOR;
  use super::THREAD_HISTORY_MIGRATOR;
 +use super::apply_custom_schema_migrations;
++use super::migrate_legacy_custom_schema_migrations;
  use super::repair_legacy_recency_migration_version;
 +use super::runtime_state_migrator;
  use crate::PINNED_THREAD_SECTION_ID;
  use crate::PINNED_THREAD_SECTION_NAME;
  
-@@ -32,6 +36,388 @@ fn migrator_through(version: i64) -> Migrator {
+@@ -32,6 +38,343 @@ fn migrator_through(version: i64) -> Migrator {
      }
  }
  
@@ -411,23 +476,6 @@ index fea8878d36c7f8601879b380d7880a00b0c27a7a..fb99021eb1aeaa6c8e05b12a25bc03b6
 +    .execute(pool)
 +    .await
 +    .expect("legacy migration row should insert");
-+}
-+
-+async fn assert_upstream_49_and_50_are_official(pool: &sqlx::SqlitePool) {
-+    let actual = sqlx::query_as::<_, (i64, Vec<u8>)>(
-+        "SELECT version, checksum FROM _sqlx_migrations \
-+         WHERE version IN (49, 50) ORDER BY version",
-+    )
-+    .fetch_all(pool)
-+    .await
-+    .expect("official migration rows should load");
-+    let expected = STATE_MIGRATOR
-+        .migrations
-+        .iter()
-+        .filter(|migration| matches!(migration.version, 49 | 50))
-+        .map(|migration| (migration.version, migration.checksum.to_vec()))
-+        .collect::<Vec<_>>();
-+    assert_eq!(actual, expected);
 +}
 +
 +#[tokio::test]
@@ -485,7 +533,7 @@ index fea8878d36c7f8601879b380d7880a00b0c27a7a..fb99021eb1aeaa6c8e05b12a25bc03b6
 +}
 +
 +#[tokio::test]
-+async fn legacy_v49_and_v50_adopt_before_official_migrations_without_losing_data() {
++async fn legacy_v49_and_v50_require_opt_in_then_cut_over_without_losing_data() {
 +    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
 +    tokio::fs::create_dir_all(&sqlite_home)
 +        .await
@@ -547,22 +595,75 @@ index fea8878d36c7f8601879b380d7880a00b0c27a7a..fb99021eb1aeaa6c8e05b12a25bc03b6
 +    .execute(&pool)
 +    .await
 +    .expect("legacy turn provenance should insert");
-+    pool.close().await;
-+
-+    let pool = sqlite
-+        .open_state_db(&runtime_state_migrator(), /*telemetry_override*/ None)
-+        .await
-+        .expect("legacy database should adopt before official migrations");
-+
-+    assert_upstream_49_and_50_are_official(&pool).await;
-+    let custom_rows = sqlx::query_as::<_, (i64, String, String)>(
-+        "SELECT version, name, definition FROM codex_custom_schema_migrations ORDER BY version",
++    let state_migrator = runtime_state_migrator();
++    let error = migrate_legacy_custom_schema_migrations(
++        &pool,
++        &state_migrator,
++        LegacyMigrationCutover::Disabled,
 +    )
-+    .fetch_all(&pool)
 +    .await
-+    .expect("adopted custom rows should load");
++    .expect_err("legacy migration versions should require an exclusive cutover");
++    let error = error.to_string();
++    assert!(error.contains("stop all older Codex app-server and TUI processes"));
++    assert!(error.contains("CODEX_STATE_LEGACY_MIGRATION_CUTOVER=1"));
++
 +    assert_eq!(
-+        custom_rows,
++        sqlx::query_as::<_, (i64, String)>(
++            "SELECT version, lower(hex(checksum)) FROM _sqlx_migrations \
++             WHERE version IN (49, 50) ORDER BY version",
++        )
++        .fetch_all(&pool)
++        .await
++        .expect("legacy rows should remain unchanged"),
++        vec![
++            (49, CUSTOM_SCHEMA_V1.legacy_checksum.to_string()),
++            (50, CUSTOM_SCHEMA_V2.legacy_checksum.to_string()),
++        ]
++    );
++    assert_eq!(
++        sqlx::query_scalar::<_, i64>(
++            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' \
++             AND name = 'codex_custom_schema_migrations'",
++        )
++        .fetch_one(&pool)
++        .await
++        .expect("custom registry absence should load"),
++        0
++    );
++
++    migrate_legacy_custom_schema_migrations(
++        &pool,
++        &state_migrator,
++        LegacyMigrationCutover::Enabled,
++    )
++    .await
++    .expect("explicit cutover should adopt validated legacy migrations");
++    STATE_MIGRATOR
++        .run(&pool)
++        .await
++        .expect("official migrations should apply after explicit cutover");
++    assert_eq!(
++        sqlx::query_as::<_, (i64, Vec<u8>)>(
++            "SELECT version, checksum FROM _sqlx_migrations \
++             WHERE version IN (49, 50) ORDER BY version",
++        )
++        .fetch_all(&pool)
++        .await
++        .expect("official migration rows should load"),
++        STATE_MIGRATOR
++            .migrations
++            .iter()
++            .filter(|migration| matches!(migration.version, 49 | 50))
++            .map(|migration| (migration.version, migration.checksum.to_vec()))
++            .collect::<Vec<_>>()
++    );
++    assert_eq!(
++        sqlx::query_as::<_, (i64, String, String)>(
++            "SELECT version, name, definition FROM codex_custom_schema_migrations ORDER BY version",
++        )
++        .fetch_all(&pool)
++        .await
++        .expect("adopted custom rows should load"),
 +        vec![
 +            (
 +                1,
@@ -575,6 +676,15 @@ index fea8878d36c7f8601879b380d7880a00b0c27a7a..fb99021eb1aeaa6c8e05b12a25bc03b6
 +                CUSTOM_SCHEMA_V2.definition.to_string(),
 +            ),
 +        ]
++    );
++    assert_eq!(
++        sqlx::query_as::<_, (String, i64)>(
++            "SELECT thread_id, generation FROM thread_writer_generations",
++        )
++        .fetch_all(&pool)
++        .await
++        .expect("legacy writer generations should load"),
++        vec![("00000000-0000-0000-0000-000000000049".to_string(), 7,)]
 +    );
 +    assert_eq!(
 +        sqlx::query_scalar::<_, String>(
@@ -607,95 +717,7 @@ index fea8878d36c7f8601879b380d7880a00b0c27a7a..fb99021eb1aeaa6c8e05b12a25bc03b6
 +}
 +
 +#[tokio::test]
-+async fn legacy_v49_only_adopts_independently() {
-+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
-+    tokio::fs::create_dir_all(&sqlite_home)
-+        .await
-+        .expect("sqlite home should be created");
-+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
-+        let _ = std::fs::remove_dir_all(sqlite_home);
-+    });
-+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
-+    let pool = sqlite
-+        .open_read_write_pool(&sqlite.state_db_path())
-+        .await
-+        .expect("database should open");
-+    migrator_through(/*version*/ 48)
-+        .run(&pool)
-+        .await
-+        .expect("upstream migrations through 48 should apply");
-+    sqlx::raw_sql(CUSTOM_SCHEMA_V1.definition)
-+        .execute(&pool)
-+        .await
-+        .expect("legacy writer schema should apply");
-+    insert_legacy_custom_migration(&pool, &CUSTOM_SCHEMA_V1, CUSTOM_SCHEMA_V1.legacy_checksum)
-+        .await;
-+    pool.close().await;
-+
-+    let pool = sqlite
-+        .open_state_db(&runtime_state_migrator(), /*telemetry_override*/ None)
-+        .await
-+        .expect("v49-only legacy database should adopt");
-+
-+    assert_upstream_49_and_50_are_official(&pool).await;
-+    assert_eq!(
-+        sqlx::query_scalar::<_, i64>(
-+            "SELECT version FROM codex_custom_schema_migrations ORDER BY version",
-+        )
-+        .fetch_all(&pool)
-+        .await
-+        .expect("custom versions should load"),
-+        vec![1]
-+    );
-+    pool.close().await;
-+}
-+
-+#[tokio::test]
-+async fn official_v49_and_legacy_v50_are_classified_independently() {
-+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
-+    tokio::fs::create_dir_all(&sqlite_home)
-+        .await
-+        .expect("sqlite home should be created");
-+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
-+        let _ = std::fs::remove_dir_all(sqlite_home);
-+    });
-+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
-+    let pool = sqlite
-+        .open_read_write_pool(&sqlite.state_db_path())
-+        .await
-+        .expect("database should open");
-+    migrator_through(/*version*/ 49)
-+        .run(&pool)
-+        .await
-+        .expect("official migrations through 49 should apply");
-+    sqlx::raw_sql(CUSTOM_SCHEMA_V2.definition)
-+        .execute(&pool)
-+        .await
-+        .expect("legacy execution binding schema should apply");
-+    insert_legacy_custom_migration(&pool, &CUSTOM_SCHEMA_V2, CUSTOM_SCHEMA_V2.legacy_checksum)
-+        .await;
-+    pool.close().await;
-+
-+    let pool = sqlite
-+        .open_state_db(&runtime_state_migrator(), /*telemetry_override*/ None)
-+        .await
-+        .expect("mixed official and legacy rows should migrate");
-+
-+    assert_upstream_49_and_50_are_official(&pool).await;
-+    assert_eq!(
-+        sqlx::query_scalar::<_, i64>(
-+            "SELECT version FROM codex_custom_schema_migrations ORDER BY version",
-+        )
-+        .fetch_all(&pool)
-+        .await
-+        .expect("custom versions should load"),
-+        vec![2]
-+    );
-+    pool.close().await;
-+}
-+
-+#[tokio::test]
-+async fn unknown_v50_prevents_legacy_v49_adoption_without_mutation() {
++async fn unknown_v50_fails_without_mutation() {
 +    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
 +    tokio::fs::create_dir_all(&sqlite_home)
 +        .await
@@ -725,18 +747,16 @@ index fea8878d36c7f8601879b380d7880a00b0c27a7a..fb99021eb1aeaa6c8e05b12a25bc03b6
 +        "05b8f0203829d22c122233012fa066fe6be269395e9e0f7a16848722f8ecd34124097826db94bef9925f88b381c2223b",
 +    )
 +    .await;
-+    pool.close().await;
-+
-+    let error = sqlite
-+        .open_state_db(&runtime_state_migrator(), /*telemetry_override*/ None)
-+        .await
-+        .expect_err("unknown v50 should fail before adopting v49");
++    let state_migrator = runtime_state_migrator();
++    let error = migrate_legacy_custom_schema_migrations(
++        &pool,
++        &state_migrator,
++        LegacyMigrationCutover::Enabled,
++    )
++    .await
++    .expect_err("unknown v50 should fail before changing v49");
 +    assert!(error.to_string().contains("unknown checksum"));
 +
-+    let pool = sqlite
-+        .open_read_only_pool(&state_path)
-+        .await
-+        .expect("failed database should remain readable");
 +    assert_eq!(
 +        sqlx::query_as::<_, (i64, String)>(
 +            "SELECT version, lower(hex(checksum)) FROM _sqlx_migrations \
@@ -771,7 +791,7 @@ index fea8878d36c7f8601879b380d7880a00b0c27a7a..fb99021eb1aeaa6c8e05b12a25bc03b6
  async fn thread_section_migration_preserves_legacy_pin_compatibility() {
      let sqlite_home = crate::runtime::test_support::unique_temp_dir();
 diff --git a/codex-rs/state/src/runtime.rs b/codex-rs/state/src/runtime.rs
-index 95765f98f0c0564af22428b2788c018912af2ed7..ca80e9b3f263ec2336c3552f1b44d3406339f4d6 100644
+index 95765f98f..ca80e9b3f 100644
 --- a/codex-rs/state/src/runtime.rs
 +++ b/codex-rs/state/src/runtime.rs
 @@ -7,6 +7,7 @@ use crate::ThreadMetadata;
@@ -840,7 +860,7 @@ index 95765f98f0c0564af22428b2788c018912af2ed7..ca80e9b3f263ec2336c3552f1b44d340
              sqlite,
 diff --git a/codex-rs/state/src/runtime/writer_authority.rs b/codex-rs/state/src/runtime/writer_authority.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..76ed271fa623bfb397fd649625dac55bb32adbce
+index 000000000..76ed271fa
 --- /dev/null
 +++ b/codex-rs/state/src/runtime/writer_authority.rs
 @@ -0,0 +1,87 @@
@@ -933,7 +953,7 @@ index 0000000000000000000000000000000000000000..76ed271fa623bfb397fd649625dac55b
 +mod tests;
 diff --git a/codex-rs/state/src/runtime/writer_authority_tests.rs b/codex-rs/state/src/runtime/writer_authority_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..3d4b357f1a55b76abf3282d88e0a05218fd5ed13
+index 000000000..3d4b357f1
 --- /dev/null
 +++ b/codex-rs/state/src/runtime/writer_authority_tests.rs
 @@ -0,0 +1,60 @@
@@ -998,27 +1018,33 @@ index 0000000000000000000000000000000000000000..3d4b357f1a55b76abf3282d88e0a0521
 +    restarted.close().await;
 +}
 diff --git a/codex-rs/state/src/sqlite.rs b/codex-rs/state/src/sqlite.rs
-index 4bb65c6e359fca71db8ca96c227ab5f8100b453e..3925fe1fad3540cfb5dad90f5faf8a4b8d1d4924 100644
+index 4bb65c6e3..52b402845 100644
 --- a/codex-rs/state/src/sqlite.rs
 +++ b/codex-rs/state/src/sqlite.rs
-@@ -6,6 +6,7 @@
+@@ -6,6 +6,9 @@
  )]
  
  use crate::DbTelemetry;
-+use crate::migrations::adopt_legacy_custom_schema_migrations;
++use crate::migrations::LEGACY_MIGRATION_CUTOVER_ENV;
++use crate::migrations::LegacyMigrationCutover;
++use crate::migrations::migrate_legacy_custom_schema_migrations;
  use crate::migrations::repair_legacy_recency_migration_version;
  use crate::runtime::RuntimeDbInitError;
  use crate::telemetry;
-@@ -253,6 +254,7 @@ impl SqliteConfig {
+@@ -253,6 +256,11 @@ impl SqliteConfig {
          let started = Instant::now();
          let migrate_result = async {
              if matches!(spec.kind, DbKind::State) {
-+                adopt_legacy_custom_schema_migrations(&pool, migrator).await?;
++                let cutover = match std::env::var(LEGACY_MIGRATION_CUTOVER_ENV).as_deref() {
++                    Ok("1") => LegacyMigrationCutover::Enabled,
++                    _ => LegacyMigrationCutover::Disabled,
++                };
++                migrate_legacy_custom_schema_migrations(&pool, migrator, cutover).await?;
                  repair_legacy_recency_migration_version(&pool, migrator).await?;
              }
              migrator.run(&pool).await.map_err(anyhow::Error::from)
 diff --git a/codex-rs/thread-store/src/lib.rs b/codex-rs/thread-store/src/lib.rs
-index 75253e05413bd1185b1c3ca31a09dcca37b16ea2..f63f60b997c4cf4c85489eebee59dadc0f82e5b3 100644
+index 75253e054..f63f60b99 100644
 --- a/codex-rs/thread-store/src/lib.rs
 +++ b/codex-rs/thread-store/src/lib.rs
 @@ -31,6 +31,9 @@ pub use local::RolloutMigrationOutcome;
@@ -1032,7 +1058,7 @@ index 75253e05413bd1185b1c3ca31a09dcca37b16ea2..f63f60b997c4cf4c85489eebee59dadc
  pub use projects::CreatedProject;
  pub use projects::DeletedProject;
 diff --git a/codex-rs/thread-store/src/local/live_writer.rs b/codex-rs/thread-store/src/local/live_writer.rs
-index 3c48136272acd090451d200dbeb4020d5cf147d2..7bebf3d890d81931caede96518ee70700fc68b3b 100644
+index 3c4813627..7bebf3d89 100644
 --- a/codex-rs/thread-store/src/local/live_writer.rs
 +++ b/codex-rs/thread-store/src/local/live_writer.rs
 @@ -30,7 +30,7 @@ pub(super) async fn create_thread(
@@ -1054,7 +1080,7 @@ index 3c48136272acd090451d200dbeb4020d5cf147d2..7bebf3d890d81931caede96518ee7070
          canonical_history_mode_from_rollout_items(history)
      } else if let Some(rollout_path) = params.rollout_path.as_ref() {
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index d3d82091445da0d5704316ca9e6236556d44b59b..238b4a80a55aed8f6e025b9b92e76ce2148418b9 100644
+index d3d820914..238b4a80a 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
 @@ -105,6 +105,12 @@ pub use rollout_migration::RolloutMigrationOutcome;
@@ -1147,7 +1173,7 @@ index d3d82091445da0d5704316ca9e6236556d44b59b..238b4a80a55aed8f6e025b9b92e76ce2
          Ok(writer_locks)
      }
 diff --git a/codex-rs/thread-store/src/local/revert_thread.rs b/codex-rs/thread-store/src/local/revert_thread.rs
-index 1bb40be4005d8d4e4ec1278059474a64d077c5a1..24944292ef9f145f57b4f8f01789e0d1391b7690 100644
+index 1bb40be40..24944292e 100644
 --- a/codex-rs/thread-store/src/local/revert_thread.rs
 +++ b/codex-rs/thread-store/src/local/revert_thread.rs
 @@ -33,7 +33,7 @@ pub(super) async fn revert(
@@ -1160,7 +1186,7 @@ index 1bb40be4005d8d4e4ec1278059474a64d077c5a1..24944292ef9f145f57b4f8f01789e0d1
      // Resolution may return a compressed sibling. Keep SQLite's exact stored path for the CAS.
      let expected_sqlite_path = state_db
 diff --git a/codex-rs/thread-store/src/local/rollout_migration.rs b/codex-rs/thread-store/src/local/rollout_migration.rs
-index 666e626f77e9799b95ee7d7c7c5d558f85172935..5766c1c4cc0f13daf0fbb537c86e4c94b2dae1fc 100644
+index 666e626f7..5766c1c4c 100644
 --- a/codex-rs/thread-store/src/local/rollout_migration.rs
 +++ b/codex-rs/thread-store/src/local/rollout_migration.rs
 @@ -444,7 +444,7 @@ impl LocalThreadStore {
@@ -1182,7 +1208,7 @@ index 666e626f77e9799b95ee7d7c7c5d558f85172935..5766c1c4cc0f13daf0fbb537c86e4c94
              .then(|| decompressed_staged_rollout_path(rollout_path))
              .transpose()?;
 diff --git a/codex-rs/thread-store/src/local/unarchive_thread.rs b/codex-rs/thread-store/src/local/unarchive_thread.rs
-index 4ef1bdb0afab39a179f45cdc42b2b4aea151ff75..e4d2708482afff13c192e737f41253be59880d39 100644
+index 4ef1bdb0a..e4d270848 100644
 --- a/codex-rs/thread-store/src/local/unarchive_thread.rs
 +++ b/codex-rs/thread-store/src/local/unarchive_thread.rs
 @@ -23,7 +23,7 @@ pub(super) async fn unarchive_thread(
@@ -1195,7 +1221,7 @@ index 4ef1bdb0afab39a179f45cdc42b2b4aea151ff75..e4d2708482afff13c192e737f41253be
      let selected_archived_path =
          thread_rollout_resolver::resolve_current_including_archived(store, thread_id)
 diff --git a/codex-rs/thread-store/src/local/writer_lock.rs b/codex-rs/thread-store/src/local/writer_lock.rs
-index f6b2c8564be288ec065940288bcda101dca4a309..5ed33b9573d963da73cf78ebe13ad465c9edcb4a 100644
+index f6b2c8564..5ed33b957 100644
 --- a/codex-rs/thread-store/src/local/writer_lock.rs
 +++ b/codex-rs/thread-store/src/local/writer_lock.rs
 @@ -1,3 +1,4 @@
@@ -1346,7 +1372,7 @@ index f6b2c8564be288ec065940288bcda101dca4a309..5ed33b9573d963da73cf78ebe13ad465
              Ok(lock) => lock,
              Err(err) => {
 diff --git a/codex-rs/thread-store/src/local/writer_lock_tests.rs b/codex-rs/thread-store/src/local/writer_lock_tests.rs
-index 64063142251ab9d55d12add61f61b3936b4bf1a7..16771092f34008c86c8bbf29ed034c6adef151a8 100644
+index 640631422..16771092f 100644
 --- a/codex-rs/thread-store/src/local/writer_lock_tests.rs
 +++ b/codex-rs/thread-store/src/local/writer_lock_tests.rs
 @@ -1,13 +1,28 @@
@@ -1561,3 +1587,6 @@ index 64063142251ab9d55d12add61f61b3936b4bf1a7..16771092f34008c86c8bbf29ed034c6a
 +    drop(owner);
 +    assert!(!lock_path.exists());
 +}
+-- 
+2.50.1 (Apple Git-155)
+

@@ -28,8 +28,8 @@ The target is upstream [`rust-v0.149.0`](https://github.com/openai/codex/release
 | Area | Current status |
 |---|---|
 | P001–P011 implementation and focused checks | Complete |
-| Ordered 0.149 patch export and clean-apply verification | Complete; 11 patches reproduce tree `096164cc5236699b0a7257f272d402ca4bf3ce09` |
-| macOS arm64 release build and artifacts | Complete; [Actions run 32485937374](https://github.com/iLfounder/codex-cli-custom/actions/runs/32485937374), artifact `codex-custom-rust-v0.149.0-macos-arm64` |
+| Ordered 0.149 patch export and clean-apply verification | Complete; 11 patches reproduce tree `0b611f585edbea2c31af97011b1a13077849b981` |
+| macOS arm64 release build and artifacts | Final review fixes pending rebuild; [run 32485937374](https://github.com/iLfounder/codex-cli-custom/actions/runs/32485937374) proves the superseded pre-review tree |
 | Final independent reviews | Pending |
 | 0.149 publication | Pending |
 
@@ -128,9 +128,13 @@ git checkout 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
 /path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD"
 ```
 
-The applier rejects a dirty or wrong-base worktree, verifies every patch digest, applies P001–P011 in order, and requires final tree `096164cc5236699b0a7257f272d402ca4bf3ce09`.
+The applier rejects a dirty or wrong-base worktree, verifies every patch digest, applies P001–P011 in order, and requires final tree `0b611f585edbea2c31af97011b1a13077849b981`.
 
 This separation is the maintenance strategy: when upstream advances, each P-number can be inspected, adapted, and verified against its own feature boundary.
+
+### Upgrading an existing 0.148 custom state store
+
+The older custom series used migration numbers that official 0.149 later claimed. The new binary therefore stops without changing the database when it detects those legacy rows. Stop every older TUI and app-server sharing that state store, then start the 0.149 build once with `CODEX_STATE_LEGACY_MIGRATION_CUTOVER=1`. Exact checksums, table definitions, and custom migration metadata are revalidated before the atomic adoption. Unknown or partial schemas remain fail-closed. Remove the variable after the one-time cutover; old binaries must not reopen the migrated store.
 
 ## Build, review, and publication
 
@@ -139,11 +143,11 @@ The following remain before 0.149 can be called fully reviewed and published:
 1. inspect the built final candidate with two independent fresh-context reviews; and
 2. resolve any material findings and update the publication status.
 
-The release build and artifact are available from [Actions run 32485937374](https://github.com/iLfounder/codex-cli-custom/actions/runs/32485937374). Final review and completed publication are not claimed until the remaining rows are updated.
+[Actions run 32485937374](https://github.com/iLfounder/codex-cli-custom/actions/runs/32485937374) built the pre-review tree. The final review fixes require a new build and artifact before completed publication is claimed.
 
 ## Historical working notes
 
-The original personal investigation and build notes are preserved as non-authoritative background under [`docs/handoff.md`](docs/handoff.md) and [`docs/codex-rs-build-guide.md`](docs/codex-rs-build-guide.md). They predate the current 0.149 design and are not the public runtime contract.
+The sanitized design history and earlier build notes are preserved as non-authoritative background under [`docs/handoff.md`](docs/handoff.md) and [`docs/codex-rs-build-guide.md`](docs/codex-rs-build-guide.md). They predate the current 0.149 design and are not the public runtime contract.
 
 ## License
 

@@ -1,4 +1,4 @@
-From 86904dd6c1f169ec89a7455c68a25bf724342ea3 Mon Sep 17 00:00:00 2001
+From aae199d824ad2bf131674fa4470c99ac985e7d33 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 19:13:43 +0900
 Subject: [PATCH 09/11] feat(custom): switch thread accounts without restart
@@ -9,7 +9,7 @@ Subject: [PATCH 09/11] feat(custom): switch thread accounts without restart
  .../app-server/src/session_runtime/mod.rs     |   2 +
  .../src/session_runtime/relinquish.rs         |  10 +-
  .../src/session_runtime/snapshot.rs           |  51 +-
- .../src/session_runtime/switch_account.rs     | 274 +++++++++++
+ .../src/session_runtime/switch_account.rs     | 289 ++++++++++++
  codex-rs/app-server/src/thread_state.rs       |  15 +
  codex-rs/app-server/tests/suite/v2/mod.rs     |   1 +
  .../tests/suite/v2/thread_account_switch.rs   | 284 ++++++++++++
@@ -45,13 +45,13 @@ Subject: [PATCH 09/11] feat(custom): switch thread accounts without restart
  codex-rs/network-proxy/src/proxy.rs           |   6 +-
  .../network-proxy/src/remote_config_tests.rs  |  24 +-
  codex-rs/network-proxy/src/runtime.rs         |  21 +-
- 40 files changed, 1753 insertions(+), 171 deletions(-)
+ 40 files changed, 1768 insertions(+), 171 deletions(-)
  create mode 100644 codex-rs/app-server/src/session_runtime/switch_account.rs
  create mode 100644 codex-rs/app-server/tests/suite/v2/thread_account_switch.rs
  create mode 100644 codex-rs/ext/extension-api/src/contributors/execution_account.rs
 
 diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
-index 25f068b6d781021a0e9a682873423932e50860cd..688bacc852f99b72100c9626688d9bef546ef888 100644
+index 25f068b6d..688bacc85 100644
 --- a/codex-rs/app-server/src/message_processor.rs
 +++ b/codex-rs/app-server/src/message_processor.rs
 @@ -11,7 +11,6 @@ use crate::connection_rpc_gate::ConnectionRpcGate;
@@ -78,7 +78,7 @@ index 25f068b6d781021a0e9a682873423932e50860cd..688bacc852f99b72100c9626688d9bef
                  .session_runtime
                  .relinquish(connection_id, params)
 diff --git a/codex-rs/app-server/src/session_runtime/mod.rs b/codex-rs/app-server/src/session_runtime/mod.rs
-index 03fdb73e54400de114c21f1e1f7b65f947881ebc..64a7830b94ea225cc46230438d557f3ecd1dd7f7 100644
+index 2117f40e3..8845590c7 100644
 --- a/codex-rs/app-server/src/session_runtime/mod.rs
 +++ b/codex-rs/app-server/src/session_runtime/mod.rs
 @@ -3,6 +3,7 @@ mod operations;
@@ -89,7 +89,7 @@ index 03fdb73e54400de114c21f1e1f7b65f947881ebc..64a7830b94ea225cc46230438d557f3e
  
  use std::collections::HashMap;
  use std::collections::HashSet;
-@@ -55,6 +56,7 @@ struct EngineState {
+@@ -56,6 +57,7 @@ struct EngineState {
      pages: pagination::SnapshotCache,
      #[allow(dead_code)]
      operations: OperationCache,
@@ -98,10 +98,10 @@ index 03fdb73e54400de114c21f1e1f7b65f947881ebc..64a7830b94ea225cc46230438d557f3e
  
  #[derive(Default)]
 diff --git a/codex-rs/app-server/src/session_runtime/relinquish.rs b/codex-rs/app-server/src/session_runtime/relinquish.rs
-index c74e85210dfd399be94082f6b7cded13a5e8bfe9..cb67942926b38cd719265feaf3e3d8b97c621ec3 100644
+index 4620d169b..cd2b48e63 100644
 --- a/codex-rs/app-server/src/session_runtime/relinquish.rs
 +++ b/codex-rs/app-server/src/session_runtime/relinquish.rs
-@@ -213,7 +213,7 @@ impl SessionRuntimeEngine {
+@@ -228,7 +228,7 @@ impl SessionRuntimeEngine {
          Ok(ThreadRelinquishResponse { operation })
      }
  
@@ -110,7 +110,7 @@ index c74e85210dfd399be94082f6b7cded13a5e8bfe9..cb67942926b38cd719265feaf3e3d8b9
          &self,
          thread_id: ThreadId,
      ) -> Result<codex_app_server_protocol::SessionRuntimeSnapshot, JSONRPCErrorError> {
-@@ -261,6 +261,7 @@ impl SessionRuntimeEngine {
+@@ -276,6 +276,7 @@ impl SessionRuntimeEngine {
              .await
              .map_err(|_| internal_error("session runtime publisher is unavailable"))?;
          let store_runtime = self.thread_store.runtime_snapshot(thread_id).await;
@@ -118,7 +118,7 @@ index c74e85210dfd399be94082f6b7cded13a5e8bfe9..cb67942926b38cd719265feaf3e3d8b9
          let (runtime_notification, operation_notification, operation) = {
              let mut state = self.state.lock().await;
              let mut snapshot = state
-@@ -289,7 +290,12 @@ impl SessionRuntimeEngine {
+@@ -304,7 +305,12 @@ impl SessionRuntimeEngine {
                          Some("released_persistence_snapshot_unavailable".to_string());
                  }
              }
@@ -133,7 +133,7 @@ index c74e85210dfd399be94082f6b7cded13a5e8bfe9..cb67942926b38cd719265feaf3e3d8b9
              state.sequence = state.sequence.saturating_add(1);
              let runtime_notification = SessionRuntimeChangedNotification {
 diff --git a/codex-rs/app-server/src/session_runtime/snapshot.rs b/codex-rs/app-server/src/session_runtime/snapshot.rs
-index eeafa17114283ef03983c4fe4ae28f3455a9edc2..6ef11b03e64afa5623e93a3e779c2a801eacaf33 100644
+index eeafa1711..6ef11b03e 100644
 --- a/codex-rs/app-server/src/session_runtime/snapshot.rs
 +++ b/codex-rs/app-server/src/session_runtime/snapshot.rs
 @@ -45,7 +45,6 @@ use crate::thread_status::resolve_thread_status;
@@ -232,10 +232,10 @@ index eeafa17114283ef03983c4fe4ae28f3455a9edc2..6ef11b03e64afa5623e93a3e779c2a80
  }
 diff --git a/codex-rs/app-server/src/session_runtime/switch_account.rs b/codex-rs/app-server/src/session_runtime/switch_account.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..92d3716a0731eae1c80071dec1ee4ab0e58e378b
+index 000000000..08ae9686c
 --- /dev/null
 +++ b/codex-rs/app-server/src/session_runtime/switch_account.rs
-@@ -0,0 +1,274 @@
+@@ -0,0 +1,289 @@
 +use codex_app_server_protocol::JSONRPCErrorError;
 +use codex_app_server_protocol::SessionRuntimeAccountSwitchState;
 +use codex_app_server_protocol::SessionRuntimeLifecycleState;
@@ -285,7 +285,22 @@ index 0000000000000000000000000000000000000000..92d3716a0731eae1c80071dec1ee4ab0
 +                )
 +                .await;
 +        }
-+        let snapshot = self.refresh_snapshot_for_control(thread_id).await?;
++        let snapshot = match self.refresh_snapshot_for_control(thread_id).await {
++            Ok(snapshot) => snapshot,
++            Err(error) => {
++                let _ = self
++                    .update_operation_status(
++                        &params.operation_id,
++                        SessionRuntimeOperationStatus::Failed,
++                        Some(SessionRuntimeOperationError {
++                            code: "runtime_snapshot_unavailable".to_string(),
++                            message: "thread runtime snapshot is unavailable".to_string(),
++                        }),
++                    )
++                    .await;
++                return Err(error);
++            }
++        };
 +        if snapshot.state_revision != params.expected_state_revision {
 +            return self
 +                .failed_switch(
@@ -511,7 +526,7 @@ index 0000000000000000000000000000000000000000..92d3716a0731eae1c80071dec1ee4ab0
 +    }
 +}
 diff --git a/codex-rs/app-server/src/thread_state.rs b/codex-rs/app-server/src/thread_state.rs
-index 51b8d0c65b2939c119dd8afabbc36e8c150aa31b..18b0e18922011d205405b378b20ce25a091dd81c 100644
+index 51b8d0c65..18b0e1892 100644
 --- a/codex-rs/app-server/src/thread_state.rs
 +++ b/codex-rs/app-server/src/thread_state.rs
 @@ -522,6 +522,21 @@ impl ThreadStateManager {
@@ -537,7 +552,7 @@ index 51b8d0c65b2939c119dd8afabbc36e8c150aa31b..18b0e18922011d205405b378b20ce25a
      #[expect(
          clippy::await_holding_invalid_type,
 diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
-index 3c39bcc4a6b757843d0e86fdef6f654f84176f71..40ee87194bf5c822218dece95085bd39d3109b2f 100644
+index 3c39bcc4a..40ee87194 100644
 --- a/codex-rs/app-server/tests/suite/v2/mod.rs
 +++ b/codex-rs/app-server/tests/suite/v2/mod.rs
 @@ -88,6 +88,7 @@ mod server_diagnostics;
@@ -550,7 +565,7 @@ index 3c39bcc4a6b757843d0e86fdef6f654f84176f71..40ee87194bf5c822218dece95085bd39
  mod thread_fork;
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_account_switch.rs b/codex-rs/app-server/tests/suite/v2/thread_account_switch.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..d81093e1504e63b7e39be6dd24b846d135d8b9df
+index 000000000..d81093e15
 --- /dev/null
 +++ b/codex-rs/app-server/tests/suite/v2/thread_account_switch.rs
 @@ -0,0 +1,284 @@
@@ -839,7 +854,7 @@ index 0000000000000000000000000000000000000000..d81093e1504e63b7e39be6dd24b846d1
 +    Ok(())
 +}
 diff --git a/codex-rs/codex-mcp/src/runtime.rs b/codex-rs/codex-mcp/src/runtime.rs
-index ca85a035012e0b005287789ccabdf20ea588ecb4..8ea98a4556be0fba8461dbff4c7fdc52b6b2fb39 100644
+index ca85a0350..8ea98a455 100644
 --- a/codex-rs/codex-mcp/src/runtime.rs
 +++ b/codex-rs/codex-mcp/src/runtime.rs
 @@ -508,6 +508,12 @@ impl McpRuntime {
@@ -856,7 +871,7 @@ index ca85a035012e0b005287789ccabdf20ea588ecb4..8ea98a4556be0fba8461dbff4c7fdc52
  
  #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
-index 6d12dd0a9d94e9f1492aeebf79690b17ad6847a0..6db2528b21c2a1fd50ed67f1fa0e5114a6a63589 100644
+index 6d12dd0a9..6db2528b2 100644
 --- a/codex-rs/core/src/codex_thread.rs
 +++ b/codex-rs/core/src/codex_thread.rs
 @@ -200,13 +200,27 @@ impl CodexThread {
@@ -898,7 +913,7 @@ index 6d12dd0a9d94e9f1492aeebf79690b17ad6847a0..6db2528b21c2a1fd50ed67f1fa0e5114
              .await
      }
 diff --git a/codex-rs/core/src/config/network_proxy_spec_tests.rs b/codex-rs/core/src/config/network_proxy_spec_tests.rs
-index ff90af0c741391011d763795b430d6739a996f41..8051f5a38ac10f502a3f17ba4c909780a27bbaf6 100644
+index ff90af0c7..8051f5a38 100644
 --- a/codex-rs/core/src/config/network_proxy_spec_tests.rs
 +++ b/codex-rs/core/src/config/network_proxy_spec_tests.rs
 @@ -37,7 +37,7 @@ fn build_state_with_audit_metadata_threads_metadata_to_state() {
@@ -911,7 +926,7 @@ index ff90af0c741391011d763795b430d6739a996f41..8051f5a38ac10f502a3f17ba4c909780
  
  #[test]
 diff --git a/codex-rs/core/src/environment_selection.rs b/codex-rs/core/src/environment_selection.rs
-index 39a598bff95bd31c54a7111fa453eac8710d740b..cc8068dc03bbbb0d0776492ebf1295aab0d1c64e 100644
+index 39a598bff..cc8068dc0 100644
 --- a/codex-rs/core/src/environment_selection.rs
 +++ b/codex-rs/core/src/environment_selection.rs
 @@ -155,7 +155,7 @@ impl StartingTurnEnvironment {
@@ -953,7 +968,7 @@ index 39a598bff95bd31c54a7111fa453eac8710d740b..cc8068dc03bbbb0d0776492ebf1295aa
      pub(crate) fn selections(&self) -> Vec<TurnEnvironmentSelection> {
          self.environments
 diff --git a/codex-rs/core/src/execution_account.rs b/codex-rs/core/src/execution_account.rs
-index 3cb564486a780101a82ade959ba96031d0718751..a7536fbac469b09ba0038fa8fdd94bea368d97a8 100644
+index 3cb564486..a7536fbac 100644
 --- a/codex-rs/core/src/execution_account.rs
 +++ b/codex-rs/core/src/execution_account.rs
 @@ -2,9 +2,11 @@ use std::future::Future;
@@ -1008,7 +1023,7 @@ index 3cb564486a780101a82ade959ba96031d0718751..a7536fbac469b09ba0038fa8fdd94bea
      fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
          formatter
 diff --git a/codex-rs/core/src/guardian/review.rs b/codex-rs/core/src/guardian/review.rs
-index 93d36c52a8539a65d501ccc9233efcaa70b94956..ae9b57ff500df3ad301073e854c2154dd6cbf3be 100644
+index 93d36c52a..ae9b57ff5 100644
 --- a/codex-rs/core/src/guardian/review.rs
 +++ b/codex-rs/core/src/guardian/review.rs
 @@ -219,15 +219,14 @@ fn track_guardian_review(
@@ -1039,7 +1054,7 @@ index 93d36c52a8539a65d501ccc9233efcaa70b94956..ae9b57ff500df3ad301073e854c2154d
                  parent_session: Arc::clone(&session),
                  parent_context: context.clone(),
 diff --git a/codex-rs/core/src/guardian/tests.rs b/codex-rs/core/src/guardian/tests.rs
-index 679f6f78d087ae14f5747e57abbf2caf58951b6e..f06640b99a510b8621dbc42642ff06f3be0b64aa 100644
+index 679f6f78d..f06640b99 100644
 --- a/codex-rs/core/src/guardian/tests.rs
 +++ b/codex-rs/core/src/guardian/tests.rs
 @@ -2252,7 +2252,7 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
@@ -1061,7 +1076,7 @@ index 679f6f78d087ae14f5747e57abbf2caf58951b6e..f06640b99a510b8621dbc42642ff06f3
              id: "stale-turn".to_string(),
              msg: EventMsg::TurnComplete(TurnCompleteEvent {
 diff --git a/codex-rs/core/src/hook_mcp_executor.rs b/codex-rs/core/src/hook_mcp_executor.rs
-index ea1252f931896a644aaddb753160b25826287f5d..9edfbb2cfac30aaa9b15ac46cc71e2066076f08a 100644
+index ea1252f93..9edfbb2cf 100644
 --- a/codex-rs/core/src/hook_mcp_executor.rs
 +++ b/codex-rs/core/src/hook_mcp_executor.rs
 @@ -10,7 +10,7 @@ use futures::future::BoxFuture;
@@ -1085,7 +1100,7 @@ index ea1252f931896a644aaddb753160b25826287f5d..9edfbb2cfac30aaa9b15ac46cc71e206
                      &call.server,
                      &call.tool,
 diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
-index 6b76b7be007e83da3fc500baf5955b069ff158cc..3c0e050e354d530247421ca8c38d48b5107294bd 100644
+index 6b76b7be0..3c0e050e3 100644
 --- a/codex-rs/core/src/realtime_conversation.rs
 +++ b/codex-rs/core/src/realtime_conversation.rs
 @@ -1144,6 +1144,7 @@ struct PreparedRealtimeConversationStart {
@@ -1137,7 +1152,7 @@ index 6b76b7be007e83da3fc500baf5955b069ff158cc..3c0e050e354d530247421ca8c38d48b5
      };
      let start_output = sess.conversation.start(start, mode_instructions).await?;
 diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
-index 35c1182aa21a5b52f91285b641ada185d95be390..f016ce31923d93395d5fc49cc227cdb5e449c8cb 100644
+index 35c1182aa..f016ce319 100644
 --- a/codex-rs/core/src/session/handlers.rs
 +++ b/codex-rs/core/src/session/handlers.rs
 @@ -356,7 +356,7 @@ pub async fn thread_rollback(sess: &Arc<Session>, sub_id: String, num_turns: u32
@@ -1168,7 +1183,7 @@ index 35c1182aa21a5b52f91285b641ada185d95be390..f016ce31923d93395d5fc49cc227cdb5
          i64::try_from(turn_count).unwrap_or(0),
          &[],
 diff --git a/codex-rs/core/src/session/mcp.rs b/codex-rs/core/src/session/mcp.rs
-index caf6a279244a829564e6af1d62fabec4b43366a5..946cdb0c856460c658b3d481fe8416d04bacf785 100644
+index caf6a2792..946cdb0c8 100644
 --- a/codex-rs/core/src/session/mcp.rs
 +++ b/codex-rs/core/src/session/mcp.rs
 @@ -160,9 +160,9 @@ impl Session {
@@ -1345,7 +1360,7 @@ index caf6a279244a829564e6af1d62fabec4b43366a5..946cdb0c856460c658b3d481fe8416d0
      };
  
 diff --git a/codex-rs/core/src/session/mcp_prewarm.rs b/codex-rs/core/src/session/mcp_prewarm.rs
-index f4b45b6e21aa7f952cf6a69d27d42afa9445ef92..788640de523871000451a93fbed4f36883e52f76 100644
+index f4b45b6e2..788640de5 100644
 --- a/codex-rs/core/src/session/mcp_prewarm.rs
 +++ b/codex-rs/core/src/session/mcp_prewarm.rs
 @@ -13,11 +13,15 @@ impl Session {
@@ -1379,7 +1394,7 @@ index f4b45b6e21aa7f952cf6a69d27d42afa9445ef92..788640de523871000451a93fbed4f368
              .mcp_prewarm_task
              .lock()
 diff --git a/codex-rs/core/src/session/mcp_runtime.rs b/codex-rs/core/src/session/mcp_runtime.rs
-index 3c1bebb4db47c3d14a82789a35ec56b911416be4..674a173db0130ab606c58f0d82e1cc05b3d1030b 100644
+index 3c1bebb4d..674a173db 100644
 --- a/codex-rs/core/src/session/mcp_runtime.rs
 +++ b/codex-rs/core/src/session/mcp_runtime.rs
 @@ -42,7 +42,7 @@ impl Session {
@@ -1522,7 +1537,7 @@ index 3c1bebb4db47c3d14a82789a35ec56b911416be4..674a173db0130ab606c58f0d82e1cc05
 +    }
  }
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 6fe06e2f93ea4974b4b5742bc134a1e7625eccf8..849624d78634a2e7fb630461e2d9c00098e480c8 100644
+index 6fe06e2f9..849624d78 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -1177,7 +1177,9 @@ impl Session {
@@ -1562,7 +1577,7 @@ index 6fe06e2f93ea4974b4b5742bc134a1e7625eccf8..849624d78634a2e7fb630461e2d9c000
                  .recommended_plugin_candidates_for_config(RecommendedPluginCandidatesInput {
                      plugins_config: &plugins_config,
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
-index 1ebed06e5d99705b84f329e7861377cdb8f7c793..7cc8a9b3db9713f7a6040757c9eb587f335a593d 100644
+index fdd096e50..152851387 100644
 --- a/codex-rs/core/src/session/session.rs
 +++ b/codex-rs/core/src/session/session.rs
 @@ -39,7 +39,8 @@ use tokio::sync::Semaphore;
@@ -2101,7 +2116,7 @@ index 1ebed06e5d99705b84f329e7861377cdb8f7c793..7cc8a9b3db9713f7a6040757c9eb587f
                  .await;
              let session_start_source = match &initial_history {
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index eca18ced0928c1562b073346045624efbed601d0..40421bd587d0460b2af207ad5ce7872d7b58cccf 100644
+index 4e584db22..0a55d0b02 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -92,6 +92,28 @@ fn default_execution_account(
@@ -2200,7 +2215,7 @@ index eca18ced0928c1562b073346045624efbed601d0..40421bd587d0460b2af207ad5ce7872d
          services,
          git_enrichment_policy: GitEnrichmentPolicy::Fresh,
          fork_persistence: ForkPersistence::Copied,
-@@ -7883,7 +7913,7 @@ async fn shutdown_and_wait_shuts_down_cached_guardian_subagent() {
+@@ -7904,7 +7934,7 @@ async fn shutdown_and_wait_shuts_down_cached_guardian_subagent() {
          session_loop_termination: session_loop_termination_from_handle(child_session_loop_handle),
      };
      parent_session
@@ -2209,7 +2224,7 @@ index eca18ced0928c1562b073346045624efbed601d0..40421bd587d0460b2af207ad5ce7872d
          .cache_for_test(child_session, child_io)
          .await;
  
-@@ -7915,13 +7945,13 @@ async fn cached_guardian_subagent_exposes_its_rollout_path() {
+@@ -7936,13 +7966,13 @@ async fn cached_guardian_subagent_exposes_its_rollout_path() {
          session_loop_termination: session_loop_termination_from_handle(child_session_loop_handle),
      };
      parent_session
@@ -2225,7 +2240,7 @@ index eca18ced0928c1562b073346045624efbed601d0..40421bd587d0460b2af207ad5ce7872d
              .trunk_rollout_path()
              .await,
          Some(child_rollout_path)
-@@ -7968,7 +7998,7 @@ async fn shutdown_and_wait_shuts_down_tracked_ephemeral_guardian_review() {
+@@ -7989,7 +8019,7 @@ async fn shutdown_and_wait_shuts_down_tracked_ephemeral_guardian_review() {
          session_loop_termination: session_loop_termination_from_handle(child_session_loop_handle),
      };
      parent_session
@@ -2234,7 +2249,7 @@ index eca18ced0928c1562b073346045624efbed601d0..40421bd587d0460b2af207ad5ce7872d
          .register_ephemeral_for_test(child_session, child_io)
          .await;
  
-@@ -8118,6 +8148,7 @@ where
+@@ -8139,6 +8169,7 @@ where
      ));
      let network_approval = Arc::new(NetworkApprovalService::default());
      let mcp_runtime = Arc::new(codex_mcp::McpRuntime::empty(config.prefix_mcp_tool_names()));
@@ -2242,7 +2257,7 @@ index eca18ced0928c1562b073346045624efbed601d0..40421bd587d0460b2af207ad5ce7872d
      let executed_tool_calls = config
          .features
          .enabled(Feature::ExecutedToolCallMetadata)
-@@ -8129,7 +8160,7 @@ where
+@@ -8150,7 +8181,7 @@ where
          },
          thread_id,
          Arc::new(CoreHookMcpExecutor {
@@ -2251,7 +2266,7 @@ index eca18ced0928c1562b073346045624efbed601d0..40421bd587d0460b2af207ad5ce7872d
              thread_id,
          }),
      )
-@@ -8149,6 +8180,7 @@ where
+@@ -8170,6 +8201,7 @@ where
              config.analytics_enabled,
          ),
          hooks: arc_swap::ArcSwap::from_pointee(hooks),
@@ -2259,7 +2274,7 @@ index eca18ced0928c1562b073346045624efbed601d0..40421bd587d0460b2af207ad5ce7872d
          rollout_thread_trace: codex_rollout_trace::ThreadTraceContext::disabled(),
          user_shell: Arc::new(default_user_shell()),
          show_raw_agent_reasoning: config.show_raw_agent_reasoning,
-@@ -8218,7 +8250,11 @@ where
+@@ -8239,7 +8271,11 @@ where
  
      let session = Arc::new(Session {
          thread_id,
@@ -2272,7 +2287,7 @@ index eca18ced0928c1562b073346045624efbed601d0..40421bd587d0460b2af207ad5ce7872d
          installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
          tx_event,
          agent_status: agent_status_tx,
-@@ -8232,7 +8268,8 @@ where
+@@ -8253,7 +8289,8 @@ where
          mcp_elicitation_reviewer_handle: OnceLock::new(),
          mcp_elicitation_lifecycle_handle: OnceLock::new(),
          mcp_prewarm_tx: async_channel::bounded(1).0,
@@ -2282,7 +2297,7 @@ index eca18ced0928c1562b073346045624efbed601d0..40421bd587d0460b2af207ad5ce7872d
          mcp_prewarm_task: std::sync::Mutex::new(None),
          conversation: Arc::new(RealtimeConversationManager::new()),
          active_turn: Mutex::new(None),
-@@ -8240,7 +8277,6 @@ where
+@@ -8261,7 +8298,6 @@ where
          execution_control_closing: std::sync::atomic::AtomicBool::new(false),
          async_hook_results,
          input_queue: super::input_queue::InputQueue::new(),
@@ -2291,7 +2306,7 @@ index eca18ced0928c1562b073346045624efbed601d0..40421bd587d0460b2af207ad5ce7872d
          git_enrichment_policy: GitEnrichmentPolicy::Fresh,
          fork_persistence: ForkPersistence::Copied,
 diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
-index 60baf0d91bd9796d196ddf39cf6f1c8f77a693a6..243db9ea6fb5e5c71f908d9c15490a7001720aa9 100644
+index 60baf0d91..243db9ea6 100644
 --- a/codex-rs/core/src/session/turn_context.rs
 +++ b/codex-rs/core/src/session/turn_context.rs
 @@ -860,9 +860,11 @@ impl Session {
@@ -2386,7 +2401,7 @@ index 60baf0d91bd9796d196ddf39cf6f1c8f77a693a6..243db9ea6fb5e5c71f908d9c15490a70
                  .network_proxy
                  .load_full()
 diff --git a/codex-rs/core/src/session_startup_prewarm.rs b/codex-rs/core/src/session_startup_prewarm.rs
-index 4d63cc8c77e59846fb2d548beb1e52ba7aa0635f..c17dae2c5c7c47e7c233dfbb815c22dd813e8739 100644
+index 4d63cc8c7..c17dae2c5 100644
 --- a/codex-rs/core/src/session_startup_prewarm.rs
 +++ b/codex-rs/core/src/session_startup_prewarm.rs
 @@ -183,10 +183,11 @@ impl SessionStartupPrewarmHandle {
@@ -2443,7 +2458,7 @@ index 4d63cc8c77e59846fb2d548beb1e52ba7aa0635f..c17dae2c5c7c47e7c233dfbb815c22dd
      client_session
          .prewarm_websocket(
 diff --git a/codex-rs/core/src/state/service.rs b/codex-rs/core/src/state/service.rs
-index 0ef84c9b97172b8b4c8f9e9032818c333448adda..261f88f0bca9dbaca213b06074a945a6bccc96cc 100644
+index 0ef84c9b9..261f88f0b 100644
 --- a/codex-rs/core/src/state/service.rs
 +++ b/codex-rs/core/src/state/service.rs
 @@ -56,6 +56,8 @@ pub(crate) struct SessionServices {
@@ -2456,7 +2471,7 @@ index 0ef84c9b97172b8b4c8f9e9032818c333448adda..261f88f0bca9dbaca213b06074a945a6
      pub(crate) user_shell: Arc<crate::shell::Shell>,
      pub(crate) show_raw_agent_reasoning: bool,
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 47d18a7dd4c26968f2cfef5afcb0e31091a12a0f..61ef39aaab528ba12ccd10845deba53bda56297c 100644
+index 47d18a7dd..61ef39aaa 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -373,6 +373,7 @@ pub(crate) struct ThreadManagerState {
@@ -2563,7 +2578,7 @@ index 47d18a7dd4c26968f2cfef5afcb0e31091a12a0f..61ef39aaab528ba12ccd10845deba53b
              },
          );
 diff --git a/codex-rs/ext/extension-api/src/contributors.rs b/codex-rs/ext/extension-api/src/contributors.rs
-index d51ee6597ee273f738e0310aa953e7c1b250d50c..67830b63d7f0b053083f3b6ebb4d479891897e87 100644
+index d51ee6597..67830b63d 100644
 --- a/codex-rs/ext/extension-api/src/contributors.rs
 +++ b/codex-rs/ext/extension-api/src/contributors.rs
 @@ -13,6 +13,7 @@ use crate::ExtensionData;
@@ -2586,7 +2601,7 @@ index d51ee6597ee273f738e0310aa953e7c1b250d50c..67830b63d7f0b053083f3b6ebb4d4798
  pub use mcp::SelectedPluginIdentity;
 diff --git a/codex-rs/ext/extension-api/src/contributors/execution_account.rs b/codex-rs/ext/extension-api/src/contributors/execution_account.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..673b01813a3a363b1ca43595e1d2884daef873be
+index 000000000..673b01813
 --- /dev/null
 +++ b/codex-rs/ext/extension-api/src/contributors/execution_account.rs
 @@ -0,0 +1,35 @@
@@ -2626,7 +2641,7 @@ index 0000000000000000000000000000000000000000..673b01813a3a363b1ca43595e1d2884d
 +    ) -> ExtensionFuture<'a, Result<Arc<dyn PreparedExecutionAccountRuntime>, String>>;
 +}
 diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
-index 54c329ae226ff641091db8fcee233a979617976c..ea0662457a3a5d355fdd147926cf2b7e72794529 100644
+index 54c329ae2..ea0662457 100644
 --- a/codex-rs/ext/extension-api/src/lib.rs
 +++ b/codex-rs/ext/extension-api/src/lib.rs
 @@ -38,10 +38,13 @@ pub use codex_tools::parse_tool_input_schema_without_compaction;
@@ -2644,7 +2659,7 @@ index 54c329ae226ff641091db8fcee233a979617976c..ea0662457a3a5d355fdd147926cf2b7e
  pub use contributors::PromptFragment;
  pub use contributors::PromptSlot;
 diff --git a/codex-rs/ext/extension-api/src/registry.rs b/codex-rs/ext/extension-api/src/registry.rs
-index be4670cbba09a370cdb1c1d38937a9b12ea6533f..555915fbb0e75a00506a10c1dcd94961cf65faf7 100644
+index be4670cbb..555915fbb 100644
 --- a/codex-rs/ext/extension-api/src/registry.rs
 +++ b/codex-rs/ext/extension-api/src/registry.rs
 @@ -5,6 +5,7 @@ use codex_protocol::protocol::ReviewDecision;
@@ -2703,7 +2718,7 @@ index be4670cbba09a370cdb1c1d38937a9b12ea6533f..555915fbb0e75a00506a10c1dcd94961
      pub fn thread_lifecycle_contributors(&self) -> &[Arc<dyn ThreadLifecycleContributor<C>>] {
          &self.thread_lifecycle_contributors
 diff --git a/codex-rs/ext/goal/src/extension.rs b/codex-rs/ext/goal/src/extension.rs
-index 649f12f21820ff7fdb06f23b651ba9fbb6057259..774c6945a7f904be280c333b02d79d47a0674d3b 100644
+index 649f12f21..774c6945a 100644
 --- a/codex-rs/ext/goal/src/extension.rs
 +++ b/codex-rs/ext/goal/src/extension.rs
 @@ -1,13 +1,17 @@
@@ -2803,7 +2818,7 @@ index 649f12f21820ff7fdb06f23b651ba9fbb6057259..774c6945a7f904be280c333b02d79d47
      registry.turn_lifecycle_contributor(extension.clone());
      registry.token_usage_contributor(extension.clone());
 diff --git a/codex-rs/ext/goal/src/runtime.rs b/codex-rs/ext/goal/src/runtime.rs
-index 28cc32712700ef0de5506eb8c05ecc45e776cfe1..f87cbe9f8c32ba271cc248ceb7efdca65db91e5b 100644
+index 28cc32712..f87cbe9f8 100644
 --- a/codex-rs/ext/goal/src/runtime.rs
 +++ b/codex-rs/ext/goal/src/runtime.rs
 @@ -1,4 +1,5 @@
@@ -2949,7 +2964,7 @@ index 28cc32712700ef0de5506eb8c05ecc45e776cfe1..f87cbe9f8c32ba271cc248ceb7efdca6
                      previous_status,
                      GoalEventAttribution::NoTurn,
 diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/extension.rs b/codex-rs/ext/guardian-v2/src/async_scorer/extension.rs
-index d571d38b87a6a8ba76cbe7b355fbddc77912a960..f549c91d6622701cd73bc68e1eb7b1a35210469c 100644
+index d571d38b8..f549c91d6 100644
 --- a/codex-rs/ext/guardian-v2/src/async_scorer/extension.rs
 +++ b/codex-rs/ext/guardian-v2/src/async_scorer/extension.rs
 @@ -1,5 +1,6 @@
@@ -3129,7 +3144,7 @@ index d571d38b87a6a8ba76cbe7b355fbddc77912a960..f549c91d6622701cd73bc68e1eb7b1a3
      registry.tool_lifecycle_contributor(extension);
  }
 diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
-index 258e9a9c3521936e709e09213979b7f47d551bbe..1fd9e309a74a3d21f733d8de77c76488c8fe238b 100644
+index 258e9a9c3..1fd9e309a 100644
 --- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
 +++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
 @@ -211,6 +211,26 @@ impl LunaSampler {
@@ -3160,7 +3175,7 @@ index 258e9a9c3521936e709e09213979b7f47d551bbe..1fd9e309a74a3d21f733d8de77c76488
          let provider = self
              .config
 diff --git a/codex-rs/ext/skills/src/extension.rs b/codex-rs/ext/skills/src/extension.rs
-index 0ac722182d198446891d1db4234ea0e74fca28a5..f28a76f302607475bbace29102e612f01be9461a 100644
+index 0ac722182..f28a76f30 100644
 --- a/codex-rs/ext/skills/src/extension.rs
 +++ b/codex-rs/ext/skills/src/extension.rs
 @@ -11,12 +11,15 @@ use codex_exec_server::ResolvedSelectedCapabilityRoot;
@@ -3230,7 +3245,7 @@ index 0ac722182d198446891d1db4234ea0e74fca28a5..f28a76f302607475bbace29102e612f0
      registry.prompt_contributor(extension.clone());
      registry.turn_input_contributor(extension.clone());
 diff --git a/codex-rs/network-proxy/src/proxy.rs b/codex-rs/network-proxy/src/proxy.rs
-index 6577259405f457c8e70042fff088dcd48bf1329e..e7b40df694d2176a4b58dfb922eb0bf62e4887a5 100644
+index 657725940..e7b40df69 100644
 --- a/codex-rs/network-proxy/src/proxy.rs
 +++ b/codex-rs/network-proxy/src/proxy.rs
 @@ -825,6 +825,10 @@ impl NetworkProxy {
@@ -3254,7 +3269,7 @@ index 6577259405f457c8e70042fff088dcd48bf1329e..e7b40df694d2176a4b58dfb922eb0bf6
              execution_id,
              policy_decision_timeout_ms: None,
 diff --git a/codex-rs/network-proxy/src/remote_config_tests.rs b/codex-rs/network-proxy/src/remote_config_tests.rs
-index 5094acfaade237cc27e8f8c0eea1fa710d5f5c1d..31e44b43cc7653f32ae9ae1400a14dcf8aaaea70 100644
+index 5094acfaa..31e44b43c 100644
 --- a/codex-rs/network-proxy/src/remote_config_tests.rs
 +++ b/codex-rs/network-proxy/src/remote_config_tests.rs
 @@ -115,11 +115,33 @@ fn launch_config_materializes_audit_and_execution_attribution() {
@@ -3293,7 +3308,7 @@ index 5094acfaade237cc27e8f8c0eea1fa710d5f5c1d..31e44b43cc7653f32ae9ae1400a14dcf
  fn policy_decision_callback_timeout_round_trips() {
      let config = RemoteNetworkProxyConfig::from_effective_config(&NetworkProxyConfig::default())
 diff --git a/codex-rs/network-proxy/src/runtime.rs b/codex-rs/network-proxy/src/runtime.rs
-index 1a449a44381fafa4a5d6a5d0e08753f425f339fc..b261f5506aab9b758a5868811d0b6123a201efe0 100644
+index 1a449a443..b261f5506 100644
 --- a/codex-rs/network-proxy/src/runtime.rs
 +++ b/codex-rs/network-proxy/src/runtime.rs
 @@ -36,6 +36,7 @@ use std::path::Path;
@@ -3352,3 +3367,6 @@ index 1a449a44381fafa4a5d6a5d0e08753f425f339fc..b261f5506aab9b758a5868811d0b6123
      }
  
      pub fn virtualize_child_credentials(&self, env: &mut HashMap<String, String>) {
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,7 +1,7 @@
-From 410841258a659ee00deb7bb7a481fa0ae8da274a Mon Sep 17 00:00:00 2001
+From 6cdf406325d491eea8206ba3af01a5543596814a Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 20:14:51 +0900
-Subject: [PATCH] feat(custom): add structured plugin commands and TUI
+Subject: [PATCH 11/11] feat(custom): add structured plugin commands and TUI
  presentation for 0.149
 
 ---
@@ -53,14 +53,16 @@ Subject: [PATCH] feat(custom): add structured plugin commands and TUI
  codex-rs/core/src/codex_thread.rs             |  32 +
  codex-rs/core/src/lib.rs                      |   6 +
  codex-rs/core/src/tasks/mod.rs                |   2 +
- codex-rs/core/src/tasks/plugin_executable.rs  | 209 ++++++
+ codex-rs/core/src/tasks/plugin_executable.rs  | 217 ++++++
+ .../core/src/tasks/plugin_executable_tests.rs |  19 +
  codex-rs/exec/src/lib.rs                      |   1 +
  codex-rs/tui/src/app.rs                       |   2 +
  .../tui/src/app/app_server_event_targets.rs   |   3 +
  codex-rs/tui/src/app/app_server_events.rs     |  19 +
  codex-rs/tui/src/app/event_dispatch.rs        |  30 +
  codex-rs/tui/src/app/history_ui.rs            |   1 +
- codex-rs/tui/src/app/plugin_commands.rs       | 290 ++++++++
+ codex-rs/tui/src/app/plugin_commands.rs       | 303 +++++++++
+ codex-rs/tui/src/app/plugin_commands_tests.rs |  66 ++
  codex-rs/tui/src/app/session_lifecycle.rs     |   3 +
  codex-rs/tui/src/app/startup.rs               |   1 +
  codex-rs/tui/src/app/test_support.rs          |   1 +
@@ -81,7 +83,7 @@ Subject: [PATCH] feat(custom): add structured plugin commands and TUI
  codex-rs/tui/src/history_cell/mod.rs          |   2 +
  .../tui/src/history_cell/plugin_surfaces.rs   | 158 +++++
  .../src/history_cell/plugin_surfaces_tests.rs |  42 ++
- 76 files changed, 4983 insertions(+), 39 deletions(-)
+ 78 files changed, 5089 insertions(+), 39 deletions(-)
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/PluginCommandInvokeParams.json
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/PluginCommandInvokeResponse.json
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/PluginCommandListParams.json
@@ -109,7 +111,9 @@ Subject: [PATCH] feat(custom): add structured plugin commands and TUI
  create mode 100644 codex-rs/core-plugins/src/command_contributions.rs
  create mode 100644 codex-rs/core-plugins/src/command_contributions_tests.rs
  create mode 100644 codex-rs/core/src/tasks/plugin_executable.rs
+ create mode 100644 codex-rs/core/src/tasks/plugin_executable_tests.rs
  create mode 100644 codex-rs/tui/src/app/plugin_commands.rs
+ create mode 100644 codex-rs/tui/src/app/plugin_commands_tests.rs
  create mode 100644 codex-rs/tui/src/chatwidget/plugin_commands.rs
  create mode 100644 codex-rs/tui/src/history_cell/plugin_surfaces.rs
  create mode 100644 codex-rs/tui/src/history_cell/plugin_surfaces_tests.rs
@@ -15962,10 +15966,10 @@ index 0c4f1bbfd..437085190 100644
  pub(crate) use user_shell::UserShellCommandMode;
 diff --git a/codex-rs/core/src/tasks/plugin_executable.rs b/codex-rs/core/src/tasks/plugin_executable.rs
 new file mode 100644
-index 000000000..da0464002
+index 000000000..6c2166cf5
 --- /dev/null
 +++ b/codex-rs/core/src/tasks/plugin_executable.rs
-@@ -0,0 +1,209 @@
+@@ -0,0 +1,217 @@
 +use std::sync::Arc;
 +use std::sync::Mutex;
 +
@@ -16029,6 +16033,10 @@ index 000000000..da0464002
 +            let _ = result_tx.send(result);
 +        }
 +    }
++}
++
++fn plugin_hook_command(command: &[String]) -> String {
++    codex_shell_command::parse_command::shlex_join(command)
 +}
 +
 +impl SessionTask for PluginExecutableTask {
@@ -16124,7 +16132,7 @@ index 000000000..da0464002
 +    let request = ExecCommandRequest {
 +        command: command.clone(),
 +        shell_type,
-+        hook_command: command.join(" "),
++        hook_command: plugin_hook_command(&command),
 +        process_id,
 +        yield_time_ms: MAX_YIELD_TIME_MS,
 +        max_output_tokens: Some(DEFAULT_MAX_OUTPUT_TOKENS),
@@ -16174,6 +16182,35 @@ index 000000000..da0464002
 +        output: output_text,
 +        timed_out,
 +    })
++}
++
++#[cfg(test)]
++#[path = "plugin_executable_tests.rs"]
++mod tests;
+diff --git a/codex-rs/core/src/tasks/plugin_executable_tests.rs b/codex-rs/core/src/tasks/plugin_executable_tests.rs
+new file mode 100644
+index 000000000..b802be451
+--- /dev/null
++++ b/codex-rs/core/src/tasks/plugin_executable_tests.rs
+@@ -0,0 +1,19 @@
++use pretty_assertions::assert_eq;
++
++use super::plugin_hook_command;
++
++#[test]
++fn hook_command_shell_escapes_exact_direct_argv() {
++    let command = vec![
++        "/tmp/plugin runner".to_string(),
++        "--message=two words".to_string(),
++        "semi;colon".to_string(),
++        "$HOME".to_string(),
++        String::new(),
++    ];
++
++    assert_eq!(
++        plugin_hook_command(&command),
++        "'/tmp/plugin runner' '--message=two words' 'semi;colon' '$HOME' ''"
++    );
 +}
 diff --git a/codex-rs/exec/src/lib.rs b/codex-rs/exec/src/lib.rs
 index 68bf5cea1..9057ff784 100644
@@ -16313,10 +16350,10 @@ index 024288de5..fb20c6c64 100644
  
 diff --git a/codex-rs/tui/src/app/plugin_commands.rs b/codex-rs/tui/src/app/plugin_commands.rs
 new file mode 100644
-index 000000000..72eec551e
+index 000000000..358c2627c
 --- /dev/null
 +++ b/codex-rs/tui/src/app/plugin_commands.rs
-@@ -0,0 +1,290 @@
+@@ -0,0 +1,303 @@
 +//! Exact-thread plugin command catalog, invocation, and ephemeral presentation projection.
 +
 +use super::*;
@@ -16360,11 +16397,17 @@ index 000000000..72eec551e
 +    result
 +}
 +
++fn projected_command_name(name: &str) -> String {
++    name.strip_prefix('/').unwrap_or(name).to_string()
++}
++
 +fn project_commands(commands: Vec<PluginCommand>) -> Vec<PluginSlashCommand> {
 +    let mut short_counts = HashMap::new();
 +    for command in &commands {
 +        if let Some(short_name) = &command.short_name {
-+            *short_counts.entry(short_name.clone()).or_insert(0usize) += 1;
++            *short_counts
++                .entry(projected_command_name(short_name))
++                .or_insert(0usize) += 1;
 +        }
 +    }
 +
@@ -16373,7 +16416,7 @@ index 000000000..72eec551e
 +        .flat_map(|command| {
 +            let canonical = PluginSlashCommand {
 +                id: command.id.clone(),
-+                name: command.canonical_name,
++                name: projected_command_name(&command.canonical_name),
 +                description: bounded(&command.description, 240),
 +                available: command.available,
 +                deny_reason: command
@@ -16382,22 +16425,29 @@ index 000000000..72eec551e
 +                    .map(|value| bounded(value, 240)),
 +                canonical: true,
 +            };
-+            let short = command.short_name.and_then(|name| {
-+                (short_counts.get(&name) == Some(&1) && !is_builtin_command_name(&name)).then(
-+                    || PluginSlashCommand {
-+                        id: command.id,
-+                        name,
-+                        description: canonical.description.clone(),
-+                        available: canonical.available,
-+                        deny_reason: canonical.deny_reason.clone(),
-+                        canonical: false,
-+                    },
-+                )
-+            });
++            let short = command
++                .short_name
++                .map(|name| projected_command_name(&name))
++                .and_then(|name| {
++                    (short_counts.get(&name) == Some(&1) && !is_builtin_command_name(&name)).then(
++                        || PluginSlashCommand {
++                            id: command.id,
++                            name,
++                            description: canonical.description.clone(),
++                            available: canonical.available,
++                            deny_reason: canonical.deny_reason.clone(),
++                            canonical: false,
++                        },
++                    )
++                });
 +            std::iter::once(canonical).chain(short)
 +        })
 +        .collect()
 +}
++
++#[cfg(test)]
++#[path = "plugin_commands_tests.rs"]
++mod tests;
 +
 +impl App {
 +    pub(super) fn refresh_plugin_commands(&mut self, app_server: &AppServerSession) {
@@ -16606,6 +16656,78 @@ index 000000000..72eec551e
 +        self.backtrack_render_pending = true;
 +        tui.frame_requester().schedule_frame();
 +    }
++}
+diff --git a/codex-rs/tui/src/app/plugin_commands_tests.rs b/codex-rs/tui/src/app/plugin_commands_tests.rs
+new file mode 100644
+index 000000000..43d4ae2e6
+--- /dev/null
++++ b/codex-rs/tui/src/app/plugin_commands_tests.rs
+@@ -0,0 +1,66 @@
++use codex_app_server_protocol::PluginCommandTarget;
++use pretty_assertions::assert_eq;
++
++use super::*;
++use crate::bottom_pane::slash_commands::BuiltinCommandFlags;
++use crate::bottom_pane::slash_commands::SlashCommandItem;
++use crate::bottom_pane::slash_commands::find_slash_command;
++
++#[test]
++fn projection_removes_one_backend_slash_for_render_and_dispatch() {
++    let projected = project_commands(vec![PluginCommand {
++        id: "fixture:review".to_string(),
++        plugin_id: "fixture".to_string(),
++        canonical_name: "/fixture:review".to_string(),
++        short_name: Some("/fixture-review".to_string()),
++        description: "Review the current change".to_string(),
++        target: PluginCommandTarget::Prompt,
++        available: true,
++        deny_reason: None,
++    }]);
++    let expected = vec![
++        PluginSlashCommand {
++            id: "fixture:review".to_string(),
++            name: "fixture:review".to_string(),
++            description: "Review the current change".to_string(),
++            available: true,
++            deny_reason: None,
++            canonical: true,
++        },
++        PluginSlashCommand {
++            id: "fixture:review".to_string(),
++            name: "fixture-review".to_string(),
++            description: "Review the current change".to_string(),
++            available: true,
++            deny_reason: None,
++            canonical: false,
++        },
++    ];
++
++    assert_eq!(projected, expected);
++    assert_eq!(
++        find_slash_command(
++            "fixture:review",
++            BuiltinCommandFlags::default(),
++            &[],
++            &projected,
++        ),
++        Some(SlashCommandItem::Plugin(expected[0].clone()))
++    );
++    assert_eq!(
++        find_slash_command(
++            "fixture-review",
++            BuiltinCommandFlags::default(),
++            &[],
++            &projected,
++        ),
++        Some(SlashCommandItem::Plugin(expected[1].clone()))
++    );
++    assert_eq!(
++        projected
++            .iter()
++            .map(|command| format!("/{}", command.name))
++            .collect::<Vec<_>>(),
++        vec!["/fixture:review".to_string(), "/fixture-review".to_string(),]
++    );
 +}
 diff --git a/codex-rs/tui/src/app/session_lifecycle.rs b/codex-rs/tui/src/app/session_lifecycle.rs
 index 60e6c5400..67a101803 100644

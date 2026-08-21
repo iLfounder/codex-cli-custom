@@ -1,4 +1,4 @@
-From 61dbc2c5bdf15d6d58d36c31bae4592ccc34bb36 Mon Sep 17 00:00:00 2001
+From ca0d24bff53504e656d69f0979ab2f1395ed6c56 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 19:45:26 +0900
 Subject: [PATCH 10/11] feat(custom): add release-aware TUI controls for 0.149
@@ -58,7 +58,7 @@ Subject: [PATCH 10/11] feat(custom): add release-aware TUI controls for 0.149
  create mode 100644 codex-rs/tui/src/app/runtime_controls_tests.rs
 
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadResumeParams.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadResumeParams.json
-index 0bce28ec6a10943996f35fb295d81aef2520acc8..f0907422165340e9fae3c151d3bd72331b452a4a 100644
+index 0bce28ec6..f09074221 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadResumeParams.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadResumeParams.json
 @@ -201,6 +201,103 @@
@@ -4938,7 +4938,7 @@ z=Qb^=om$YmD}s|pT5Rllb)an-aK75a75*>|9{_;yZyMKEbir2?g_vtD5JGk59A{h}
 nAD<!(Y;{Z=(&(oqfHHAHKZjTkZ)S&@M|9^T2>q%OsqJ+_E3&Wp
 
 diff --git a/codex-rs/app-server-protocol/src/protocol/v2/tests.rs b/codex-rs/app-server-protocol/src/protocol/v2/tests.rs
-index 1ca960b5b2f5ab8c94ddc9679dbd6052827880f6..1bf77036e95e12ef1aad4dbcbd13374b0c5af718 100644
+index 1ca960b5b..1bf77036e 100644
 --- a/codex-rs/app-server-protocol/src/protocol/v2/tests.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/v2/tests.rs
 @@ -241,6 +241,38 @@ fn thread_resume_params_accept_turns_page_bootstrap() {
@@ -4981,7 +4981,7 @@ index 1ca960b5b2f5ab8c94ddc9679dbd6052827880f6..1bf77036e95e12ef1aad4dbcbd13374b
  fn thread_resume_response_round_trips_initial_turns_page() {
      let response = ThreadResumeResponse {
 diff --git a/codex-rs/app-server-protocol/src/protocol/v2/thread.rs b/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
-index 75fe5091b188f1f2fc601fadd169dc737cba31bd..2baf106e79b8a1fb68cfcfd95e02da59bbc5b0e7 100644
+index 75fe5091b..2baf106e7 100644
 --- a/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
 @@ -392,6 +392,15 @@ pub struct ThreadResumeParams {
@@ -5001,7 +5001,7 @@ index 75fe5091b188f1f2fc601fadd169dc737cba31bd..2baf106e79b8a1fb68cfcfd95e02da59
      /// populating `thread.turns`. This is useful when the client plans to call
      /// `thread/turns/list` immediately after resuming.
 diff --git a/codex-rs/app-server/README.md b/codex-rs/app-server/README.md
-index a7fa71360c31577f65aa2f0d3c076dfea264ba46..3e7fa9b57bef6c3456434b3896a5c454e2e7c698 100644
+index a7fa71360..3e7fa9b57 100644
 --- a/codex-rs/app-server/README.md
 +++ b/codex-rs/app-server/README.md
 @@ -361,7 +361,7 @@ Start a fresh thread when you need a new Codex conversation.
@@ -5023,7 +5023,7 @@ index a7fa71360c31577f65aa2f0d3c076dfea264ba46..3e7fa9b57bef6c3456434b3896a5c454
  Each entry in `dynamicTools` is either a top-level function or a namespace containing function tools. Dynamic tool identifiers follow the same constraints as Responses tools:
  
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index a57e19a125c007b05c91f76c4bc765b3fd6f9332..5e73dfa664cf72751983d8129baad1652d03fd8f 100644
+index a57e19a12..5e73dfa66 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
 @@ -191,6 +191,18 @@ fn collect_resume_override_mismatches(
@@ -5117,7 +5117,7 @@ index a57e19a125c007b05c91f76c4bc765b3fd6f9332..5e73dfa664cf72751983d8129baad165
                  // the loaded thread or shutdown did not complete.
                  tracing::warn!(
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor_tests.rs b/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
-index ffba9ba44f13e4f4045b5ced0f4af70838712614..b22573c08f939dcd9d2e4b4ef82b1dda855d0a62 100644
+index ffba9ba44..b22573c08 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
 @@ -673,6 +673,7 @@ mod thread_processor_behavior_tests {
@@ -5137,7 +5137,7 @@ index ffba9ba44f13e4f4045b5ced0f4af70838712614..b22573c08f939dcd9d2e4b4ef82b1dda
                  mode: ModeKind::Default,
                  settings: Settings {
 diff --git a/codex-rs/app-server/tests/suite/v2/dynamic_tools.rs b/codex-rs/app-server/tests/suite/v2/dynamic_tools.rs
-index 349f4573d183a4a27dd5b73c2cef35a92eab2018..c1223a2b41d6ecb4a25e31d7659a6b0fe956b5cc 100644
+index 349f4573d..c1223a2b4 100644
 --- a/codex-rs/app-server/tests/suite/v2/dynamic_tools.rs
 +++ b/codex-rs/app-server/tests/suite/v2/dynamic_tools.rs
 @@ -21,6 +21,8 @@ use codex_app_server_protocol::JSONRPCResponse;
@@ -5273,7 +5273,7 @@ index 349f4573d183a4a27dd5b73c2cef35a92eab2018..c1223a2b41d6ecb4a25e31d7659a6b0f
  async fn thread_start_rejects_hidden_dynamic_tools_without_namespace() -> Result<()> {
      let server = MockServer::start().await;
 diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
-index 6db2528b21c2a1fd50ed67f1fa0e5114a6a63589..9cb3d05af838526f4497444dabadfc2f070b78d7 100644
+index 6db2528b2..9cb3d05af 100644
 --- a/codex-rs/core/src/codex_thread.rs
 +++ b/codex-rs/core/src/codex_thread.rs
 @@ -17,6 +17,7 @@ use codex_protocol::config_types::CollaborationMode;
@@ -5293,7 +5293,7 @@ index 6db2528b21c2a1fd50ed67f1fa0e5114a6a63589..9cb3d05af838526f4497444dabadfc2f
      pub session_source: SessionSource,
      pub history_mode: ThreadHistoryMode,
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
-index 7cc8a9b3db9713f7a6040757c9eb587f335a593d..08b0ba373766b9c44326729656eb1794ab17a256 100644
+index 152851387..86792745b 100644
 --- a/codex-rs/core/src/session/session.rs
 +++ b/codex-rs/core/src/session/session.rs
 @@ -243,6 +243,7 @@ impl SessionConfiguration {
@@ -5305,7 +5305,7 @@ index 7cc8a9b3db9713f7a6040757c9eb587f335a593d..08b0ba373766b9c44326729656eb1794
              session_source: self.session_source.clone(),
              history_mode: self.history_mode,
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 61ef39aaab528ba12ccd10845deba53bda56297c..6cf42abede79c419a3d2a41c0158b9bad39eded4 100644
+index 61ef39aaa..6cf42abed 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -1164,6 +1164,7 @@ impl ThreadManager {
@@ -5349,7 +5349,7 @@ index 61ef39aaab528ba12ccd10845deba53bda56297c..6cf42abede79c419a3d2a41c0158b9ba
              client_mcp_extensions,
              ..StartThreadOptions::new(config)
 diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
-index 3196d1bf240f6f04541b758e9dd60666bd82d8f4..c573ddea658f44eeba7236b79ccfe0cf7b833c6d 100644
+index 3196d1bf2..c573ddea6 100644
 --- a/codex-rs/core/src/thread_manager_tests.rs
 +++ b/codex-rs/core/src/thread_manager_tests.rs
 @@ -1714,6 +1714,7 @@ async fn rollout_path_resume_and_fork_read_history_through_thread_store() {
@@ -5385,7 +5385,7 @@ index 3196d1bf240f6f04541b758e9dd60666bd82d8f4..c573ddea658f44eeba7236b79ccfe0cf
              ClientMcpExtensions::default(),
          )
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
-index fc76ab4b47ba88e41a4b85c2f4e269c946cc424d..b401d61faf6d6c74804b80fe7307474aceb9fe85 100644
+index fc76ab4b4..b401d61fa 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 @@ -2802,6 +2802,7 @@ async fn resume_agent_restores_closed_agent_and_accepts_send_input() {
@@ -5397,7 +5397,7 @@ index fc76ab4b47ba88e41a4b85c2f4e269c946cc424d..b401d61faf6d6c74804b80fe7307474a
              ClientMcpExtensions::default(),
          )
 diff --git a/codex-rs/core/tests/suite/fork_thread.rs b/codex-rs/core/tests/suite/fork_thread.rs
-index 1329863048c9cab21f2104f86ba9006b0a672d51..7b1c464ff3de2b14990e2dfd645e536f6933b881 100644
+index 132986304..7b1c464ff 100644
 --- a/codex-rs/core/tests/suite/fork_thread.rs
 +++ b/codex-rs/core/tests/suite/fork_thread.rs
 @@ -263,6 +263,7 @@ async fn assert_copied_fork_persists_inherited_history(history_mode: ThreadHisto
@@ -5409,7 +5409,7 @@ index 1329863048c9cab21f2104f86ba9006b0a672d51..7b1c464ff3de2b14990e2dfd645e536f
                  ClientMcpExtensions::default(),
              )
 diff --git a/codex-rs/core/tests/suite/realtime_conversation.rs b/codex-rs/core/tests/suite/realtime_conversation.rs
-index fa5ee2fb66382c2a059bd12d0ca385013b3eb477..ab281815d4940e8670511b82f47ef3a2320b6a14 100644
+index fa5ee2fb6..ab281815d 100644
 --- a/codex-rs/core/tests/suite/realtime_conversation.rs
 +++ b/codex-rs/core/tests/suite/realtime_conversation.rs
 @@ -3006,6 +3006,7 @@ async fn conversation_startup_context_current_thread_selects_many_turns_by_budge
@@ -5421,7 +5421,7 @@ index fa5ee2fb66382c2a059bd12d0ca385013b3eb477..ab281815d4940e8670511b82f47ef3a2
              ClientMcpExtensions::default(),
          )
 diff --git a/codex-rs/core/tests/suite/resume_warning.rs b/codex-rs/core/tests/suite/resume_warning.rs
-index 66b52a2c38ba3c5a5396194151b39b021d6be125..bb99baac2e62ecec9d7f43223ed9d38e4ddb91bf 100644
+index 66b52a2c3..bb99baac2 100644
 --- a/codex-rs/core/tests/suite/resume_warning.rs
 +++ b/codex-rs/core/tests/suite/resume_warning.rs
 @@ -118,6 +118,7 @@ async fn emits_warning_when_resumed_model_differs() {
@@ -5433,7 +5433,7 @@ index 66b52a2c38ba3c5a5396194151b39b021d6be125..bb99baac2e62ecec9d7f43223ed9d38e
              ClientMcpExtensions::default(),
          )
 diff --git a/codex-rs/core/tests/suite/unstable_features_warning.rs b/codex-rs/core/tests/suite/unstable_features_warning.rs
-index 552c70b5d8e3b1e323ae9a66aa6a734a873b2a26..fbc6fb8eca28e3cb156dc19b82eccc7a7758edab 100644
+index 552c70b5d..fbc6fb8ec 100644
 --- a/codex-rs/core/tests/suite/unstable_features_warning.rs
 +++ b/codex-rs/core/tests/suite/unstable_features_warning.rs
 @@ -50,6 +50,7 @@ async fn emits_warning_when_unstable_features_enabled_via_config() {
@@ -5453,7 +5453,7 @@ index 552c70b5d8e3b1e323ae9a66aa6a734a873b2a26..fbc6fb8eca28e3cb156dc19b82eccc7a
              ClientMcpExtensions::default(),
          )
 diff --git a/codex-rs/tui/src/app.rs b/codex-rs/tui/src/app.rs
-index 70d147de5314040654470be4cdbccc98d9b4d680..30cd56b4f911eb01401ffd9c3a545fda2164df33 100644
+index 70d147de5..30cd56b4f 100644
 --- a/codex-rs/tui/src/app.rs
 +++ b/codex-rs/tui/src/app.rs
 @@ -91,6 +91,8 @@ use crate::workspace_command::WorkspaceCommandRunner;
@@ -5528,7 +5528,7 @@ index 70d147de5314040654470be4cdbccc98d9b4d680..30cd56b4f911eb01401ffd9c3a545fda
  
 diff --git a/codex-rs/tui/src/app/account_controls.rs b/codex-rs/tui/src/app/account_controls.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..e5651d72ea1c29e1f29e91a4e44ec87d5ee72859
+index 000000000..e5651d72e
 --- /dev/null
 +++ b/codex-rs/tui/src/app/account_controls.rs
 @@ -0,0 +1,420 @@
@@ -5954,7 +5954,7 @@ index 0000000000000000000000000000000000000000..e5651d72ea1c29e1f29e91a4e44ec87d
 +}
 diff --git a/codex-rs/tui/src/app/account_login.rs b/codex-rs/tui/src/app/account_login.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..0e3e403ee685b6ef8f579bdbf79523b5ff3f5e4e
+index 000000000..0e3e403ee
 --- /dev/null
 +++ b/codex-rs/tui/src/app/account_login.rs
 @@ -0,0 +1,205 @@
@@ -6165,7 +6165,7 @@ index 0000000000000000000000000000000000000000..0e3e403ee685b6ef8f579bdbf79523b5
 +}
 diff --git a/codex-rs/tui/src/app/account_picker.rs b/codex-rs/tui/src/app/account_picker.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..47724c75fee3651a8b26dfa9e90db05627afb428
+index 000000000..47724c75f
 --- /dev/null
 +++ b/codex-rs/tui/src/app/account_picker.rs
 @@ -0,0 +1,163 @@
@@ -6334,7 +6334,7 @@ index 0000000000000000000000000000000000000000..47724c75fee3651a8b26dfa9e90db056
 +}
 diff --git a/codex-rs/tui/src/app/account_picker_view.rs b/codex-rs/tui/src/app/account_picker_view.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..261e736b1304877beaf7d50bacea5bee0eb656b0
+index 000000000..261e736b1
 --- /dev/null
 +++ b/codex-rs/tui/src/app/account_picker_view.rs
 @@ -0,0 +1,206 @@
@@ -6546,7 +6546,7 @@ index 0000000000000000000000000000000000000000..261e736b1304877beaf7d50bacea5bee
 +mod tests;
 diff --git a/codex-rs/tui/src/app/account_picker_view_tests.rs b/codex-rs/tui/src/app/account_picker_view_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..c60c84a5215d60cbcfc69d97bf7d5b04be64605a
+index 000000000..c60c84a52
 --- /dev/null
 +++ b/codex-rs/tui/src/app/account_picker_view_tests.rs
 @@ -0,0 +1,56 @@
@@ -6608,7 +6608,7 @@ index 0000000000000000000000000000000000000000..c60c84a5215d60cbcfc69d97bf7d5b04
 +}
 diff --git a/codex-rs/tui/src/app/account_validation.rs b/codex-rs/tui/src/app/account_validation.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..7cfacf233dfd8385dd0dff6651be33b7021b976e
+index 000000000..7cfacf233
 --- /dev/null
 +++ b/codex-rs/tui/src/app/account_validation.rs
 @@ -0,0 +1,120 @@
@@ -6733,7 +6733,7 @@ index 0000000000000000000000000000000000000000..7cfacf233dfd8385dd0dff6651be33b7
 +    }
 +}
 diff --git a/codex-rs/tui/src/app/app_server_events.rs b/codex-rs/tui/src/app/app_server_events.rs
-index 19104451ba3a0521e3a437fdd995f99c59f0ce87..6c6bdc1dae202decff7bf8712398be2486accf23 100644
+index 19104451b..6c6bdc1da 100644
 --- a/codex-rs/tui/src/app/app_server_events.rs
 +++ b/codex-rs/tui/src/app/app_server_events.rs
 @@ -88,6 +88,43 @@ impl App {
@@ -6795,7 +6795,7 @@ index 19104451ba3a0521e3a437fdd995f99c59f0ce87..6c6bdc1dae202decff7bf8712398be24
              && self.pending_startup_thread_start
 diff --git a/codex-rs/tui/src/app/dynamic_thread_controls.rs b/codex-rs/tui/src/app/dynamic_thread_controls.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..205ae1ccd16ae8ab4e161b441aa16dc67c90ce66
+index 000000000..205ae1ccd
 --- /dev/null
 +++ b/codex-rs/tui/src/app/dynamic_thread_controls.rs
 @@ -0,0 +1,156 @@
@@ -6957,7 +6957,7 @@ index 0000000000000000000000000000000000000000..205ae1ccd16ae8ab4e161b441aa16dc6
 +mod tests;
 diff --git a/codex-rs/tui/src/app/dynamic_thread_controls_tests.rs b/codex-rs/tui/src/app/dynamic_thread_controls_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..c2752f999c57cbb43c4bb57101ed794bbf4dbe9c
+index 000000000..c2752f999
 --- /dev/null
 +++ b/codex-rs/tui/src/app/dynamic_thread_controls_tests.rs
 @@ -0,0 +1,66 @@
@@ -7028,7 +7028,7 @@ index 0000000000000000000000000000000000000000..c2752f999c57cbb43c4bb57101ed794b
 +    assert!(app.pending_dynamic_thread_control.is_none());
 +}
 diff --git a/codex-rs/tui/src/app/event_dispatch.rs b/codex-rs/tui/src/app/event_dispatch.rs
-index e967543b8ef8e2df320cbebb9b71d3f3ca696f96..08c0e85d7e509e08b8c49a28c10f4b96222c413a 100644
+index e967543b8..08c0e85d7 100644
 --- a/codex-rs/tui/src/app/event_dispatch.rs
 +++ b/codex-rs/tui/src/app/event_dispatch.rs
 @@ -17,8 +17,6 @@ use codex_app_server_protocol::ThreadGoalStatus;
@@ -7170,7 +7170,7 @@ index e967543b8ef8e2df320cbebb9b71d3f3ca696f96..08c0e85d7e509e08b8c49a28c10f4b96
          }
 diff --git a/codex-rs/tui/src/app/runtime_controls.rs b/codex-rs/tui/src/app/runtime_controls.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..6da84ac19aad5161bf8668e26940dbcfca2a1aff
+index 000000000..6da84ac19
 --- /dev/null
 +++ b/codex-rs/tui/src/app/runtime_controls.rs
 @@ -0,0 +1,290 @@
@@ -7466,7 +7466,7 @@ index 0000000000000000000000000000000000000000..6da84ac19aad5161bf8668e26940dbcf
 +mod tests;
 diff --git a/codex-rs/tui/src/app/runtime_controls_tests.rs b/codex-rs/tui/src/app/runtime_controls_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..d03f36c5d7e24bbc03d652198302a1561b87e442
+index 000000000..d03f36c5d
 --- /dev/null
 +++ b/codex-rs/tui/src/app/runtime_controls_tests.rs
 @@ -0,0 +1,55 @@
@@ -7526,7 +7526,7 @@ index 0000000000000000000000000000000000000000..d03f36c5d7e24bbc03d652198302a156
 +    assert!(app.pending_shutdown.is_none());
 +}
 diff --git a/codex-rs/tui/src/app/startup.rs b/codex-rs/tui/src/app/startup.rs
-index ee9b713a764fc1909dca4dd413c3d64c81354f2e..132a8b802f77f9d8af84b1c632e85f593f88c538 100644
+index ee9b713a7..132a8b802 100644
 --- a/codex-rs/tui/src/app/startup.rs
 +++ b/codex-rs/tui/src/app/startup.rs
 @@ -476,7 +476,15 @@ See the Codex keymap documentation for supported actions and examples."
@@ -7547,7 +7547,7 @@ index ee9b713a764fc1909dca4dd413c3d64c81354f2e..132a8b802f77f9d8af84b1c632e85f59
              thread_event_channels: HashMap::new(),
              thread_event_listener_tasks: HashMap::new(),
 diff --git a/codex-rs/tui/src/app/test_support.rs b/codex-rs/tui/src/app/test_support.rs
-index acca925a6a38c94e26105eb8299557fa8814cb9f..4c99bc5433e153ea63011a48db94f36d7590fc31 100644
+index acca925a6..4c99bc543 100644
 --- a/codex-rs/tui/src/app/test_support.rs
 +++ b/codex-rs/tui/src/app/test_support.rs
 @@ -57,7 +57,15 @@ pub(super) async fn make_test_app() -> App {
@@ -7568,7 +7568,7 @@ index acca925a6a38c94e26105eb8299557fa8814cb9f..4c99bc5433e153ea63011a48db94f36d
          thread_event_channels: HashMap::new(),
          thread_event_listener_tasks: HashMap::new(),
 diff --git a/codex-rs/tui/src/app/tests.rs b/codex-rs/tui/src/app/tests.rs
-index 7b043346f0256bd1c56d598185347423c24e31b3..87176681a63b273275d8f50ee8cf2c3108ad3e9d 100644
+index 7b043346f..87176681a 100644
 --- a/codex-rs/tui/src/app/tests.rs
 +++ b/codex-rs/tui/src/app/tests.rs
 @@ -5037,7 +5037,16 @@ async fn active_non_primary_shutdown_target_returns_none_when_shutdown_exit_is_p
@@ -7686,7 +7686,7 @@ index 7b043346f0256bd1c56d598185347423c24e31b3..87176681a63b273275d8f50ee8cf2c31
          op_rx.try_recv().is_err(),
          "shutdown should not submit Op::Shutdown"
 diff --git a/codex-rs/tui/src/app/thread_routing.rs b/codex-rs/tui/src/app/thread_routing.rs
-index 554282f4da5dac83d078f7ba8859c1c668d49374..71c6d07a39672d48252d3ede37bc500c9fd3482f 100644
+index 554282f4d..71c6d07a3 100644
 --- a/codex-rs/tui/src/app/thread_routing.rs
 +++ b/codex-rs/tui/src/app/thread_routing.rs
 @@ -1469,7 +1469,7 @@ impl App {
@@ -7740,7 +7740,7 @@ index 554282f4da5dac83d078f7ba8859c1c668d49374..71c6d07a39672d48252d3ede37bc500c
          self.handle_thread_event_now_recovering_file_changes(event)
              .await;
 diff --git a/codex-rs/tui/src/app_event.rs b/codex-rs/tui/src/app_event.rs
-index 85938623a4fcd2566fda57dd447a4172febe0ce0..bb93d3683f5376b981ab66ef8b4b39e5bd2d69e8 100644
+index 85938623a..bb93d3683 100644
 --- a/codex-rs/tui/src/app_event.rs
 +++ b/codex-rs/tui/src/app_event.rs
 @@ -13,6 +13,8 @@ use std::sync::Arc;
@@ -7820,7 +7820,7 @@ index 85938623a4fcd2566fda57dd447a4172febe0ce0..bb93d3683f5376b981ab66ef8b4b39e5
      OpenAgentsOverview,
      /// Update the daemon-wide overview after a background thread listing finishes.
 diff --git a/codex-rs/tui/src/app_server_session.rs b/codex-rs/tui/src/app_server_session.rs
-index 09d6f798a04fb59d2d9717614ccb1b80f852e0d7..40f96e00b1a42c00cff1fe578722b79699821d2a 100644
+index 09d6f798a..40f96e00b 100644
 --- a/codex-rs/tui/src/app_server_session.rs
 +++ b/codex-rs/tui/src/app_server_session.rs
 @@ -26,6 +26,14 @@ use codex_app_server_client::AppServerPath;
@@ -8097,7 +8097,7 @@ index 09d6f798a04fb59d2d9717614ccb1b80f852e0d7..40f96e00b1a42c00cff1fe578722b796
 +    }
  }
 diff --git a/codex-rs/tui/src/bottom_pane/chat_composer.rs b/codex-rs/tui/src/bottom_pane/chat_composer.rs
-index ec1b00c938fa7bd14a40a09a36ee798140bdc548..11cd835ba5603fd3f95a562f21c1e96e4bfe5a04 100644
+index ec1b00c93..11cd835ba 100644
 --- a/codex-rs/tui/src/bottom_pane/chat_composer.rs
 +++ b/codex-rs/tui/src/bottom_pane/chat_composer.rs
 @@ -396,6 +396,7 @@ fn parent_owned_command_is_allowed(command: SlashCommand, args: &str) -> bool {
@@ -8109,7 +8109,7 @@ index ec1b00c938fa7bd14a40a09a36ee798140bdc548..11cd835ba5603fd3f95a562f21c1e96e
                  | SlashCommand::Raw
                  | SlashCommand::Diff
 diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
-index 331b347bf340474f12d3f1ea0358f4d4205fa65d..9306ccb8f3f540ef2458e567e914e58bab1ea7cc 100644
+index 331b347bf..9306ccb8f 100644
 --- a/codex-rs/tui/src/chatwidget.rs
 +++ b/codex-rs/tui/src/chatwidget.rs
 @@ -1414,6 +1414,11 @@ impl ChatWidget {
@@ -8125,7 +8125,7 @@ index 331b347bf340474f12d3f1ea0358f4d4205fa65d..9306ccb8f3f540ef2458e567e914e58b
          self.frame_requester.schedule_frame();
      }
 diff --git a/codex-rs/tui/src/chatwidget/slash_dispatch.rs b/codex-rs/tui/src/chatwidget/slash_dispatch.rs
-index 1b434ec247a2d85273eef29c5666592b5e53d5d8..b3466e72cfedeb20a8679d463c56f79f7118557c 100644
+index 1b434ec24..b3466e72c 100644
 --- a/codex-rs/tui/src/chatwidget/slash_dispatch.rs
 +++ b/codex-rs/tui/src/chatwidget/slash_dispatch.rs
 @@ -316,6 +316,9 @@ impl ChatWidget {
@@ -8147,7 +8147,7 @@ index 1b434ec247a2d85273eef29c5666592b5e53d5d8..b3466e72cfedeb20a8679d463c56f79f
              | SlashCommand::Permissions
              | SlashCommand::ElevateSandbox
 diff --git a/codex-rs/tui/src/slash_command.rs b/codex-rs/tui/src/slash_command.rs
-index cbfd820859514fdbc00a3a082b3bb498a5773e97..de59a7181f5d725e06b46c299ce3a7585bc9f62c 100644
+index cbfd82085..de59a7181 100644
 --- a/codex-rs/tui/src/slash_command.rs
 +++ b/codex-rs/tui/src/slash_command.rs
 @@ -61,6 +61,7 @@ pub enum SlashCommand {
@@ -8174,3 +8174,6 @@ index cbfd820859514fdbc00a3a082b3bb498a5773e97..de59a7181f5d725e06b46c299ce3a758
              | SlashCommand::MemoryDrop
              | SlashCommand::MemoryUpdate => false,
              SlashCommand::Diff
+-- 
+2.50.1 (Apple Git-155)
+

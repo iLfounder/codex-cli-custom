@@ -1,4 +1,4 @@
-From 07393ffa0f4a178964deb24d5b4d9d6d401a5b02 Mon Sep 17 00:00:00 2001
+From 6a06834ed05c293aa758fa05ad30f3b360500149 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 14:37:11 +0900
 Subject: [PATCH 03/11] feat(custom): add multi-account registry for 0.149
@@ -19,7 +19,7 @@ Subject: [PATCH 03/11] feat(custom): add multi-account registry for 0.149
 
 diff --git a/codex-rs/app-server/src/account_registry.rs b/codex-rs/app-server/src/account_registry.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..d77295e1acf4640ab4358d20f1dfe33dd6d7c6b9
+index 000000000..d77295e1a
 --- /dev/null
 +++ b/codex-rs/app-server/src/account_registry.rs
 @@ -0,0 +1,570 @@
@@ -595,7 +595,7 @@ index 0000000000000000000000000000000000000000..d77295e1acf4640ab4358d20f1dfe33d
 +mod tests;
 diff --git a/codex-rs/app-server/src/account_registry_tests.rs b/codex-rs/app-server/src/account_registry_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..af7c6527682beb7212f377b1287466890d3c9541
+index 000000000..af7c65276
 --- /dev/null
 +++ b/codex-rs/app-server/src/account_registry_tests.rs
 @@ -0,0 +1,161 @@
@@ -761,7 +761,7 @@ index 0000000000000000000000000000000000000000..af7c6527682beb7212f377b128746689
 +    assert!(snapshot.is_default);
 +}
 diff --git a/codex-rs/app-server/src/lib.rs b/codex-rs/app-server/src/lib.rs
-index b0f5062389ebec738bb56321af3dd8b9308c9ea1..0c67d18e0e920b7c275ab07acce9582768aaf87f 100644
+index b0f506238..0c67d18e0 100644
 --- a/codex-rs/app-server/src/lib.rs
 +++ b/codex-rs/app-server/src/lib.rs
 @@ -82,6 +82,7 @@ use tracing_subscriber::util::SubscriberInitExt;
@@ -773,7 +773,7 @@ index b0f5062389ebec738bb56321af3dd8b9308c9ea1..0c67d18e0e920b7c275ab07acce95827
  mod app_info;
  mod app_server_tracing;
 diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
-index 114254494db50fb043bf0b99d456e34f2bff4763..a1a473dc1fa9dffa536f410c20a67b36122e8872 100644
+index 114254494..a1a473dc1 100644
 --- a/codex-rs/app-server/src/message_processor.rs
 +++ b/codex-rs/app-server/src/message_processor.rs
 @@ -4,6 +4,7 @@ use std::sync::Arc;
@@ -831,7 +831,7 @@ index 114254494db50fb043bf0b99d456e34f2bff4763..a1a473dc1fa9dffa536f410c20a67b36
                  "accountSlot/login/start is not implemented yet",
              )),
 diff --git a/codex-rs/app-server/src/request_processors.rs b/codex-rs/app-server/src/request_processors.rs
-index e1e359f1735fcebf83f9994d39e0485eeedc540f..c328a868cb5cd8f852a2bf3a4aa6a160553cd8ce 100644
+index e1e359f17..c328a868c 100644
 --- a/codex-rs/app-server/src/request_processors.rs
 +++ b/codex-rs/app-server/src/request_processors.rs
 @@ -21,6 +21,8 @@ use codex_analytics::InputError;
@@ -844,7 +844,7 @@ index e1e359f1735fcebf83f9994d39e0485eeedc540f..c328a868cb5cd8f852a2bf3a4aa6a160
  use codex_app_server_protocol::AccountTokenUsageSummary;
  use codex_app_server_protocol::AccountUpdatedNotification;
 diff --git a/codex-rs/app-server/src/request_processors/account_processor.rs b/codex-rs/app-server/src/request_processors/account_processor.rs
-index 565bf730ddac5025569f8bb9adeac7b58fa79039..94685ca71b752fcf311d8ee6c2495aa223cc0b4a 100644
+index 565bf730d..94685ca71 100644
 --- a/codex-rs/app-server/src/request_processors/account_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/account_processor.rs
 @@ -1,6 +1,7 @@
@@ -894,7 +894,7 @@ index 565bf730ddac5025569f8bb9adeac7b58fa79039..94685ca71b752fcf311d8ee6c2495aa2
          &self,
          request_id: ConnectionRequestId,
 diff --git a/codex-rs/login/src/auth/auth_tests.rs b/codex-rs/login/src/auth/auth_tests.rs
-index 8a642b0a540e70b6f0192bd314867b75891308f8..19a9260b595d315516b83d5b7c3087fccb4103e5 100644
+index 8a642b0a5..19a9260b5 100644
 --- a/codex-rs/login/src/auth/auth_tests.rs
 +++ b/codex-rs/login/src/auth/auth_tests.rs
 @@ -33,6 +33,84 @@ const WORKSPACE_ID_ALLOWED: &str = "123e4567-e89b-42d3-a456-426614174000";
@@ -1005,7 +1005,7 @@ index 8a642b0a540e70b6f0192bd314867b75891308f8..19a9260b595d315516b83d5b7c3087fc
      initial: CodexAuth,
      refreshed: CodexAuth,
 diff --git a/codex-rs/login/src/auth/manager.rs b/codex-rs/login/src/auth/manager.rs
-index 01c039c0839a1d195ac529a284e476846a99327b..35fd8b58cbe46dde2fe9382f5b990182b909dd0f 100644
+index 01c039c08..35fd8b58c 100644
 --- a/codex-rs/login/src/auth/manager.rs
 +++ b/codex-rs/login/src/auth/manager.rs
 @@ -211,6 +211,30 @@ pub enum RefreshTokenError {
@@ -1543,7 +1543,7 @@ index 01c039c0839a1d195ac529a284e476846a99327b..35fd8b58cbe46dde2fe9382f5b990182
          UnauthorizedRecovery::new(Arc::clone(self))
      }
 diff --git a/codex-rs/login/src/lib.rs b/codex-rs/login/src/lib.rs
-index 717bd0f4b0316a4ae4ec24a2b4f4d837695a7955..f20d24e36f1349892836ef5e2ab653bfe6aad83f 100644
+index 717bd0f4b..f20d24e36 100644
 --- a/codex-rs/login/src/lib.rs
 +++ b/codex-rs/login/src/lib.rs
 @@ -34,6 +34,7 @@ pub use auth::AuthKeyringBackendKind;
@@ -1554,3 +1554,6 @@ index 717bd0f4b0316a4ae4ec24a2b4f4d837695a7955..f20d24e36f1349892836ef5e2ab653bf
  pub use auth::CLIENT_ID;
  pub use auth::CLIENT_ID_OVERRIDE_ENV_VAR;
  pub use auth::CODEX_ACCESS_TOKEN_ENV_VAR;
+-- 
+2.50.1 (Apple Git-155)
+

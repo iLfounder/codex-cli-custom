@@ -1,10 +1,10 @@
-From a9bd5664d8de06df30110fe29f92572176b28b69 Mon Sep 17 00:00:00 2001
+From f8a1c236c88250f9ff4e8d8fdcc1c535886b057f Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 15:13:34 +0900
 Subject: [PATCH 04/11] feat(custom): add execution account binding for 0.149
 
 ---
- codex-rs/app-server/src/account_registry.rs   |  54 ++++++
+ codex-rs/app-server/src/account_registry.rs   |  54 +++++
  codex-rs/app-server/src/message_processor.rs  |   4 +
  .../request_processors/feedback_processor.rs  |   1 +
  .../persisted_resume_settings_tests.rs        |   1 +
@@ -12,39 +12,39 @@ Subject: [PATCH 04/11] feat(custom): add execution account binding for 0.149
  codex-rs/core/src/codex_delegate.rs           |   9 +-
  codex-rs/core/src/codex_thread.rs             |   4 +
  .../core/src/context_manager/history_tests.rs |   1 +
- codex-rs/core/src/execution_account.rs        |  67 +++++++
+ codex-rs/core/src/execution_account.rs        |  67 ++++++
  codex-rs/core/src/lib.rs                      |   4 +
  codex-rs/core/src/session/mod.rs              |   3 +
  codex-rs/core/src/session/review.rs           |   1 +
  .../session/rollout_reconstruction_tests.rs   |   8 +
- codex-rs/core/src/session/session.rs          |  20 ++
- codex-rs/core/src/session/tests.rs            |  35 +++-
+ codex-rs/core/src/session/session.rs          |  22 ++
+ codex-rs/core/src/session/tests.rs            |  56 ++++-
  .../core/src/session/tests/guardian_tests.rs  |  12 +-
  codex-rs/core/src/session/turn_context.rs     |   6 +
- codex-rs/core/src/thread_manager.rs           | 182 +++++++++++++++++-
+ codex-rs/core/src/thread_manager.rs           | 182 ++++++++++++++-
  codex-rs/core/tests/suite/resume_warning.rs   |   1 +
- codex-rs/protocol/src/protocol.rs             |  43 +++++
+ codex-rs/protocol/src/protocol.rs             |  43 ++++
  codex-rs/rollout/src/recorder_tests.rs        |   1 +
  codex-rs/state/src/extract.rs                 |   4 +
  codex-rs/state/src/migrations.rs              |   3 +-
- codex-rs/state/src/migrations_tests.rs        |  22 ++-
+ codex-rs/state/src/migrations_tests.rs        |  22 +-
  codex-rs/state/src/runtime.rs                 |   1 +
- .../state/src/runtime/execution_account.rs    | 134 +++++++++++++
- .../src/runtime/execution_account_tests.rs    |  76 ++++++++
+ .../state/src/runtime/execution_account.rs    | 134 +++++++++++
+ .../src/runtime/execution_account_tests.rs    |  76 +++++++
  codex-rs/state/src/runtime/threads.rs         |  21 ++
- codex-rs/thread-store/src/in_memory.rs        | 143 +++++++++++++-
- .../thread-store/src/local/live_writer.rs     |  24 +++
- codex-rs/thread-store/src/local/mod.rs        | 141 ++++++++++++++
+ codex-rs/thread-store/src/in_memory.rs        | 143 +++++++++++-
+ .../thread-store/src/local/live_writer.rs     |  24 ++
+ codex-rs/thread-store/src/local/mod.rs        | 208 ++++++++++++++++++
  .../src/local/model_context_tests.rs          |   1 +
  .../src/local/rollout_migration_tests.rs      |   1 +
  codex-rs/thread-store/src/store.rs            |  49 +++++
- 34 files changed, 1058 insertions(+), 26 deletions(-)
+ 34 files changed, 1148 insertions(+), 26 deletions(-)
  create mode 100644 codex-rs/core/src/execution_account.rs
  create mode 100644 codex-rs/state/src/runtime/execution_account.rs
  create mode 100644 codex-rs/state/src/runtime/execution_account_tests.rs
 
 diff --git a/codex-rs/app-server/src/account_registry.rs b/codex-rs/app-server/src/account_registry.rs
-index d77295e1acf4640ab4358d20f1dfe33dd6d7c6b9..49e71a17aa7cbdc2e3b3e9aeaec4768669179671 100644
+index d77295e1a..49e71a17a 100644
 --- a/codex-rs/app-server/src/account_registry.rs
 +++ b/codex-rs/app-server/src/account_registry.rs
 @@ -14,6 +14,9 @@ use codex_app_server_protocol::AccountSlotListResponse;
@@ -123,7 +123,7 @@ index d77295e1acf4640ab4358d20f1dfe33dd6d7c6b9..49e71a17aa7cbdc2e3b3e9aeaec47686
      AccountSlotsManifest {
          schema_version: MANIFEST_SCHEMA_VERSION,
 diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
-index a1a473dc1fa9dffa536f410c20a67b36122e8872..15d18af2351204dc08a91ab77bf5281bbc71ac03 100644
+index a1a473dc1..15d18af23 100644
 --- a/codex-rs/app-server/src/message_processor.rs
 +++ b/codex-rs/app-server/src/message_processor.rs
 @@ -361,6 +361,10 @@ impl MessageProcessor {
@@ -138,7 +138,7 @@ index a1a473dc1fa9dffa536f410c20a67b36122e8872..15d18af2351204dc08a91ab77bf5281b
                  Some(provider) => manager.with_code_mode_session_provider(provider),
                  None => manager,
 diff --git a/codex-rs/app-server/src/request_processors/feedback_processor.rs b/codex-rs/app-server/src/request_processors/feedback_processor.rs
-index 8de82abdb0b781fef1af88a51488381f816ea6ea..6077d213e6f85b15b5105b4a0fd12be28ffa4486 100644
+index 8de82abdb..6077d213e 100644
 --- a/codex-rs/app-server/src/request_processors/feedback_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/feedback_processor.rs
 @@ -701,6 +701,7 @@ mod tests {
@@ -150,7 +150,7 @@ index 8de82abdb0b781fef1af88a51488381f816ea6ea..6077d213e6f85b15b5105b4a0fd12be2
                          .expect("absolute feedback rollout directory"),
                      workspace_roots: None,
 diff --git a/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs b/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs
-index ed96867eb1a7607289fea4eb0b0e2912d503ba28..85340f8ca0e9b8a10150a4c0de8fff90a8a1d35e 100644
+index ed96867eb..85340f8ca 100644
 --- a/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs
 +++ b/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs
 @@ -61,6 +61,7 @@ fn turn_context_item(
@@ -162,7 +162,7 @@ index ed96867eb1a7607289fea4eb0b0e2912d503ba28..85340f8ca0e9b8a10150a4c0de8fff90
          workspace_roots: Some(vec![cwd()]),
          current_date: None,
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index afea864aff81b8096aa9622e8820d36f1a885b40..a57e19a125c007b05c91f76c4bc765b3fd6f9332 100644
+index afea864af..a57e19a12 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
 @@ -84,6 +84,7 @@ struct ThreadRevertRuntimeSnapshot {
@@ -203,7 +203,7 @@ index afea864aff81b8096aa9622e8820d36f1a885b40..a57e19a125c007b05c91f76c4bc765b3
                  client_mcp_extensions,
              )
 diff --git a/codex-rs/core/src/codex_delegate.rs b/codex-rs/core/src/codex_delegate.rs
-index 0b4ff1ac46426225056170f8fb5fcb776d480b9d..ff6df2afd669568a94567a39dd9f73a0076a9f61 100644
+index 0b4ff1ac4..ff6df2afd 100644
 --- a/codex-rs/core/src/codex_delegate.rs
 +++ b/codex-rs/core/src/codex_delegate.rs
 @@ -49,8 +49,8 @@ use crate::session::completed_session_loop_termination;
@@ -230,7 +230,7 @@ index 0b4ff1ac46426225056170f8fb5fcb776d480b9d..ff6df2afd669568a94567a39dd9f73a0
              .services
              .turn_environments
 diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
-index 2f5403c60437ace5f82c9302d21aca0c377f7408..5359c4f14496cf9ccdfd16d26360b793d8c779c7 100644
+index 2f5403c60..5359c4f14 100644
 --- a/codex-rs/core/src/codex_thread.rs
 +++ b/codex-rs/core/src/codex_thread.rs
 @@ -196,6 +196,10 @@ impl CodexThread {
@@ -245,7 +245,7 @@ index 2f5403c60437ace5f82c9302d21aca0c377f7408..5359c4f14496cf9ccdfd16d26360b793
      pub fn thread_extension_data(&self) -> &codex_extension_api::ExtensionData {
          &self.session.services.thread_extension_data
 diff --git a/codex-rs/core/src/context_manager/history_tests.rs b/codex-rs/core/src/context_manager/history_tests.rs
-index 666c708ef7f6469ce180b4f7f0f273b45d85f9c6..73494edac410685f2da5d80a3a48e87592c1a7fd 100644
+index 666c708ef..73494edac 100644
 --- a/codex-rs/core/src/context_manager/history_tests.rs
 +++ b/codex-rs/core/src/context_manager/history_tests.rs
 @@ -296,6 +296,7 @@ fn developer_msg_with_fragments(texts: &[&str]) -> ResponseItem {
@@ -258,7 +258,7 @@ index 666c708ef7f6469ce180b4f7f0f273b45d85f9c6..73494edac410685f2da5d80a3a48e875
                  .expect("current directory")
 diff --git a/codex-rs/core/src/execution_account.rs b/codex-rs/core/src/execution_account.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..e9266344c8168ba580c1b5109d84445233c51155
+index 000000000..e9266344c
 --- /dev/null
 +++ b/codex-rs/core/src/execution_account.rs
 @@ -0,0 +1,67 @@
@@ -330,7 +330,7 @@ index 0000000000000000000000000000000000000000..e9266344c8168ba580c1b5109d844452
 +    }
 +}
 diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
-index 1814288fcce819b308529a582209e1f762d7ae20..cf76f99b5506e770c20a7f203593819e4b3d4e8d 100644
+index 1814288fc..cf76f99b5 100644
 --- a/codex-rs/core/src/lib.rs
 +++ b/codex-rs/core/src/lib.rs
 @@ -59,6 +59,7 @@ mod environment_selection;
@@ -352,7 +352,7 @@ index 1814288fcce819b308529a582209e1f762d7ae20..cf76f99b5506e770c20a7f203593819e
  pub(crate) mod web_search;
  pub(crate) mod windows_sandbox_read_grants;
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 513e7c03eb2e57642dd06278af881a6293bbe1f5..58b90acc45d4ef42c029bae166bab9101db656fc 100644
+index 513e7c03e..58b90acc4 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -396,6 +396,7 @@ pub(crate) struct SessionSpawnArgs {
@@ -380,7 +380,7 @@ index 513e7c03eb2e57642dd06278af881a6293bbe1f5..58b90acc45d4ef42c029bae166bab910
              exec_policy,
              tx_event.clone(),
 diff --git a/codex-rs/core/src/session/review.rs b/codex-rs/core/src/session/review.rs
-index d431e602b574d0a93d16af9ed28a439c39e8737c..ae9eca28ddd8d5ff61bc5893da266fd4fe533f57 100644
+index d431e602b..ae9eca28d 100644
 --- a/codex-rs/core/src/session/review.rs
 +++ b/codex-rs/core/src/session/review.rs
 @@ -137,6 +137,7 @@ pub(super) async fn spawn_review_thread(
@@ -392,7 +392,7 @@ index d431e602b574d0a93d16af9ed28a439c39e8737c..ae9eca28ddd8d5ff61bc5893da266fd4
          model_info: Arc::new(model_info.clone()),
          session_telemetry: session_telemetry_for_context,
 diff --git a/codex-rs/core/src/session/rollout_reconstruction_tests.rs b/codex-rs/core/src/session/rollout_reconstruction_tests.rs
-index 1d9848511d3352b2bda4630e41cdfa884bcdf6d1..6ecb4739df6de3ad275d4dd3ddb529e8c227bd8e 100644
+index 1d9848511..6ecb4739d 100644
 --- a/codex-rs/core/src/session/rollout_reconstruction_tests.rs
 +++ b/codex-rs/core/src/session/rollout_reconstruction_tests.rs
 @@ -222,6 +222,7 @@ async fn record_initial_history_resumed_bare_turn_context_does_not_hydrate_previ
@@ -460,7 +460,7 @@ index 1d9848511d3352b2bda4630e41cdfa884bcdf6d1..6ecb4739df6de3ad275d4dd3ddb529e8
          cwd: turn_context.cwd.clone(),
          workspace_roots: None,
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
-index c0b0407967e68211dc84646132e91790e5292420..c644eb85efe827ca7799d1df8c848a8a9bfbaf6a 100644
+index c0b040796..940245af4 100644
 --- a/codex-rs/core/src/session/session.rs
 +++ b/codex-rs/core/src/session/session.rs
 @@ -37,6 +37,7 @@ use tokio::sync::Semaphore;
@@ -500,26 +500,28 @@ index c0b0407967e68211dc84646132e91790e5292420..c644eb85efe827ca7799d1df8c848a8a
                  installation_id,
                  tx_event: tx_event.clone(),
                  agent_status,
-@@ -1552,6 +1561,17 @@ impl Session {
+@@ -1552,6 +1561,19 @@ impl Session {
                  sess.try_ensure_rollout_materialized(PersistContext::Standard)
                      .await?;
              }
-+            let persisted_binding = thread_store
-+                .initialize_execution_account_binding(
-+                    thread_id,
-+                    execution_account.binding.clone(),
-+                )
-+                .await?;
-+            if persisted_binding != execution_account.binding {
-+                anyhow::bail!(
-+                    "thread {thread_id} execution account changed during session startup"
-+                );
++            if !config.ephemeral {
++                let persisted_binding = thread_store
++                    .initialize_execution_account_binding(
++                        thread_id,
++                        execution_account.binding.clone(),
++                    )
++                    .await?;
++                if persisted_binding != execution_account.binding {
++                    anyhow::bail!(
++                        "thread {thread_id} execution account changed during session startup"
++                    );
++                }
 +            }
              {
                  let mut state = sess.state.lock().await;
                  state.queue_pending_session_start_source(session_start_source);
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 4233e5f94d6bf8539313d043d7916840f22034a3..63faa35469ea4ae96fc3cc286ef3452f3d618526 100644
+index 4233e5f94..97c33206b 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -78,6 +78,20 @@ use codex_protocol::turn_input::TurnInput as SubmittedTurnInput;
@@ -611,7 +613,35 @@ index 4233e5f94d6bf8539313d043d7916840f22034a3..63faa35469ea4ae96fc3cc286ef3452f
          model_info,
          Arc::new(ExecPolicyManager::default()),
          tx_event,
-@@ -8191,6 +8212,7 @@ where
+@@ -6343,6 +6364,27 @@ async fn resumed_root_session_uses_thread_id_as_session_id() {
+     assert_eq!(event.thread_id, thread_id);
+ }
+ 
++#[tokio::test]
++async fn ephemeral_session_does_not_create_durable_execution_account_binding() {
++    let (session, _rx_event) = make_session_with_history_source_and_agent_control_and_rx(
++        InitialHistory::New,
++        SessionSource::Exec,
++        AgentControl::default(),
++    )
++    .await
++    .expect("ephemeral session should start");
++
++    assert_eq!(
++        session
++            .services
++            .thread_store
++            .execution_account_binding(session.thread_id())
++            .await
++            .expect("read durable binding"),
++        None
++    );
++}
++
+ #[tokio::test]
+ async fn resumed_subagent_session_restores_persisted_session_id() {
+     let parent_thread_id = ThreadId::new();
+@@ -8191,6 +8233,7 @@ where
  
      let session = Arc::new(Session {
          thread_id,
@@ -619,7 +649,7 @@ index 4233e5f94d6bf8539313d043d7916840f22034a3..63faa35469ea4ae96fc3cc286ef3452f
          installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
          tx_event,
          agent_status: agent_status_tx,
-@@ -8242,6 +8264,7 @@ where
+@@ -8242,6 +8285,7 @@ where
          thread_id,
          SessionId::from(thread_id),
          Some(Arc::clone(&auth_manager)),
@@ -628,7 +658,7 @@ index 4233e5f94d6bf8539313d043d7916840f22034a3..63faa35469ea4ae96fc3cc286ef3452f
          session_configuration.provider.clone(),
          &session_configuration,
 diff --git a/codex-rs/core/src/session/tests/guardian_tests.rs b/codex-rs/core/src/session/tests/guardian_tests.rs
-index 67133adb86811726f8aea26bacf7026b091bbec1..b19e0169fb53c57cd2e810711631297bea11d30c 100644
+index 67133adb8..b19e0169f 100644
 --- a/codex-rs/core/src/session/tests/guardian_tests.rs
 +++ b/codex-rs/core/src/session/tests/guardian_tests.rs
 @@ -803,8 +803,16 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
@@ -651,7 +681,7 @@ index 67133adb86811726f8aea26bacf7026b091bbec1..b19e0169fb53c57cd2e810711631297b
          skills_service,
          plugins_manager,
 diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
-index 728749a4109928072e0b56c5513a6d057f65496f..bb0698fdf15e79e3735274cd140641bc2291e4cf 100644
+index 728749a41..bb0698fdf 100644
 --- a/codex-rs/core/src/session/turn_context.rs
 +++ b/codex-rs/core/src/session/turn_context.rs
 @@ -147,6 +147,7 @@ pub struct TurnContext {
@@ -703,7 +733,7 @@ index 728749a4109928072e0b56c5513a6d057f65496f..bb0698fdf15e79e3735274cd140641bc
              session_configuration.provider.clone(),
              &session_configuration,
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index e91143d561efc66e0c408a3214a5270519b7d451..bfdeb3e21d256af5e617115f86e880b6b697e4ca 100644
+index e91143d56..bfdeb3e21 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -7,6 +7,9 @@ use crate::config::ThreadStoreConfig;
@@ -998,7 +1028,7 @@ index e91143d561efc66e0c408a3214a5270519b7d451..bfdeb3e21d256af5e617115f86e880b6
              skills_service: Arc::clone(&self.skills_service),
              plugins_manager: Arc::clone(&self.plugins_manager),
 diff --git a/codex-rs/core/tests/suite/resume_warning.rs b/codex-rs/core/tests/suite/resume_warning.rs
-index a02519282260ed9d6bdd05e09f0eb8b16cf7db9e..66b52a2c38ba3c5a5396194151b39b021d6be125 100644
+index a02519282..66b52a2c3 100644
 --- a/codex-rs/core/tests/suite/resume_warning.rs
 +++ b/codex-rs/core/tests/suite/resume_warning.rs
 @@ -30,6 +30,7 @@ fn resume_history(
@@ -1010,7 +1040,7 @@ index a02519282260ed9d6bdd05e09f0eb8b16cf7db9e..66b52a2c38ba3c5a5396194151b39b02
          workspace_roots: None,
          current_date: None,
 diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
-index b2230b0aea8d4f57b17b5c772682668bcdc0f34c..42e8dece95ef8e748b1b9627ed8a994cf48ea8bd 100644
+index b2230b0ae..42e8dece9 100644
 --- a/codex-rs/protocol/src/protocol.rs
 +++ b/codex-rs/protocol/src/protocol.rs
 @@ -3019,6 +3019,18 @@ pub struct TurnContextNetworkItem {
@@ -1085,7 +1115,7 @@ index b2230b0aea8d4f57b17b5c772682668bcdc0f34c..42e8dece95ef8e748b1b9627ed8a994c
              workspace_roots: None,
              current_date: None,
 diff --git a/codex-rs/rollout/src/recorder_tests.rs b/codex-rs/rollout/src/recorder_tests.rs
-index 0c4e663aa35bea92fd4cae88b3d2fe1a1384e24d..8bb8d54e49456fb64fef183f4ab3463f2ba7f347 100644
+index 0c4e663aa..8bb8d54e4 100644
 --- a/codex-rs/rollout/src/recorder_tests.rs
 +++ b/codex-rs/rollout/src/recorder_tests.rs
 @@ -1699,6 +1699,7 @@ async fn resume_candidate_matches_cwd_reads_latest_turn_context() -> std::io::Re
@@ -1097,7 +1127,7 @@ index 0c4e663aa35bea92fd4cae88b3d2fe1a1384e24d..8bb8d54e49456fb64fef183f4ab3463f
                  .expect("absolute latest cwd"),
              workspace_roots: None,
 diff --git a/codex-rs/state/src/extract.rs b/codex-rs/state/src/extract.rs
-index 989075a23b447c2baecd0dddd03c8dc2e717b4a6..366d81c052b5c54a4396d01deeb3b8336bef506d 100644
+index 989075a23..366d81c05 100644
 --- a/codex-rs/state/src/extract.rs
 +++ b/codex-rs/state/src/extract.rs
 @@ -421,6 +421,7 @@ mod tests {
@@ -1133,10 +1163,10 @@ index 989075a23b447c2baecd0dddd03c8dc2e717b4a6..366d81c052b5c54a4396d01deeb3b833
                      std::env::current_dir()
                          .expect("current directory")
 diff --git a/codex-rs/state/src/migrations.rs b/codex-rs/state/src/migrations.rs
-index 646cc4f8caba05b4f603b3960dcd58dfec4851c7..32d170176de51b64dc2e03897716648d2b829761 100644
+index 9d14b7997..ba26e455c 100644
 --- a/codex-rs/state/src/migrations.rs
 +++ b/codex-rs/state/src/migrations.rs
-@@ -132,7 +132,8 @@ CREATE TABLE thread_turn_execution_accounts (
+@@ -133,7 +133,8 @@ CREATE TABLE thread_turn_execution_accounts (
      ],
  };
  
@@ -1147,10 +1177,10 @@ index 646cc4f8caba05b4f603b3960dcd58dfec4851c7..32d170176de51b64dc2e03897716648d
      &[&CUSTOM_SCHEMA_V1, &CUSTOM_SCHEMA_V2];
  
 diff --git a/codex-rs/state/src/migrations_tests.rs b/codex-rs/state/src/migrations_tests.rs
-index fb99021eb1aeaa6c8e05b12a25bc03b6840f48e5..8b5428d826116428b77a3b6af11ccbcb19bc60a8 100644
+index 4b667dd57..3e2202656 100644
 --- a/codex-rs/state/src/migrations_tests.rs
 +++ b/codex-rs/state/src/migrations_tests.rs
-@@ -111,15 +111,23 @@ async fn custom_schema_bootstrap_serializes_concurrent_callers() {
+@@ -96,15 +96,23 @@ async fn custom_schema_bootstrap_serializes_concurrent_callers() {
      .expect("custom migration record should load");
      assert_eq!(
          applied,
@@ -1180,7 +1210,7 @@ index fb99021eb1aeaa6c8e05b12a25bc03b6840f48e5..8b5428d826116428b77a3b6af11ccbcb
      )
      .fetch_all(&pool)
      .await
-@@ -127,6 +135,8 @@ async fn custom_schema_bootstrap_serializes_concurrent_callers() {
+@@ -112,6 +120,8 @@ async fn custom_schema_bootstrap_serializes_concurrent_callers() {
      assert_eq!(
          custom_tables,
          vec![
@@ -1190,7 +1220,7 @@ index fb99021eb1aeaa6c8e05b12a25bc03b6840f48e5..8b5428d826116428b77a3b6af11ccbcb
              "writer_authority_store".to_string(),
          ]
 diff --git a/codex-rs/state/src/runtime.rs b/codex-rs/state/src/runtime.rs
-index ca80e9b3f263ec2336c3552f1b44d3406339f4d6..9782c7139460ff3ff2ba5a932509ceeb0c08aeb9 100644
+index ca80e9b3f..9782c7139 100644
 --- a/codex-rs/state/src/runtime.rs
 +++ b/codex-rs/state/src/runtime.rs
 @@ -41,6 +41,7 @@ use std::time::Instant;
@@ -1203,7 +1233,7 @@ index ca80e9b3f263ec2336c3552f1b44d3406339f4d6..9782c7139460ff3ff2ba5a932509ceeb
  mod logs;
 diff --git a/codex-rs/state/src/runtime/execution_account.rs b/codex-rs/state/src/runtime/execution_account.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..d0a235c6cb5e068a52b9d48157c4f4bfc7ee3be9
+index 000000000..d0a235c6c
 --- /dev/null
 +++ b/codex-rs/state/src/runtime/execution_account.rs
 @@ -0,0 +1,134 @@
@@ -1343,7 +1373,7 @@ index 0000000000000000000000000000000000000000..d0a235c6cb5e068a52b9d48157c4f4bf
 +mod tests;
 diff --git a/codex-rs/state/src/runtime/execution_account_tests.rs b/codex-rs/state/src/runtime/execution_account_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..8e268ed65cb91a5a01e7150f252eb72ce542a860
+index 000000000..8e268ed65
 --- /dev/null
 +++ b/codex-rs/state/src/runtime/execution_account_tests.rs
 @@ -0,0 +1,76 @@
@@ -1424,7 +1454,7 @@ index 0000000000000000000000000000000000000000..8e268ed65cb91a5a01e7150f252eb72c
 +    runtime.close().await;
 +}
 diff --git a/codex-rs/state/src/runtime/threads.rs b/codex-rs/state/src/runtime/threads.rs
-index 4bb83cd169c0678f45704319efcbb631635097ca..ee37610b4d03177d26810eae1bfe85a8db396c92 100644
+index 4bb83cd16..ee37610b4 100644
 --- a/codex-rs/state/src/runtime/threads.rs
 +++ b/codex-rs/state/src/runtime/threads.rs
 @@ -1047,6 +1047,17 @@ ON CONFLICT(id) DO UPDATE SET
@@ -1463,7 +1493,7 @@ index 4bb83cd169c0678f45704319efcbb631635097ca..ee37610b4d03177d26810eae1bfe85a8
              sqlx::query(
                  "DELETE FROM thread_spawn_edges WHERE parent_thread_id = ? OR child_thread_id = ?",
 diff --git a/codex-rs/thread-store/src/in_memory.rs b/codex-rs/thread-store/src/in_memory.rs
-index 9ea7e2bdef18f0c4e89d98d2740b9fbb08e44df7..0724a465526226df187f6b6d86a6ecb6cc0a2d7c 100644
+index 9ea7e2bde..0724a4655 100644
 --- a/codex-rs/thread-store/src/in_memory.rs
 +++ b/codex-rs/thread-store/src/in_memory.rs
 @@ -13,6 +13,7 @@ use chrono::Utc;
@@ -1652,7 +1682,7 @@ index 9ea7e2bdef18f0c4e89d98d2740b9fbb08e44df7..0724a465526226df187f6b6d86a6ecb6
          Box::pin(InMemoryThreadStore::create_thread(self, params))
      }
 diff --git a/codex-rs/thread-store/src/local/live_writer.rs b/codex-rs/thread-store/src/local/live_writer.rs
-index 7bebf3d890d81931caede96518ee70700fc68b3b..85ebe3a5e3bfc22f029d82fd0c5be5d1e03b6420 100644
+index 7bebf3d89..85ebe3a5e 100644
 --- a/codex-rs/thread-store/src/local/live_writer.rs
 +++ b/codex-rs/thread-store/src/local/live_writer.rs
 @@ -328,8 +328,32 @@ async fn write_and_project(
@@ -1689,7 +1719,7 @@ index 7bebf3d890d81931caede96518ee70700fc68b3b..85ebe3a5e3bfc22f029d82fd0c5be5d1
          let rollout_path = recorder.rollout_path();
          // SQLite is a rebuildable view. The flush barrier must win before projection starts so it
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index 238b4a80a55aed8f6e025b9b92e76ce2148418b9..187201709c38431f9f99ecae0a3bd0d869105763 100644
+index 238b4a80a..97b04a0b0 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
 @@ -31,6 +31,7 @@ mod pending_thread_metadata_tests;
@@ -1700,7 +1730,43 @@ index 238b4a80a55aed8f6e025b9b92e76ce2148418b9..187201709c38431f9f99ecae0a3bd0d8
  use codex_protocol::protocol::ThreadHistoryMode;
  use codex_rollout::RolloutRecorder;
  use codex_rollout::StateDbHandle;
-@@ -466,6 +467,92 @@ impl ThreadStore for LocalThreadStore {
+@@ -255,6 +256,35 @@ impl LocalThreadStore {
+         self.state_db.clone()
+     }
+ 
++    /// Check the durable thread binding authority for an account slot.
++    pub async fn durable_execution_account_slot_in_use(
++        &self,
++        account_slot_id: &str,
++    ) -> ThreadStoreResult<bool> {
++        if self.state_db.is_none() {
++            return Ok(false);
++        }
++        let pool = self
++            .config
++            .sqlite
++            .open_read_only_pool(&self.config.sqlite.state_db_path())
++            .await
++            .map_err(|err| ThreadStoreError::Internal {
++                message: format!("failed to open execution account binding store: {err}"),
++            })?;
++        let result = sqlx::query_scalar::<_, bool>(
++            "SELECT EXISTS(SELECT 1 FROM thread_execution_account_bindings WHERE slot_id = ?)",
++        )
++        .bind(account_slot_id)
++        .fetch_one(&pool)
++        .await
++        .map_err(|err| ThreadStoreError::Internal {
++            message: format!("failed to scan execution account bindings: {err}"),
++        });
++        pool.close().await;
++        result
++    }
++
+     /// Probe current writer ownership and persistent control metadata without
+     /// creating, deleting, or taking ownership of a thread lock.
+     pub async fn probe_writer_authority(
+@@ -466,6 +496,92 @@ impl ThreadStore for LocalThreadStore {
          self
      }
  
@@ -1793,7 +1859,7 @@ index 238b4a80a55aed8f6e025b9b92e76ce2148418b9..187201709c38431f9f99ecae0a3bd0d8
      fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreFuture<'_, ()> {
          Box::pin(async move { live_writer::create_thread(self, params).await })
      }
-@@ -726,6 +813,7 @@ mod tests {
+@@ -726,6 +842,7 @@ mod tests {
      use codex_protocol::protocol::AgentMessageEvent;
      use codex_protocol::protocol::AskForApproval;
      use codex_protocol::protocol::EventMsg;
@@ -1801,7 +1867,7 @@ index 238b4a80a55aed8f6e025b9b92e76ce2148418b9..187201709c38431f9f99ecae0a3bd0d8
      use codex_protocol::protocol::ItemCompletedEvent;
      use codex_protocol::protocol::SandboxPolicy;
      use codex_protocol::protocol::SessionSource;
-@@ -832,6 +920,58 @@ mod tests {
+@@ -832,6 +949,96 @@ mod tests {
          );
      }
  
@@ -1857,10 +1923,48 @@ index 238b4a80a55aed8f6e025b9b92e76ce2148418b9..187201709c38431f9f99ecae0a3bd0d8
 +        );
 +    }
 +
++    #[tokio::test]
++    async fn durable_execution_account_slot_scan_reads_binding_authority() {
++        let home = TempDir::new().expect("temp dir");
++        let config = test_config(home.path());
++        let runtime = codex_state::StateRuntime::init(
++            config.sqlite.clone(),
++            config.default_model_provider_id.clone(),
++        )
++        .await
++        .expect("state db should initialize");
++        let store = LocalThreadStore::new(config, Some(runtime));
++        let thread_id = ThreadId::default();
++
++        store
++            .initialize_execution_account_binding(
++                thread_id,
++                ExecutionAccountBinding {
++                    slot_id: "secondary".to_string(),
++                    generation: 1,
++                },
++            )
++            .await
++            .expect("initialize durable binding");
++
++        assert!(
++            store
++                .durable_execution_account_slot_in_use("secondary")
++                .await
++                .expect("scan durable bindings")
++        );
++        assert!(
++            !store
++                .durable_execution_account_slot_in_use("unused")
++                .await
++                .expect("scan durable bindings")
++        );
++    }
++
      #[tokio::test]
      async fn live_thread_observes_appended_items_into_sqlite_metadata() {
          let home = TempDir::new().expect("temp dir");
-@@ -968,6 +1108,7 @@ mod tests {
+@@ -968,6 +1175,7 @@ mod tests {
          let turn_context = |model: &str, approval_policy| {
              RolloutItem::TurnContext(TurnContextItem {
                  turn_id: Some("turn-1".to_string()),
@@ -1869,7 +1973,7 @@ index 238b4a80a55aed8f6e025b9b92e76ce2148418b9..187201709c38431f9f99ecae0a3bd0d8
                  workspace_roots: None,
                  current_date: None,
 diff --git a/codex-rs/thread-store/src/local/model_context_tests.rs b/codex-rs/thread-store/src/local/model_context_tests.rs
-index 7e83d8a74f6752144b99c203db05996b270cb76b..684409cf2b622ab89bf204b1533645fad3458112 100644
+index 7e83d8a74..684409cf2 100644
 --- a/codex-rs/thread-store/src/local/model_context_tests.rs
 +++ b/codex-rs/thread-store/src/local/model_context_tests.rs
 @@ -595,6 +595,7 @@ fn agent_message(message: &str) -> RolloutItem {
@@ -1881,7 +1985,7 @@ index 7e83d8a74f6752144b99c203db05996b270cb76b..684409cf2b622ab89bf204b1533645fa
          workspace_roots: None,
          current_date: None,
 diff --git a/codex-rs/thread-store/src/local/rollout_migration_tests.rs b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
-index 1fd9af7691806b655ac0a6cad4dced6204ac0fbe..aee7b3517f1a2e038f11be5f004257cdea5cc531 100644
+index 1fd9af769..aee7b3517 100644
 --- a/codex-rs/thread-store/src/local/rollout_migration_tests.rs
 +++ b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
 @@ -1417,6 +1417,7 @@ async fn migration_compacts_subagent_prefix_and_does_not_project_it() {
@@ -1893,7 +1997,7 @@ index 1fd9af7691806b655ac0a6cad4dced6204ac0fbe..aee7b3517f1a2e038f11be5f004257cd
                  workspace_roots: None,
                  current_date: None,
 diff --git a/codex-rs/thread-store/src/store.rs b/codex-rs/thread-store/src/store.rs
-index 5cc582c51f5b46869621fc9c44d1ca5dc9d8e8ad..f8f00b9915304a0afb2aab60955bfe59877eeeba 100644
+index 5cc582c51..f8f00b991 100644
 --- a/codex-rs/thread-store/src/store.rs
 +++ b/codex-rs/thread-store/src/store.rs
 @@ -1,4 +1,5 @@
@@ -1957,3 +2061,6 @@ index 5cc582c51f5b46869621fc9c44d1ca5dc9d8e8ad..f8f00b9915304a0afb2aab60955bfe59
      /// Creates a new live thread.
      fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreFuture<'_, ()>;
  
+-- 
+2.50.1 (Apple Git-155)
+

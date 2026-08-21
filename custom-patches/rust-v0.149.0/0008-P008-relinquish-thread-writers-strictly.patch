@@ -1,4 +1,4 @@
-From a119314ce76d77a460210166c228ccb86e99d79e Mon Sep 17 00:00:00 2001
+From a98d3937af5122670e58b19a8d15d95f564df3c4 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 18:06:29 +0900
 Subject: [PATCH 08/11] feat(custom): relinquish thread writers strictly for
@@ -7,19 +7,19 @@ Subject: [PATCH 08/11] feat(custom): relinquish thread writers strictly for
 ---
  codex-rs/app-server/src/message_processor.rs  |  11 +-
  .../app-server/src/session_runtime/mod.rs     |   4 +
- .../src/session_runtime/relinquish.rs         | 369 ++++++++++++++++++
+ .../src/session_runtime/relinquish.rs         | 384 ++++++++++++++++++
  .../src/session_runtime/snapshot.rs           |  47 ++-
  codex-rs/app-server/src/thread_state.rs       |  36 ++
  codex-rs/app-server/tests/suite/v2/mod.rs     |   1 +
- .../tests/suite/v2/thread_relinquish.rs       | 111 ++++++
- codex-rs/core/src/codex_thread.rs             |  22 ++
+ .../tests/suite/v2/thread_relinquish.rs       | 111 +++++
+ codex-rs/core/src/codex_thread.rs             |  22 +
  codex-rs/core/src/realtime_conversation.rs    |  10 +
  codex-rs/core/src/session/handlers.rs         |  74 ++++
  codex-rs/core/src/session/mod.rs              |  20 +
  codex-rs/core/src/session/session.rs          |  33 ++
  codex-rs/core/src/session/tests.rs            |   4 +
  codex-rs/core/src/session/turn_input.rs       |  20 +
- codex-rs/core/src/session/turn_input_tests.rs |  66 ++++
+ codex-rs/core/src/session/turn_input_tests.rs |  66 +++
  codex-rs/core/src/tasks/mod.rs                |   8 +
  codex-rs/protocol/src/protocol.rs             |   7 +
  codex-rs/thread-store/src/in_memory.rs        |  20 +
@@ -29,13 +29,13 @@ Subject: [PATCH 08/11] feat(custom): relinquish thread writers strictly for
  .../src/local/tests/relinquish_tests.rs       | 127 ++++++
  .../thread-store/src/local/writer_lock.rs     |  12 +-
  codex-rs/thread-store/src/store.rs            |  23 ++
- 24 files changed, 1105 insertions(+), 25 deletions(-)
+ 24 files changed, 1120 insertions(+), 25 deletions(-)
  create mode 100644 codex-rs/app-server/src/session_runtime/relinquish.rs
  create mode 100644 codex-rs/app-server/tests/suite/v2/thread_relinquish.rs
  create mode 100644 codex-rs/thread-store/src/local/tests/relinquish_tests.rs
 
 diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
-index e58c9df4237ffc8b28c5b036e6cc50346512cc63..25f068b6d781021a0e9a682873423932e50860cd 100644
+index e58c9df42..25f068b6d 100644
 --- a/codex-rs/app-server/src/message_processor.rs
 +++ b/codex-rs/app-server/src/message_processor.rs
 @@ -393,6 +393,7 @@ impl MessageProcessor {
@@ -76,7 +76,7 @@ index e58c9df4237ffc8b28c5b036e6cc50346512cc63..25f068b6d781021a0e9a682873423932
                  .config_processor
                  .read(params)
 diff --git a/codex-rs/app-server/src/session_runtime/mod.rs b/codex-rs/app-server/src/session_runtime/mod.rs
-index 520dbd9b83149a6e403bf604ad04b03b319dd203..03fdb73e54400de114c21f1e1f7b65f947881ebc 100644
+index 77f8e29b2..2117f40e3 100644
 --- a/codex-rs/app-server/src/session_runtime/mod.rs
 +++ b/codex-rs/app-server/src/session_runtime/mod.rs
 @@ -1,6 +1,7 @@
@@ -87,7 +87,7 @@ index 520dbd9b83149a6e403bf604ad04b03b319dd203..03fdb73e54400de114c21f1e1f7b65f9
  mod snapshot;
  
  use std::collections::HashMap;
-@@ -41,6 +42,7 @@ pub(crate) struct SessionRuntimeEngine {
+@@ -42,6 +43,7 @@ pub(crate) struct SessionRuntimeEngine {
      thread_state_manager: ThreadStateManager,
      thread_watch_manager: ThreadWatchManager,
      pending_thread_unloads: Arc<Mutex<HashSet<ThreadId>>>,
@@ -95,7 +95,7 @@ index 520dbd9b83149a6e403bf604ad04b03b319dd203..03fdb73e54400de114c21f1e1f7b65f9
      account_registry: Arc<AccountRegistry>,
      outgoing: Arc<OutgoingMessageSender>,
  }
-@@ -70,6 +72,7 @@ impl SessionRuntimeEngine {
+@@ -71,6 +73,7 @@ impl SessionRuntimeEngine {
          thread_state_manager: ThreadStateManager,
          thread_watch_manager: ThreadWatchManager,
          pending_thread_unloads: Arc<Mutex<HashSet<ThreadId>>>,
@@ -103,7 +103,7 @@ index 520dbd9b83149a6e403bf604ad04b03b319dd203..03fdb73e54400de114c21f1e1f7b65f9
          account_registry: Arc<AccountRegistry>,
          outgoing: Arc<OutgoingMessageSender>,
      ) -> Self {
-@@ -83,6 +86,7 @@ impl SessionRuntimeEngine {
+@@ -84,6 +87,7 @@ impl SessionRuntimeEngine {
              thread_state_manager,
              thread_watch_manager,
              pending_thread_unloads,
@@ -113,10 +113,10 @@ index 520dbd9b83149a6e403bf604ad04b03b319dd203..03fdb73e54400de114c21f1e1f7b65f9
          }
 diff --git a/codex-rs/app-server/src/session_runtime/relinquish.rs b/codex-rs/app-server/src/session_runtime/relinquish.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..c74e85210dfd399be94082f6b7cded13a5e8bfe9
+index 000000000..4620d169b
 --- /dev/null
 +++ b/codex-rs/app-server/src/session_runtime/relinquish.rs
-@@ -0,0 +1,369 @@
+@@ -0,0 +1,384 @@
 +use codex_app_server_protocol::JSONRPCErrorError;
 +use codex_app_server_protocol::ServerNotification;
 +use codex_app_server_protocol::SessionRuntimeChangedNotification;
@@ -174,7 +174,22 @@ index 0000000000000000000000000000000000000000..c74e85210dfd399be94082f6b7cded13
 +                )
 +                .await;
 +        }
-+        let snapshot = self.refresh_snapshot_for_control(thread_id).await?;
++        let snapshot = match self.refresh_snapshot_for_control(thread_id).await {
++            Ok(snapshot) => snapshot,
++            Err(error) => {
++                let _ = self
++                    .update_operation_status(
++                        &params.operation_id,
++                        SessionRuntimeOperationStatus::Failed,
++                        Some(SessionRuntimeOperationError {
++                            code: "runtime_snapshot_unavailable".to_string(),
++                            message: "thread runtime snapshot is unavailable".to_string(),
++                        }),
++                    )
++                    .await;
++                return Err(error);
++            }
++        };
 +        if snapshot.state_revision != params.expected_state_revision {
 +            return self
 +                .failed_relinquish(
@@ -487,7 +502,7 @@ index 0000000000000000000000000000000000000000..c74e85210dfd399be94082f6b7cded13
 +    }
 +}
 diff --git a/codex-rs/app-server/src/session_runtime/snapshot.rs b/codex-rs/app-server/src/session_runtime/snapshot.rs
-index 96be01563386fd49ef21caeb486929cb8b632d71..eeafa17114283ef03983c4fe4ae28f3455a9edc2 100644
+index 96be01563..eeafa1711 100644
 --- a/codex-rs/app-server/src/session_runtime/snapshot.rs
 +++ b/codex-rs/app-server/src/session_runtime/snapshot.rs
 @@ -233,6 +233,7 @@ impl SessionRuntimeEngine {
@@ -574,7 +589,7 @@ index 96be01563386fd49ef21caeb486929cb8b632d71..eeafa17114283ef03983c4fe4ae28f34
  
  fn sanitize_git_origin(origin: String) -> Option<String> {
 diff --git a/codex-rs/app-server/src/thread_state.rs b/codex-rs/app-server/src/thread_state.rs
-index 13580f9d784df9e3bd374f1d7d3caa3948dc35b8..51b8d0c65b2939c119dd8afabbc36e8c150aa31b 100644
+index 13580f9d7..51b8d0c65 100644
 --- a/codex-rs/app-server/src/thread_state.rs
 +++ b/codex-rs/app-server/src/thread_state.rs
 @@ -125,6 +125,13 @@ pub(crate) enum PendingUnloadSubscription<T> {
@@ -628,7 +643,7 @@ index 13580f9d784df9e3bd374f1d7d3caa3948dc35b8..51b8d0c65b2939c119dd8afabbc36e8c
          self.mark_runtime_dirty();
          let changed = {
 diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
-index 6f9dd9b44377ee8eaa9185f562abfc9b24f7c9a4..3c39bcc4a6b757843d0e86fdef6f654f84176f71 100644
+index 6f9dd9b44..3c39bcc4a 100644
 --- a/codex-rs/app-server/tests/suite/v2/mod.rs
 +++ b/codex-rs/app-server/tests/suite/v2/mod.rs
 @@ -99,6 +99,7 @@ mod thread_metadata_update;
@@ -641,7 +656,7 @@ index 6f9dd9b44377ee8eaa9185f562abfc9b24f7c9a4..3c39bcc4a6b757843d0e86fdef6f654f
  mod thread_rollback;
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_relinquish.rs b/codex-rs/app-server/tests/suite/v2/thread_relinquish.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..3bddc88c3bfb0e3f5eb4e34f8dbd8a92704fdc2e
+index 000000000..3bddc88c3
 --- /dev/null
 +++ b/codex-rs/app-server/tests/suite/v2/thread_relinquish.rs
 @@ -0,0 +1,111 @@
@@ -757,7 +772,7 @@ index 0000000000000000000000000000000000000000..3bddc88c3bfb0e3f5eb4e34f8dbd8a92
 +    Ok(())
 +}
 diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
-index 5359c4f14496cf9ccdfd16d26360b793d8c779c7..6d12dd0a9d94e9f1492aeebf79690b17ad6847a0 100644
+index 5359c4f14..6d12dd0a9 100644
 --- a/codex-rs/core/src/codex_thread.rs
 +++ b/codex-rs/core/src/codex_thread.rs
 @@ -191,6 +191,13 @@ impl CodexThread {
@@ -806,7 +821,7 @@ index 5359c4f14496cf9ccdfd16d26360b793d8c779c7..6d12dd0a9d94e9f1492aeebf79690b17
          if elicitations.count == 0 {
              return Err(CodexErr::InvalidRequest(
 diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
-index f9c96bea3b3decb1e1bf5700657369bcdaafae0f..6b76b7be007e83da3fc500baf5955b069ff158cc 100644
+index f9c96bea3..6b76b7be0 100644
 --- a/codex-rs/core/src/realtime_conversation.rs
 +++ b/codex-rs/core/src/realtime_conversation.rs
 @@ -1082,11 +1082,21 @@ async fn stop_conversation_state(
@@ -832,7 +847,7 @@ index f9c96bea3b3decb1e1bf5700657369bcdaafae0f..6b76b7be007e83da3fc500baf5955b06
          Ok(prepared_start) => prepared_start,
          Err(err) => {
 diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
-index a928090cc82eae3368030172e36b938c9422d5c3..35c1182aa21a5b52f91285b641ada185d95be390 100644
+index a928090cc..35c1182aa 100644
 --- a/codex-rs/core/src/session/handlers.rs
 +++ b/codex-rs/core/src/session/handlers.rs
 @@ -79,6 +79,10 @@ pub async fn realtime_conversation_list_voices(sess: &Session, sub_id: String) {
@@ -966,7 +981,7 @@ index a928090cc82eae3368030172e36b938c9422d5c3..35c1182aa21a5b52f91285b641ada185
                      review(&sess, &config, sub.id.clone(), review_request).await;
                      false
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index cf888ec94a08c3ea671de39ec4c079a1601ca63d..6fe06e2f93ea4974b4b5742bc134a1e7625eccf8 100644
+index cf888ec94..6fe06e2f9 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -896,6 +896,26 @@ impl SessionIo {
@@ -997,7 +1012,7 @@ index cf888ec94a08c3ea671de39ec4c079a1601ca63d..6fe06e2f93ea4974b4b5742bc134a1e7
          let event = self
              .rx_event
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
-index 11bdbff1a2042ecbbadb4050c2c828209a760717..1ebed06e5d99705b84f329e7861377cdb8f7c793 100644
+index 79fcab481..fdd096e50 100644
 --- a/codex-rs/core/src/session/session.rs
 +++ b/codex-rs/core/src/session/session.rs
 @@ -30,6 +30,8 @@ use codex_protocol::protocol::TurnEnvironmentSelections;
@@ -1062,7 +1077,7 @@ index 11bdbff1a2042ecbbadb4050c2c828209a760717..1ebed06e5d99705b84f329e7861377cd
                  input_queue: InputQueue::new(),
                  guardian_review_session: GuardianReviewSessionManager::default(),
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 6db15e396d0027bb9aaa4431ed8b2d94b2af41ac..eca18ced0928c1562b073346045624efbed601d0 100644
+index 73e19f137..4e584db22 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -6017,6 +6017,8 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
@@ -1074,7 +1089,7 @@ index 6db15e396d0027bb9aaa4431ed8b2d94b2af41ac..eca18ced0928c1562b073346045624ef
          async_hook_results,
          input_queue: super::input_queue::InputQueue::new(),
          guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
-@@ -8234,6 +8236,8 @@ where
+@@ -8255,6 +8257,8 @@ where
          mcp_prewarm_task: std::sync::Mutex::new(None),
          conversation: Arc::new(RealtimeConversationManager::new()),
          active_turn: Mutex::new(None),
@@ -1084,7 +1099,7 @@ index 6db15e396d0027bb9aaa4431ed8b2d94b2af41ac..eca18ced0928c1562b073346045624ef
          input_queue: super::input_queue::InputQueue::new(),
          guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
 diff --git a/codex-rs/core/src/session/turn_input.rs b/codex-rs/core/src/session/turn_input.rs
-index 424faf3c3a0e298dc5c8e1f562c919388adb9c0e..d1894fdcf711a582db5ebb5af73916f590760ad6 100644
+index 424faf3c3..d1894fdcf 100644
 --- a/codex-rs/core/src/session/turn_input.rs
 +++ b/codex-rs/core/src/session/turn_input.rs
 @@ -138,12 +138,22 @@ impl PreparedTurnInputSettings {
@@ -1133,7 +1148,7 @@ index 424faf3c3a0e298dc5c8e1f562c919388adb9c0e..d1894fdcf711a582db5ebb5af73916f5
      start_if_idle(session, request, submission_id, /*is_recovery*/ true).await
  }
 diff --git a/codex-rs/core/src/session/turn_input_tests.rs b/codex-rs/core/src/session/turn_input_tests.rs
-index b1eb5f07fe54ff370a98aa38681a15a8cd5c7b81..f97b16ece40a169d25760f21abc1ba34d7583558 100644
+index b1eb5f07f..f97b16ece 100644
 --- a/codex-rs/core/src/session/turn_input_tests.rs
 +++ b/codex-rs/core/src/session/turn_input_tests.rs
 @@ -64,6 +64,72 @@ fn user_message(text: &str) -> ResponseItem {
@@ -1210,7 +1225,7 @@ index b1eb5f07fe54ff370a98aa38681a15a8cd5c7b81..f97b16ece40a169d25760f21abc1ba34
      session: &Arc<Session>,
      input: SubmittedTurnInput,
 diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
-index cc71acb3b590ee88e87d9be1a2be89fa40cc156d..0c4f1bbfd4dae0668e8333e432eb72e4eed87811 100644
+index cc71acb3b..0c4f1bbfd 100644
 --- a/codex-rs/core/src/tasks/mod.rs
 +++ b/codex-rs/core/src/tasks/mod.rs
 @@ -460,10 +460,18 @@ impl Session {
@@ -1233,7 +1248,7 @@ index cc71acb3b590ee88e87d9be1a2be89fa40cc156d..0c4f1bbfd4dae0668e8333e432eb72e4
              || (!self.input_queue.has_trigger_turn_mailbox_items().await
                  && !self.has_outstanding_durable_sleep())
 diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
-index 42e8dece95ef8e748b1b9627ed8a994cf48ea8bd..fe7cc42eef62d6691e6200fa5ff7765532cb6de2 100644
+index 42e8dece9..fe7cc42ee 100644
 --- a/codex-rs/protocol/src/protocol.rs
 +++ b/codex-rs/protocol/src/protocol.rs
 @@ -686,6 +686,12 @@ pub enum Op {
@@ -1258,7 +1273,7 @@ index 42e8dece95ef8e748b1b9627ed8a994cf48ea8bd..fe7cc42eef62d6691e6200fa5ff77655
          }
      }
 diff --git a/codex-rs/thread-store/src/in_memory.rs b/codex-rs/thread-store/src/in_memory.rs
-index 4529e319e1abf80e29f296be6235b35222327ed5..00759a11c6d23fd8477aabe0a1ef4fe734f7e39f 100644
+index 4529e319e..00759a11c 100644
 --- a/codex-rs/thread-store/src/in_memory.rs
 +++ b/codex-rs/thread-store/src/in_memory.rs
 @@ -1070,6 +1070,26 @@ impl ThreadStore for InMemoryThreadStore {
@@ -1289,7 +1304,7 @@ index 4529e319e1abf80e29f296be6235b35222327ed5..00759a11c6d23fd8477aabe0a1ef4fe7
          Box::pin(async move {
              self.state.lock().await.calls.discard_thread += 1;
 diff --git a/codex-rs/thread-store/src/live_thread.rs b/codex-rs/thread-store/src/live_thread.rs
-index 2f043800f252f1d32e1b22c4496fe42cec78f2be..8f367d6990e6a14f0f639fbabf8e27d95f1d4805 100644
+index 2f043800f..8f367d699 100644
 --- a/codex-rs/thread-store/src/live_thread.rs
 +++ b/codex-rs/thread-store/src/live_thread.rs
 @@ -287,6 +287,18 @@ impl LiveThread {
@@ -1312,7 +1327,7 @@ index 2f043800f252f1d32e1b22c4496fe42cec78f2be..8f367d6990e6a14f0f639fbabf8e27d9
          self.thread_store.discard_thread(self.thread_id).await
      }
 diff --git a/codex-rs/thread-store/src/local/live_writer.rs b/codex-rs/thread-store/src/local/live_writer.rs
-index 85ebe3a5e3bfc22f029d82fd0c5be5d1e03b6420..7e2395179f25105063c2e1a1923a07013f47fd37 100644
+index 85ebe3a5e..7e2395179 100644
 --- a/codex-rs/thread-store/src/local/live_writer.rs
 +++ b/codex-rs/thread-store/src/local/live_writer.rs
 @@ -198,6 +198,47 @@ pub(super) async fn shutdown_thread(
@@ -1395,10 +1410,10 @@ index 85ebe3a5e3bfc22f029d82fd0c5be5d1e03b6420..7e2395179f25105063c2e1a1923a0701
  
  fn thread_store_io_error(err: std::io::Error) -> ThreadStoreError {
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index 76ff169d6e18cbcc4de799a7008c569f425ae82c..15b9d7c8561f303de9a99236dcfb73c7254c6fa4 100644
+index c89d30761..ece58f389 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
-@@ -730,6 +730,38 @@ impl ThreadStore for LocalThreadStore {
+@@ -759,6 +759,38 @@ impl ThreadStore for LocalThreadStore {
          Box::pin(async move { live_writer::shutdown_thread(self, thread_id).await })
      }
  
@@ -1437,7 +1452,7 @@ index 76ff169d6e18cbcc4de799a7008c569f425ae82c..15b9d7c8561f303de9a99236dcfb73c7
      fn discard_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
          Box::pin(async move { live_writer::discard_thread(self, thread_id).await })
      }
-@@ -922,6 +954,9 @@ impl ThreadStore for LocalThreadStore {
+@@ -951,6 +983,9 @@ impl ThreadStore for LocalThreadStore {
  
  #[cfg(test)]
  mod tests {
@@ -1449,7 +1464,7 @@ index 76ff169d6e18cbcc4de799a7008c569f425ae82c..15b9d7c8561f303de9a99236dcfb73c7
      use codex_protocol::ThreadId;
 diff --git a/codex-rs/thread-store/src/local/tests/relinquish_tests.rs b/codex-rs/thread-store/src/local/tests/relinquish_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..a435c467c7ee941f21bb6769cfbadad95ac5dabe
+index 000000000..a435c467c
 --- /dev/null
 +++ b/codex-rs/thread-store/src/local/tests/relinquish_tests.rs
 @@ -0,0 +1,127 @@
@@ -1581,7 +1596,7 @@ index 0000000000000000000000000000000000000000..a435c467c7ee941f21bb6769cfbadad9
 +    assert!(matches!(competing, Err(ThreadStoreError::Conflict { .. })));
 +}
 diff --git a/codex-rs/thread-store/src/local/writer_lock.rs b/codex-rs/thread-store/src/local/writer_lock.rs
-index 5ed33b9573d963da73cf78ebe13ad465c9edcb4a..292e2f721847de864467e5017d7c7d4a01c847a5 100644
+index 5ed33b957..292e2f721 100644
 --- a/codex-rs/thread-store/src/local/writer_lock.rs
 +++ b/codex-rs/thread-store/src/local/writer_lock.rs
 @@ -31,7 +31,7 @@ pub(super) struct WriterLockGuard {
@@ -1620,7 +1635,7 @@ index 5ed33b9573d963da73cf78ebe13ad465c9edcb4a..292e2f721847de864467e5017d7c7d4a
  
  impl Drop for WriterLockGuard {
 diff --git a/codex-rs/thread-store/src/store.rs b/codex-rs/thread-store/src/store.rs
-index e4510eabde80e7c2bf18e552af49d65430bc2f3c..ef163a70005031183d1e689a06bf2f2ef54a1ab9 100644
+index e4510eabd..ef163a700 100644
 --- a/codex-rs/thread-store/src/store.rs
 +++ b/codex-rs/thread-store/src/store.rs
 @@ -261,6 +261,29 @@ pub trait ThreadStore: Any + Send + Sync {
@@ -1653,3 +1668,6 @@ index e4510eabde80e7c2bf18e552af49d65430bc2f3c..ef163a70005031183d1e689a06bf2f2e
      /// Discards the live thread writer without forcing pending in-memory items to become durable.
      ///
      /// Core calls this when session initialization fails after a live writer has been created.
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,4 +1,4 @@
-From 4c1ab67fb724fcd330e77e11982850932202b233 Mon Sep 17 00:00:00 2001
+From 7c5c5c6b8b702f188050c4de6a61117355e8deaf Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 17:31:24 +0900
 Subject: [PATCH 07/11] feat(custom): add live account registration for 0.149
@@ -33,16 +33,16 @@ Subject: [PATCH 07/11] feat(custom): add live account registration for 0.149
  codex-rs/app-server/src/outgoing_message.rs   | 121 +++-
  codex-rs/app-server/src/request_processors.rs |   2 +-
  .../request_processors/account_processor.rs   |  51 +-
- .../account_processor/slot_login.rs           | 581 ++++++++++++++++
+ .../account_processor/slot_login.rs           | 588 ++++++++++++++++
  .../account_processor/slot_login/transport.rs | 210 ++++++
  .../account_processor/slot_logout.rs          |  46 ++
- .../app-server/src/session_runtime/mod.rs     |  25 +
+ .../app-server/src/session_runtime/mod.rs     |  37 +
  .../app-server/tests/suite/v2/account_slot.rs |  82 +++
  codex-rs/app-server/tests/suite/v2/mod.rs     |   1 +
  codex-rs/core/src/thread_manager.rs           |  15 +
  codex-rs/login/src/lib.rs                     |   1 +
  codex-rs/login/src/server.rs                  |  70 +-
- 38 files changed, 2700 insertions(+), 71 deletions(-)
+ 38 files changed, 2719 insertions(+), 71 deletions(-)
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/AccountSlotLogoutParams.json
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/AccountSlotLogoutResponse.json
  create mode 100644 codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotLogoutParams.ts
@@ -54,7 +54,7 @@ Subject: [PATCH 07/11] feat(custom): add live account registration for 0.149
  create mode 100644 codex-rs/app-server/tests/suite/v2/account_slot.rs
 
 diff --git a/codex-rs/app-server-protocol/schema/json/ClientRequest.json b/codex-rs/app-server-protocol/schema/json/ClientRequest.json
-index 65431508e7cdf37f911044c8f3053e5aaf47f177..fbf4e0fb3620371aa9badbe53e4cdcd87b0ce74f 100644
+index 65431508e..fbf4e0fb3 100644
 --- a/codex-rs/app-server-protocol/schema/json/ClientRequest.json
 +++ b/codex-rs/app-server-protocol/schema/json/ClientRequest.json
 @@ -155,6 +155,30 @@
@@ -120,7 +120,7 @@ index 65431508e7cdf37f911044c8f3053e5aaf47f177..fbf4e0fb3620371aa9badbe53e4cdcd8
        "properties": {
          "id": {
 diff --git a/codex-rs/app-server-protocol/schema/json/ServerNotification.json b/codex-rs/app-server-protocol/schema/json/ServerNotification.json
-index 570e6a37d7ebcfbcf575aa7e8c62c6f8cce97a57..f4303f0d156fe88889547e17e73efdf97c0590af 100644
+index 570e6a37d..f4303f0d1 100644
 --- a/codex-rs/app-server-protocol/schema/json/ServerNotification.json
 +++ b/codex-rs/app-server-protocol/schema/json/ServerNotification.json
 @@ -54,7 +54,8 @@
@@ -134,7 +134,7 @@ index 570e6a37d7ebcfbcf575aa7e8c62c6f8cce97a57..f4303f0d156fe88889547e17e73efdf9
        "type": "string"
      },
 diff --git a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
-index 0cafca43cae9a628647d85250fe6a2e1bf2db72e..f8a04026fa5a794310a3bb398f74b5a402b4c930 100644
+index 0cafca43c..f8a04026f 100644
 --- a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
 +++ b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
 @@ -2051,6 +2051,30 @@
@@ -225,7 +225,7 @@ index 0cafca43cae9a628647d85250fe6a2e1bf2db72e..f8a04026fa5a794310a3bb398f74b5a4
          "description": "A host-managed account slot without credential paths, email addresses, or tokens.",
          "properties": {
 diff --git a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
-index 8a46af9f11706bb7b66e909e4c3fd7d49de6e83b..1956711a876ef7761bedcd185ee202da84f895a3 100644
+index 8a46af9f1..1956711a8 100644
 --- a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
 +++ b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
 @@ -125,7 +125,8 @@
@@ -316,7 +316,7 @@ index 8a46af9f11706bb7b66e909e4c3fd7d49de6e83b..1956711a876ef7761bedcd185ee202da
            "properties": {
              "id": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/AccountSlotChangedNotification.json b/codex-rs/app-server-protocol/schema/json/v2/AccountSlotChangedNotification.json
-index 31b96fbf6e6aaf4bd8fd267013b2a8545a16483b..bce122efbc0f84b73f57b75681b7daaf16fdefdd 100644
+index 31b96fbf6..bce122efb 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/AccountSlotChangedNotification.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/AccountSlotChangedNotification.json
 @@ -5,7 +5,8 @@
@@ -330,7 +330,7 @@ index 31b96fbf6e6aaf4bd8fd267013b2a8545a16483b..bce122efbc0f84b73f57b75681b7daaf
        "type": "string"
      },
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/AccountSlotListResponse.json b/codex-rs/app-server-protocol/schema/json/v2/AccountSlotListResponse.json
-index 150e65c32d18d19164d51e7423f231b56f90d846..eb5c280b38121c424181367f6586c5e5add1b887 100644
+index 150e65c32..eb5c280b3 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/AccountSlotListResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/AccountSlotListResponse.json
 @@ -5,7 +5,8 @@
@@ -344,7 +344,7 @@ index 150e65c32d18d19164d51e7423f231b56f90d846..eb5c280b38121c424181367f6586c5e5
        "type": "string"
      },
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/AccountSlotLoginStartResponse.json b/codex-rs/app-server-protocol/schema/json/v2/AccountSlotLoginStartResponse.json
-index fdb8b0a61060d2b210c5f672dfd5b93f89aac78c..9cb9c6d9756c386be68ed9cf53ec3063b71e7f20 100644
+index fdb8b0a61..9cb9c6d97 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/AccountSlotLoginStartResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/AccountSlotLoginStartResponse.json
 @@ -5,7 +5,8 @@
@@ -359,7 +359,7 @@ index fdb8b0a61060d2b210c5f672dfd5b93f89aac78c..9cb9c6d9756c386be68ed9cf53ec3063
      },
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/AccountSlotLogoutParams.json b/codex-rs/app-server-protocol/schema/json/v2/AccountSlotLogoutParams.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..511b8d5990a17e5c21c1258436ba2524c9e1884e
+index 000000000..511b8d599
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/json/v2/AccountSlotLogoutParams.json
 @@ -0,0 +1,26 @@
@@ -392,7 +392,7 @@ index 0000000000000000000000000000000000000000..511b8d5990a17e5c21c1258436ba2524
 \ No newline at end of file
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/AccountSlotLogoutResponse.json b/codex-rs/app-server-protocol/schema/json/v2/AccountSlotLogoutResponse.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..e3b1185d21ff329468e4f495ac0dc60e839c030e
+index 000000000..e3b1185d2
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/json/v2/AccountSlotLogoutResponse.json
 @@ -0,0 +1,178 @@
@@ -11795,7 +11795,7 @@ zHp(rDgf#NM+Y3L2*J_4|90$BEteIY`DnU%|-Yin&2(1ACAZ>GJeGmM|;b_KAArB`_
 o71*WWG1rD({Ln3Fw@`J$Jags*cG6SLJSd91eTQu@EBe)jO8fGsxBvhE
 
 diff --git a/codex-rs/app-server-protocol/schema/typescript/ClientRequest.ts b/codex-rs/app-server-protocol/schema/typescript/ClientRequest.ts
-index d17cda68fc627ceab29b65a386b96eb9a06e2508..31ca466b7e1d0ac606f36fa39fc3eb399d28f5de 100644
+index d17cda68f..31ca466b7 100644
 --- a/codex-rs/app-server-protocol/schema/typescript/ClientRequest.ts
 +++ b/codex-rs/app-server-protocol/schema/typescript/ClientRequest.ts
 @@ -9,6 +9,7 @@ import type { InitializeParams } from "./InitializeParams";
@@ -11813,7 +11813,7 @@ index d17cda68fc627ceab29b65a386b96eb9a06e2508..31ca466b7e1d0ac606f36fa39fc3eb39
 -export type ClientRequest ={ "method": "initialize", id: RequestId, params: InitializeParams, } | { "method": "thread/start", id: RequestId, params: ThreadStartParams, } | { "method": "thread/resume", id: RequestId, params: ThreadResumeParams, } | { "method": "thread/fork", id: RequestId, params: ThreadForkParams, } | { "method": "thread/archive", id: RequestId, params: ThreadArchiveParams, } | { "method": "thread/delete", id: RequestId, params: ThreadDeleteParams, } | { "method": "thread/unsubscribe", id: RequestId, params: ThreadUnsubscribeParams, } | { "method": "thread/account/switch", id: RequestId, params: ThreadAccountSwitchParams, } | { "method": "thread/relinquish", id: RequestId, params: ThreadRelinquishParams, } | { "method": "thread/name/set", id: RequestId, params: ThreadSetNameParams, } | { "method": "thread/goal/set", id: RequestId, params: ThreadGoalSetParams, } | { "method": "thread/goal/get", id: RequestId, params: ThreadGoalGetParams, } | { "method": "thread/goal/clear", id: RequestId, params: ThreadGoalClearParams, } | { "method": "thread/metadata/update", id: RequestId, params: ThreadMetadataUpdateParams, } | { "method": "thread/section/move", id: RequestId, params: ThreadSectionMoveParams, } | { "method": "thread/unarchive", id: RequestId, params: ThreadUnarchiveParams, } | { "method": "thread/compact/start", id: RequestId, params: ThreadCompactStartParams, } | { "method": "thread/shellCommand", id: RequestId, params: ThreadShellCommandParams, } | { "method": "thread/approveGuardianDeniedAction", id: RequestId, params: ThreadApproveGuardianDeniedActionParams, } | { "method": "thread/rollback", id: RequestId, params: ThreadRollbackParams, } | { "method": "thread/list", id: RequestId, params: ThreadListParams, } | { "method": "threadSection/list", id: RequestId, params: ThreadSectionListParams, } | { "method": "threadSection/create", id: RequestId, params: ThreadSectionCreateParams, } | { "method": "threadSection/update", id: RequestId, params: ThreadSectionUpdateParams, } | { "method": "threadSection/delete", id: RequestId, params: ThreadSectionDeleteParams, } | { "method": "thread/loaded/list", id: RequestId, params: ThreadLoadedListParams, } | { "method": "sessionRuntime/list", id: RequestId, params: SessionRuntimeListParams, } | { "method": "thread/read", id: RequestId, params: ThreadReadParams, } | { "method": "thread/inject_items", id: RequestId, params: ThreadInjectItemsParams, } | { "method": "skills/list", id: RequestId, params: SkillsListParams, } | { "method": "skills/extraRoots/set", id: RequestId, params: SkillsExtraRootsSetParams, } | { "method": "hooks/list", id: RequestId, params: HooksListParams, } | { "method": "marketplace/add", id: RequestId, params: MarketplaceAddParams, } | { "method": "marketplace/remove", id: RequestId, params: MarketplaceRemoveParams, } | { "method": "marketplace/upgrade", id: RequestId, params: MarketplaceUpgradeParams, } | { "method": "plugin/list", id: RequestId, params: PluginListParams, } | { "method": "plugin/installed", id: RequestId, params: PluginInstalledParams, } | { "method": "plugin/read", id: RequestId, params: PluginReadParams, } | { "method": "plugin/skill/read", id: RequestId, params: PluginSkillReadParams, } | { "method": "plugin/share/save", id: RequestId, params: PluginShareSaveParams, } | { "method": "plugin/share/updateTargets", id: RequestId, params: PluginShareUpdateTargetsParams, } | { "method": "plugin/share/list", id: RequestId, params: PluginShareListParams, } | { "method": "plugin/share/checkout", id: RequestId, params: PluginShareCheckoutParams, } | { "method": "plugin/share/delete", id: RequestId, params: PluginShareDeleteParams, } | { "method": "app/read", id: RequestId, params: AppsReadParams, } | { "method": "app/list", id: RequestId, params: AppsListParams, } | { "method": "app/installed", id: RequestId, params: AppsInstalledParams, } | { "method": "fs/readFile", id: RequestId, params: FsReadFileParams, } | { "method": "fs/writeFile", id: RequestId, params: FsWriteFileParams, } | { "method": "fs/createDirectory", id: RequestId, params: FsCreateDirectoryParams, } | { "method": "fs/getMetadata", id: RequestId, params: FsGetMetadataParams, } | { "method": "fs/readDirectory", id: RequestId, params: FsReadDirectoryParams, } | { "method": "fs/remove", id: RequestId, params: FsRemoveParams, } | { "method": "fs/copy", id: RequestId, params: FsCopyParams, } | { "method": "fs/watch", id: RequestId, params: FsWatchParams, } | { "method": "fs/unwatch", id: RequestId, params: FsUnwatchParams, } | { "method": "skills/config/write", id: RequestId, params: SkillsConfigWriteParams, } | { "method": "plugin/install", id: RequestId, params: PluginInstallParams, } | { "method": "plugin/uninstall", id: RequestId, params: PluginUninstallParams, } | { "method": "turn/start", id: RequestId, params: TurnStartParams, } | { "method": "turn/steer", id: RequestId, params: TurnSteerParams, } | { "method": "turn/interrupt", id: RequestId, params: TurnInterruptParams, } | { "method": "review/start", id: RequestId, params: ReviewStartParams, } | { "method": "model/list", id: RequestId, params: ModelListParams, } | { "method": "modelProvider/capabilities/read", id: RequestId, params: ModelProviderCapabilitiesReadParams, } | { "method": "experimentalFeature/list", id: RequestId, params: ExperimentalFeatureListParams, } | { "method": "permissionProfile/list", id: RequestId, params: PermissionProfileListParams, } | { "method": "experimentalFeature/enablement/set", id: RequestId, params: ExperimentalFeatureEnablementSetParams, } | { "method": "mcpServer/oauth/login", id: RequestId, params: McpServerOauthLoginParams, } | { "method": "config/mcpServer/reload", id: RequestId, params: undefined, } | { "method": "mcpServerStatus/list", id: RequestId, params: ListMcpServerStatusParams, } | { "method": "mcpServer/resource/read", id: RequestId, params: McpResourceReadParams, } | { "method": "mcpServer/tool/call", id: RequestId, params: McpServerToolCallParams, } | { "method": "windowsSandbox/setupStart", id: RequestId, params: WindowsSandboxSetupStartParams, } | { "method": "windowsSandbox/readiness", id: RequestId, params: undefined, } | { "method": "accountSlot/list", id: RequestId, params: AccountSlotListParams, } | { "method": "accountSlot/login/start", id: RequestId, params: AccountSlotLoginStartParams, } | { "method": "account/login/start", id: RequestId, params: LoginAccountParams, } | { "method": "account/login/cancel", id: RequestId, params: CancelLoginAccountParams, } | { "method": "account/logout", id: RequestId, params: undefined, } | { "method": "account/rateLimits/read", id: RequestId, params: undefined, } | { "method": "account/rateLimitResetCredit/consume", id: RequestId, params: ConsumeAccountRateLimitResetCreditParams, } | { "method": "account/usage/read", id: RequestId, params?: GetAccountTokenUsageParams | undefined, } | { "method": "account/workspaceMessages/read", id: RequestId, params: undefined, } | { "method": "account/sendAddCreditsNudgeEmail", id: RequestId, params: SendAddCreditsNudgeEmailParams, } | { "method": "feedback/upload", id: RequestId, params: FeedbackUploadParams, } | { "method": "command/exec", id: RequestId, params: CommandExecParams, } | { "method": "command/exec/write", id: RequestId, params: CommandExecWriteParams, } | { "method": "command/exec/terminate", id: RequestId, params: CommandExecTerminateParams, } | { "method": "command/exec/resize", id: RequestId, params: CommandExecResizeParams, } | { "method": "config/read", id: RequestId, params: ConfigReadParams, } | { "method": "externalAgentConfig/detect", id: RequestId, params: ExternalAgentConfigDetectParams, } | { "method": "externalAgentConfig/import", id: RequestId, params: ExternalAgentConfigImportParams, } | { "method": "externalAgentConfig/import/recordHistory", id: RequestId, params: ExternalAgentConfigImportHistoryRecordParams, } | { "method": "externalAgentConfig/import/readHistories", id: RequestId, params: undefined, } | { "method": "config/value/write", id: RequestId, params: ConfigValueWriteParams, } | { "method": "config/batchWrite", id: RequestId, params: ConfigBatchWriteParams, } | { "method": "configRequirements/read", id: RequestId, params: undefined, } | { "method": "account/read", id: RequestId, params: GetAccountParams, } | { "method": "getConversationSummary", id: RequestId, params: GetConversationSummaryParams, } | { "method": "gitDiffToRemote", id: RequestId, params: GitDiffToRemoteParams, } | { "method": "getAuthStatus", id: RequestId, params: GetAuthStatusParams, } | { "method": "fuzzyFileSearch", id: RequestId, params: FuzzyFileSearchParams, };
 +export type ClientRequest ={ "method": "initialize", id: RequestId, params: InitializeParams, } | { "method": "thread/start", id: RequestId, params: ThreadStartParams, } | { "method": "thread/resume", id: RequestId, params: ThreadResumeParams, } | { "method": "thread/fork", id: RequestId, params: ThreadForkParams, } | { "method": "thread/archive", id: RequestId, params: ThreadArchiveParams, } | { "method": "thread/delete", id: RequestId, params: ThreadDeleteParams, } | { "method": "thread/unsubscribe", id: RequestId, params: ThreadUnsubscribeParams, } | { "method": "thread/account/switch", id: RequestId, params: ThreadAccountSwitchParams, } | { "method": "thread/relinquish", id: RequestId, params: ThreadRelinquishParams, } | { "method": "thread/name/set", id: RequestId, params: ThreadSetNameParams, } | { "method": "thread/goal/set", id: RequestId, params: ThreadGoalSetParams, } | { "method": "thread/goal/get", id: RequestId, params: ThreadGoalGetParams, } | { "method": "thread/goal/clear", id: RequestId, params: ThreadGoalClearParams, } | { "method": "thread/metadata/update", id: RequestId, params: ThreadMetadataUpdateParams, } | { "method": "thread/section/move", id: RequestId, params: ThreadSectionMoveParams, } | { "method": "thread/unarchive", id: RequestId, params: ThreadUnarchiveParams, } | { "method": "thread/compact/start", id: RequestId, params: ThreadCompactStartParams, } | { "method": "thread/shellCommand", id: RequestId, params: ThreadShellCommandParams, } | { "method": "thread/approveGuardianDeniedAction", id: RequestId, params: ThreadApproveGuardianDeniedActionParams, } | { "method": "thread/rollback", id: RequestId, params: ThreadRollbackParams, } | { "method": "thread/list", id: RequestId, params: ThreadListParams, } | { "method": "threadSection/list", id: RequestId, params: ThreadSectionListParams, } | { "method": "threadSection/create", id: RequestId, params: ThreadSectionCreateParams, } | { "method": "threadSection/update", id: RequestId, params: ThreadSectionUpdateParams, } | { "method": "threadSection/delete", id: RequestId, params: ThreadSectionDeleteParams, } | { "method": "thread/loaded/list", id: RequestId, params: ThreadLoadedListParams, } | { "method": "sessionRuntime/list", id: RequestId, params: SessionRuntimeListParams, } | { "method": "thread/read", id: RequestId, params: ThreadReadParams, } | { "method": "thread/inject_items", id: RequestId, params: ThreadInjectItemsParams, } | { "method": "skills/list", id: RequestId, params: SkillsListParams, } | { "method": "skills/extraRoots/set", id: RequestId, params: SkillsExtraRootsSetParams, } | { "method": "hooks/list", id: RequestId, params: HooksListParams, } | { "method": "marketplace/add", id: RequestId, params: MarketplaceAddParams, } | { "method": "marketplace/remove", id: RequestId, params: MarketplaceRemoveParams, } | { "method": "marketplace/upgrade", id: RequestId, params: MarketplaceUpgradeParams, } | { "method": "plugin/list", id: RequestId, params: PluginListParams, } | { "method": "plugin/installed", id: RequestId, params: PluginInstalledParams, } | { "method": "plugin/read", id: RequestId, params: PluginReadParams, } | { "method": "plugin/skill/read", id: RequestId, params: PluginSkillReadParams, } | { "method": "plugin/share/save", id: RequestId, params: PluginShareSaveParams, } | { "method": "plugin/share/updateTargets", id: RequestId, params: PluginShareUpdateTargetsParams, } | { "method": "plugin/share/list", id: RequestId, params: PluginShareListParams, } | { "method": "plugin/share/checkout", id: RequestId, params: PluginShareCheckoutParams, } | { "method": "plugin/share/delete", id: RequestId, params: PluginShareDeleteParams, } | { "method": "app/read", id: RequestId, params: AppsReadParams, } | { "method": "app/list", id: RequestId, params: AppsListParams, } | { "method": "app/installed", id: RequestId, params: AppsInstalledParams, } | { "method": "fs/readFile", id: RequestId, params: FsReadFileParams, } | { "method": "fs/writeFile", id: RequestId, params: FsWriteFileParams, } | { "method": "fs/createDirectory", id: RequestId, params: FsCreateDirectoryParams, } | { "method": "fs/getMetadata", id: RequestId, params: FsGetMetadataParams, } | { "method": "fs/readDirectory", id: RequestId, params: FsReadDirectoryParams, } | { "method": "fs/remove", id: RequestId, params: FsRemoveParams, } | { "method": "fs/copy", id: RequestId, params: FsCopyParams, } | { "method": "fs/watch", id: RequestId, params: FsWatchParams, } | { "method": "fs/unwatch", id: RequestId, params: FsUnwatchParams, } | { "method": "skills/config/write", id: RequestId, params: SkillsConfigWriteParams, } | { "method": "plugin/install", id: RequestId, params: PluginInstallParams, } | { "method": "plugin/uninstall", id: RequestId, params: PluginUninstallParams, } | { "method": "turn/start", id: RequestId, params: TurnStartParams, } | { "method": "turn/steer", id: RequestId, params: TurnSteerParams, } | { "method": "turn/interrupt", id: RequestId, params: TurnInterruptParams, } | { "method": "review/start", id: RequestId, params: ReviewStartParams, } | { "method": "model/list", id: RequestId, params: ModelListParams, } | { "method": "modelProvider/capabilities/read", id: RequestId, params: ModelProviderCapabilitiesReadParams, } | { "method": "experimentalFeature/list", id: RequestId, params: ExperimentalFeatureListParams, } | { "method": "permissionProfile/list", id: RequestId, params: PermissionProfileListParams, } | { "method": "experimentalFeature/enablement/set", id: RequestId, params: ExperimentalFeatureEnablementSetParams, } | { "method": "mcpServer/oauth/login", id: RequestId, params: McpServerOauthLoginParams, } | { "method": "config/mcpServer/reload", id: RequestId, params: undefined, } | { "method": "mcpServerStatus/list", id: RequestId, params: ListMcpServerStatusParams, } | { "method": "mcpServer/resource/read", id: RequestId, params: McpResourceReadParams, } | { "method": "mcpServer/tool/call", id: RequestId, params: McpServerToolCallParams, } | { "method": "windowsSandbox/setupStart", id: RequestId, params: WindowsSandboxSetupStartParams, } | { "method": "windowsSandbox/readiness", id: RequestId, params: undefined, } | { "method": "accountSlot/list", id: RequestId, params: AccountSlotListParams, } | { "method": "accountSlot/login/start", id: RequestId, params: AccountSlotLoginStartParams, } | { "method": "accountSlot/logout", id: RequestId, params: AccountSlotLogoutParams, } | { "method": "account/login/start", id: RequestId, params: LoginAccountParams, } | { "method": "account/login/cancel", id: RequestId, params: CancelLoginAccountParams, } | { "method": "account/logout", id: RequestId, params: undefined, } | { "method": "account/rateLimits/read", id: RequestId, params: undefined, } | { "method": "account/rateLimitResetCredit/consume", id: RequestId, params: ConsumeAccountRateLimitResetCreditParams, } | { "method": "account/usage/read", id: RequestId, params?: GetAccountTokenUsageParams | undefined, } | { "method": "account/workspaceMessages/read", id: RequestId, params: undefined, } | { "method": "account/sendAddCreditsNudgeEmail", id: RequestId, params: SendAddCreditsNudgeEmailParams, } | { "method": "feedback/upload", id: RequestId, params: FeedbackUploadParams, } | { "method": "command/exec", id: RequestId, params: CommandExecParams, } | { "method": "command/exec/write", id: RequestId, params: CommandExecWriteParams, } | { "method": "command/exec/terminate", id: RequestId, params: CommandExecTerminateParams, } | { "method": "command/exec/resize", id: RequestId, params: CommandExecResizeParams, } | { "method": "config/read", id: RequestId, params: ConfigReadParams, } | { "method": "externalAgentConfig/detect", id: RequestId, params: ExternalAgentConfigDetectParams, } | { "method": "externalAgentConfig/import", id: RequestId, params: ExternalAgentConfigImportParams, } | { "method": "externalAgentConfig/import/recordHistory", id: RequestId, params: ExternalAgentConfigImportHistoryRecordParams, } | { "method": "externalAgentConfig/import/readHistories", id: RequestId, params: undefined, } | { "method": "config/value/write", id: RequestId, params: ConfigValueWriteParams, } | { "method": "config/batchWrite", id: RequestId, params: ConfigBatchWriteParams, } | { "method": "configRequirements/read", id: RequestId, params: undefined, } | { "method": "account/read", id: RequestId, params: GetAccountParams, } | { "method": "getConversationSummary", id: RequestId, params: GetConversationSummaryParams, } | { "method": "gitDiffToRemote", id: RequestId, params: GitDiffToRemoteParams, } | { "method": "getAuthStatus", id: RequestId, params: GetAuthStatusParams, } | { "method": "fuzzyFileSearch", id: RequestId, params: FuzzyFileSearchParams, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotAction.ts b/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotAction.ts
-index 5ae0da21c046020ac65b55ed7ada30286a622d20..9ec304d586b13fc79f96f0b4b405a3c5707b16eb 100644
+index 5ae0da21c..9ec304d58 100644
 --- a/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotAction.ts
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotAction.ts
 @@ -2,4 +2,4 @@
@@ -11824,7 +11824,7 @@ index 5ae0da21c046020ac65b55ed7ada30286a622d20..9ec304d586b13fc79f96f0b4b405a3c5
 +export type AccountSlotAction = "login" | "retryLogin" | "switchTo" | "logout";
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotLogoutParams.ts b/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotLogoutParams.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..ff3e3b508b5379e068254691604e8babab9731bf
+index 000000000..ff3e3b508
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotLogoutParams.ts
 @@ -0,0 +1,8 @@
@@ -11838,7 +11838,7 @@ index 0000000000000000000000000000000000000000..ff3e3b508b5379e068254691604e8bab
 +export type AccountSlotLogoutParams = { accountSlotId: string, expectedRegistryRevision: number, expectedAttemptGeneration: number, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotLogoutResponse.ts b/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotLogoutResponse.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..c2ecc59ef0dc52fe013fcbd195182be8777af93c
+index 000000000..c2ecc59ef
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotLogoutResponse.ts
 @@ -0,0 +1,6 @@
@@ -11849,7 +11849,7 @@ index 0000000000000000000000000000000000000000..c2ecc59ef0dc52fe013fcbd195182be8
 +
 +export type AccountSlotLogoutResponse = { slot: AccountSlotSnapshot, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/index.ts b/codex-rs/app-server-protocol/schema/typescript/v2/index.ts
-index f3164ea96f114b645e2c09a8dd36f378a9d88fad..6357553d06df2fda95a42dab4c70d7f3fdf6f66a 100644
+index f3164ea96..6357553d0 100644
 --- a/codex-rs/app-server-protocol/schema/typescript/v2/index.ts
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/index.ts
 @@ -12,6 +12,8 @@ export type { AccountSlotListResponse } from "./AccountSlotListResponse";
@@ -11862,7 +11862,7 @@ index f3164ea96f114b645e2c09a8dd36f378a9d88fad..6357553d06df2fda95a42dab4c70d7f3
  export type { AccountSlotStatus } from "./AccountSlotStatus";
  export type { AccountTokenUsageDailyBucket } from "./AccountTokenUsageDailyBucket";
 diff --git a/codex-rs/app-server-protocol/src/protocol/common.rs b/codex-rs/app-server-protocol/src/protocol/common.rs
-index 89f686bdaa70252f3186780ddffd2324606fb042..d32eb838da7baf9618dce7078c16548caa556236 100644
+index 89f686bda..d32eb838d 100644
 --- a/codex-rs/app-server-protocol/src/protocol/common.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/common.rs
 @@ -1188,6 +1188,12 @@ client_request_definitions! {
@@ -11879,7 +11879,7 @@ index 89f686bdaa70252f3186780ddffd2324606fb042..d32eb838da7baf9618dce7078c16548c
          params: v2::LoginAccountParams,
          inspect_params: true,
 diff --git a/codex-rs/app-server-protocol/src/protocol/v2/account.rs b/codex-rs/app-server-protocol/src/protocol/v2/account.rs
-index ca2d5a08507c04c96b2acf4578bad1344ea81be7..045daad47eaf7add68f4395adb98377d427c5cff 100644
+index ca2d5a085..045daad47 100644
 --- a/codex-rs/app-server-protocol/src/protocol/v2/account.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/v2/account.rs
 @@ -325,6 +325,7 @@ pub enum AccountSlotAction {
@@ -11917,7 +11917,7 @@ index ca2d5a08507c04c96b2acf4578bad1344ea81be7..045daad47eaf7add68f4395adb98377d
  #[serde(rename_all = "camelCase")]
  #[ts(export_to = "v2/")]
 diff --git a/codex-rs/app-server/README.md b/codex-rs/app-server/README.md
-index 5ec11f3ada09073dda88a4c855a99819bde76b05..a7fa71360c31577f65aa2f0d3c076dfea264ba46 100644
+index 5ec11f3ad..a7fa71360 100644
 --- a/codex-rs/app-server/README.md
 +++ b/codex-rs/app-server/README.md
 @@ -2250,6 +2250,7 @@ Codex supports these authentication modes. The current mode is surfaced in `acco
@@ -11954,7 +11954,7 @@ index 5ec11f3ada09073dda88a4c855a99819bde76b05..a7fa71360c31577f65aa2f0d3c076dfe
  
  ### 1) Check auth state
 diff --git a/codex-rs/app-server/src/account_registry.rs b/codex-rs/app-server/src/account_registry.rs
-index 49e71a17aa7cbdc2e3b3e9aeaec4768669179671..3a052234aa8f4fe9a8a88f47b1b436b57dab425f 100644
+index 49e71a17a..3a052234a 100644
 --- a/codex-rs/app-server/src/account_registry.rs
 +++ b/codex-rs/app-server/src/account_registry.rs
 @@ -3,11 +3,11 @@ use std::io;
@@ -12136,7 +12136,7 @@ index 49e71a17aa7cbdc2e3b3e9aeaec4768669179671..3a052234aa8f4fe9a8a88f47b1b436b5
                      CodexErr::Fatal("account slot registry is unavailable".to_string())
 diff --git a/codex-rs/app-server/src/account_registry/live_registration.rs b/codex-rs/app-server/src/account_registry/live_registration.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..c9e1bb9b13317c9e6aed31ab2c97d0c2788d23f6
+index 000000000..c9e1bb9b1
 --- /dev/null
 +++ b/codex-rs/app-server/src/account_registry/live_registration.rs
 @@ -0,0 +1,647 @@
@@ -12788,7 +12788,7 @@ index 0000000000000000000000000000000000000000..c9e1bb9b13317c9e6aed31ab2c97d0c2
 +    error
 +}
 diff --git a/codex-rs/app-server/src/account_registry_tests.rs b/codex-rs/app-server/src/account_registry_tests.rs
-index af7c6527682beb7212f377b1287466890d3c9541..33208bac21a8d4894a33021b0ea009771a4bf664 100644
+index af7c65276..33208bac2 100644
 --- a/codex-rs/app-server/src/account_registry_tests.rs
 +++ b/codex-rs/app-server/src/account_registry_tests.rs
 @@ -1,10 +1,14 @@
@@ -13090,7 +13090,7 @@ index af7c6527682beb7212f377b1287466890d3c9541..33208bac21a8d4894a33021b0ea00977
 +        .expect("clear second reservation");
 +}
 diff --git a/codex-rs/app-server/src/external_auth.rs b/codex-rs/app-server/src/external_auth.rs
-index d00777f7101595594af4ecd75b72903fc5fda15b..8d5eccfb3b9f889c03c1362b877f32e195fc57b5 100644
+index d00777f71..8d5eccfb3 100644
 --- a/codex-rs/app-server/src/external_auth.rs
 +++ b/codex-rs/app-server/src/external_auth.rs
 @@ -12,7 +12,9 @@ use codex_login::auth::ExternalAuthRefreshContext;
@@ -13177,7 +13177,7 @@ index d00777f7101595594af4ecd75b72903fc5fda15b..8d5eccfb3b9f889c03c1362b877f32e1
              Ok(result) => {
                  let result = result.map_err(|err| {
 diff --git a/codex-rs/app-server/src/in_process.rs b/codex-rs/app-server/src/in_process.rs
-index 31fc42153212495527f57e533731998aad478aff..856c23749308f287250a9665cd7c6f128ce9f1f3 100644
+index 31fc42153..856c23749 100644
 --- a/codex-rs/app-server/src/in_process.rs
 +++ b/codex-rs/app-server/src/in_process.rs
 @@ -629,12 +629,12 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
@@ -13205,7 +13205,7 @@ index 31fc42153212495527f57e533731998aad478aff..856c23749308f287250a9665cd7c6f12
                              }
                          }
 diff --git a/codex-rs/app-server/src/lib.rs b/codex-rs/app-server/src/lib.rs
-index 77b0bea6593488545729b30b5d9eea9156ebf579..e0be3957cf2b856ec4e5ecdc54304cfd9ffc4259 100644
+index 77b0bea65..e0be3957c 100644
 --- a/codex-rs/app-server/src/lib.rs
 +++ b/codex-rs/app-server/src/lib.rs
 @@ -1106,7 +1106,7 @@ pub async fn run_main_with_transport_options(
@@ -13227,7 +13227,7 @@ index 77b0bea6593488545729b30b5d9eea9156ebf579..e0be3957cf2b856ec4e5ecdc54304cfd
                                  }
                              }
 diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
-index f5101a991134023aaac5a7ed4ef080360972e61b..e58c9df4237ffc8b28c5b036e6cc50346512cc63 100644
+index f5101a991..e58c9df42 100644
 --- a/codex-rs/app-server/src/message_processor.rs
 +++ b/codex-rs/app-server/src/message_processor.rs
 @@ -314,6 +314,15 @@ impl MessageProcessor {
@@ -13311,7 +13311,7 @@ index f5101a991134023aaac5a7ed4ef080360972e61b..e58c9df4237ffc8b28c5b036e6cc5034
                  "thread/account/switch is not implemented yet",
              )),
 diff --git a/codex-rs/app-server/src/outgoing_message.rs b/codex-rs/app-server/src/outgoing_message.rs
-index 262c674ae6905b8ec556b0107bfeb07076a11b85..f7876a61f6ff690c533126e7db2e462311c887e1 100644
+index 262c674ae..f7876a61f 100644
 --- a/codex-rs/app-server/src/outgoing_message.rs
 +++ b/codex-rs/app-server/src/outgoing_message.rs
 @@ -122,6 +122,7 @@ pub(crate) struct ThreadScopedOutgoingMessageSender {
@@ -13501,7 +13501,7 @@ index 262c674ae6905b8ec556b0107bfeb07076a11b85..f7876a61f6ff690c533126e7db2e4623
      async fn pending_requests_for_thread_returns_thread_requests_in_request_id_order() {
          let (tx, _rx) = mpsc::channel::<OutgoingEnvelope>(8);
 diff --git a/codex-rs/app-server/src/request_processors.rs b/codex-rs/app-server/src/request_processors.rs
-index 756f1d99400e25cff27579a8b88d35c15ea9948e..7775e0b9747242a8be02775b5f4d899856fbe16a 100644
+index 756f1d994..7775e0b97 100644
 --- a/codex-rs/app-server/src/request_processors.rs
 +++ b/codex-rs/app-server/src/request_processors.rs
 @@ -416,7 +416,7 @@ use codex_login::login_with_api_key;
@@ -13514,7 +13514,7 @@ index 756f1d99400e25cff27579a8b88d35c15ea9948e..7775e0b9747242a8be02775b5f4d8998
  use codex_mcp::McpServerStatusSnapshot;
  use codex_mcp::McpSnapshotDetail;
 diff --git a/codex-rs/app-server/src/request_processors/account_processor.rs b/codex-rs/app-server/src/request_processors/account_processor.rs
-index 94685ca71b752fcf311d8ee6c2495aa223cc0b4a..bc285b9e67d8653bb282ae21ddd60a6fe78312c7 100644
+index 94685ca71..bc285b9e6 100644
 --- a/codex-rs/app-server/src/request_processors/account_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/account_processor.rs
 @@ -2,14 +2,20 @@ use super::bedrock_auth::clear_user_model_provider_if_bedrock;
@@ -13643,10 +13643,10 @@ index 94685ca71b752fcf311d8ee6c2495aa223cc0b4a..bc285b9e67d8653bb282ae21ddd60a6f
          Ok(LoginAccountResponse::Chatgpt {
 diff --git a/codex-rs/app-server/src/request_processors/account_processor/slot_login.rs b/codex-rs/app-server/src/request_processors/account_processor/slot_login.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..28fc1b9380f426a63c270d3f3558f01441c428cc
+index 000000000..7c7a6aa41
 --- /dev/null
 +++ b/codex-rs/app-server/src/request_processors/account_processor/slot_login.rs
-@@ -0,0 +1,581 @@
+@@ -0,0 +1,588 @@
 +use std::collections::HashMap;
 +use std::sync::Arc;
 +use std::sync::atomic::AtomicBool;
@@ -13692,6 +13692,7 @@ index 0000000000000000000000000000000000000000..28fc1b9380f426a63c270d3f3558f014
 +use crate::external_auth::ExternalAuthBridge;
 +
 +const SLOT_RETRY_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
++const ERROR_SLOT_BOUND: &str = "accountSlotBound";
 +
 +mod transport;
 +
@@ -13787,6 +13788,12 @@ index 0000000000000000000000000000000000000000..28fc1b9380f426a63c270d3f3558f014
 +        let (requested_slot, kind) = slot_request_identity(&params);
 +        if let Some(slot_id) = requested_slot.as_deref() {
 +            self.await_previous_slot_login(slot_id).await?;
++            if self.session_runtime.account_slot_in_use(slot_id).await? {
++                return Err(structured_invalid_request(
++                    ERROR_SLOT_BOUND,
++                    "account slot is bound to a thread",
++                ));
++            }
 +        }
 +
 +        let operation_id = Uuid::new_v4().to_string();
@@ -14230,7 +14237,7 @@ index 0000000000000000000000000000000000000000..28fc1b9380f426a63c270d3f3558f014
 +}
 diff --git a/codex-rs/app-server/src/request_processors/account_processor/slot_login/transport.rs b/codex-rs/app-server/src/request_processors/account_processor/slot_login/transport.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..caffc1c65a00deef1bd6eb3c77b4dea625d36576
+index 000000000..caffc1c65
 --- /dev/null
 +++ b/codex-rs/app-server/src/request_processors/account_processor/slot_login/transport.rs
 @@ -0,0 +1,210 @@
@@ -14446,7 +14453,7 @@ index 0000000000000000000000000000000000000000..caffc1c65a00deef1bd6eb3c77b4dea6
 +}
 diff --git a/codex-rs/app-server/src/request_processors/account_processor/slot_logout.rs b/codex-rs/app-server/src/request_processors/account_processor/slot_logout.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..b3dcede714799cc3bbfa9325a79760ba1f0dc8fd
+index 000000000..b3dcede71
 --- /dev/null
 +++ b/codex-rs/app-server/src/request_processors/account_processor/slot_logout.rs
 @@ -0,0 +1,46 @@
@@ -14497,10 +14504,18 @@ index 0000000000000000000000000000000000000000..b3dcede714799cc3bbfa9325a79760ba
 +    }
 +}
 diff --git a/codex-rs/app-server/src/session_runtime/mod.rs b/codex-rs/app-server/src/session_runtime/mod.rs
-index 3e36cbd67bdd38b4d5eb701bac5202c8be6e3886..520dbd9b83149a6e403bf604ad04b03b319dd203 100644
+index 3e36cbd67..77f8e29b2 100644
 --- a/codex-rs/app-server/src/session_runtime/mod.rs
 +++ b/codex-rs/app-server/src/session_runtime/mod.rs
-@@ -186,6 +186,31 @@ impl SessionRuntimeEngine {
+@@ -17,6 +17,7 @@ use codex_app_server_protocol::SessionRuntimeListResponse;
+ use codex_app_server_protocol::SessionRuntimeSnapshot;
+ use codex_core::ThreadManager;
+ use codex_protocol::ThreadId;
++use codex_thread_store::LocalThreadStore;
+ use codex_thread_store::ThreadStore;
+ use tokio::sync::Mutex;
+ use tokio::sync::Semaphore;
+@@ -186,6 +187,42 @@ impl SessionRuntimeEngine {
              .await;
      }
  
@@ -14508,6 +14523,17 @@ index 3e36cbd67bdd38b4d5eb701bac5202c8be6e3886..520dbd9b83149a6e403bf604ad04b03b
 +        &self,
 +        account_slot_id: &str,
 +    ) -> Result<bool, JSONRPCErrorError> {
++        if let Some(local_store) = self
++            .thread_store
++            .as_any()
++            .downcast_ref::<LocalThreadStore>()
++            && local_store
++                .durable_execution_account_slot_in_use(account_slot_id)
++                .await
++                .map_err(|_| internal_error("execution account binding store is unavailable"))?
++        {
++            return Ok(true);
++        }
 +        let _build_guard = self
 +            .build_lock
 +            .acquire()
@@ -14534,7 +14560,7 @@ index 3e36cbd67bdd38b4d5eb701bac5202c8be6e3886..520dbd9b83149a6e403bf604ad04b03b
          thread_id: Option<&str>,
 diff --git a/codex-rs/app-server/tests/suite/v2/account_slot.rs b/codex-rs/app-server/tests/suite/v2/account_slot.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..d490533c20f5105d3e76a96634240c669eb7ab53
+index 000000000..d490533c2
 --- /dev/null
 +++ b/codex-rs/app-server/tests/suite/v2/account_slot.rs
 @@ -0,0 +1,82 @@
@@ -14621,7 +14647,7 @@ index 0000000000000000000000000000000000000000..d490533c20f5105d3e76a96634240c66
 +    Ok(())
 +}
 diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
-index f34a78e95ff7543f2c65f4948f54df5dd6d3ea88..6f9dd9b44377ee8eaa9185f562abfc9b24f7c9a4 100644
+index f34a78e95..6f9dd9b44 100644
 --- a/codex-rs/app-server/tests/suite/v2/mod.rs
 +++ b/codex-rs/app-server/tests/suite/v2/mod.rs
 @@ -1,4 +1,5 @@
@@ -14631,7 +14657,7 @@ index f34a78e95ff7543f2c65f4948f54df5dd6d3ea88..6f9dd9b44377ee8eaa9185f562abfc9b
  mod analytics;
  mod app_installed;
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index c5e394d23cebdbc9b733e3f0671c45ff49c6a973..47d18a7dd4c26968f2cfef5afcb0e31091a12a0f 100644
+index c5e394d23..47d18a7dd 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -843,6 +843,21 @@ impl ThreadManager {
@@ -14657,7 +14683,7 @@ index c5e394d23cebdbc9b733e3f0671c45ff49c6a973..47d18a7dd4c26968f2cfef5afcb0e310
          &self,
          thread_id: ThreadId,
 diff --git a/codex-rs/login/src/lib.rs b/codex-rs/login/src/lib.rs
-index f20d24e36f1349892836ef5e2ab653bfe6aad83f..c08808636ca6b9ec89bafca40de5239a6a993560 100644
+index f20d24e36..c08808636 100644
 --- a/codex-rs/login/src/lib.rs
 +++ b/codex-rs/login/src/lib.rs
 @@ -22,6 +22,7 @@ pub use server::LoginServer;
@@ -14669,7 +14695,7 @@ index f20d24e36f1349892836ef5e2ab653bfe6aad83f..c08808636ca6b9ec89bafca40de5239a
  pub use success_page::LoginSuccessPage;
  pub use success_page::LoginSuccessPageBrand;
 diff --git a/codex-rs/login/src/server.rs b/codex-rs/login/src/server.rs
-index dbfddc3d3b5e700f1605b2fa36a1992b23e527cf..505ad3e4a05039f11db66ba93dd879e0b89bb021 100644
+index dbfddc3d3..505ad3e4a 100644
 --- a/codex-rs/login/src/server.rs
 +++ b/codex-rs/login/src/server.rs
 @@ -158,10 +158,31 @@ impl ShutdownHandle {
@@ -14783,3 +14809,6 @@ index dbfddc3d3b5e700f1605b2fa36a1992b23e527cf..505ad3e4a05039f11db66ba93dd879e0
      #[test]
      fn parse_token_endpoint_error_prefers_error_description() {
          let detail = parse_token_endpoint_error(
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,4 +1,4 @@
-From cadc9139fc13022bcf6a732c3a9ce15064c6386a Mon Sep 17 00:00:00 2001
+From 287ca4dce5c211cedfa616c123bda41a89788491 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 16:05:16 +0900
 Subject: [PATCH 05/11] feat(custom): isolate account-sensitive consumers for
@@ -92,7 +92,7 @@ Subject: [PATCH 05/11] feat(custom): isolate account-sensitive consumers for
  84 files changed, 960 insertions(+), 520 deletions(-)
 
 diff --git a/codex-rs/app-server-protocol/schema/json/ClientRequest.json b/codex-rs/app-server-protocol/schema/json/ClientRequest.json
-index 94fc9e5535ddf38f717ec516711731b3f1f92914..65431508e7cdf37f911044c8f3053e5aaf47f177 100644
+index 94fc9e553..65431508e 100644
 --- a/codex-rs/app-server-protocol/schema/json/ClientRequest.json
 +++ b/codex-rs/app-server-protocol/schema/json/ClientRequest.json
 @@ -4103,6 +4103,13 @@
@@ -110,7 +110,7 @@ index 94fc9e5535ddf38f717ec516711731b3f1f92914..65431508e7cdf37f911044c8f3053e5a
        },
        "type": "object"
 diff --git a/codex-rs/app-server-protocol/schema/json/ServerNotification.json b/codex-rs/app-server-protocol/schema/json/ServerNotification.json
-index cb8ffd43a2749ac18b1458f8d821df90ca385d59..570e6a37d7ebcfbcf575aa7e8c62c6f8cce97a57 100644
+index cb8ffd43a..570e6a37d 100644
 --- a/codex-rs/app-server-protocol/schema/json/ServerNotification.json
 +++ b/codex-rs/app-server-protocol/schema/json/ServerNotification.json
 @@ -465,6 +465,12 @@
@@ -127,7 +127,7 @@ index cb8ffd43a2749ac18b1458f8d821df90ca385d59..570e6a37d7ebcfbcf575aa7e8c62c6f8
        },
        "required": [
 diff --git a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
-index fed660d0aa74eb20d9d6684dfbcf9cb7926bca68..0cafca43cae9a628647d85250fe6a2e1bf2db72e 100644
+index fed660d0a..0cafca43c 100644
 --- a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
 +++ b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
 @@ -7472,6 +7472,12 @@
@@ -158,7 +158,7 @@ index fed660d0aa74eb20d9d6684dfbcf9cb7926bca68..0cafca43cae9a628647d85250fe6a2e1
          },
          "title": "SkillsListParams",
 diff --git a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
-index 5b5560bd424bc8b05241d419e3bdbc0eaa926b98..8a46af9f11706bb7b66e909e4c3fd7d49de6e83b 100644
+index 5b5560bd4..8a46af9f1 100644
 --- a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
 +++ b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
 @@ -1037,6 +1037,12 @@
@@ -189,7 +189,7 @@ index 5b5560bd424bc8b05241d419e3bdbc0eaa926b98..8a46af9f11706bb7b66e909e4c3fd7d4
        },
        "title": "SkillsListParams",
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/AppListUpdatedNotification.json b/codex-rs/app-server-protocol/schema/json/v2/AppListUpdatedNotification.json
-index 46ca0f64d3a67c149993d5b39799fd8f2bc33e27..4b31a6adbf29032153c48e0fef02690e8031c25f 100644
+index 46ca0f64d..4b31a6adb 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/AppListUpdatedNotification.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/AppListUpdatedNotification.json
 @@ -278,6 +278,12 @@
@@ -206,7 +206,7 @@ index 46ca0f64d3a67c149993d5b39799fd8f2bc33e27..4b31a6adbf29032153c48e0fef02690e
    },
    "required": [
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/SkillsListParams.json b/codex-rs/app-server-protocol/schema/json/v2/SkillsListParams.json
-index a9a8a9ef8d4de8ce2356ab6dd97ef773606356c4..e11088428fd88eea053f44bdba59cfc322e2a044 100644
+index a9a8a9ef8..e11088428 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/SkillsListParams.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/SkillsListParams.json
 @@ -11,6 +11,13 @@
@@ -11282,7 +11282,7 @@ zk%xfN%44Qe9f1n~YjG-Cfiw(GYZz<3$Cghs6snf6sf^=M!+ces^hPWcLn@tLYuhn`
 hxS@l!_=B}0@3(|eHeM@bu3!Jx-)!CFm@#h?0B$i%t1$oo
 
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/AppListUpdatedNotification.ts b/codex-rs/app-server-protocol/schema/typescript/v2/AppListUpdatedNotification.ts
-index c6ad87f2cf28fecb6e950377dce70ce21afb1399..568d9f9876cbe303bef9285f7ec0cbad957cd952 100644
+index c6ad87f2c..568d9f987 100644
 --- a/codex-rs/app-server-protocol/schema/typescript/v2/AppListUpdatedNotification.ts
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/AppListUpdatedNotification.ts
 @@ -6,4 +6,4 @@ import type { AppInfo } from "./AppInfo";
@@ -11292,7 +11292,7 @@ index c6ad87f2cf28fecb6e950377dce70ce21afb1399..568d9f9876cbe303bef9285f7ec0cbad
 -export type AppListUpdatedNotification = { data: Array<AppInfo>, };
 +export type AppListUpdatedNotification = { threadId: string | null, data: Array<AppInfo>, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/SkillsListParams.ts b/codex-rs/app-server-protocol/schema/typescript/v2/SkillsListParams.ts
-index 4adeb38b3badacfe1a28b7b935ac91096ce53277..e2742c0aadcb528cb3f4e6f1394894df7fe94982 100644
+index 4adeb38b3..e2742c0aa 100644
 --- a/codex-rs/app-server-protocol/schema/typescript/v2/SkillsListParams.ts
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/SkillsListParams.ts
 @@ -3,6 +3,10 @@
@@ -11307,7 +11307,7 @@ index 4adeb38b3badacfe1a28b7b935ac91096ce53277..e2742c0aadcb528cb3f4e6f1394894df
   * When empty, defaults to the current session working directory.
   */
 diff --git a/codex-rs/app-server-protocol/src/protocol/common.rs b/codex-rs/app-server-protocol/src/protocol/common.rs
-index 425b775496815d2c648fac5737b543d65e112826..89f686bdaa70252f3186780ddffd2324606fb042 100644
+index 425b77549..89f686bda 100644
 --- a/codex-rs/app-server-protocol/src/protocol/common.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/common.rs
 @@ -2282,6 +2282,7 @@ mod tests {
@@ -11319,7 +11319,7 @@ index 425b775496815d2c648fac5737b543d65e112826..89f686bdaa70252f3186780ddffd2324
                  force_reload: false,
              },
 diff --git a/codex-rs/app-server-protocol/src/protocol/v2/apps.rs b/codex-rs/app-server-protocol/src/protocol/v2/apps.rs
-index 1993c27b759e9e402ba200b89dc1f67984bfd55b..5cba4ba33f7fa9ba1b5039bb0c0e99ccbfd367ce 100644
+index 1993c27b7..5cba4ba33 100644
 --- a/codex-rs/app-server-protocol/src/protocol/v2/apps.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/v2/apps.rs
 @@ -267,5 +267,6 @@ pub struct AppsListResponse {
@@ -11330,7 +11330,7 @@ index 1993c27b759e9e402ba200b89dc1f67984bfd55b..5cba4ba33f7fa9ba1b5039bb0c0e99cc
      pub data: Vec<AppInfo>,
  }
 diff --git a/codex-rs/app-server-protocol/src/protocol/v2/plugin.rs b/codex-rs/app-server-protocol/src/protocol/v2/plugin.rs
-index de2bdc3a4e391b1f9b70e7c220b5840c223ba0dc..e022cc71a0b0b38ed4d149d8de5f88dad392e88a 100644
+index de2bdc3a4..e022cc71a 100644
 --- a/codex-rs/app-server-protocol/src/protocol/v2/plugin.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/v2/plugin.rs
 @@ -18,6 +18,10 @@ use std::path::PathBuf;
@@ -11345,7 +11345,7 @@ index de2bdc3a4e391b1f9b70e7c220b5840c223ba0dc..e022cc71a0b0b38ed4d149d8de5f88da
      #[serde(default, skip_serializing_if = "Vec::is_empty")]
      pub cwds: Vec<PathBuf>,
 diff --git a/codex-rs/app-server-protocol/src/protocol/v2/tests.rs b/codex-rs/app-server-protocol/src/protocol/v2/tests.rs
-index a4d867cf9ed5f5124ec16defd3f27c6b5a43b47f..1ca960b5b2f5ab8c94ddc9679dbd6052827880f6 100644
+index a4d867cf9..1ca960b5b 100644
 --- a/codex-rs/app-server-protocol/src/protocol/v2/tests.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/v2/tests.rs
 @@ -3494,20 +3494,23 @@ fn hook_handler_metadata_only_exposes_async_for_commands() {
@@ -11374,7 +11374,7 @@ index a4d867cf9ed5f5124ec16defd3f27c6b5a43b47f..1ca960b5b2f5ab8c94ddc9679dbd6052
              "forceReload": true,
          }),
 diff --git a/codex-rs/app-server/README.md b/codex-rs/app-server/README.md
-index 787e6a48ebe0ad046dfd6b4e4f23dac3774a6be8..5ec11f3ada09073dda88a4c855a99819bde76b05 100644
+index 787e6a48e..5ec11f3ad 100644
 --- a/codex-rs/app-server/README.md
 +++ b/codex-rs/app-server/README.md
 @@ -1882,13 +1882,16 @@ Example:
@@ -11411,7 +11411,7 @@ index 787e6a48ebe0ad046dfd6b4e4f23dac3774a6be8..5ec11f3ada09073dda88a4c855a99819
        {
          "id": "demo-app",
 diff --git a/codex-rs/app-server/src/effective_plugin_change.rs b/codex-rs/app-server/src/effective_plugin_change.rs
-index 2a64377e2a1ad4240527648cb191fc2e06fcf18a..63b451b8134aecb237dec0098867541861d3864e 100644
+index 2a64377e2..63b451b81 100644
 --- a/codex-rs/app-server/src/effective_plugin_change.rs
 +++ b/codex-rs/app-server/src/effective_plugin_change.rs
 @@ -28,7 +28,7 @@ pub(crate) fn effective_plugins_changed_callback(
@@ -11424,7 +11424,7 @@ index 2a64377e2a1ad4240527648cb191fc2e06fcf18a..63b451b8134aecb237dec00988675418
  
          let refresh_thread_manager = Arc::clone(&thread_manager);
 diff --git a/codex-rs/app-server/src/extensions.rs b/codex-rs/app-server/src/extensions.rs
-index 21855dffcac857eaaee196bae6ffc5cff12d7466..dbc3ad4fffd362dfb68fbcd28972e3aad3930efe 100644
+index 21855dffc..dbc3ad4ff 100644
 --- a/codex-rs/app-server/src/extensions.rs
 +++ b/codex-rs/app-server/src/extensions.rs
 @@ -22,7 +22,6 @@ use codex_extension_api::ExtensionWarning;
@@ -11480,7 +11480,7 @@ index 21855dffcac857eaaee196bae6ffc5cff12d7466..dbc3ad4fffd362dfb68fbcd28972e3aa
      });
      let skill_providers = codex_skills_extension::SkillProviders::new()
 diff --git a/codex-rs/app-server/src/mcp_refresh.rs b/codex-rs/app-server/src/mcp_refresh.rs
-index 148ea6a568a7a3340021b8d4f080c2b6539af6a8..f5226ba246180c60f72d9697c4ce61bf35e0a1a5 100644
+index 148ea6a56..f5226ba24 100644
 --- a/codex-rs/app-server/src/mcp_refresh.rs
 +++ b/codex-rs/app-server/src/mcp_refresh.rs
 @@ -330,7 +330,6 @@ enabled = false
@@ -11492,7 +11492,7 @@ index 148ea6a568a7a3340021b8d4f080c2b6539af6a8..f5226ba246180c60f72d9697c4ce61bf
                          analytics_events_client: codex_analytics::AnalyticsEventsClient::disabled(),
                          thread_manager: thread_manager.clone(),
 diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
-index 15d18af2351204dc08a91ab77bf5281bbc71ac03..e49547d5d2e9eb56ca36faad363e79df6ce8d34d 100644
+index 15d18af23..e49547d5d 100644
 --- a/codex-rs/app-server/src/message_processor.rs
 +++ b/codex-rs/app-server/src/message_processor.rs
 @@ -333,7 +333,6 @@ impl MessageProcessor {
@@ -11539,7 +11539,7 @@ index 15d18af2351204dc08a91ab77bf5281bbc71ac03..e49547d5d2e9eb56ca36faad363e79df
              outgoing.clone(),
              analytics_events_client.clone(),
 diff --git a/codex-rs/app-server/src/request_processors.rs b/codex-rs/app-server/src/request_processors.rs
-index c328a868cb5cd8f852a2bf3a4aa6a160553cd8ce..756f1d99400e25cff27579a8b88d35c15ea9948e 100644
+index c328a868c..756f1d994 100644
 --- a/codex-rs/app-server/src/request_processors.rs
 +++ b/codex-rs/app-server/src/request_processors.rs
 @@ -334,6 +334,7 @@ use codex_config::types::McpServerTransportConfig;
@@ -11551,7 +11551,7 @@ index c328a868cb5cd8f852a2bf3a4aa6a160553cd8ce..756f1d99400e25cff27579a8b88d35c1
  use codex_core::McpManager;
  use codex_core::NewThread;
 diff --git a/codex-rs/app-server/src/request_processors/apps_processor.rs b/codex-rs/app-server/src/request_processors/apps_processor.rs
-index 28add513f4954cb7f3a4caa45bf77b618d555dc0..0654395c3d35d772f14fd8d48a927cfc7153e7df 100644
+index 28add513f..0654395c3 100644
 --- a/codex-rs/app-server/src/request_processors/apps_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/apps_processor.rs
 @@ -64,13 +64,16 @@ impl AppsRequestProcessor {
@@ -11774,7 +11774,7 @@ index 28add513f4954cb7f3a4caa45bf77b618d555dc0..0654395c3d35d772f14fd8d48a927cfc
          .await;
  }
 diff --git a/codex-rs/app-server/src/request_processors/apps_processor/installed.rs b/codex-rs/app-server/src/request_processors/apps_processor/installed.rs
-index a7ce8dd66a8114a0c921978060cf6ec379107bce..40505efb4e1ac18e8599cabb3e89c08548c2bd61 100644
+index a7ce8dd66..40505efb4 100644
 --- a/codex-rs/app-server/src/request_processors/apps_processor/installed.rs
 +++ b/codex-rs/app-server/src/request_processors/apps_processor/installed.rs
 @@ -51,12 +51,15 @@ impl AppsRequestProcessor {
@@ -11805,7 +11805,7 @@ index a7ce8dd66a8114a0c921978060cf6ec379107bce..40505efb4e1ac18e8599cabb3e89c085
                          startup_policy: McpStartupPolicy::Eager,
                          config: Arc::clone(&mcp_config),
 diff --git a/codex-rs/app-server/src/request_processors/apps_processor/read.rs b/codex-rs/app-server/src/request_processors/apps_processor/read.rs
-index 276633bd8967696002240bc9949063494b6504e5..d229928efe71dd3200168ea9244c1964c3334fc6 100644
+index 276633bd8..d229928ef 100644
 --- a/codex-rs/app-server/src/request_processors/apps_processor/read.rs
 +++ b/codex-rs/app-server/src/request_processors/apps_processor/read.rs
 @@ -27,7 +27,10 @@ impl AppsRequestProcessor {
@@ -11833,7 +11833,7 @@ index 276633bd8967696002240bc9949063494b6504e5..d229928efe71dd3200168ea9244c1964
              .await;
          let connector_snapshot =
 diff --git a/codex-rs/app-server/src/request_processors/catalog_processor.rs b/codex-rs/app-server/src/request_processors/catalog_processor.rs
-index 1a20b3518751a9f24c1af3099ab24cd635cdc948..b60e24d964a4966c95c4eddabbefc96ad71de38c 100644
+index 1a20b3518..b60e24d96 100644
 --- a/codex-rs/app-server/src/request_processors/catalog_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/catalog_processor.rs
 @@ -238,6 +238,39 @@ impl CatalogRequestProcessor {
@@ -11902,7 +11902,7 @@ index 1a20b3518751a9f24c1af3099ab24cd635cdc948..b60e24d964a4966c95c4eddabbefc96a
              plugins_manager.clear_cache();
              skills_service.clear_cache();
 diff --git a/codex-rs/app-server/src/request_processors/config_processor.rs b/codex-rs/app-server/src/request_processors/config_processor.rs
-index ed59d984579e73db9834a9ad0b2709ed7749bfb1..f54bc9169ae26a0747f65d8ac63813445c460fca 100644
+index ed59d9845..f54bc9169 100644
 --- a/codex-rs/app-server/src/request_processors/config_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/config_processor.rs
 @@ -195,7 +195,7 @@ impl ConfigRequestProcessor {
@@ -11915,7 +11915,7 @@ index ed59d984579e73db9834a9ad0b2709ed7749bfb1..f54bc9169ae26a0747f65d8ac6381344
      }
  
 diff --git a/codex-rs/app-server/src/request_processors/feedback_processor.rs b/codex-rs/app-server/src/request_processors/feedback_processor.rs
-index 6077d213e6f85b15b5105b4a0fd12be28ffa4486..f72e17b51f10d92385e3ab444ae1544fbf1ee016 100644
+index 6077d213e..f72e17b51 100644
 --- a/codex-rs/app-server/src/request_processors/feedback_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/feedback_processor.rs
 @@ -17,6 +17,7 @@ pub(crate) struct FeedbackRequestProcessor {
@@ -12036,7 +12036,7 @@ index 6077d213e6f85b15b5105b4a0fd12be28ffa4486..f72e17b51f10d92385e3ab444ae1544f
              {
                  extra_attachments.push(doctor_report.attachment);
 diff --git a/codex-rs/app-server/src/request_processors/marketplace_processor.rs b/codex-rs/app-server/src/request_processors/marketplace_processor.rs
-index 18270279f52dffaa838f59a5d6cd653de4983be7..6071096b1a564ab5c434b69c6ebd0f586cea5057 100644
+index 18270279f..6071096b1 100644
 --- a/codex-rs/app-server/src/request_processors/marketplace_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/marketplace_processor.rs
 @@ -88,7 +88,7 @@ impl MarketplaceRequestProcessor {
@@ -12049,7 +12049,7 @@ index 18270279f52dffaa838f59a5d6cd653de4983be7..6071096b1a564ab5c434b69c6ebd0f58
              self.thread_manager.invalidate_mcp_runtimes().await;
              self.thread_manager.refresh_hook_runtimes().await;
 diff --git a/codex-rs/app-server/src/request_processors/mcp_processor.rs b/codex-rs/app-server/src/request_processors/mcp_processor.rs
-index e5b2217c2eed55aecc76616bbb9d13881e747ef0..ba34bfc053b2b6b529bc11e1134ec1e3c90d2ce7 100644
+index e5b2217c2..ba34bfc05 100644
 --- a/codex-rs/app-server/src/request_processors/mcp_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/mcp_processor.rs
 @@ -129,13 +129,17 @@ impl McpRequestProcessor {
@@ -12125,7 +12125,7 @@ index e5b2217c2eed55aecc76616bbb9d13881e747ef0..ba34bfc053b2b6b529bc11e1134ec1e3
              Some(thread) => thread.runtime_mcp_config_and_context(&config).await,
              None => {
 diff --git a/codex-rs/app-server/src/request_processors/plugins.rs b/codex-rs/app-server/src/request_processors/plugins.rs
-index 4802228999370a23e609180311cc5297c1090a2e..8876cdd8d788095a988432d4dd9c07323cae3189 100644
+index 480222899..8876cdd8d 100644
 --- a/codex-rs/app-server/src/request_processors/plugins.rs
 +++ b/codex-rs/app-server/src/request_processors/plugins.rs
 @@ -525,7 +525,7 @@ impl PluginRequestProcessor {
@@ -12138,7 +12138,7 @@ index 4802228999370a23e609180311cc5297c1090a2e..8876cdd8d788095a988432d4dd9c0732
      }
  
 diff --git a/codex-rs/app-server/src/request_processors/thread_lifecycle.rs b/codex-rs/app-server/src/request_processors/thread_lifecycle.rs
-index c777f9403b90b1f0faf25a6fd782074f57b7214d..86fedbe945166f7fffeda8309734f15a09228ebc 100644
+index c777f9403..86fedbe94 100644
 --- a/codex-rs/app-server/src/request_processors/thread_lifecycle.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_lifecycle.rs
 @@ -234,11 +234,16 @@ pub(super) async fn ensure_listener_task_running(
@@ -12175,7 +12175,7 @@ index c777f9403b90b1f0faf25a6fd782074f57b7214d..86fedbe945166f7fffeda8309734f15a
  
                      // Track the event before emitting any typed translations
 diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
-index 822dcace40a6474cd260226495eb056d59ce3b2b..9126cc4bcdb61b5dc65c83c78eacf417140c6ec2 100644
+index 822dcace4..9126cc4bc 100644
 --- a/codex-rs/app-server/src/request_processors/turn_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
 @@ -87,7 +87,6 @@ fn validate_response_item_image_urls(items: &[ResponseItem]) -> Result<(), JSONR
@@ -12217,7 +12217,7 @@ index 822dcace40a6474cd260226495eb056d59ce3b2b..9126cc4bcdb61b5dc65c83c78eacf417
                      Arc::clone(&thread),
                      thread.config().await,
 diff --git a/codex-rs/app-server/src/skills_watcher.rs b/codex-rs/app-server/src/skills_watcher.rs
-index da3d1f7076b53a7e6eeb289a6f8242c1ac437219..4099d41e77414ba77f5ed3e476fb32f4bd48074a 100644
+index da3d1f707..4099d41e7 100644
 --- a/codex-rs/app-server/src/skills_watcher.rs
 +++ b/codex-rs/app-server/src/skills_watcher.rs
 @@ -90,6 +90,7 @@ impl SkillsWatcher {
@@ -12237,7 +12237,7 @@ index da3d1f7076b53a7e6eeb289a6f8242c1ac437219..4099d41e77414ba77f5ed3e476fb32f4
          let skills_input = HostSkillsLoadInput::new(
              config.cwd.clone(),
 diff --git a/codex-rs/app-server/src/turn_cost_worker.rs b/codex-rs/app-server/src/turn_cost_worker.rs
-index db469411618280550c5f44cd8254858a10543f83..9f0ec9486f349dcb6a1ca933227937ab1c4976d1 100644
+index db4694116..9f0ec9486 100644
 --- a/codex-rs/app-server/src/turn_cost_worker.rs
 +++ b/codex-rs/app-server/src/turn_cost_worker.rs
 @@ -35,7 +35,6 @@ pub(crate) struct TurnCostWorker {
@@ -12520,7 +12520,7 @@ index db469411618280550c5f44cd8254858a10543f83..9f0ec9486f349dcb6a1ca933227937ab
      }
  
 diff --git a/codex-rs/app-server/src/turn_cost_worker_tests.rs b/codex-rs/app-server/src/turn_cost_worker_tests.rs
-index d9f7009e5a29f8be283d7aed0db7ee39c3e729ea..a8755a31eddebcca323fcdf7296857dd0f33226c 100644
+index d9f7009e5..a8755a31e 100644
 --- a/codex-rs/app-server/src/turn_cost_worker_tests.rs
 +++ b/codex-rs/app-server/src/turn_cost_worker_tests.rs
 @@ -1,104 +1,75 @@
@@ -12753,7 +12753,7 @@ index d9f7009e5a29f8be283d7aed0db7ee39c3e729ea..a8755a31eddebcca323fcdf7296857dd
 -    .expect("timed out waiting for turn-cost request");
 -}
 diff --git a/codex-rs/app-server/tests/suite/v2/skills_list.rs b/codex-rs/app-server/tests/suite/v2/skills_list.rs
-index 26d135af21f85287bf4617d22612aee65cf43ae5..d266960cae227242d08fc9dea785bc0f36144216 100644
+index 26d135af2..d266960ca 100644
 --- a/codex-rs/app-server/tests/suite/v2/skills_list.rs
 +++ b/codex-rs/app-server/tests/suite/v2/skills_list.rs
 @@ -140,6 +140,7 @@ async fn skills_list_disabled_bundled_skills_preserves_shared_system_skill_cache
@@ -12957,7 +12957,7 @@ index 26d135af21f85287bf4617d22612aee65cf43ae5..d266960cae227242d08fc9dea785bc0f
              force_reload: false,
          })
 diff --git a/codex-rs/chatgpt/src/chatgpt_client.rs b/codex-rs/chatgpt/src/chatgpt_client.rs
-index 2e6feb8256e29d85f3ed24b643a7d081321e270f..dd503ceb6790f1f66417c46844d0efe16c7b0b1e 100644
+index 2e6feb825..dd503ceb6 100644
 --- a/codex-rs/chatgpt/src/chatgpt_client.rs
 +++ b/codex-rs/chatgpt/src/chatgpt_client.rs
 @@ -1,7 +1,6 @@
@@ -13005,7 +13005,7 @@ index 2e6feb8256e29d85f3ed24b643a7d081321e270f..dd503ceb6790f1f66417c46844d0efe1
          .header("Content-Type", "application/json");
      if let Some(timeout) = timeout {
 diff --git a/codex-rs/chatgpt/src/connectors.rs b/codex-rs/chatgpt/src/connectors.rs
-index ae6cbce5c8110a4bab6b0dd807ff39d02e43a048..a1883dc8de75a0e0a6680b270a475fd5e412a00e 100644
+index ae6cbce5c..a1883dc8d 100644
 --- a/codex-rs/chatgpt/src/connectors.rs
 +++ b/codex-rs/chatgpt/src/connectors.rs
 @@ -19,9 +19,11 @@ use codex_core::config::Config;
@@ -13086,7 +13086,7 @@ index ae6cbce5c8110a4bab6b0dd807ff39d02e43a048..a1883dc8de75a0e0a6680b270a475fd5
                  Some(DIRECTORY_CONNECTORS_TIMEOUT),
              )
 diff --git a/codex-rs/chatgpt/src/get_task.rs b/codex-rs/chatgpt/src/get_task.rs
-index 9301ffc38d32fe6d67089534ef775597167fffeb..9ba689c4c410259e3756c0728bc56eed55c868cd 100644
+index 9301ffc38..9ba689c4c 100644
 --- a/codex-rs/chatgpt/src/get_task.rs
 +++ b/codex-rs/chatgpt/src/get_task.rs
 @@ -1,4 +1,5 @@
@@ -13109,7 +13109,7 @@ index 9301ffc38d32fe6d67089534ef775597167fffeb..9ba689c4c410259e3756c0728bc56eed
 +    chatgpt_get_request(config, &auth, path).await
  }
 diff --git a/codex-rs/cli/src/main.rs b/codex-rs/cli/src/main.rs
-index 45218a6d394d6f4d77b73e1344a48af2b5ab647c..bcb81e53b040958f242266b384a637df5fe22ff9 100644
+index 45218a6d3..bcb81e53b 100644
 --- a/codex-rs/cli/src/main.rs
 +++ b/codex-rs/cli/src/main.rs
 @@ -2256,12 +2256,9 @@ async fn run_debug_prompt_input_command(
@@ -13126,7 +13126,7 @@ index 45218a6d394d6f4d77b73e1344a48af2b5ab647c..bcb81e53b040958f242266b384a637df
          config.http_client_factory(),
      );
 diff --git a/codex-rs/core/src/codex_delegate.rs b/codex-rs/core/src/codex_delegate.rs
-index ff6df2afd669568a94567a39dd9f73a0076a9f61..db73cb94296a16d15ecae8523823c907e4b3399a 100644
+index ff6df2afd..db73cb942 100644
 --- a/codex-rs/core/src/codex_delegate.rs
 +++ b/codex-rs/core/src/codex_delegate.rs
 @@ -98,8 +98,8 @@ pub(crate) async fn run_codex_thread_interactive(
@@ -13159,7 +13159,7 @@ index ff6df2afd669568a94567a39dd9f73a0076a9f61..db73cb94296a16d15ecae8523823c907
          session.session_id(),
          session.thread_id(),
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index b58e99d9d9fc3146cdf3a91f314f05ff3e6a44e5..08ed026c1f552a84f48b197d5ea8d986e461b8ac 100644
+index b58e99d9d..08ed026c1 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
 @@ -257,7 +257,7 @@ async fn run_compact_task_inner_impl(
@@ -13172,7 +13172,7 @@ index b58e99d9d9fc3146cdf3a91f314f05ff3e6a44e5..08ed026c1f552a84f48b197d5ea8d986
      // request tracking)
      // survives retries within this compact turn.
 diff --git a/codex-rs/core/src/compact_remote_request.rs b/codex-rs/core/src/compact_remote_request.rs
-index 25f8689fd8333dddd2cb3b2057fe93ca7d56dd8c..2b5b7d39101f76feb7d6d368529b5b2ca129da5d 100644
+index 25f8689fd..2b5b7d391 100644
 --- a/codex-rs/core/src/compact_remote_request.rs
 +++ b/codex-rs/core/src/compact_remote_request.rs
 @@ -74,8 +74,7 @@ pub(super) async fn run_remote_compact_attempt(
@@ -13197,7 +13197,7 @@ index 25f8689fd8333dddd2cb3b2057fe93ca7d56dd8c..2b5b7d39101f76feb7d6d368529b5b2c
                  } else {
                      turn_context.config.service_tier.clone()
 diff --git a/codex-rs/core/src/compact_remote_v2_attempt.rs b/codex-rs/core/src/compact_remote_v2_attempt.rs
-index d66bf519be3d65b0c72b5f856865fd54eaf65a3c..7ee5823c73c3786078357ec8b417695f66ed44a0 100644
+index d66bf519b..7ee5823c7 100644
 --- a/codex-rs/core/src/compact_remote_v2_attempt.rs
 +++ b/codex-rs/core/src/compact_remote_v2_attempt.rs
 @@ -99,7 +99,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
@@ -13210,7 +13210,7 @@ index d66bf519be3d65b0c72b5f856865fd54eaf65a3c..7ee5823c73c3786078357ec8b417695f
      let compaction_output_result = run_remote_compaction_request_v2(
          sess,
 diff --git a/codex-rs/core/src/connectors.rs b/codex-rs/core/src/connectors.rs
-index cea1a8171941cbb203480c6d9bcf30c456ae48f7..d15b2dc9cba193daeafe8a8992fbe3cfc63ce008 100644
+index cea1a8171..d15b2dc9c 100644
 --- a/codex-rs/core/src/connectors.rs
 +++ b/codex-rs/core/src/connectors.rs
 @@ -124,13 +124,20 @@ pub async fn list_cached_accessible_connectors_from_mcp_tools(
@@ -13282,7 +13282,7 @@ index cea1a8171941cbb203480c6d9bcf30c456ae48f7..d15b2dc9cba193daeafe8a8992fbe3cf
          return Vec::new();
      };
 diff --git a/codex-rs/core/src/execution_account.rs b/codex-rs/core/src/execution_account.rs
-index e9266344c8168ba580c1b5109d84445233c51155..3cb564486a780101a82ade959ba96031d0718751 100644
+index e9266344c..3cb564486 100644
 --- a/codex-rs/core/src/execution_account.rs
 +++ b/codex-rs/core/src/execution_account.rs
 @@ -2,6 +2,7 @@ use std::future::Future;
@@ -13316,7 +13316,7 @@ index e9266344c8168ba580c1b5109d84445233c51155..3cb564486a780101a82ade959ba96031
      fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
          formatter
 diff --git a/codex-rs/core/src/guardian/review_session.rs b/codex-rs/core/src/guardian/review_session.rs
-index 3ed0584e3511d7bbc19a478b1f493856e47100be..167fbcaafab68376abeb0a64b82cb033b3fd29c8 100644
+index 3ed0584e3..167fbcaaf 100644
 --- a/codex-rs/core/src/guardian/review_session.rs
 +++ b/codex-rs/core/src/guardian/review_session.rs
 @@ -855,8 +855,8 @@ async fn spawn_guardian_review_session(
@@ -13331,7 +13331,7 @@ index 3ed0584e3511d7bbc19a478b1f493856e47100be..167fbcaafab68376abeb0a64b82cb033
          Arc::clone(parent_context.turn()),
          parent_context.environments().clone(),
 diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
-index cf76f99b5506e770c20a7f203593819e4b3d4e8d..48985e4b585781953c9cb72e6d4726a6bb37d648 100644
+index cf76f99b5..48985e4b5 100644
 --- a/codex-rs/core/src/lib.rs
 +++ b/codex-rs/core/src/lib.rs
 @@ -113,6 +113,7 @@ pub use codex_prompts as review_prompts;
@@ -13343,7 +13343,7 @@ index cf76f99b5506e770c20a7f203593819e4b3d4e8d..48985e4b585781953c9cb72e6d4726a6
  pub(crate) mod web_search;
  pub(crate) mod windows_sandbox_read_grants;
 diff --git a/codex-rs/core/src/mcp_openai_file.rs b/codex-rs/core/src/mcp_openai_file.rs
-index 1320519b0383fb7aac799059b1092df7b5a2350f..7578374f4218f1c11b7a4b6747fca1605dd8b690 100644
+index 1320519b0..7578374f4 100644
 --- a/codex-rs/core/src/mcp_openai_file.rs
 +++ b/codex-rs/core/src/mcp_openai_file.rs
 @@ -46,7 +46,12 @@ pub(crate) async fn rewrite_mcp_tool_arguments_for_openai_files(
@@ -13361,7 +13361,7 @@ index 1320519b0383fb7aac799059b1092df7b5a2350f..7578374f4218f1c11b7a4b6747fca160
  
      for (field_name, optional_fields) in openai_file_input_optional_fields {
 diff --git a/codex-rs/core/src/mcp_tool_call.rs b/codex-rs/core/src/mcp_tool_call.rs
-index 58ecdac2e5d64a0c5f8c85a5b0bd409c62440739..d4bc64f48edca3baf8531444356804a9936fdf3c 100644
+index 58ecdac2e..d4bc64f48 100644
 --- a/codex-rs/core/src/mcp_tool_call.rs
 +++ b/codex-rs/core/src/mcp_tool_call.rs
 @@ -733,7 +733,7 @@ async fn refresh_codex_apps_after_connector_auth(sess: &Arc<Session>, turn_conte
@@ -13383,7 +13383,7 @@ index 58ecdac2e5d64a0c5f8c85a5b0bd409c62440739..d4bc64f48edca3baf8531444356804a9
          AppInvocation {
              connector_id,
 diff --git a/codex-rs/core/src/plugins/metrics.rs b/codex-rs/core/src/plugins/metrics.rs
-index 5e817632492da4d0526682d39ba1441a22819a4d..3242930b864c52af4a2155a6d8432e573ef14586 100644
+index 5e8176324..3242930b8 100644
 --- a/codex-rs/core/src/plugins/metrics.rs
 +++ b/codex-rs/core/src/plugins/metrics.rs
 @@ -13,7 +13,7 @@ pub(crate) async fn sidecar_for_command(
@@ -13407,7 +13407,7 @@ index 5e817632492da4d0526682d39ba1441a22819a4d..3242930b864c52af4a2155a6d8432e57
              thread_id: session.thread_id().to_string(),
              turn_id: turn.sub_id.clone(),
 diff --git a/codex-rs/core/src/responses_retry.rs b/codex-rs/core/src/responses_retry.rs
-index 178c13df494f0c3a73f646ef526230945c0faeb8..5ff732d4e6ed49085505d31cccc7ac0a300aa6bc 100644
+index 178c13df4..5ff732d4e 100644
 --- a/codex-rs/core/src/responses_retry.rs
 +++ b/codex-rs/core/src/responses_retry.rs
 @@ -109,7 +109,7 @@ pub(crate) async fn handle_retryable_response_stream_error(
@@ -13420,7 +13420,7 @@ index 178c13df494f0c3a73f646ef526230945c0faeb8..5ff732d4e6ed49085505d31cccc7ac0a
              // Surface retry information to any UI/front-end so the user understands what is
              // happening instead of staring at a seemingly frozen screen.
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 58b90acc45d4ef42c029bae166bab9101db656fc..cf888ec94a08c3ea671de39ec4c079a1601ca63d 100644
+index 58b90acc4..cf888ec94 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -3211,7 +3211,7 @@ impl Session {
@@ -13433,7 +13433,7 @@ index 58b90acc45d4ef42c029bae166bab9101db656fc..cf888ec94a08c3ea671de39ec4c079a1
          }
          .or_cancel(cancellation_token)
 diff --git a/codex-rs/core/src/session/review.rs b/codex-rs/core/src/session/review.rs
-index ae9eca28ddd8d5ff61bc5893da266fd4fe533f57..f403d3832b9fef53f0a985c18acd6f663a4463c2 100644
+index ae9eca28d..f403d3832 100644
 --- a/codex-rs/core/src/session/review.rs
 +++ b/codex-rs/core/src/session/review.rs
 @@ -139,6 +139,10 @@ pub(super) async fn spawn_review_thread(
@@ -13448,7 +13448,7 @@ index ae9eca28ddd8d5ff61bc5893da266fd4fe533f57..f403d3832b9fef53f0a985c18acd6f66
          session_telemetry: session_telemetry_for_context,
          provider: provider_for_context,
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
-index c644eb85efe827ca7799d1df8c848a8a9bfbaf6a..11bdbff1a2042ecbbadb4050c2c828209a760717 100644
+index 940245af4..79fcab481 100644
 --- a/codex-rs/core/src/session/session.rs
 +++ b/codex-rs/core/src/session/session.rs
 @@ -1326,6 +1326,8 @@ impl Session {
@@ -13461,7 +13461,7 @@ index c644eb85efe827ca7799d1df8c848a8a9bfbaf6a..11bdbff1a2042ecbbadb4050c2c82820
              let mcp_resource_client = Arc::new(McpResourceClient::new(Arc::clone(&mcp_runtime)));
              let extension_metrics =
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 63faa35469ea4ae96fc3cc286ef3452f3d618526..6db15e396d0027bb9aaa4431ed8b2d94b2af41ac 100644
+index 97c33206b..73e19f137 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -6052,6 +6052,10 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
@@ -13475,7 +13475,7 @@ index 63faa35469ea4ae96fc3cc286ef3452f3d618526..6db15e396d0027bb9aaa4431ed8b2d94
          &session_telemetry,
          session_configuration.provider.clone(),
          &session_configuration,
-@@ -8265,6 +8269,10 @@ where
+@@ -8286,6 +8290,10 @@ where
          SessionId::from(thread_id),
          Some(Arc::clone(&auth_manager)),
          default_execution_account(&auth_manager, &models_manager),
@@ -13487,7 +13487,7 @@ index 63faa35469ea4ae96fc3cc286ef3452f3d618526..6db15e396d0027bb9aaa4431ed8b2d94
          session_configuration.provider.clone(),
          &session_configuration,
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index c7d7c63477bb916aa8619a3815efc2b390276610..ac1dfaad8099cfd758ed8665eb092ab0cd93d4e7 100644
+index c7d7c6347..ac1dfaad8 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -161,7 +161,7 @@ pub(crate) async fn run_turn(
@@ -13602,7 +13602,7 @@ index c7d7c63477bb916aa8619a3815efc2b390276610..ac1dfaad8099cfd758ed8665eb092ab0
                      .track_code_mode_tool_call(
                          codex_analytics::CodeModeToolCallFact::SamplingResponseCompleted {
 diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
-index bb0698fdf15e79e3735274cd140641bc2291e4cf..60baf0d91bd9796d196ddf39cf6f1c8f77a693a6 100644
+index bb0698fdf..60baf0d91 100644
 --- a/codex-rs/core/src/session/turn_context.rs
 +++ b/codex-rs/core/src/session/turn_context.rs
 @@ -138,7 +138,6 @@ impl std::fmt::Debug for TurnEnvironment {
@@ -13696,7 +13696,7 @@ index bb0698fdf15e79e3735274cd140641bc2291e4cf..60baf0d91bd9796d196ddf39cf6f1c8f
              session_configuration.provider.clone(),
              &session_configuration,
 diff --git a/codex-rs/core/src/tasks/review.rs b/codex-rs/core/src/tasks/review.rs
-index 94859375dd53f8dfeedb8b66302c11f0968fec7a..d2871071c5551fd5b1677d039b04c5e867841947 100644
+index 94859375d..d2871071c 100644
 --- a/codex-rs/core/src/tasks/review.rs
 +++ b/codex-rs/core/src/tasks/review.rs
 @@ -125,8 +125,8 @@ async fn start_review_conversation(
@@ -13711,7 +13711,7 @@ index 94859375dd53f8dfeedb8b66302c11f0968fec7a..d2871071c5551fd5b1677d039b04c5e8
          Arc::clone(&session),
          ctx.clone(),
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index bfdeb3e21d256af5e617115f86e880b6b697e4ca..c5e394d23cebdbc9b733e3f0671c45ff49c6a973 100644
+index bfdeb3e21..c5e394d23 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -10,6 +10,7 @@ use crate::environment_selection::default_thread_environment_selections;
@@ -13960,7 +13960,7 @@ index bfdeb3e21d256af5e617115f86e880b6b697e4ca..c5e394d23cebdbc9b733e3f0671c45ff
              attestation_provider: self.attestation_provider.clone(),
              external_time_provider: self.external_time_provider.clone(),
 diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
-index 7ea1248c729df2ba580952465377ee7a64f540a0..3196d1bf240f6f04541b758e9dd60666bd82d8f4 100644
+index 7ea1248c7..3196d1bf2 100644
 --- a/codex-rs/core/src/thread_manager_tests.rs
 +++ b/codex-rs/core/src/thread_manager_tests.rs
 @@ -48,6 +48,59 @@ use wiremock::MockServer;
@@ -14024,7 +14024,7 @@ index 7ea1248c729df2ba580952465377ee7a64f540a0..3196d1bf240f6f04541b758e9dd60666
  #[test]
  fn thread_id_generator_defaults_to_standard_ids() {
 diff --git a/codex-rs/core/src/tools/code_mode/execute_handler.rs b/codex-rs/core/src/tools/code_mode/execute_handler.rs
-index 87d260be4e7fece993060e39cc887331ccdb37ac..525c01daac6dba9160d2135d5e974805587b82c1 100644
+index 87d260be4..525c01daa 100644
 --- a/codex-rs/core/src/tools/code_mode/execute_handler.rs
 +++ b/codex-rs/core/src/tools/code_mode/execute_handler.rs
 @@ -165,7 +165,7 @@ impl CodeModeExecuteHandler {
@@ -14037,7 +14037,7 @@ index 87d260be4e7fece993060e39cc887331ccdb37ac..525c01daac6dba9160d2135d5e974805
              turn.sub_id.clone(),
              call_id.clone(),
 diff --git a/codex-rs/core/src/tools/code_mode/wait_handler.rs b/codex-rs/core/src/tools/code_mode/wait_handler.rs
-index 4f65cef15e9d683466a88f0c07ed0598998aae7c..802ee55729cfa4d36525051da7d35eaca31f301b 100644
+index 4f65cef15..802ee5572 100644
 --- a/codex-rs/core/src/tools/code_mode/wait_handler.rs
 +++ b/codex-rs/core/src/tools/code_mode/wait_handler.rs
 @@ -74,7 +74,7 @@ impl CodeModeWaitHandler {
@@ -14050,7 +14050,7 @@ index 4f65cef15e9d683466a88f0c07ed0598998aae7c..802ee55729cfa4d36525051da7d35eac
              turn.sub_id.clone(),
              call_id.clone(),
 diff --git a/codex-rs/core/src/tools/handlers/request_plugin_install.rs b/codex-rs/core/src/tools/handlers/request_plugin_install.rs
-index 6236423d2318748461d3a91c83fda4bfd678892d..02d37430c9cb3475c04bfe75f624094977129842 100644
+index 6236423d2..02d37430c 100644
 --- a/codex-rs/core/src/tools/handlers/request_plugin_install.rs
 +++ b/codex-rs/core/src/tools/handlers/request_plugin_install.rs
 @@ -179,7 +179,7 @@ impl RequestPluginInstallHandler {
@@ -14103,7 +14103,7 @@ index 6236423d2318748461d3a91c83fda4bfd678892d..02d37430c9cb3475c04bfe75f6240949
      if let Err(err) = plugins_manager
          .build_and_cache_remote_installed_plugin_marketplaces(
 diff --git a/codex-rs/core/tests/suite/code_mode.rs b/codex-rs/core/tests/suite/code_mode.rs
-index 129368082db90028306ee2c984897602ee776133..5220a680a7be4e977c075ad1f8c686bcb5e94016 100644
+index 129368082..5220a680a 100644
 --- a/codex-rs/core/tests/suite/code_mode.rs
 +++ b/codex-rs/core/tests/suite/code_mode.rs
 @@ -523,9 +523,8 @@ text(result);
@@ -14118,7 +14118,7 @@ index 129368082db90028306ee2c984897602ee776133..5220a680a7be4e977c075ad1f8c686bc
          .with_auth(auth)
          .with_extensions(Arc::new(extension_builder.build()))
 diff --git a/codex-rs/core/tests/suite/extension_sandbox.rs b/codex-rs/core/tests/suite/extension_sandbox.rs
-index b6d99659c1164168ed2c6c20f3edccb50d600511..2081e57f91b452dc99a2a7955794b9d38b09dbab 100644
+index b6d99659c..2081e57f9 100644
 --- a/codex-rs/core/tests/suite/extension_sandbox.rs
 +++ b/codex-rs/core/tests/suite/extension_sandbox.rs
 @@ -55,12 +55,10 @@ const TINY_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAD
@@ -14154,7 +14154,7 @@ index b6d99659c1164168ed2c6c20f3edccb50d600511..2081e57f91b452dc99a2a7955794b9d3
          &[],
          NetworkSandboxPolicy::Restricted,
 diff --git a/codex-rs/core/tests/suite/responses_lite.rs b/codex-rs/core/tests/suite/responses_lite.rs
-index 3cafa0c8ffd6af41b73a9241a6f76ce8b990d13a..29f477dde35aaa1e3a197f160923dd436475e253 100644
+index 3cafa0c8f..29f477dde 100644
 --- a/codex-rs/core/tests/suite/responses_lite.rs
 +++ b/codex-rs/core/tests/suite/responses_lite.rs
 @@ -34,11 +34,10 @@ use serde_json::Value;
@@ -14218,7 +14218,7 @@ index 3cafa0c8ffd6af41b73a9241a6f76ce8b990d13a..29f477dde35aaa1e3a197f160923dd43
          .with_auth(auth)
          .with_extensions(extensions)
 diff --git a/codex-rs/core/tests/suite/sqlite_state.rs b/codex-rs/core/tests/suite/sqlite_state.rs
-index d4ad40410af680c442b423c28ec38bf26c9cade8..3718639b75f8e9d78a89916ebe95a50e0397ea95 100644
+index d4ad40410..3718639b7 100644
 --- a/codex-rs/core/tests/suite/sqlite_state.rs
 +++ b/codex-rs/core/tests/suite/sqlite_state.rs
 @@ -638,9 +638,8 @@ async fn standalone_web_search_marks_thread_memory_mode_polluted_when_configured
@@ -14233,7 +14233,7 @@ index d4ad40410af680c442b423c28ec38bf26c9cade8..3718639b75f8e9d78a89916ebe95a50e
          .with_auth(auth)
          .with_extensions(Arc::new(extension_builder.build()))
 diff --git a/codex-rs/ext/git-attribution/src/lib.rs b/codex-rs/ext/git-attribution/src/lib.rs
-index a0a3e4dcbf46eb7c72477b35b720d9314af75c77..a1c93f5c9cd1eca2f96d4f8764dd2c1d8afd9ada 100644
+index a0a3e4dcb..a1c93f5c9 100644
 --- a/codex-rs/ext/git-attribution/src/lib.rs
 +++ b/codex-rs/ext/git-attribution/src/lib.rs
 @@ -24,7 +24,6 @@ use crate::world_state::git_attribution_world_state_section;
@@ -14299,7 +14299,7 @@ index a0a3e4dcbf46eb7c72477b35b720d9314af75c77..a1c93f5c9cd1eca2f96d4f8764dd2c1d
          http_client_factory,
      }));
 diff --git a/codex-rs/ext/goal/src/extension.rs b/codex-rs/ext/goal/src/extension.rs
-index 923f436581b36c90556030ebdfc8e1dc30969ab4..649f12f21820ff7fdb06f23b651ba9fbb6057259 100644
+index 923f43658..649f12f21 100644
 --- a/codex-rs/ext/goal/src/extension.rs
 +++ b/codex-rs/ext/goal/src/extension.rs
 @@ -110,6 +110,11 @@ where
@@ -14370,7 +14370,7 @@ index 923f436581b36c90556030ebdfc8e1dc30969ab4..649f12f21820ff7fdb06f23b651ba9fb
                  self.metrics.clone(),
              )),
 diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/extension.rs b/codex-rs/ext/guardian-v2/src/async_scorer/extension.rs
-index 41de621f7966b8853fa2429c0f3b14afc20d6ffb..d571d38b87a6a8ba76cbe7b355fbddc77912a960 100644
+index 41de621f7..d571d38b8 100644
 --- a/codex-rs/ext/guardian-v2/src/async_scorer/extension.rs
 +++ b/codex-rs/ext/guardian-v2/src/async_scorer/extension.rs
 @@ -7,6 +7,7 @@ use std::time::Duration;
@@ -14476,7 +14476,7 @@ index 41de621f7966b8853fa2429c0f3b14afc20d6ffb..d571d38b87a6a8ba76cbe7b355fbddc7
          thread_manager,
      });
 diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/extension_tests.rs b/codex-rs/ext/guardian-v2/src/async_scorer/extension_tests.rs
-index b01a7ffdd4a5797bea3aec9fec707ebb1e2fab19..37bee4d9e9c3e92215e5d159cca27142610a378c 100644
+index b01a7ffdd..37bee4d9e 100644
 --- a/codex-rs/ext/guardian-v2/src/async_scorer/extension_tests.rs
 +++ b/codex-rs/ext/guardian-v2/src/async_scorer/extension_tests.rs
 @@ -110,13 +110,12 @@ async fn installed_extension_reconnects_after_auth_refresh() -> Result<()> {
@@ -14534,7 +14534,7 @@ index b01a7ffdd4a5797bea3aec9fec707ebb1e2fab19..37bee4d9e9c3e92215e5d159cca27142
      let metrics = Arc::new(RecordingMetrics::default());
      thread_store.insert(parent_model);
 diff --git a/codex-rs/ext/guardian-v2/src/lib.rs b/codex-rs/ext/guardian-v2/src/lib.rs
-index 2bc93c10402b0d52829cc3f4da16cbb375d05375..02e63b01b164b44ce64c7124f6949ae3a0b95ecc 100644
+index 2bc93c104..02e63b01b 100644
 --- a/codex-rs/ext/guardian-v2/src/lib.rs
 +++ b/codex-rs/ext/guardian-v2/src/lib.rs
 @@ -9,7 +9,6 @@ use codex_extension_api::ExtensionFuture;
@@ -14559,7 +14559,7 @@ index 2bc93c10402b0d52829cc3f4da16cbb375d05375..02e63b01b164b44ce64c7124f6949ae3
 +    async_scorer::install(registry, thread_manager);
  }
 diff --git a/codex-rs/ext/image-generation/src/extension.rs b/codex-rs/ext/image-generation/src/extension.rs
-index 38a24eed7c63ec251f6b2a50ad54577854f6ea15..5cfeb0bfc6956c0d7af49b11c13197a873da4e36 100644
+index 38a24eed7..5cfeb0bfc 100644
 --- a/codex-rs/ext/image-generation/src/extension.rs
 +++ b/codex-rs/ext/image-generation/src/extension.rs
 @@ -1,5 +1,6 @@
@@ -14625,7 +14625,7 @@ index 38a24eed7c63ec251f6b2a50ad54577854f6ea15..5cfeb0bfc6956c0d7af49b11c13197a8
      });
      registry.thread_lifecycle_contributor(extension.clone());
 diff --git a/codex-rs/ext/web-search/src/extension.rs b/codex-rs/ext/web-search/src/extension.rs
-index e269a18a3f242d0ef444befa2336441890e5388b..26b107f2869fe55d4bd985f250afa10f397e846a 100644
+index e269a18a3..26b107f28 100644
 --- a/codex-rs/ext/web-search/src/extension.rs
 +++ b/codex-rs/ext/web-search/src/extension.rs
 @@ -8,6 +8,7 @@ use codex_api::LocationType;
@@ -14702,7 +14702,7 @@ index e269a18a3f242d0ef444befa2336441890e5388b..26b107f2869fe55d4bd985f250afa10f
          thread_store.insert(WebSearchExtensionConfig {
              available: true,
 diff --git a/codex-rs/mcp-server/src/message_processor.rs b/codex-rs/mcp-server/src/message_processor.rs
-index 25c5faa36c6aec5f563ff774ec7d829d2a325487..3e064383c809bd78ffff6051fbd3c7b6046ffa61 100644
+index 25c5faa36..3e064383c 100644
 --- a/codex-rs/mcp-server/src/message_processor.rs
 +++ b/codex-rs/mcp-server/src/message_processor.rs
 @@ -71,15 +71,12 @@ impl MessageProcessor {
@@ -14725,7 +14725,7 @@ index 25c5faa36c6aec5f563ff774ec7d829d2a325487..3e064383c809bd78ffff6051fbd3c7b6
              .with_host_provider(Arc::new(codex_skills_extension::HostSkillProvider::new()));
          codex_skills_extension::install_with_providers_and_metrics(
 diff --git a/codex-rs/memories/write/src/runtime.rs b/codex-rs/memories/write/src/runtime.rs
-index 4fc69e74b60e1afb088336762602b6c06972defb..7dce4396e298dd056b96f64ac386fc724740d0b5 100644
+index 4fc69e74b..7dce4396e 100644
 --- a/codex-rs/memories/write/src/runtime.rs
 +++ b/codex-rs/memories/write/src/runtime.rs
 @@ -1,4 +1,5 @@
@@ -14856,7 +14856,7 @@ index 4fc69e74b60e1afb088336762602b6c06972defb..7dce4396e298dd056b96f64ac386fc72
          let agent = SpawnedConsolidationAgent { thread_id, thread };
          let submit_result = match agent
 diff --git a/codex-rs/memories/write/src/start.rs b/codex-rs/memories/write/src/start.rs
-index d7c964bd234b9689e6c4f0003ccf4229916616cf..f2f1551caa03e6b2e403f1097b6c795cdb4843d5 100644
+index d7c964bd2..f2f1551ca 100644
 --- a/codex-rs/memories/write/src/start.rs
 +++ b/codex-rs/memories/write/src/start.rs
 @@ -7,10 +7,10 @@ use crate::phase1;
@@ -14902,7 +14902,7 @@ index d7c964bd234b9689e6c4f0003ccf4229916616cf..f2f1551caa03e6b2e403f1097b6c795c
                  MEMORY_STARTUP,
                  /*inc*/ 1,
 diff --git a/codex-rs/memories/write/src/startup_tests.rs b/codex-rs/memories/write/src/startup_tests.rs
-index b1de7d0af81e28111c03458ce4c16cf6c7ae7397..3ac656963a63f0a1c5bc8230ea07cb447b6a28d7 100644
+index b1de7d0af..3ac656963 100644
 --- a/codex-rs/memories/write/src/startup_tests.rs
 +++ b/codex-rs/memories/write/src/startup_tests.rs
 @@ -738,7 +738,7 @@ async fn trigger_memories_startup(test: &TestCodex) {
@@ -14915,7 +14915,7 @@ index b1de7d0af81e28111c03458ce4c16cf6c7ae7397..3ac656963a63f0a1c5bc8230ea07cb44
          Arc::clone(&test.codex),
          Arc::new(config),
 diff --git a/codex-rs/thread-manager-sample/src/main.rs b/codex-rs/thread-manager-sample/src/main.rs
-index 155e3026a08545b267d687ced3630b0d00c31258..23bbb3eac3cd5d3f38a181bd1eefcd2243efe82c 100644
+index 155e3026a..23bbb3eac 100644
 --- a/codex-rs/thread-manager-sample/src/main.rs
 +++ b/codex-rs/thread-manager-sample/src/main.rs
 @@ -136,7 +136,7 @@ async fn run_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
@@ -14928,7 +14928,7 @@ index 155e3026a08545b267d687ced3630b0d00c31258..23bbb3eac3cd5d3f38a181bd1eefcd22
      });
      let thread_manager = ThreadManager::new(
 diff --git a/codex-rs/tui/src/app/app_server_event_targets.rs b/codex-rs/tui/src/app/app_server_event_targets.rs
-index a54a0fe8d95e35d0f376d0706bb75ca5cde2ddf7..2589f626bfb94aa5f1afffd2ce3c16d64b093167 100644
+index a54a0fe8d..2589f626b 100644
 --- a/codex-rs/tui/src/app/app_server_event_targets.rs
 +++ b/codex-rs/tui/src/app/app_server_event_targets.rs
 @@ -174,6 +174,12 @@ pub(super) fn server_notification_thread_target(
@@ -14953,7 +14953,7 @@ index a54a0fe8d95e35d0f376d0706bb75ca5cde2ddf7..2589f626bfb94aa5f1afffd2ce3c16d6
          | ServerNotification::EnvironmentDisconnected(_)
          | ServerNotification::RemoteControlStatusChanged(_)
 diff --git a/codex-rs/tui/src/app/app_server_events.rs b/codex-rs/tui/src/app/app_server_events.rs
-index d1bd3ad6e8ca37f0051b4a5889e1ec25dee98f29..19104451ba3a0521e3a437fdd995f99c59f0ce87 100644
+index d1bd3ad6e..19104451b 100644
 --- a/codex-rs/tui/src/app/app_server_events.rs
 +++ b/codex-rs/tui/src/app/app_server_events.rs
 @@ -20,6 +20,7 @@ use codex_app_server_protocol::ServerRequest;
@@ -14980,7 +14980,7 @@ index d1bd3ad6e8ca37f0051b4a5889e1ec25dee98f29..19104451ba3a0521e3a437fdd995f99c
                          .refresh_connector_directory_after_notification(
                              notification
 diff --git a/codex-rs/tui/src/app/background_requests.rs b/codex-rs/tui/src/app/background_requests.rs
-index d51c50d3c1db52c84a1516aab7a6eb237a050f64..d44257564afcc59c5db74f149b796d47e3bb8cdb 100644
+index d51c50d3c..d44257564 100644
 --- a/codex-rs/tui/src/app/background_requests.rs
 +++ b/codex-rs/tui/src/app/background_requests.rs
 @@ -887,6 +887,7 @@ pub(super) async fn fetch_skills_list(
@@ -14992,7 +14992,7 @@ index d51c50d3c1db52c84a1516aab7a6eb237a050f64..d44257564afcc59c5db74f149b796d47
                  force_reload: true,
              },
 diff --git a/codex-rs/tui/src/app/tests/connector_policy.rs b/codex-rs/tui/src/app/tests/connector_policy.rs
-index a806e90e22340e984d07e92303343dc955fb352e..cc4f81edaf4d16eae1904003226eed9d274c87aa 100644
+index a806e90e2..cc4f81eda 100644
 --- a/codex-rs/tui/src/app/tests/connector_policy.rs
 +++ b/codex-rs/tui/src/app/tests/connector_policy.rs
 @@ -126,12 +126,28 @@ async fn app_list_notifications_revalidate_installed_mentions_and_the_current_di
@@ -15041,7 +15041,7 @@ index a806e90e22340e984d07e92303343dc955fb352e..cc4f81edaf4d16eae1904003226eed9d
      });
      app.handle_app_server_event(
 diff --git a/codex-rs/tui/src/app/thread_routing.rs b/codex-rs/tui/src/app/thread_routing.rs
-index feac96ff869efeb09450a46594019d5f5c702817..554282f4da5dac83d078f7ba8859c1c668d49374 100644
+index feac96ff8..554282f4d 100644
 --- a/codex-rs/tui/src/app/thread_routing.rs
 +++ b/codex-rs/tui/src/app/thread_routing.rs
 @@ -767,6 +767,7 @@ impl App {
@@ -15052,3 +15052,6 @@ index feac96ff869efeb09450a46594019d5f5c702817..554282f4da5dac83d078f7ba8859c1c6
                              cwds: cwds.clone(),
                              force_reload: *force_reload,
                          })
+-- 
+2.50.1 (Apple Git-155)
+

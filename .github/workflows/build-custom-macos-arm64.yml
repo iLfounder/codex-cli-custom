@@ -23,7 +23,7 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
       CARGO_TERM_COLOR: always
       SOURCE_COMMIT: 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
-      PATCH_TREE: 096164cc5236699b0a7257f272d402ca4bf3ce09
+      PATCH_TREE: 0b611f585edbea2c31af97011b1a13077849b981
 
     steps:
       - name: Check out patch repository
@@ -64,8 +64,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --release -p codex-cli --bin codex
-          cargo build --release -p codex-app-server --bin codex-app-server
+          # The release tag carries placeholder versions for workspace packages in Cargo.lock.
+          # Normalize only those exact placeholders, then keep dependency resolution locked.
+          perl -0pi -e 's/version = "0\.0\.0"/version = "0.149.0"/g' Cargo.lock
+          cargo build --locked --release -p codex-cli --bin codex
+          cargo build --locked --release -p codex-app-server --bin codex-app-server
 
       - name: Package binaries and provenance
         shell: bash
@@ -76,7 +79,7 @@ jobs:
           cp "$CARGO_TARGET_DIR/release/codex-app-server" dist/codex-app-server
           strip -x dist/codex dist/codex-app-server
           chmod 0755 dist/codex dist/codex-app-server
-          shasum -a 256 dist/codex dist/codex-app-server > dist/SHA256SUMS
+          (cd dist && shasum -a 256 codex codex-app-server > SHA256SUMS)
           {
             printf 'upstream_commit=%s\n' "$SOURCE_COMMIT"
             printf 'patched_tree=%s\n' "$PATCH_TREE"

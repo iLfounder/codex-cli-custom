@@ -28,8 +28,8 @@ Stock Codex는 인증과 runtime 소유권의 많은 부분을 process 단위로
 | 영역 | 현재 상태 |
 |---|---|
 | P001–P011 구현과 focused check | 완료 |
-| 순서형 0.149 patch export와 clean-apply 검증 | 완료; 11개 patch가 tree `096164cc5236699b0a7257f272d402ca4bf3ce09`를 재현함 |
-| macOS arm64 release build와 artifact | 완료; [Actions run 32485937374](https://github.com/iLfounder/codex-cli-custom/actions/runs/32485937374), artifact `codex-custom-rust-v0.149.0-macos-arm64` |
+| 순서형 0.149 patch export와 clean-apply 검증 | 완료; 11개 patch가 tree `0b611f585edbea2c31af97011b1a13077849b981`를 재현함 |
+| macOS arm64 release build와 artifact | final review 수정 후 rebuild 대기; [run 32485937374](https://github.com/iLfounder/codex-cli-custom/actions/runs/32485937374)는 교체된 review 전 tree의 증거임 |
 | 최종 독립 review | Pending |
 | 0.149 publication | Pending |
 
@@ -128,9 +128,13 @@ git checkout 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
 /path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD"
 ```
 
-Applier는 dirty 또는 잘못된 base worktree를 거절하고, 각 patch digest를 검증하며, P001–P011을 순서대로 적용한 뒤 final tree `096164cc5236699b0a7257f272d402ca4bf3ce09`를 요구한다.
+Applier는 dirty 또는 잘못된 base worktree를 거절하고, 각 patch digest를 검증하며, P001–P011을 순서대로 적용한 뒤 final tree `0b611f585edbea2c31af97011b1a13077849b981`를 요구한다.
 
 이 분리가 유지보수 방식이다. upstream이 갱신되면 각 P번호를 자기 기능 경계 안에서 inspect·adapt·verify할 수 있다.
+
+### 기존 0.148 custom state store 업그레이드
+
+이전 custom series가 사용한 migration 번호를 official 0.149가 나중에 사용했다. 따라서 새 binary는 legacy row를 발견하면 DB를 바꾸지 않고 중단한다. 같은 state store를 공유하는 모든 구버전 TUI와 app-server를 먼저 종료한 뒤, 0.149 build를 `CODEX_STATE_LEGACY_MIGRATION_CUTOVER=1`로 한 번만 시작한다. atomic adoption 전에 exact checksum, table definition, custom migration metadata를 다시 검증하며 unknown 또는 partial schema는 계속 fail-closed다. 일회성 cutover가 끝나면 변수를 제거하고 old binary로 해당 store를 다시 열지 않는다.
 
 ## Build, review, publication
 
@@ -139,11 +143,11 @@ Applier는 dirty 또는 잘못된 base worktree를 거절하고, 각 patch diges
 1. build된 동일 final candidate에 대한 fresh-context 독립 review 2회
 2. material finding 반영과 최종 publication 상태 갱신
 
-release build와 artifact는 [Actions run 32485937374](https://github.com/iLfounder/codex-cli-custom/actions/runs/32485937374)에서 제공한다. 남은 행을 갱신하기 전에는 최종 review와 publication 완료를 주장하지 않는다.
+[Actions run 32485937374](https://github.com/iLfounder/codex-cli-custom/actions/runs/32485937374)는 review 전 tree를 build했다. final review 수정본은 새 build와 artifact가 완료되기 전까지 publication 완료로 주장하지 않는다.
 
 ## 과거 작업 참고자료
 
-초기 개인 조사와 build note는 비정본 배경자료로 [`docs/handoff.md`](docs/handoff.md)와 [`docs/codex-rs-build-guide.md`](docs/codex-rs-build-guide.md)에 보존한다. 현재 0.149 설계보다 오래된 자료이며 public runtime contract가 아니다.
+식별 정보를 제거한 초기 설계 조사와 build note는 비정본 배경자료로 [`docs/handoff.md`](docs/handoff.md)와 [`docs/codex-rs-build-guide.md`](docs/codex-rs-build-guide.md)에 보존한다. 현재 0.149 설계보다 오래된 자료이며 public runtime contract가 아니다.
 
 ## License
 

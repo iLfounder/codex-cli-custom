@@ -1,4 +1,4 @@
-From 9a9b5ebdd2ef1e7f00bf9ad84f4fb4570da49455 Mon Sep 17 00:00:00 2001
+From 77f4bb23fbc09c7708a5195d86221de30363aeeb Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 14:30:42 +0900
 Subject: [PATCH 02/11] feat(custom): add session runtime protocol for 0.149
@@ -130,7 +130,7 @@ Subject: [PATCH 02/11] feat(custom): add session runtime protocol for 0.149
  create mode 100644 codex-rs/app-server-protocol/src/protocol/v2/session_runtime.rs
 
 diff --git a/codex-rs/app-server-protocol/schema/json/ClientRequest.json b/codex-rs/app-server-protocol/schema/json/ClientRequest.json
-index c5fe07c1d170f7b1e71a96ff528511e8c638e49d..94fc9e5535ddf38f717ec516711731b3f1f92914 100644
+index c5fe07c1d..94fc9e553 100644
 --- a/codex-rs/app-server-protocol/schema/json/ClientRequest.json
 +++ b/codex-rs/app-server-protocol/schema/json/ClientRequest.json
 @@ -5,6 +5,156 @@
@@ -550,7 +550,7 @@ index c5fe07c1d170f7b1e71a96ff528511e8c638e49d..94fc9e5535ddf38f717ec516711731b3
        "properties": {
          "id": {
 diff --git a/codex-rs/app-server-protocol/schema/json/ServerNotification.json b/codex-rs/app-server-protocol/schema/json/ServerNotification.json
-index 2d65f17ecd7394075b83fada7acf1462076a99d9..cb8ffd43a2749ac18b1458f8d821df90ca385d59 100644
+index 2d65f17ec..cb8ffd43a 100644
 --- a/codex-rs/app-server-protocol/schema/json/ServerNotification.json
 +++ b/codex-rs/app-server-protocol/schema/json/ServerNotification.json
 @@ -50,6 +50,132 @@
@@ -1615,7 +1615,7 @@ index 2d65f17ecd7394075b83fada7acf1462076a99d9..cb8ffd43a2749ac18b1458f8d821df90
        "properties": {
          "method": {
 diff --git a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
-index 6802d1635345501032a4010552fda8372ec9396a..fed660d0aa74eb20d9d6684dfbcf9cb7926bca68 100644
+index 6802d1635..fed660d0a 100644
 --- a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
 +++ b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
 @@ -372,6 +372,54 @@
@@ -6156,7 +6156,7 @@ index 6802d1635345501032a4010552fda8372ec9396a..fed660d0aa74eb20d9d6684dfbcf9cb7
          "properties": {
            "itemsView": {
 diff --git a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
-index 9a40484e126746a92592e2c658171e81be720785..5b5560bd424bc8b05241d419e3bdbc0eaa926b98 100644
+index 9a40484e1..5b5560bd4 100644
 --- a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
 +++ b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
 @@ -121,746 +121,760 @@
@@ -13978,7 +13978,7 @@ index 9a40484e126746a92592e2c658171e81be720785..5b5560bd424bc8b05241d419e3bdbc0e
          "itemsView": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/AccountSlotChangedNotification.json b/codex-rs/app-server-protocol/schema/json/v2/AccountSlotChangedNotification.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..31b96fbf6e6aaf4bd8fd267013b2a8545a16483b
+index 000000000..31b96fbf6
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/json/v2/AccountSlotChangedNotification.json
 @@ -0,0 +1,184 @@
@@ -14169,7 +14169,7 @@ index 0000000000000000000000000000000000000000..31b96fbf6e6aaf4bd8fd267013b2a854
 \ No newline at end of file
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/AccountSlotListParams.json b/codex-rs/app-server-protocol/schema/json/v2/AccountSlotListParams.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..ca2744d1cdfc4bb77b76cfc9e576620a3bbf06b0
+index 000000000..ca2744d1c
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/json/v2/AccountSlotListParams.json
 @@ -0,0 +1,24 @@
@@ -14200,7 +14200,7 @@ index 0000000000000000000000000000000000000000..ca2744d1cdfc4bb77b76cfc9e576620a
 \ No newline at end of file
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/AccountSlotListResponse.json b/codex-rs/app-server-protocol/schema/json/v2/AccountSlotListResponse.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..150e65c32d18d19164d51e7423f231b56f90d846
+index 000000000..150e65c32
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/json/v2/AccountSlotListResponse.json
 @@ -0,0 +1,216 @@
@@ -14423,7 +14423,7 @@ index 0000000000000000000000000000000000000000..150e65c32d18d19164d51e7423f231b5
 \ No newline at end of file
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/AccountSlotLoginStartParams.json b/codex-rs/app-server-protocol/schema/json/v2/AccountSlotLoginStartParams.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..c5f62cf7459766438fa081473d94a9e78fe5dc5c
+index 000000000..c5f62cf74
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/json/v2/AccountSlotLoginStartParams.json
 @@ -0,0 +1,139 @@
@@ -14569,7 +14569,7 @@ index 0000000000000000000000000000000000000000..c5f62cf7459766438fa081473d94a9e7
 \ No newline at end of file
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/AccountSlotLoginStartResponse.json b/codex-rs/app-server-protocol/schema/json/v2/AccountSlotLoginStartResponse.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..fdb8b0a61060d2b210c5f672dfd5b93f89aac78c
+index 000000000..fdb8b0a61
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/json/v2/AccountSlotLoginStartResponse.json
 @@ -0,0 +1,358 @@
@@ -14934,7 +14934,7 @@ index 0000000000000000000000000000000000000000..fdb8b0a61060d2b210c5f672dfd5b93f
 \ No newline at end of file
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/SessionRuntimeChangedNotification.json b/codex-rs/app-server-protocol/schema/json/v2/SessionRuntimeChangedNotification.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..0ac4ce705519d30caba17fa976d168fb6bfb753b
+index 000000000..0ac4ce705
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/json/v2/SessionRuntimeChangedNotification.json
 @@ -0,0 +1,844 @@
@@ -15785,7 +15785,7 @@ index 0000000000000000000000000000000000000000..0ac4ce705519d30caba17fa976d168fb
 \ No newline at end of file
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/SessionRuntimeListParams.json b/codex-rs/app-server-protocol/schema/json/v2/SessionRuntimeListParams.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..ee234228efe656cd03c9f95f7e4bd39e428af31a
+index 000000000..ee234228e
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/json/v2/SessionRuntimeListParams.json
 @@ -0,0 +1,31 @@
@@ -15823,7 +15823,7 @@ index 0000000000000000000000000000000000000000..ee234228efe656cd03c9f95f7e4bd39e
 \ No newline at end of file
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/SessionRuntimeListResponse.json b/codex-rs/app-server-protocol/schema/json/v2/SessionRuntimeListResponse.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..2877f2b37641559aa1f2e37a92f2d0dff17aa2aa
+index 000000000..2877f2b37
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/json/v2/SessionRuntimeListResponse.json
 @@ -0,0 +1,887 @@
@@ -16717,7 +16717,7 @@ index 0000000000000000000000000000000000000000..2877f2b37641559aa1f2e37a92f2d0df
 \ No newline at end of file
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/SessionRuntimeOperationUpdatedNotification.json b/codex-rs/app-server-protocol/schema/json/v2/SessionRuntimeOperationUpdatedNotification.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..ecf2d603ccb79cf3d9d915fd9380d00d5c4de077
+index 000000000..ecf2d603c
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/json/v2/SessionRuntimeOperationUpdatedNotification.json
 @@ -0,0 +1,137 @@
@@ -16861,7 +16861,7 @@ index 0000000000000000000000000000000000000000..ecf2d603ccb79cf3d9d915fd9380d00d
 \ No newline at end of file
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadAccountSwitchParams.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadAccountSwitchParams.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..c5716a0c4131de023430bdb4c6ab1cfa05f55397
+index 000000000..c5716a0c4
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadAccountSwitchParams.json
 @@ -0,0 +1,38 @@
@@ -16906,7 +16906,7 @@ index 0000000000000000000000000000000000000000..c5716a0c4131de023430bdb4c6ab1cfa
 \ No newline at end of file
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadAccountSwitchResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadAccountSwitchResponse.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..2eb75b74ddb676880fd7314bd6ebde4a3efbc9d1
+index 000000000..2eb75b74d
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadAccountSwitchResponse.json
 @@ -0,0 +1,126 @@
@@ -17039,7 +17039,7 @@ index 0000000000000000000000000000000000000000..2eb75b74ddb676880fd7314bd6ebde4a
 \ No newline at end of file
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadRelinquishParams.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadRelinquishParams.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..f87b1cca576881754b9cd1627782c782e5fd49a4
+index 000000000..f87b1cca5
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadRelinquishParams.json
 @@ -0,0 +1,34 @@
@@ -17080,7 +17080,7 @@ index 0000000000000000000000000000000000000000..f87b1cca576881754b9cd1627782c782
 \ No newline at end of file
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadRelinquishResponse.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadRelinquishResponse.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..c59ef7cd640912a52dcee9c25afb107d237d599a
+index 000000000..c59ef7cd6
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadRelinquishResponse.json
 @@ -0,0 +1,126 @@
@@ -22564,7 +22564,7 @@ zW$LDgcLQ7;i)(QJ2LR>?;<eASBf}isf{Cf?j2Pj=+w5E2+h~?ySl;@=D7!wyl@73e
 ltZsNCBgC%`{!#v>ZYy$V)_8;#pu@dwd;YHnA!3SqBmuiJcQyb3
 
 diff --git a/codex-rs/app-server-protocol/schema/typescript/ClientRequest.ts b/codex-rs/app-server-protocol/schema/typescript/ClientRequest.ts
-index dffd07fbf9233f325dc6d26c1b9e6f1cc9e62123..d17cda68fc627ceab29b65a386b96eb9a06e2508 100644
+index dffd07fbf..d17cda68f 100644
 --- a/codex-rs/app-server-protocol/schema/typescript/ClientRequest.ts
 +++ b/codex-rs/app-server-protocol/schema/typescript/ClientRequest.ts
 @@ -7,6 +7,8 @@ import type { GetConversationSummaryParams } from "./GetConversationSummaryParam
@@ -22603,7 +22603,7 @@ index dffd07fbf9233f325dc6d26c1b9e6f1cc9e62123..d17cda68fc627ceab29b65a386b96eb9
 -export type ClientRequest ={ "method": "initialize", id: RequestId, params: InitializeParams, } | { "method": "thread/start", id: RequestId, params: ThreadStartParams, } | { "method": "thread/resume", id: RequestId, params: ThreadResumeParams, } | { "method": "thread/fork", id: RequestId, params: ThreadForkParams, } | { "method": "thread/archive", id: RequestId, params: ThreadArchiveParams, } | { "method": "thread/delete", id: RequestId, params: ThreadDeleteParams, } | { "method": "thread/unsubscribe", id: RequestId, params: ThreadUnsubscribeParams, } | { "method": "thread/name/set", id: RequestId, params: ThreadSetNameParams, } | { "method": "thread/goal/set", id: RequestId, params: ThreadGoalSetParams, } | { "method": "thread/goal/get", id: RequestId, params: ThreadGoalGetParams, } | { "method": "thread/goal/clear", id: RequestId, params: ThreadGoalClearParams, } | { "method": "thread/metadata/update", id: RequestId, params: ThreadMetadataUpdateParams, } | { "method": "thread/section/move", id: RequestId, params: ThreadSectionMoveParams, } | { "method": "thread/unarchive", id: RequestId, params: ThreadUnarchiveParams, } | { "method": "thread/compact/start", id: RequestId, params: ThreadCompactStartParams, } | { "method": "thread/shellCommand", id: RequestId, params: ThreadShellCommandParams, } | { "method": "thread/approveGuardianDeniedAction", id: RequestId, params: ThreadApproveGuardianDeniedActionParams, } | { "method": "thread/rollback", id: RequestId, params: ThreadRollbackParams, } | { "method": "thread/list", id: RequestId, params: ThreadListParams, } | { "method": "threadSection/list", id: RequestId, params: ThreadSectionListParams, } | { "method": "threadSection/create", id: RequestId, params: ThreadSectionCreateParams, } | { "method": "threadSection/update", id: RequestId, params: ThreadSectionUpdateParams, } | { "method": "threadSection/delete", id: RequestId, params: ThreadSectionDeleteParams, } | { "method": "thread/loaded/list", id: RequestId, params: ThreadLoadedListParams, } | { "method": "thread/read", id: RequestId, params: ThreadReadParams, } | { "method": "thread/inject_items", id: RequestId, params: ThreadInjectItemsParams, } | { "method": "skills/list", id: RequestId, params: SkillsListParams, } | { "method": "skills/extraRoots/set", id: RequestId, params: SkillsExtraRootsSetParams, } | { "method": "hooks/list", id: RequestId, params: HooksListParams, } | { "method": "marketplace/add", id: RequestId, params: MarketplaceAddParams, } | { "method": "marketplace/remove", id: RequestId, params: MarketplaceRemoveParams, } | { "method": "marketplace/upgrade", id: RequestId, params: MarketplaceUpgradeParams, } | { "method": "plugin/list", id: RequestId, params: PluginListParams, } | { "method": "plugin/installed", id: RequestId, params: PluginInstalledParams, } | { "method": "plugin/read", id: RequestId, params: PluginReadParams, } | { "method": "plugin/skill/read", id: RequestId, params: PluginSkillReadParams, } | { "method": "plugin/share/save", id: RequestId, params: PluginShareSaveParams, } | { "method": "plugin/share/updateTargets", id: RequestId, params: PluginShareUpdateTargetsParams, } | { "method": "plugin/share/list", id: RequestId, params: PluginShareListParams, } | { "method": "plugin/share/checkout", id: RequestId, params: PluginShareCheckoutParams, } | { "method": "plugin/share/delete", id: RequestId, params: PluginShareDeleteParams, } | { "method": "app/read", id: RequestId, params: AppsReadParams, } | { "method": "app/list", id: RequestId, params: AppsListParams, } | { "method": "app/installed", id: RequestId, params: AppsInstalledParams, } | { "method": "fs/readFile", id: RequestId, params: FsReadFileParams, } | { "method": "fs/writeFile", id: RequestId, params: FsWriteFileParams, } | { "method": "fs/createDirectory", id: RequestId, params: FsCreateDirectoryParams, } | { "method": "fs/getMetadata", id: RequestId, params: FsGetMetadataParams, } | { "method": "fs/readDirectory", id: RequestId, params: FsReadDirectoryParams, } | { "method": "fs/remove", id: RequestId, params: FsRemoveParams, } | { "method": "fs/copy", id: RequestId, params: FsCopyParams, } | { "method": "fs/watch", id: RequestId, params: FsWatchParams, } | { "method": "fs/unwatch", id: RequestId, params: FsUnwatchParams, } | { "method": "skills/config/write", id: RequestId, params: SkillsConfigWriteParams, } | { "method": "plugin/install", id: RequestId, params: PluginInstallParams, } | { "method": "plugin/uninstall", id: RequestId, params: PluginUninstallParams, } | { "method": "turn/start", id: RequestId, params: TurnStartParams, } | { "method": "turn/steer", id: RequestId, params: TurnSteerParams, } | { "method": "turn/interrupt", id: RequestId, params: TurnInterruptParams, } | { "method": "review/start", id: RequestId, params: ReviewStartParams, } | { "method": "model/list", id: RequestId, params: ModelListParams, } | { "method": "modelProvider/capabilities/read", id: RequestId, params: ModelProviderCapabilitiesReadParams, } | { "method": "experimentalFeature/list", id: RequestId, params: ExperimentalFeatureListParams, } | { "method": "permissionProfile/list", id: RequestId, params: PermissionProfileListParams, } | { "method": "experimentalFeature/enablement/set", id: RequestId, params: ExperimentalFeatureEnablementSetParams, } | { "method": "mcpServer/oauth/login", id: RequestId, params: McpServerOauthLoginParams, } | { "method": "config/mcpServer/reload", id: RequestId, params: undefined, } | { "method": "mcpServerStatus/list", id: RequestId, params: ListMcpServerStatusParams, } | { "method": "mcpServer/resource/read", id: RequestId, params: McpResourceReadParams, } | { "method": "mcpServer/tool/call", id: RequestId, params: McpServerToolCallParams, } | { "method": "windowsSandbox/setupStart", id: RequestId, params: WindowsSandboxSetupStartParams, } | { "method": "windowsSandbox/readiness", id: RequestId, params: undefined, } | { "method": "account/login/start", id: RequestId, params: LoginAccountParams, } | { "method": "account/login/cancel", id: RequestId, params: CancelLoginAccountParams, } | { "method": "account/logout", id: RequestId, params: undefined, } | { "method": "account/rateLimits/read", id: RequestId, params: undefined, } | { "method": "account/rateLimitResetCredit/consume", id: RequestId, params: ConsumeAccountRateLimitResetCreditParams, } | { "method": "account/usage/read", id: RequestId, params?: GetAccountTokenUsageParams | undefined, } | { "method": "account/workspaceMessages/read", id: RequestId, params: undefined, } | { "method": "account/sendAddCreditsNudgeEmail", id: RequestId, params: SendAddCreditsNudgeEmailParams, } | { "method": "feedback/upload", id: RequestId, params: FeedbackUploadParams, } | { "method": "command/exec", id: RequestId, params: CommandExecParams, } | { "method": "command/exec/write", id: RequestId, params: CommandExecWriteParams, } | { "method": "command/exec/terminate", id: RequestId, params: CommandExecTerminateParams, } | { "method": "command/exec/resize", id: RequestId, params: CommandExecResizeParams, } | { "method": "config/read", id: RequestId, params: ConfigReadParams, } | { "method": "externalAgentConfig/detect", id: RequestId, params: ExternalAgentConfigDetectParams, } | { "method": "externalAgentConfig/import", id: RequestId, params: ExternalAgentConfigImportParams, } | { "method": "externalAgentConfig/import/recordHistory", id: RequestId, params: ExternalAgentConfigImportHistoryRecordParams, } | { "method": "externalAgentConfig/import/readHistories", id: RequestId, params: undefined, } | { "method": "config/value/write", id: RequestId, params: ConfigValueWriteParams, } | { "method": "config/batchWrite", id: RequestId, params: ConfigBatchWriteParams, } | { "method": "configRequirements/read", id: RequestId, params: undefined, } | { "method": "account/read", id: RequestId, params: GetAccountParams, } | { "method": "getConversationSummary", id: RequestId, params: GetConversationSummaryParams, } | { "method": "gitDiffToRemote", id: RequestId, params: GitDiffToRemoteParams, } | { "method": "getAuthStatus", id: RequestId, params: GetAuthStatusParams, } | { "method": "fuzzyFileSearch", id: RequestId, params: FuzzyFileSearchParams, };
 +export type ClientRequest ={ "method": "initialize", id: RequestId, params: InitializeParams, } | { "method": "thread/start", id: RequestId, params: ThreadStartParams, } | { "method": "thread/resume", id: RequestId, params: ThreadResumeParams, } | { "method": "thread/fork", id: RequestId, params: ThreadForkParams, } | { "method": "thread/archive", id: RequestId, params: ThreadArchiveParams, } | { "method": "thread/delete", id: RequestId, params: ThreadDeleteParams, } | { "method": "thread/unsubscribe", id: RequestId, params: ThreadUnsubscribeParams, } | { "method": "thread/account/switch", id: RequestId, params: ThreadAccountSwitchParams, } | { "method": "thread/relinquish", id: RequestId, params: ThreadRelinquishParams, } | { "method": "thread/name/set", id: RequestId, params: ThreadSetNameParams, } | { "method": "thread/goal/set", id: RequestId, params: ThreadGoalSetParams, } | { "method": "thread/goal/get", id: RequestId, params: ThreadGoalGetParams, } | { "method": "thread/goal/clear", id: RequestId, params: ThreadGoalClearParams, } | { "method": "thread/metadata/update", id: RequestId, params: ThreadMetadataUpdateParams, } | { "method": "thread/section/move", id: RequestId, params: ThreadSectionMoveParams, } | { "method": "thread/unarchive", id: RequestId, params: ThreadUnarchiveParams, } | { "method": "thread/compact/start", id: RequestId, params: ThreadCompactStartParams, } | { "method": "thread/shellCommand", id: RequestId, params: ThreadShellCommandParams, } | { "method": "thread/approveGuardianDeniedAction", id: RequestId, params: ThreadApproveGuardianDeniedActionParams, } | { "method": "thread/rollback", id: RequestId, params: ThreadRollbackParams, } | { "method": "thread/list", id: RequestId, params: ThreadListParams, } | { "method": "threadSection/list", id: RequestId, params: ThreadSectionListParams, } | { "method": "threadSection/create", id: RequestId, params: ThreadSectionCreateParams, } | { "method": "threadSection/update", id: RequestId, params: ThreadSectionUpdateParams, } | { "method": "threadSection/delete", id: RequestId, params: ThreadSectionDeleteParams, } | { "method": "thread/loaded/list", id: RequestId, params: ThreadLoadedListParams, } | { "method": "sessionRuntime/list", id: RequestId, params: SessionRuntimeListParams, } | { "method": "thread/read", id: RequestId, params: ThreadReadParams, } | { "method": "thread/inject_items", id: RequestId, params: ThreadInjectItemsParams, } | { "method": "skills/list", id: RequestId, params: SkillsListParams, } | { "method": "skills/extraRoots/set", id: RequestId, params: SkillsExtraRootsSetParams, } | { "method": "hooks/list", id: RequestId, params: HooksListParams, } | { "method": "marketplace/add", id: RequestId, params: MarketplaceAddParams, } | { "method": "marketplace/remove", id: RequestId, params: MarketplaceRemoveParams, } | { "method": "marketplace/upgrade", id: RequestId, params: MarketplaceUpgradeParams, } | { "method": "plugin/list", id: RequestId, params: PluginListParams, } | { "method": "plugin/installed", id: RequestId, params: PluginInstalledParams, } | { "method": "plugin/read", id: RequestId, params: PluginReadParams, } | { "method": "plugin/skill/read", id: RequestId, params: PluginSkillReadParams, } | { "method": "plugin/share/save", id: RequestId, params: PluginShareSaveParams, } | { "method": "plugin/share/updateTargets", id: RequestId, params: PluginShareUpdateTargetsParams, } | { "method": "plugin/share/list", id: RequestId, params: PluginShareListParams, } | { "method": "plugin/share/checkout", id: RequestId, params: PluginShareCheckoutParams, } | { "method": "plugin/share/delete", id: RequestId, params: PluginShareDeleteParams, } | { "method": "app/read", id: RequestId, params: AppsReadParams, } | { "method": "app/list", id: RequestId, params: AppsListParams, } | { "method": "app/installed", id: RequestId, params: AppsInstalledParams, } | { "method": "fs/readFile", id: RequestId, params: FsReadFileParams, } | { "method": "fs/writeFile", id: RequestId, params: FsWriteFileParams, } | { "method": "fs/createDirectory", id: RequestId, params: FsCreateDirectoryParams, } | { "method": "fs/getMetadata", id: RequestId, params: FsGetMetadataParams, } | { "method": "fs/readDirectory", id: RequestId, params: FsReadDirectoryParams, } | { "method": "fs/remove", id: RequestId, params: FsRemoveParams, } | { "method": "fs/copy", id: RequestId, params: FsCopyParams, } | { "method": "fs/watch", id: RequestId, params: FsWatchParams, } | { "method": "fs/unwatch", id: RequestId, params: FsUnwatchParams, } | { "method": "skills/config/write", id: RequestId, params: SkillsConfigWriteParams, } | { "method": "plugin/install", id: RequestId, params: PluginInstallParams, } | { "method": "plugin/uninstall", id: RequestId, params: PluginUninstallParams, } | { "method": "turn/start", id: RequestId, params: TurnStartParams, } | { "method": "turn/steer", id: RequestId, params: TurnSteerParams, } | { "method": "turn/interrupt", id: RequestId, params: TurnInterruptParams, } | { "method": "review/start", id: RequestId, params: ReviewStartParams, } | { "method": "model/list", id: RequestId, params: ModelListParams, } | { "method": "modelProvider/capabilities/read", id: RequestId, params: ModelProviderCapabilitiesReadParams, } | { "method": "experimentalFeature/list", id: RequestId, params: ExperimentalFeatureListParams, } | { "method": "permissionProfile/list", id: RequestId, params: PermissionProfileListParams, } | { "method": "experimentalFeature/enablement/set", id: RequestId, params: ExperimentalFeatureEnablementSetParams, } | { "method": "mcpServer/oauth/login", id: RequestId, params: McpServerOauthLoginParams, } | { "method": "config/mcpServer/reload", id: RequestId, params: undefined, } | { "method": "mcpServerStatus/list", id: RequestId, params: ListMcpServerStatusParams, } | { "method": "mcpServer/resource/read", id: RequestId, params: McpResourceReadParams, } | { "method": "mcpServer/tool/call", id: RequestId, params: McpServerToolCallParams, } | { "method": "windowsSandbox/setupStart", id: RequestId, params: WindowsSandboxSetupStartParams, } | { "method": "windowsSandbox/readiness", id: RequestId, params: undefined, } | { "method": "accountSlot/list", id: RequestId, params: AccountSlotListParams, } | { "method": "accountSlot/login/start", id: RequestId, params: AccountSlotLoginStartParams, } | { "method": "account/login/start", id: RequestId, params: LoginAccountParams, } | { "method": "account/login/cancel", id: RequestId, params: CancelLoginAccountParams, } | { "method": "account/logout", id: RequestId, params: undefined, } | { "method": "account/rateLimits/read", id: RequestId, params: undefined, } | { "method": "account/rateLimitResetCredit/consume", id: RequestId, params: ConsumeAccountRateLimitResetCreditParams, } | { "method": "account/usage/read", id: RequestId, params?: GetAccountTokenUsageParams | undefined, } | { "method": "account/workspaceMessages/read", id: RequestId, params: undefined, } | { "method": "account/sendAddCreditsNudgeEmail", id: RequestId, params: SendAddCreditsNudgeEmailParams, } | { "method": "feedback/upload", id: RequestId, params: FeedbackUploadParams, } | { "method": "command/exec", id: RequestId, params: CommandExecParams, } | { "method": "command/exec/write", id: RequestId, params: CommandExecWriteParams, } | { "method": "command/exec/terminate", id: RequestId, params: CommandExecTerminateParams, } | { "method": "command/exec/resize", id: RequestId, params: CommandExecResizeParams, } | { "method": "config/read", id: RequestId, params: ConfigReadParams, } | { "method": "externalAgentConfig/detect", id: RequestId, params: ExternalAgentConfigDetectParams, } | { "method": "externalAgentConfig/import", id: RequestId, params: ExternalAgentConfigImportParams, } | { "method": "externalAgentConfig/import/recordHistory", id: RequestId, params: ExternalAgentConfigImportHistoryRecordParams, } | { "method": "externalAgentConfig/import/readHistories", id: RequestId, params: undefined, } | { "method": "config/value/write", id: RequestId, params: ConfigValueWriteParams, } | { "method": "config/batchWrite", id: RequestId, params: ConfigBatchWriteParams, } | { "method": "configRequirements/read", id: RequestId, params: undefined, } | { "method": "account/read", id: RequestId, params: GetAccountParams, } | { "method": "getConversationSummary", id: RequestId, params: GetConversationSummaryParams, } | { "method": "gitDiffToRemote", id: RequestId, params: GitDiffToRemoteParams, } | { "method": "getAuthStatus", id: RequestId, params: GetAuthStatusParams, } | { "method": "fuzzyFileSearch", id: RequestId, params: FuzzyFileSearchParams, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/ServerNotification.ts b/codex-rs/app-server-protocol/schema/typescript/ServerNotification.ts
-index 82a48530f3d68a2351a6a19942083fb64e2fa4f5..e9f3f541fecd721efc5bb599aa77b3ee44701cfd 100644
+index 82a48530f..e9f3f541f 100644
 --- a/codex-rs/app-server-protocol/schema/typescript/ServerNotification.ts
 +++ b/codex-rs/app-server-protocol/schema/typescript/ServerNotification.ts
 @@ -5,6 +5,7 @@ import type { FuzzyFileSearchSessionCompletedNotification } from "./FuzzyFileSea
@@ -22630,7 +22630,7 @@ index 82a48530f3d68a2351a6a19942083fb64e2fa4f5..e9f3f541fecd721efc5bb599aa77b3ee
 -export type ServerNotification = { "method": "error", "params": ErrorNotification } | { "method": "thread/started", "params": ThreadStartedNotification } | { "method": "thread/status/changed", "params": ThreadStatusChangedNotification } | { "method": "thread/archived", "params": ThreadArchivedNotification } | { "method": "thread/deleted", "params": ThreadDeletedNotification } | { "method": "thread/unarchived", "params": ThreadUnarchivedNotification } | { "method": "thread/closed", "params": ThreadClosedNotification } | { "method": "thread/reverted", "params": ThreadRevertedNotification } | { "method": "skills/changed", "params": SkillsChangedNotification } | { "method": "thread/name/updated", "params": ThreadNameUpdatedNotification } | { "method": "thread/goal/updated", "params": ThreadGoalUpdatedNotification } | { "method": "thread/goal/cleared", "params": ThreadGoalClearedNotification } | { "method": "thread/queue/changed", "params": ThreadQueueChangedNotification } | { "method": "project/changed", "params": ProjectChangedNotification } | { "method": "thread/project/updated", "params": ThreadProjectUpdatedNotification } | { "method": "thread/environment/connected", "params": EnvironmentConnectionNotification } | { "method": "thread/environment/disconnected", "params": EnvironmentConnectionNotification } | { "method": "thread/settings/updated", "params": ThreadSettingsUpdatedNotification } | { "method": "thread/tokenUsage/updated", "params": ThreadTokenUsageUpdatedNotification } | { "method": "turn/started", "params": TurnStartedNotification } | { "method": "hook/started", "params": HookStartedNotification } | { "method": "turn/completed", "params": TurnCompletedNotification } | { "method": "hook/completed", "params": HookCompletedNotification } | { "method": "turn/diff/updated", "params": TurnDiffUpdatedNotification } | { "method": "turn/plan/updated", "params": TurnPlanUpdatedNotification } | { "method": "item/started", "params": ItemStartedNotification } | { "method": "item/autoApprovalReview/started", "params": ItemGuardianApprovalReviewStartedNotification } | { "method": "item/autoApprovalReview/completed", "params": ItemGuardianApprovalReviewCompletedNotification } | { "method": "autoApprovalReview/strictReviewRequired", "params": StrictReviewRequiredNotification } | { "method": "item/completed", "params": ItemCompletedNotification } | { "method": "rawResponseItem/completed", "params": RawResponseItemCompletedNotification } | { "method": "rawResponse/completed", "params": RawResponseCompletedNotification } | { "method": "item/agentMessage/delta", "params": AgentMessageDeltaNotification } | { "method": "item/plan/delta", "params": PlanDeltaNotification } | { "method": "command/exec/outputDelta", "params": CommandExecOutputDeltaNotification } | { "method": "process/outputDelta", "params": ProcessOutputDeltaNotification } | { "method": "process/exited", "params": ProcessExitedNotification } | { "method": "item/commandExecution/outputDelta", "params": CommandExecutionOutputDeltaNotification } | { "method": "item/commandExecution/terminalInteraction", "params": TerminalInteractionNotification } | { "method": "item/fileChange/outputDelta", "params": FileChangeOutputDeltaNotification } | { "method": "item/fileChange/patchUpdated", "params": FileChangePatchUpdatedNotification } | { "method": "serverRequest/resolved", "params": ServerRequestResolvedNotification } | { "method": "item/mcpToolCall/progress", "params": McpToolCallProgressNotification } | { "method": "mcpServer/oauthLogin/completed", "params": McpServerOauthLoginCompletedNotification } | { "method": "mcpServer/startupStatus/updated", "params": McpServerStatusUpdatedNotification } | { "method": "account/updated", "params": AccountUpdatedNotification } | { "method": "account/rateLimits/updated", "params": AccountRateLimitsUpdatedNotification } | { "method": "app/list/updated", "params": AppListUpdatedNotification } | { "method": "remoteControl/status/changed", "params": RemoteControlStatusChangedNotification } | { "method": "externalAgentConfig/import/progress", "params": ExternalAgentConfigImportProgressNotification } | { "method": "externalAgentConfig/import/completed", "params": ExternalAgentConfigImportCompletedNotification } | { "method": "fs/changed", "params": FsChangedNotification } | { "method": "item/reasoning/summaryTextDelta", "params": ReasoningSummaryTextDeltaNotification } | { "method": "item/reasoning/summaryPartAdded", "params": ReasoningSummaryPartAddedNotification } | { "method": "item/reasoning/textDelta", "params": ReasoningTextDeltaNotification } | { "method": "thread/compacted", "params": ContextCompactedNotification } | { "method": "model/rerouted", "params": ModelReroutedNotification } | { "method": "model/verification", "params": ModelVerificationNotification } | { "method": "turn/moderationMetadata", "params": TurnModerationMetadataNotification } | { "method": "model/safetyBuffering/updated", "params": ModelSafetyBufferingUpdatedNotification } | { "method": "warning", "params": WarningNotification } | { "method": "guardianWarning", "params": GuardianWarningNotification } | { "method": "deprecationNotice", "params": DeprecationNoticeNotification } | { "method": "configWarning", "params": ConfigWarningNotification } | { "method": "fuzzyFileSearch/sessionUpdated", "params": FuzzyFileSearchSessionUpdatedNotification } | { "method": "fuzzyFileSearch/sessionCompleted", "params": FuzzyFileSearchSessionCompletedNotification } | { "method": "thread/realtime/started", "params": ThreadRealtimeStartedNotification } | { "method": "thread/realtime/itemAdded", "params": ThreadRealtimeItemAddedNotification } | { "method": "thread/realtime/transcript/delta", "params": ThreadRealtimeTranscriptDeltaNotification } | { "method": "thread/realtime/transcript/done", "params": ThreadRealtimeTranscriptDoneNotification } | { "method": "thread/realtime/outputAudio/delta", "params": ThreadRealtimeOutputAudioDeltaNotification } | { "method": "thread/realtime/sdp", "params": ThreadRealtimeSdpNotification } | { "method": "thread/realtime/error", "params": ThreadRealtimeErrorNotification } | { "method": "thread/realtime/closed", "params": ThreadRealtimeClosedNotification } | { "method": "windows/worldWritableWarning", "params": WindowsWorldWritableWarningNotification } | { "method": "windowsSandbox/setupCompleted", "params": WindowsSandboxSetupCompletedNotification } | { "method": "account/login/completed", "params": AccountLoginCompletedNotification };
 +export type ServerNotification = { "method": "error", "params": ErrorNotification } | { "method": "thread/started", "params": ThreadStartedNotification } | { "method": "thread/status/changed", "params": ThreadStatusChangedNotification } | { "method": "thread/archived", "params": ThreadArchivedNotification } | { "method": "thread/deleted", "params": ThreadDeletedNotification } | { "method": "thread/unarchived", "params": ThreadUnarchivedNotification } | { "method": "thread/closed", "params": ThreadClosedNotification } | { "method": "thread/reverted", "params": ThreadRevertedNotification } | { "method": "skills/changed", "params": SkillsChangedNotification } | { "method": "thread/name/updated", "params": ThreadNameUpdatedNotification } | { "method": "thread/goal/updated", "params": ThreadGoalUpdatedNotification } | { "method": "thread/goal/cleared", "params": ThreadGoalClearedNotification } | { "method": "thread/queue/changed", "params": ThreadQueueChangedNotification } | { "method": "project/changed", "params": ProjectChangedNotification } | { "method": "thread/project/updated", "params": ThreadProjectUpdatedNotification } | { "method": "thread/environment/connected", "params": EnvironmentConnectionNotification } | { "method": "thread/environment/disconnected", "params": EnvironmentConnectionNotification } | { "method": "thread/settings/updated", "params": ThreadSettingsUpdatedNotification } | { "method": "thread/tokenUsage/updated", "params": ThreadTokenUsageUpdatedNotification } | { "method": "turn/started", "params": TurnStartedNotification } | { "method": "hook/started", "params": HookStartedNotification } | { "method": "turn/completed", "params": TurnCompletedNotification } | { "method": "hook/completed", "params": HookCompletedNotification } | { "method": "turn/diff/updated", "params": TurnDiffUpdatedNotification } | { "method": "turn/plan/updated", "params": TurnPlanUpdatedNotification } | { "method": "item/started", "params": ItemStartedNotification } | { "method": "item/autoApprovalReview/started", "params": ItemGuardianApprovalReviewStartedNotification } | { "method": "item/autoApprovalReview/completed", "params": ItemGuardianApprovalReviewCompletedNotification } | { "method": "autoApprovalReview/strictReviewRequired", "params": StrictReviewRequiredNotification } | { "method": "item/completed", "params": ItemCompletedNotification } | { "method": "rawResponseItem/completed", "params": RawResponseItemCompletedNotification } | { "method": "rawResponse/completed", "params": RawResponseCompletedNotification } | { "method": "item/agentMessage/delta", "params": AgentMessageDeltaNotification } | { "method": "item/plan/delta", "params": PlanDeltaNotification } | { "method": "command/exec/outputDelta", "params": CommandExecOutputDeltaNotification } | { "method": "process/outputDelta", "params": ProcessOutputDeltaNotification } | { "method": "process/exited", "params": ProcessExitedNotification } | { "method": "item/commandExecution/outputDelta", "params": CommandExecutionOutputDeltaNotification } | { "method": "item/commandExecution/terminalInteraction", "params": TerminalInteractionNotification } | { "method": "item/fileChange/outputDelta", "params": FileChangeOutputDeltaNotification } | { "method": "item/fileChange/patchUpdated", "params": FileChangePatchUpdatedNotification } | { "method": "serverRequest/resolved", "params": ServerRequestResolvedNotification } | { "method": "item/mcpToolCall/progress", "params": McpToolCallProgressNotification } | { "method": "mcpServer/oauthLogin/completed", "params": McpServerOauthLoginCompletedNotification } | { "method": "mcpServer/startupStatus/updated", "params": McpServerStatusUpdatedNotification } | { "method": "account/updated", "params": AccountUpdatedNotification } | { "method": "account/rateLimits/updated", "params": AccountRateLimitsUpdatedNotification } | { "method": "accountSlot/changed", "params": AccountSlotChangedNotification } | { "method": "sessionRuntime/changed", "params": SessionRuntimeChangedNotification } | { "method": "sessionRuntime/operation/updated", "params": SessionRuntimeOperationUpdatedNotification } | { "method": "app/list/updated", "params": AppListUpdatedNotification } | { "method": "remoteControl/status/changed", "params": RemoteControlStatusChangedNotification } | { "method": "externalAgentConfig/import/progress", "params": ExternalAgentConfigImportProgressNotification } | { "method": "externalAgentConfig/import/completed", "params": ExternalAgentConfigImportCompletedNotification } | { "method": "fs/changed", "params": FsChangedNotification } | { "method": "item/reasoning/summaryTextDelta", "params": ReasoningSummaryTextDeltaNotification } | { "method": "item/reasoning/summaryPartAdded", "params": ReasoningSummaryPartAddedNotification } | { "method": "item/reasoning/textDelta", "params": ReasoningTextDeltaNotification } | { "method": "thread/compacted", "params": ContextCompactedNotification } | { "method": "model/rerouted", "params": ModelReroutedNotification } | { "method": "model/verification", "params": ModelVerificationNotification } | { "method": "turn/moderationMetadata", "params": TurnModerationMetadataNotification } | { "method": "model/safetyBuffering/updated", "params": ModelSafetyBufferingUpdatedNotification } | { "method": "warning", "params": WarningNotification } | { "method": "guardianWarning", "params": GuardianWarningNotification } | { "method": "deprecationNotice", "params": DeprecationNoticeNotification } | { "method": "configWarning", "params": ConfigWarningNotification } | { "method": "fuzzyFileSearch/sessionUpdated", "params": FuzzyFileSearchSessionUpdatedNotification } | { "method": "fuzzyFileSearch/sessionCompleted", "params": FuzzyFileSearchSessionCompletedNotification } | { "method": "thread/realtime/started", "params": ThreadRealtimeStartedNotification } | { "method": "thread/realtime/itemAdded", "params": ThreadRealtimeItemAddedNotification } | { "method": "thread/realtime/transcript/delta", "params": ThreadRealtimeTranscriptDeltaNotification } | { "method": "thread/realtime/transcript/done", "params": ThreadRealtimeTranscriptDoneNotification } | { "method": "thread/realtime/outputAudio/delta", "params": ThreadRealtimeOutputAudioDeltaNotification } | { "method": "thread/realtime/sdp", "params": ThreadRealtimeSdpNotification } | { "method": "thread/realtime/error", "params": ThreadRealtimeErrorNotification } | { "method": "thread/realtime/closed", "params": ThreadRealtimeClosedNotification } | { "method": "windows/worldWritableWarning", "params": WindowsWorldWritableWarningNotification } | { "method": "windowsSandbox/setupCompleted", "params": WindowsSandboxSetupCompletedNotification } | { "method": "account/login/completed", "params": AccountLoginCompletedNotification };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/ServerNotificationEnvelope.ts b/codex-rs/app-server-protocol/schema/typescript/ServerNotificationEnvelope.ts
-index 9d5535fe8bd9ca2be97570be43257133bcd14d16..88432988e4510433bc4c089e2027b34c86bbe1ee 100644
+index 9d5535fe8..88432988e 100644
 --- a/codex-rs/app-server-protocol/schema/typescript/ServerNotificationEnvelope.ts
 +++ b/codex-rs/app-server-protocol/schema/typescript/ServerNotificationEnvelope.ts
 @@ -5,6 +5,7 @@ import type { FuzzyFileSearchSessionCompletedNotification } from "./FuzzyFileSea
@@ -22658,7 +22658,7 @@ index 9d5535fe8bd9ca2be97570be43257133bcd14d16..88432988e4510433bc4c089e2027b34c
 +emittedAtMs?: number, } & ({ "method": "error", "params": ErrorNotification } | { "method": "thread/started", "params": ThreadStartedNotification } | { "method": "thread/status/changed", "params": ThreadStatusChangedNotification } | { "method": "thread/archived", "params": ThreadArchivedNotification } | { "method": "thread/deleted", "params": ThreadDeletedNotification } | { "method": "thread/unarchived", "params": ThreadUnarchivedNotification } | { "method": "thread/closed", "params": ThreadClosedNotification } | { "method": "thread/reverted", "params": ThreadRevertedNotification } | { "method": "skills/changed", "params": SkillsChangedNotification } | { "method": "thread/name/updated", "params": ThreadNameUpdatedNotification } | { "method": "thread/goal/updated", "params": ThreadGoalUpdatedNotification } | { "method": "thread/goal/cleared", "params": ThreadGoalClearedNotification } | { "method": "thread/queue/changed", "params": ThreadQueueChangedNotification } | { "method": "project/changed", "params": ProjectChangedNotification } | { "method": "thread/project/updated", "params": ThreadProjectUpdatedNotification } | { "method": "thread/environment/connected", "params": EnvironmentConnectionNotification } | { "method": "thread/environment/disconnected", "params": EnvironmentConnectionNotification } | { "method": "thread/settings/updated", "params": ThreadSettingsUpdatedNotification } | { "method": "thread/tokenUsage/updated", "params": ThreadTokenUsageUpdatedNotification } | { "method": "turn/started", "params": TurnStartedNotification } | { "method": "hook/started", "params": HookStartedNotification } | { "method": "turn/completed", "params": TurnCompletedNotification } | { "method": "hook/completed", "params": HookCompletedNotification } | { "method": "turn/diff/updated", "params": TurnDiffUpdatedNotification } | { "method": "turn/plan/updated", "params": TurnPlanUpdatedNotification } | { "method": "item/started", "params": ItemStartedNotification } | { "method": "item/autoApprovalReview/started", "params": ItemGuardianApprovalReviewStartedNotification } | { "method": "item/autoApprovalReview/completed", "params": ItemGuardianApprovalReviewCompletedNotification } | { "method": "autoApprovalReview/strictReviewRequired", "params": StrictReviewRequiredNotification } | { "method": "item/completed", "params": ItemCompletedNotification } | { "method": "rawResponseItem/completed", "params": RawResponseItemCompletedNotification } | { "method": "rawResponse/completed", "params": RawResponseCompletedNotification } | { "method": "item/agentMessage/delta", "params": AgentMessageDeltaNotification } | { "method": "item/plan/delta", "params": PlanDeltaNotification } | { "method": "command/exec/outputDelta", "params": CommandExecOutputDeltaNotification } | { "method": "process/outputDelta", "params": ProcessOutputDeltaNotification } | { "method": "process/exited", "params": ProcessExitedNotification } | { "method": "item/commandExecution/outputDelta", "params": CommandExecutionOutputDeltaNotification } | { "method": "item/commandExecution/terminalInteraction", "params": TerminalInteractionNotification } | { "method": "item/fileChange/outputDelta", "params": FileChangeOutputDeltaNotification } | { "method": "item/fileChange/patchUpdated", "params": FileChangePatchUpdatedNotification } | { "method": "serverRequest/resolved", "params": ServerRequestResolvedNotification } | { "method": "item/mcpToolCall/progress", "params": McpToolCallProgressNotification } | { "method": "mcpServer/oauthLogin/completed", "params": McpServerOauthLoginCompletedNotification } | { "method": "mcpServer/startupStatus/updated", "params": McpServerStatusUpdatedNotification } | { "method": "account/updated", "params": AccountUpdatedNotification } | { "method": "account/rateLimits/updated", "params": AccountRateLimitsUpdatedNotification } | { "method": "accountSlot/changed", "params": AccountSlotChangedNotification } | { "method": "sessionRuntime/changed", "params": SessionRuntimeChangedNotification } | { "method": "sessionRuntime/operation/updated", "params": SessionRuntimeOperationUpdatedNotification } | { "method": "app/list/updated", "params": AppListUpdatedNotification } | { "method": "remoteControl/status/changed", "params": RemoteControlStatusChangedNotification } | { "method": "externalAgentConfig/import/progress", "params": ExternalAgentConfigImportProgressNotification } | { "method": "externalAgentConfig/import/completed", "params": ExternalAgentConfigImportCompletedNotification } | { "method": "fs/changed", "params": FsChangedNotification } | { "method": "item/reasoning/summaryTextDelta", "params": ReasoningSummaryTextDeltaNotification } | { "method": "item/reasoning/summaryPartAdded", "params": ReasoningSummaryPartAddedNotification } | { "method": "item/reasoning/textDelta", "params": ReasoningTextDeltaNotification } | { "method": "thread/compacted", "params": ContextCompactedNotification } | { "method": "model/rerouted", "params": ModelReroutedNotification } | { "method": "model/verification", "params": ModelVerificationNotification } | { "method": "turn/moderationMetadata", "params": TurnModerationMetadataNotification } | { "method": "model/safetyBuffering/updated", "params": ModelSafetyBufferingUpdatedNotification } | { "method": "warning", "params": WarningNotification } | { "method": "guardianWarning", "params": GuardianWarningNotification } | { "method": "deprecationNotice", "params": DeprecationNoticeNotification } | { "method": "configWarning", "params": ConfigWarningNotification } | { "method": "fuzzyFileSearch/sessionUpdated", "params": FuzzyFileSearchSessionUpdatedNotification } | { "method": "fuzzyFileSearch/sessionCompleted", "params": FuzzyFileSearchSessionCompletedNotification } | { "method": "thread/realtime/started", "params": ThreadRealtimeStartedNotification } | { "method": "thread/realtime/itemAdded", "params": ThreadRealtimeItemAddedNotification } | { "method": "thread/realtime/transcript/delta", "params": ThreadRealtimeTranscriptDeltaNotification } | { "method": "thread/realtime/transcript/done", "params": ThreadRealtimeTranscriptDoneNotification } | { "method": "thread/realtime/outputAudio/delta", "params": ThreadRealtimeOutputAudioDeltaNotification } | { "method": "thread/realtime/sdp", "params": ThreadRealtimeSdpNotification } | { "method": "thread/realtime/error", "params": ThreadRealtimeErrorNotification } | { "method": "thread/realtime/closed", "params": ThreadRealtimeClosedNotification } | { "method": "windows/worldWritableWarning", "params": WindowsWorldWritableWarningNotification } | { "method": "windowsSandbox/setupCompleted", "params": WindowsSandboxSetupCompletedNotification } | { "method": "account/login/completed", "params": AccountLoginCompletedNotification });
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotAction.ts b/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotAction.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..5ae0da21c046020ac65b55ed7ada30286a622d20
+index 000000000..5ae0da21c
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotAction.ts
 @@ -0,0 +1,5 @@
@@ -22669,7 +22669,7 @@ index 0000000000000000000000000000000000000000..5ae0da21c046020ac65b55ed7ada3028
 +export type AccountSlotAction = "login" | "retryLogin" | "switchTo";
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotActionAvailability.ts b/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotActionAvailability.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..b2065992dc88ab7f724ae7a073fa600e26d063bc
+index 000000000..b2065992d
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotActionAvailability.ts
 @@ -0,0 +1,6 @@
@@ -22681,7 +22681,7 @@ index 0000000000000000000000000000000000000000..b2065992dc88ab7f724ae7a073fa600e
 +export type AccountSlotActionAvailability = { action: AccountSlotAction, allowed: boolean, denyReason: string | null, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotCapability.ts b/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotCapability.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..35d747eafe53bbc13bfcdb4c467ab5073f613929
+index 000000000..35d747eaf
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotCapability.ts
 @@ -0,0 +1,8 @@
@@ -22695,7 +22695,7 @@ index 0000000000000000000000000000000000000000..35d747eafe53bbc13bfcdb4c467ab507
 +export type AccountSlotCapability = { available: boolean, denyReason: string | null, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotChangedNotification.ts b/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotChangedNotification.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..987e5c2f30988317640219c30d2b59cf8a53619b
+index 000000000..987e5c2f3
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotChangedNotification.ts
 @@ -0,0 +1,9 @@
@@ -22710,7 +22710,7 @@ index 0000000000000000000000000000000000000000..987e5c2f30988317640219c30d2b59cf
 +export type AccountSlotChangedNotification = { registryRevision: number, slot: AccountSlotSnapshot, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotListParams.ts b/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotListParams.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..3a83e73813a01d336c8a9d3adbb59dbc66065a38
+index 000000000..3a83e7381
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotListParams.ts
 @@ -0,0 +1,17 @@
@@ -22733,7 +22733,7 @@ index 0000000000000000000000000000000000000000..3a83e73813a01d336c8a9d3adbb59dbc
 +limit?: number | null, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotListResponse.ts b/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotListResponse.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..f4f7bf4049d4447087d202ac151b7118becb6641
+index 000000000..f4f7bf404
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotListResponse.ts
 @@ -0,0 +1,15 @@
@@ -22754,7 +22754,7 @@ index 0000000000000000000000000000000000000000..f4f7bf4049d4447087d202ac151b7118
 +nextCursor: string | null, registryRevision: number, multiAccount: AccountSlotCapability, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotLoginChallenge.ts b/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotLoginChallenge.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..9ebc23f2f4a18d1ecc00d2310f54d335ecea2790
+index 000000000..9ebc23f2f
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotLoginChallenge.ts
 @@ -0,0 +1,5 @@
@@ -22765,7 +22765,7 @@ index 0000000000000000000000000000000000000000..9ebc23f2f4a18d1ecc00d2310f54d335
 +export type AccountSlotLoginChallenge = { "type": "browser", loginId: string, authUrl: string, } | { "type": "deviceCode", loginId: string, verificationUrl: string, userCode: string, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotLoginStartParams.ts b/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotLoginStartParams.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..015af8dfd94e65fc16996222cc4192c2693c075d
+index 000000000..015af8dfd
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotLoginStartParams.ts
 @@ -0,0 +1,11 @@
@@ -22782,7 +22782,7 @@ index 0000000000000000000000000000000000000000..015af8dfd94e65fc16996222cc4192c2
 +export type AccountSlotLoginStartParams = { "type": "apiKey", slotId?: string | null, apiKey: string, } | { "type": "chatgpt", slotId?: string | null, codexStreamlinedLogin?: boolean, useHostedLoginSuccessPage?: boolean, appBrand?: LoginAppBrand | null, } | { "type": "chatgptDeviceCode", slotId?: string | null, } | { "type": "chatgptAuthTokens", slotId?: string | null, accessToken: string, chatgptAccountId: string, chatgptPlanType?: string | null, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotLoginStartResponse.ts b/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotLoginStartResponse.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..28942ee2c8abeec066d3fd6e1b35f3d26ff37d5c
+index 000000000..28942ee2c
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotLoginStartResponse.ts
 @@ -0,0 +1,8 @@
@@ -22796,7 +22796,7 @@ index 0000000000000000000000000000000000000000..28942ee2c8abeec066d3fd6e1b35f3d2
 +export type AccountSlotLoginStartResponse = { slot: AccountSlotSnapshot, operation: SessionRuntimeOperation, challenge: AccountSlotLoginChallenge | null, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotSnapshot.ts b/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotSnapshot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..ecaf86a78187140f72ef2bcd0bc00f0545084d34
+index 000000000..ecaf86a78
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotSnapshot.ts
 @@ -0,0 +1,15 @@
@@ -22817,7 +22817,7 @@ index 0000000000000000000000000000000000000000..ecaf86a78187140f72ef2bcd0bc00f05
 +updatedAt: number, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotStatus.ts b/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotStatus.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..311c5c550ab83b08edb7e4939004ce21206f76b9
+index 000000000..311c5c550
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotStatus.ts
 @@ -0,0 +1,5 @@
@@ -22828,7 +22828,7 @@ index 0000000000000000000000000000000000000000..311c5c550ab83b08edb7e4939004ce21
 +export type AccountSlotStatus = "loginRequired" | "ready" | "failed";
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeAccountBinding.ts b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeAccountBinding.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..c84fa884928a8fd9e1c60342228c2665a23c1014
+index 000000000..c84fa8849
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeAccountBinding.ts
 @@ -0,0 +1,10 @@
@@ -22844,7 +22844,7 @@ index 0000000000000000000000000000000000000000..c84fa884928a8fd9e1c60342228c2665
 +export type SessionRuntimeAccountBinding = { current: SessionRuntimeAccountRef | null, activeTurn: SessionRuntimeAccountRef | null, switchState: SessionRuntimeAccountSwitchState, switchTargetSlotId: string | null, denyReason: string | null, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeAccountRef.ts b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeAccountRef.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..adbf2b2b92d65e442f90c3a71dfc752b2e617f32
+index 000000000..adbf2b2b9
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeAccountRef.ts
 @@ -0,0 +1,5 @@
@@ -22855,7 +22855,7 @@ index 0000000000000000000000000000000000000000..adbf2b2b92d65e442f90c3a71dfc752b
 +export type SessionRuntimeAccountRef = { accountSlotId: string, executionGeneration: number, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeAccountSwitchState.ts b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeAccountSwitchState.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..146ecefe37641651f0d1fae8169f4b5a15e46ba9
+index 000000000..146ecefe3
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeAccountSwitchState.ts
 @@ -0,0 +1,5 @@
@@ -22866,7 +22866,7 @@ index 0000000000000000000000000000000000000000..146ecefe37641651f0d1fae8169f4b5a
 +export type SessionRuntimeAccountSwitchState = "stable" | "preparing" | "switching" | "unbound" | "degraded";
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeAction.ts b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeAction.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..e36f7d43230be024691cada9f10efd456ca51cca
+index 000000000..e36f7d432
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeAction.ts
 @@ -0,0 +1,5 @@
@@ -22877,7 +22877,7 @@ index 0000000000000000000000000000000000000000..e36f7d43230be024691cada9f10efd45
 +export type SessionRuntimeAction = "relinquish" | "switchAccount";
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeActionAvailability.ts b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeActionAvailability.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..f50e251d614de0ec690708d346e705b5bbf58b9a
+index 000000000..f50e251d6
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeActionAvailability.ts
 @@ -0,0 +1,6 @@
@@ -22889,7 +22889,7 @@ index 0000000000000000000000000000000000000000..f50e251d614de0ec690708d346e705b5
 +export type SessionRuntimeActionAvailability = { action: SessionRuntimeAction, allowed: boolean, denyReason: string | null, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeCapability.ts b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeCapability.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..f0f5dd0e3aba17efd24815fe0f666aa79b3bb74c
+index 000000000..f0f5dd0e3
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeCapability.ts
 @@ -0,0 +1,12 @@
@@ -22907,7 +22907,7 @@ index 0000000000000000000000000000000000000000..f0f5dd0e3aba17efd24815fe0f666aa7
 +name: string, available: boolean, denyReason: string | null, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeChangedNotification.ts b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeChangedNotification.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..fd9979284bd2919fd3e15cf2d819ceb97482cb94
+index 000000000..fd9979284
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeChangedNotification.ts
 @@ -0,0 +1,9 @@
@@ -22922,7 +22922,7 @@ index 0000000000000000000000000000000000000000..fd9979284bd2919fd3e15cf2d819ceb9
 +export type SessionRuntimeChangedNotification = { instanceEpoch: string, sequence: number, snapshot: SessionRuntimeSnapshot, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeIdentity.ts b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeIdentity.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..4033aa8302c29146f43659cac7eb5fff871392b2
+index 000000000..4033aa830
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeIdentity.ts
 @@ -0,0 +1,18 @@
@@ -22946,7 +22946,7 @@ index 0000000000000000000000000000000000000000..4033aa8302c29146f43659cac7eb5fff
 +settings: ThreadSettings | null, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeLifecycle.ts b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeLifecycle.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..504a2afd1a2101d036a3660fbab558d1242b1df9
+index 000000000..504a2afd1
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeLifecycle.ts
 @@ -0,0 +1,22 @@
@@ -22974,7 +22974,7 @@ index 0000000000000000000000000000000000000000..504a2afd1a2101d036a3660fbab558d1
 +unloadAt: number | null, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeLifecycleState.ts b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeLifecycleState.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..1af2e681ac4ddafe185cd0b480c5af6fde75eaef
+index 000000000..1af2e681a
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeLifecycleState.ts
 @@ -0,0 +1,5 @@
@@ -22985,7 +22985,7 @@ index 0000000000000000000000000000000000000000..1af2e681ac4ddafe185cd0b480c5af6f
 +export type SessionRuntimeLifecycleState = "notLoaded" | "loaded" | "idle" | "active" | "closing";
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeListParams.ts b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeListParams.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..9a1e9dae33db6f5c2f71e769400042e42880ad7c
+index 000000000..9a1e9dae3
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeListParams.ts
 @@ -0,0 +1,21 @@
@@ -23012,7 +23012,7 @@ index 0000000000000000000000000000000000000000..9a1e9dae33db6f5c2f71e769400042e4
 +threadId?: string | null, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeListResponse.ts b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeListResponse.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..8fa342edcaeb3456e32cc39e1405a774868c105f
+index 000000000..8fa342edc
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeListResponse.ts
 @@ -0,0 +1,27 @@
@@ -23045,7 +23045,7 @@ index 0000000000000000000000000000000000000000..8fa342edcaeb3456e32cc39e1405a774
 +capabilities: Array<SessionRuntimeCapability>, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeOperation.ts b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeOperation.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..5b26803942045a69c0d9fc98ea34cd16c392f808
+index 000000000..5b2680394
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeOperation.ts
 @@ -0,0 +1,20 @@
@@ -23071,7 +23071,7 @@ index 0000000000000000000000000000000000000000..5b26803942045a69c0d9fc98ea34cd16
 +updatedAt: number, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeOperationAction.ts b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeOperationAction.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..ee91e77d9f33bc6fb4a91c24789f1dd4a36cb700
+index 000000000..ee91e77d9
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeOperationAction.ts
 @@ -0,0 +1,5 @@
@@ -23082,7 +23082,7 @@ index 0000000000000000000000000000000000000000..ee91e77d9f33bc6fb4a91c24789f1dd4
 +export type SessionRuntimeOperationAction = "accountSlotLogin" | "threadAccountSwitch" | "threadRelinquish";
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeOperationError.ts b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeOperationError.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..24a8ba31ce30e8655558c3f99ffbf3f8ca68c4a1
+index 000000000..24a8ba31c
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeOperationError.ts
 @@ -0,0 +1,8 @@
@@ -23096,7 +23096,7 @@ index 0000000000000000000000000000000000000000..24a8ba31ce30e8655558c3f99ffbf3f8
 +export type SessionRuntimeOperationError = { code: string, message: string, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeOperationStatus.ts b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeOperationStatus.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..43b835b194e45d090c9116d52f90dc7f45fba578
+index 000000000..43b835b19
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeOperationStatus.ts
 @@ -0,0 +1,5 @@
@@ -23107,7 +23107,7 @@ index 0000000000000000000000000000000000000000..43b835b194e45d090c9116d52f90dc7f
 +export type SessionRuntimeOperationStatus = "accepted" | "running" | "released" | "ready" | "failed";
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeOperationUpdatedNotification.ts b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeOperationUpdatedNotification.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..9b76dd2ec31f93a801cbeeac4b8759304b4a9ba6
+index 000000000..9b76dd2ec
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeOperationUpdatedNotification.ts
 @@ -0,0 +1,9 @@
@@ -23122,7 +23122,7 @@ index 0000000000000000000000000000000000000000..9b76dd2ec31f93a801cbeeac4b875930
 +export type SessionRuntimeOperationUpdatedNotification = { instanceEpoch: string, sequence: number, operation: SessionRuntimeOperation, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimePersistence.ts b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimePersistence.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..5a9e27c69db15bf741eff03ec7c670bdfafd7717
+index 000000000..5a9e27c69
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimePersistence.ts
 @@ -0,0 +1,22 @@
@@ -23150,7 +23150,7 @@ index 0000000000000000000000000000000000000000..5a9e27c69db15bf741eff03ec7c670bd
 +materializedAt: number | null, denyReason: string | null, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimePersistenceHealth.ts b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimePersistenceHealth.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..bc28554dba59e92ad459efa78d34d6064d871808
+index 000000000..bc28554db
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimePersistenceHealth.ts
 @@ -0,0 +1,5 @@
@@ -23161,7 +23161,7 @@ index 0000000000000000000000000000000000000000..bc28554dba59e92ad459efa78d34d606
 +export type SessionRuntimePersistenceHealth = "unknown" | "healthy" | "degraded" | "failed";
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimePersistencePosition.ts b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimePersistencePosition.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..e27b7642be636a797cec639274f713139b88ebdc
+index 000000000..e27b7642b
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimePersistencePosition.ts
 @@ -0,0 +1,5 @@
@@ -23172,7 +23172,7 @@ index 0000000000000000000000000000000000000000..e27b7642be636a797cec639274f71313
 +export type SessionRuntimePersistencePosition = { ordinal: number, offset: number, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeSnapshot.ts b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeSnapshot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..4967c25ea472fc37200a1ff1c9437e8e53491928
+index 000000000..4967c25ea
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeSnapshot.ts
 @@ -0,0 +1,22 @@
@@ -23200,7 +23200,7 @@ index 0000000000000000000000000000000000000000..4967c25ea472fc37200a1ff1c9437e8e
 +stateRevision: number, identity: SessionRuntimeIdentity, lifecycle: SessionRuntimeLifecycle, writer: SessionRuntimeWriter, persistence: SessionRuntimePersistence, account: SessionRuntimeAccountBinding, actions: Array<SessionRuntimeActionAvailability>, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeWaitingOn.ts b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeWaitingOn.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..6347c513e3e9cece8d2769e9c562966203e16008
+index 000000000..6347c513e
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeWaitingOn.ts
 @@ -0,0 +1,5 @@
@@ -23211,7 +23211,7 @@ index 0000000000000000000000000000000000000000..6347c513e3e9cece8d2769e9c5629662
 +export type SessionRuntimeWaitingOn = "approval" | "userInput" | "serverRequest";
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeWriter.ts b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeWriter.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..dfcac24028b3fef1fd5c4997da39f7bee1d28b75
+index 000000000..dfcac2402
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeWriter.ts
 @@ -0,0 +1,13 @@
@@ -23230,7 +23230,7 @@ index 0000000000000000000000000000000000000000..dfcac24028b3fef1fd5c4997da39f7be
 +storeId: string | null, writerGeneration: number | null, denyReason: string | null, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeWriterState.ts b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeWriterState.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..51e928cc88ce8420c17ae35bda3b5252c05e0757
+index 000000000..51e928cc8
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeWriterState.ts
 @@ -0,0 +1,5 @@
@@ -23241,7 +23241,7 @@ index 0000000000000000000000000000000000000000..51e928cc88ce8420c17ae35bda3b5252
 +export type SessionRuntimeWriterState = "none" | "ownedHere" | "ownedElsewhere" | "unavailable";
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/ThreadAccountSwitchParams.ts b/codex-rs/app-server-protocol/schema/typescript/v2/ThreadAccountSwitchParams.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..e743e12e7a27b4eb5531f3a6f168394af0e283b4
+index 000000000..e743e12e7
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/ThreadAccountSwitchParams.ts
 @@ -0,0 +1,8 @@
@@ -23255,7 +23255,7 @@ index 0000000000000000000000000000000000000000..e743e12e7a27b4eb5531f3a6f168394a
 +export type ThreadAccountSwitchParams = { operationId: string, threadId: string, targetAccountSlotId: string, expectedInstanceEpoch: string, expectedStateRevision: number, expectedExecutionGeneration: number, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/ThreadAccountSwitchResponse.ts b/codex-rs/app-server-protocol/schema/typescript/v2/ThreadAccountSwitchResponse.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..602918e4c474aef8367339d8c084abc06af144e6
+index 000000000..602918e4c
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/ThreadAccountSwitchResponse.ts
 @@ -0,0 +1,6 @@
@@ -23267,7 +23267,7 @@ index 0000000000000000000000000000000000000000..602918e4c474aef8367339d8c084abc0
 +export type ThreadAccountSwitchResponse = { operation: SessionRuntimeOperation, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/ThreadRelinquishParams.ts b/codex-rs/app-server-protocol/schema/typescript/v2/ThreadRelinquishParams.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..17f62cc008003e34400047bb7c6f268a511bc3d7
+index 000000000..17f62cc00
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/ThreadRelinquishParams.ts
 @@ -0,0 +1,8 @@
@@ -23281,7 +23281,7 @@ index 0000000000000000000000000000000000000000..17f62cc008003e34400047bb7c6f268a
 +export type ThreadRelinquishParams = { operationId: string, threadId: string, expectedInstanceEpoch: string, expectedStateRevision: number, expectedWriterGeneration: number, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/ThreadRelinquishResponse.ts b/codex-rs/app-server-protocol/schema/typescript/v2/ThreadRelinquishResponse.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..4197aab801f0e1299094d4d194d93c18829c6119
+index 000000000..4197aab80
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/ThreadRelinquishResponse.ts
 @@ -0,0 +1,6 @@
@@ -23292,7 +23292,7 @@ index 0000000000000000000000000000000000000000..4197aab801f0e1299094d4d194d93c18
 +
 +export type ThreadRelinquishResponse = { operation: SessionRuntimeOperation, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/index.ts b/codex-rs/app-server-protocol/schema/typescript/v2/index.ts
-index 4a8984a8047c6a33e32c43d327b1b585ce12317f..f3164ea96f114b645e2c09a8dd36f378a9d88fad 100644
+index 4a8984a80..f3164ea96 100644
 --- a/codex-rs/app-server-protocol/schema/typescript/v2/index.ts
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/index.ts
 @@ -3,6 +3,17 @@
@@ -23363,7 +23363,7 @@ index 4a8984a8047c6a33e32c43d327b1b585ce12317f..f3164ea96f114b645e2c09a8dd36f378
  export type { ThreadResumeParams } from "./ThreadResumeParams";
  export type { ThreadResumeResponse } from "./ThreadResumeResponse";
 diff --git a/codex-rs/app-server-protocol/src/protocol/common.rs b/codex-rs/app-server-protocol/src/protocol/common.rs
-index ab5759e01723193a77ad05a200a43f40f84bd29e..425b775496815d2c648fac5737b543d65e112826 100644
+index ab5759e01..425b77549 100644
 --- a/codex-rs/app-server-protocol/src/protocol/common.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/common.rs
 @@ -535,6 +535,16 @@ client_request_definitions! {
@@ -23425,7 +23425,7 @@ index ab5759e01723193a77ad05a200a43f40f84bd29e..425b775496815d2c648fac5737b543d6
      RemoteControlStatusChanged => "remoteControl/status/changed" (v2::RemoteControlStatusChangedNotification),
      ExternalAgentConfigImportProgress => "externalAgentConfig/import/progress" (v2::ExternalAgentConfigImportProgressNotification),
 diff --git a/codex-rs/app-server-protocol/src/protocol/v2/account.rs b/codex-rs/app-server-protocol/src/protocol/v2/account.rs
-index bbc79596744c1533319abedf4fa55a23aa46cdba..ca2d5a08507c04c96b2acf4578bad1344ea81be7 100644
+index bbc795967..ca2d5a085 100644
 --- a/codex-rs/app-server-protocol/src/protocol/v2/account.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/v2/account.rs
 @@ -1,3 +1,4 @@
@@ -23609,7 +23609,7 @@ index bbc79596744c1533319abedf4fa55a23aa46cdba..ca2d5a08507c04c96b2acf4578bad134
  #[serde(rename_all = "camelCase")]
  #[ts(export_to = "v2/")]
 diff --git a/codex-rs/app-server-protocol/src/protocol/v2/mod.rs b/codex-rs/app-server-protocol/src/protocol/v2/mod.rs
-index 97f8b053d987f1babd78a654b62be09c5236982c..3a98ce2003b085c0b59366fb3bbc03dd263cce4a 100644
+index 97f8b053d..3a98ce200 100644
 --- a/codex-rs/app-server-protocol/src/protocol/v2/mod.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/v2/mod.rs
 @@ -26,6 +26,7 @@ mod project;
@@ -23630,7 +23630,7 @@ index 97f8b053d987f1babd78a654b62be09c5236982c..3a98ce2003b085c0b59366fb3bbc03dd
  pub use thread_data::*;
 diff --git a/codex-rs/app-server-protocol/src/protocol/v2/session_runtime.rs b/codex-rs/app-server-protocol/src/protocol/v2/session_runtime.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..b239be04bc96b42ca39d0029a76d9f0b6c0a252c
+index 000000000..b239be04b
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/src/protocol/v2/session_runtime.rs
 @@ -0,0 +1,358 @@
@@ -23993,7 +23993,7 @@ index 0000000000000000000000000000000000000000..b239be04bc96b42ca39d0029a76d9f0b
 +    pub operation: SessionRuntimeOperation,
 +}
 diff --git a/codex-rs/app-server/README.md b/codex-rs/app-server/README.md
-index 483924a572f47fd08c32b0705e98ea7399ebfd87..787e6a48ebe0ad046dfd6b4e4f23dac3774a6be8 100644
+index 483924a57..787e6a48e 100644
 --- a/codex-rs/app-server/README.md
 +++ b/codex-rs/app-server/README.md
 @@ -173,6 +173,7 @@ Example with notification opt-out:
@@ -24035,7 +24035,7 @@ index 483924a572f47fd08c32b0705e98ea7399ebfd87..787e6a48ebe0ad046dfd6b4e4f23dac3
  
  Request:
 diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
-index 4c7ca2e8de84aa2eda9152d79e3ef5be4e3b338c..114254494db50fb043bf0b99d456e34f2bff4763 100644
+index 4c7ca2e8d..114254494 100644
 --- a/codex-rs/app-server/src/message_processor.rs
 +++ b/codex-rs/app-server/src/message_processor.rs
 @@ -10,6 +10,7 @@ use crate::connection_rpc_gate::ConnectionRpcGate;
@@ -24069,7 +24069,7 @@ index 4c7ca2e8de84aa2eda9152d79e3ef5be4e3b338c..114254494db50fb043bf0b99d456e34f
                  .config_processor
                  .read(params)
 diff --git a/codex-rs/tui/src/app/app_server_event_targets.rs b/codex-rs/tui/src/app/app_server_event_targets.rs
-index 757fa8898aaa558b4241b035c4373cbbca339510..a54a0fe8d95e35d0f376d0706bb75ca5cde2ddf7 100644
+index 757fa8898..a54a0fe8d 100644
 --- a/codex-rs/tui/src/app/app_server_event_targets.rs
 +++ b/codex-rs/tui/src/app/app_server_event_targets.rs
 @@ -174,11 +174,18 @@ pub(super) fn server_notification_thread_target(
@@ -24092,7 +24092,7 @@ index 757fa8898aaa558b4241b035c4373cbbca339510..a54a0fe8d95e35d0f376d0706bb75ca5
          | ServerNotification::EnvironmentConnected(_)
          | ServerNotification::EnvironmentDisconnected(_)
 diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
-index 1f1408f13acd90c724a9f57584c2f79a2d8bde41..40af6fc34dcac0b3f6747967be4c7ce8eb4ffa72 100644
+index 1f1408f13..40af6fc34 100644
 --- a/codex-rs/tui/src/chatwidget/protocol.rs
 +++ b/codex-rs/tui/src/chatwidget/protocol.rs
 @@ -210,6 +210,9 @@ impl ChatWidget {
@@ -24106,7 +24106,7 @@ index 1f1408f13acd90c724a9f57584c2f79a2d8bde41..40af6fc34dcac0b3f6747967be4c7ce8
              | ServerNotification::ThreadStatusChanged(_)
              | ServerNotification::ThreadReverted(_)
 diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
-index 490c06984e9383d84f04fc54bf4365148231ae47..a46f74b00834e691d5f8ab09d534abee13fa7b1e 100644
+index 490c06984..a46f74b00 100644
 --- a/codex-rs/tui/src/lib.rs
 +++ b/codex-rs/tui/src/lib.rs
 @@ -1,6 +1,7 @@
@@ -24117,3 +24117,6 @@ index 490c06984e9383d84f04fc54bf4365148231ae47..a46f74b00834e691d5f8ab09d534abee
  #![deny(clippy::print_stdout, clippy::print_stderr)]
  #![deny(clippy::disallowed_methods)]
  use crate::legacy_core::config::Config;
+-- 
+2.50.1 (Apple Git-155)
+
