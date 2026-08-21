@@ -29,7 +29,7 @@ Stock Codex는 인증과 runtime 소유권의 많은 부분을 process 단위로
 |---|---|
 | P001–P011 구현과 focused check | 완료 |
 | 순서형 0.149 patch export와 clean-apply 검증 | 완료; 11개 patch가 tree `096164cc5236699b0a7257f272d402ca4bf3ce09`를 재현함 |
-| macOS arm64 release build와 artifact | Pending |
+| macOS arm64 release build와 artifact | 완료; [Actions run 32485937374](https://github.com/iLfounder/codex-cli-custom/actions/runs/32485937374), artifact `codex-custom-rust-v0.149.0-macos-arm64` |
 | 최종 독립 review | Pending |
 | 0.149 publication | Pending |
 
@@ -134,13 +134,12 @@ Applier는 dirty 또는 잘못된 base worktree를 거절하고, 각 patch diges
 
 ## Build, review, publication
 
-0.149를 공개 완료라고 부르기 전에 다음 작업이 남아 있다.
+0.149를 최종 검토·공개 완료라고 부르기 전에 다음 작업이 남아 있다.
 
-1. macOS arm64용 `codex`, `codex-app-server` build
-2. 동일한 최종 candidate에 대한 fresh-context 독립 review 2회
-3. manifest, patch, 문서, build artifact 동시 공개
+1. build된 동일 final candidate에 대한 fresh-context 독립 review 2회
+2. material finding 반영과 최종 publication 상태 갱신
 
-남은 행을 갱신하기 전에는 release build, 최종 review, artifact, publication 완료를 주장하지 않는다.
+release build와 artifact는 [Actions run 32485937374](https://github.com/iLfounder/codex-cli-custom/actions/runs/32485937374)에서 제공한다. 남은 행을 갱신하기 전에는 최종 review와 publication 완료를 주장하지 않는다.
 
 ## 과거 작업 참고자료
 

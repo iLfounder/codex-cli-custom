@@ -29,7 +29,7 @@ The target is upstream [`rust-v0.149.0`](https://github.com/openai/codex/release
 |---|---|
 | P001–P011 implementation and focused checks | Complete |
 | Ordered 0.149 patch export and clean-apply verification | Complete; 11 patches reproduce tree `096164cc5236699b0a7257f272d402ca4bf3ce09` |
-| macOS arm64 release build and artifacts | Pending |
+| macOS arm64 release build and artifacts | Complete; [Actions run 32485937374](https://github.com/iLfounder/codex-cli-custom/actions/runs/32485937374), artifact `codex-custom-rust-v0.149.0-macos-arm64` |
 | Final independent reviews | Pending |
 | 0.149 publication | Pending |
 
@@ -134,13 +134,12 @@ This separation is the maintenance strategy: when upstream advances, each P-numb
 
 ## Build, review, and publication
 
-The following remain before 0.149 can be called published:
+The following remain before 0.149 can be called fully reviewed and published:
 
-1. build `codex` and `codex-app-server` for macOS arm64;
-2. inspect the same final candidate with two independent fresh-context reviews; and
-3. publish the manifest, patches, documentation, and build artifacts together.
+1. inspect the built final candidate with two independent fresh-context reviews; and
+2. resolve any material findings and update the publication status.
 
-No release build, final review, artifact, or completed publication is claimed until those remaining rows are updated.
+The release build and artifact are available from [Actions run 32485937374](https://github.com/iLfounder/codex-cli-custom/actions/runs/32485937374). Final review and completed publication are not claimed until the remaining rows are updated.
 
 ## Historical working notes
 
