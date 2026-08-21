@@ -119,8 +119,8 @@ GitHub Actions의 `Build custom Codex for macOS arm64` workflow는 수동 실행
 
 ```bash
 cd upstream-codex/codex-rs
-cargo build --locked --release -p codex-cli --bin codex
-cargo build --locked --release -p codex-app-server --bin codex-app-server
+cargo build --release -p codex-cli --bin codex
+cargo build --release -p codex-app-server --bin codex-app-server
 ```
 
 ## License

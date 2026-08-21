@@ -64,8 +64,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --locked --release -p codex-cli --bin codex
-          cargo build --locked --release -p codex-app-server --bin codex-app-server
+          cargo build --release -p codex-cli --bin codex
+          cargo build --release -p codex-app-server --bin codex-app-server
 
       - name: Package binaries and provenance
         shell: bash
