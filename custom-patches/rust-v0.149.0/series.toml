@@ -1,7 +1,7 @@
 schema_version = 1
 applies_to = "rust-v0.149.0"
 base_commit = "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0"
-final_tree = "0b611f585edbea2c31af97011b1a13077849b981"
+final_tree = "e76aa7e4e7b0ec0902d525e939baf9d34ffdccf1"
 
 [[patches]]
 number = "P001"
@@ -36,24 +36,24 @@ sha256 = "4b411a8cabe38b756b3ed980dad19d63f7e771176e4d4cca2bb128e86eebd677"
 [[patches]]
 number = "P007"
 file = "0007-P007-add-live-account-registration.patch"
-sha256 = "1dff711e45a8263ab86fe1eb0fd2edcd3b2dc31a3753f604da5044f64de45f55"
+sha256 = "83ab3ed2df94adee56bdb7e3360bb8dfc34c8c9b79805a6af6e0d626d9a4c550"
 
 [[patches]]
 number = "P008"
 file = "0008-P008-relinquish-thread-writers-strictly.patch"
-sha256 = "ceaeb533c364b470b750a561a28e31c1e4d188189bc5980755b36b3ded7872c9"
+sha256 = "eca0a1197f16e16a47c3909d4b836788fc87255980876bf8825fbf00c38da50a"
 
 [[patches]]
 number = "P009"
 file = "0009-P009-switch-thread-execution-accounts.patch"
-sha256 = "bb73748a24fe317291aba722dec7e6e08d197d7eacdeea252d4fed587f35cc86"
+sha256 = "6e0d28729340ebae02be1b9f63c5ea44f6b4d305f58eec65597bfd316fd1698d"
 
 [[patches]]
 number = "P010"
 file = "0010-P010-add-TUI-session-and-account-controls.patch"
-sha256 = "511bffcd62807f29febcda6cbc9b6a520661d53a4913bfed4c9ef02b31a0ca15"
+sha256 = "a424baad301f8418c98586c7b0c6dad5d7ab9f16ce8cc2d25b2c2459ae0df035"
 
 [[patches]]
 number = "P011"
 file = "0011-P011-installable-plugin-commands-and-presentation.patch"
-sha256 = "06415486130c7a4d947f1bf36deaa96865120b8329271de169b3c7ca9d626d2b"
+sha256 = "d46ab3b1cae968f8c523dc2588ab9244f2ff906c341318c46ee504e049a1bcb1"

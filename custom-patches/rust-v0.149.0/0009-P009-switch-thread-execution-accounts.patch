@@ -1,4 +1,4 @@
-From aae199d824ad2bf131674fa4470c99ac985e7d33 Mon Sep 17 00:00:00 2001
+From c390c478f802ef0d7f32b07b2fc38c49fda64217 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 19:13:43 +0900
 Subject: [PATCH 09/11] feat(custom): switch thread accounts without restart

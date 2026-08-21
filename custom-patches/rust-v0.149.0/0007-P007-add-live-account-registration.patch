@@ -1,4 +1,4 @@
-From 7c5c5c6b8b702f188050c4de6a61117355e8deaf Mon Sep 17 00:00:00 2001
+From 3dc7ba0f13c09fb3ccc729a1dea184ba39fdc447 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 17:31:24 +0900
 Subject: [PATCH 07/11] feat(custom): add live account registration for 0.149
@@ -23,9 +23,9 @@ Subject: [PATCH 07/11] feat(custom): add live account registration for 0.149
  .../src/protocol/common.rs                    |   6 +
  .../src/protocol/v2/account.rs                |  20 +
  codex-rs/app-server/README.md                 |  19 +
- codex-rs/app-server/src/account_registry.rs   |  74 +-
- .../src/account_registry/live_registration.rs | 647 ++++++++++++++++++
- .../app-server/src/account_registry_tests.rs  | 283 ++++++++
+ codex-rs/app-server/src/account_registry.rs   | 110 ++-
+ .../src/account_registry/live_registration.rs | 679 ++++++++++++++++++
+ .../app-server/src/account_registry_tests.rs  | 346 +++++++++
  codex-rs/app-server/src/external_auth.rs      |  50 +-
  codex-rs/app-server/src/in_process.rs         |   6 +-
  codex-rs/app-server/src/lib.rs                |   4 +-
@@ -33,16 +33,16 @@ Subject: [PATCH 07/11] feat(custom): add live account registration for 0.149
  codex-rs/app-server/src/outgoing_message.rs   | 121 +++-
  codex-rs/app-server/src/request_processors.rs |   2 +-
  .../request_processors/account_processor.rs   |  51 +-
- .../account_processor/slot_login.rs           | 588 ++++++++++++++++
+ .../account_processor/slot_login.rs           | 618 ++++++++++++++++
  .../account_processor/slot_login/transport.rs | 210 ++++++
- .../account_processor/slot_logout.rs          |  46 ++
+ .../account_processor/slot_logout.rs          |  67 ++
  .../app-server/src/session_runtime/mod.rs     |  37 +
  .../app-server/tests/suite/v2/account_slot.rs |  82 +++
  codex-rs/app-server/tests/suite/v2/mod.rs     |   1 +
  codex-rs/core/src/thread_manager.rs           |  15 +
  codex-rs/login/src/lib.rs                     |   1 +
  codex-rs/login/src/server.rs                  |  70 +-
- 38 files changed, 2719 insertions(+), 71 deletions(-)
+ 38 files changed, 2910 insertions(+), 62 deletions(-)
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/AccountSlotLogoutParams.json
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/AccountSlotLogoutResponse.json
  create mode 100644 codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotLogoutParams.ts
@@ -11954,7 +11954,7 @@ index 5ec11f3ad..a7fa71360 100644
  
  ### 1) Check auth state
 diff --git a/codex-rs/app-server/src/account_registry.rs b/codex-rs/app-server/src/account_registry.rs
-index 49e71a17a..3a052234a 100644
+index 49e71a17a..43f1a06c2 100644
 --- a/codex-rs/app-server/src/account_registry.rs
 +++ b/codex-rs/app-server/src/account_registry.rs
 @@ -3,11 +3,11 @@ use std::io;
@@ -11970,25 +11970,34 @@ index 49e71a17a..3a052234a 100644
  use codex_app_server_protocol::AccountSlotCapability;
  use codex_app_server_protocol::AccountSlotListParams;
  use codex_app_server_protocol::AccountSlotListResponse;
-@@ -28,6 +28,7 @@ use codex_protocol::error::CodexErr;
+@@ -28,12 +28,15 @@ use codex_protocol::error::CodexErr;
  use codex_protocol::protocol::ExecutionAccountBinding;
  use serde::Deserialize;
  use serde::Serialize;
 +use tokio::sync::Mutex;
  use tokio::sync::OnceCell;
++use tokio::sync::OwnedMutexGuard;
  use uuid::Uuid;
  
-@@ -245,6 +246,9 @@ fn valid_manifest_token(value: &str) -> bool {
+ use crate::auth_mode::auth_mode_to_api;
+ use crate::error_code::internal_error;
+ use crate::error_code::invalid_params;
++use crate::error_code::invalid_request;
+ 
+ const MANIFEST_FILE: &str = "account-slots.toml";
+ const PRIVATE_HOMES_DIR: &str = "accounts";
+@@ -245,6 +248,10 @@ fn valid_manifest_token(value: &str) -> bool {
  struct AccountSlotRecord {
      manifest: AccountSlotManifest,
      runtime: Arc<OnceCell<Arc<AccountRuntimeBundle>>>,
++    binding_transition: Arc<Mutex<()>>,
 +    active_login_operation_id: Option<String>,
 +    active_logout_operation_id: Option<String>,
 +    completed_login_operation_id: Option<String>,
  }
  
  pub(crate) struct AccountRuntimeBundle {
-@@ -256,12 +260,21 @@ struct AccountRegistryState {
+@@ -256,12 +263,21 @@ struct AccountRegistryState {
      revision: u64,
      slots: Vec<AccountSlotRecord>,
      manifest_error: Option<&'static str>,
@@ -12010,7 +12019,7 @@ index 49e71a17a..3a052234a 100644
  }
  
  impl AccountRegistry {
-@@ -271,13 +284,14 @@ impl AccountRegistry {
+@@ -271,13 +287,14 @@ impl AccountRegistry {
          default_models_manager: SharedModelsManager,
      ) -> Self {
          let manifest_path = config.codex_home.join(MANIFEST_FILE);
@@ -12028,7 +12037,7 @@ index 49e71a17a..3a052234a 100644
                  ),
              };
          let default_runtime = Arc::new(AccountRuntimeBundle {
-@@ -292,7 +306,13 @@ impl AccountRegistry {
+@@ -292,7 +309,14 @@ impl AccountRegistry {
                  if manifest.is_default {
                      let _ = runtime.set(Arc::clone(&default_runtime));
                  }
@@ -12036,6 +12045,7 @@ index 49e71a17a..3a052234a 100644
 +                AccountSlotRecord {
 +                    manifest,
 +                    runtime,
++                    binding_transition: Arc::new(Mutex::new(())),
 +                    active_login_operation_id: None,
 +                    active_logout_operation_id: None,
 +                    completed_login_operation_id: None,
@@ -12043,7 +12053,7 @@ index 49e71a17a..3a052234a 100644
              })
              .collect::<Vec<_>>();
          slots.sort_by(|left, right| {
-@@ -308,7 +328,10 @@ impl AccountRegistry {
+@@ -308,7 +332,10 @@ impl AccountRegistry {
                  revision: manifest.revision,
                  slots,
                  manifest_error,
@@ -12054,7 +12064,7 @@ index 49e71a17a..3a052234a 100644
          }
      }
  
-@@ -316,6 +339,7 @@ impl AccountRegistry {
+@@ -316,6 +343,7 @@ impl AccountRegistry {
          &self,
          params: AccountSlotListParams,
      ) -> Result<AccountSlotListResponse, JSONRPCErrorError> {
@@ -12062,7 +12072,7 @@ index 49e71a17a..3a052234a 100644
          let (revision, slots, manifest_error) = {
              let state = self
                  .state
-@@ -358,6 +382,7 @@ impl AccountRegistry {
+@@ -358,6 +386,7 @@ impl AccountRegistry {
      pub(crate) async fn runtime_capability(
          &self,
      ) -> Result<AccountSlotCapability, JSONRPCErrorError> {
@@ -12070,19 +12080,22 @@ index 49e71a17a..3a052234a 100644
          let manifest_error = self
              .state
              .read()
-@@ -366,27 +391,6 @@ impl AccountRegistry {
+@@ -366,25 +395,25 @@ impl AccountRegistry {
          Ok(self.capability(manifest_error))
      }
  
 -    pub(crate) async fn slot_snapshot(
--        &self,
--        account_slot_id: &str,
++    pub(crate) async fn lock_slot_binding_transition(
+         &self,
+         account_slot_id: &str,
 -    ) -> Result<AccountSlotSnapshot, JSONRPCErrorError> {
 -        let (slot, revision, manifest_error) = {
--            let state = self
--                .state
--                .read()
--                .map_err(|_| internal_error("account slot registry is unavailable"))?;
++    ) -> Result<OwnedMutexGuard<()>, JSONRPCErrorError> {
++        let binding_transition = {
+             let state = self
+                 .state
+                 .read()
+                 .map_err(|_| internal_error("account slot registry is unavailable"))?;
 -            let slot = state
 -                .slots
 -                .iter()
@@ -12090,15 +12103,22 @@ index 49e71a17a..3a052234a 100644
 -                .cloned()
 -                .ok_or_else(|| invalid_params("account slot is unavailable"))?;
 -            (slot, state.revision, state.manifest_error)
--        };
++            Arc::clone(
++                &state
++                    .slots
++                    .iter()
++                    .find(|slot| slot.manifest.account_slot_id == account_slot_id)
++                    .ok_or_else(|| invalid_request("account slot is unavailable"))?
++                    .binding_transition,
++            )
+         };
 -        let capability = self.capability(manifest_error);
 -        Ok(self.snapshot(&slot, revision, &capability).await)
--    }
--
++        Ok(binding_transition.lock_owned().await)
+     }
+ 
      async fn snapshot(
-         &self,
-         slot: &AccountSlotRecord,
-@@ -418,9 +422,15 @@ impl AccountRegistry {
+@@ -418,9 +447,15 @@ impl AccountRegistry {
              auth_mode,
              attempt_generation: slot.manifest.attempt_generation,
              registry_revision: revision,
@@ -12116,7 +12136,7 @@ index 49e71a17a..3a052234a 100644
              updated_at: slot.manifest.updated_at,
          }
      }
-@@ -498,9 +508,17 @@ impl AccountRegistry {
+@@ -498,9 +533,40 @@ impl AccountRegistry {
      }
  }
  
@@ -12131,15 +12151,51 @@ index 49e71a17a..3a052234a 100644
 +                    error.message
 +                ))
 +            })?;
++            let slot = {
++                let state = self.state.read().map_err(|_| {
++                    CodexErr::Fatal("account slot registry is unavailable".to_string())
++                })?;
++                state
++                    .slots
++                    .iter()
++                    .find(|slot| slot.manifest.account_slot_id == binding.slot_id)
++                    .cloned()
++            };
++            let slot = slot.ok_or_else(|| {
++                CodexErr::InvalidRequest(format!(
++                    "execution account slot `{}` is unavailable",
++                    binding.slot_id
++                ))
++            })?;
++            if slot.active_logout_operation_id.is_some() {
++                return Err(CodexErr::InvalidRequest(format!(
++                    "execution account slot `{}` is being logged out",
++                    binding.slot_id
++                )));
++            }
++            let _binding_transition = Arc::clone(&slot.binding_transition).lock_owned().await;
              let (slot, manifest_error) = {
                  let state = self.state.read().map_err(|_| {
                      CodexErr::Fatal("account slot registry is unavailable".to_string())
+@@ -537,6 +603,12 @@ impl ExecutionAccountResolver for AccountRegistry {
+                     binding.slot_id
+                 )));
+             }
++            if slot.active_logout_operation_id.is_some() {
++                return Err(CodexErr::InvalidRequest(format!(
++                    "execution account slot `{}` is being logged out",
++                    binding.slot_id
++                )));
++            }
+             let runtime = self.runtime(&slot).await;
+             Ok(Arc::new(ExecutionAccountContext {
+                 binding,
 diff --git a/codex-rs/app-server/src/account_registry/live_registration.rs b/codex-rs/app-server/src/account_registry/live_registration.rs
 new file mode 100644
-index 000000000..c9e1bb9b1
+index 000000000..07e7308bf
 --- /dev/null
 +++ b/codex-rs/app-server/src/account_registry/live_registration.rs
-@@ -0,0 +1,647 @@
+@@ -0,0 +1,679 @@
 +use std::sync::Arc;
 +
 +use chrono::Utc;
@@ -12151,7 +12207,9 @@ index 000000000..c9e1bb9b1
 +use codex_app_server_protocol::AccountSlotLogoutResponse;
 +use codex_app_server_protocol::AccountSlotSnapshot;
 +use codex_app_server_protocol::JSONRPCErrorError;
++use tokio::sync::Mutex;
 +use tokio::sync::OnceCell;
++use tokio::sync::OwnedMutexGuard;
 +use uuid::Uuid;
 +
 +use super::AccountRegistry;
@@ -12191,11 +12249,12 @@ index 000000000..c9e1bb9b1
 +    pub(crate) runtime: Arc<AccountRuntimeBundle>,
 +}
 +
-+pub(super) struct ReservedSlotLogout {
++pub(crate) struct ReservedSlotLogout {
 +    account_slot_id: String,
 +    attempt_generation: u64,
 +    operation_id: String,
 +    slot: AccountSlotRecord,
++    _binding_transition: OwnedMutexGuard<()>,
 +}
 +
 +impl AccountRegistry {
@@ -12370,6 +12429,7 @@ index 000000000..c9e1bb9b1
 +                        error_code: None,
 +                    },
 +                    runtime: Arc::new(OnceCell::new()),
++                    binding_transition: Arc::new(Mutex::new(())),
 +                    active_login_operation_id: None,
 +                    active_logout_operation_id: None,
 +                    completed_login_operation_id: None,
@@ -12451,12 +12511,19 @@ index 000000000..c9e1bb9b1
 +        self.changed_notification(&changed_slot_id).await.map(Some)
 +    }
 +
++    #[cfg(test)]
 +    pub(crate) async fn logout_secondary(
 +        &self,
 +        params: AccountSlotLogoutParams,
 +    ) -> Result<LoggedOutSlot, JSONRPCErrorError> {
-+        self.reconcile().await?;
 +        let reservation = self.reserve_secondary_logout(params).await?;
++        self.logout_reserved_secondary(reservation).await
++    }
++
++    pub(crate) async fn logout_reserved_secondary(
++        &self,
++        reservation: ReservedSlotLogout,
++    ) -> Result<LoggedOutSlot, JSONRPCErrorError> {
 +        let runtime = self.runtime(&reservation.slot).await;
 +        if runtime.auth_manager.logout_with_revoke().await.is_err() {
 +            self.clear_logout_reservation(&reservation).await?;
@@ -12476,10 +12543,30 @@ index 000000000..c9e1bb9b1
 +        })
 +    }
 +
-+    pub(super) async fn reserve_secondary_logout(
++    pub(crate) async fn reserve_secondary_logout(
 +        &self,
 +        params: AccountSlotLogoutParams,
 +    ) -> Result<ReservedSlotLogout, JSONRPCErrorError> {
++        self.reconcile().await?;
++        let binding_transition = {
++            let state = self
++                .state
++                .read()
++                .map_err(|_| internal_error("account slot registry is unavailable"))?;
++            let slot = state
++                .slots
++                .iter()
++                .find(|slot| slot.manifest.account_slot_id == params.account_slot_id)
++                .ok_or_else(|| invalid_request("account slot is unavailable"))?;
++            if slot.active_logout_operation_id.is_some() {
++                return Err(structured_invalid_request(
++                    ERROR_LOGOUT_BUSY,
++                    "account slot logout is active",
++                ));
++            }
++            Arc::clone(&slot.binding_transition)
++        };
++        let binding_transition = binding_transition.lock_owned().await;
 +        let _mutation = self.mutation_lock.lock().await;
 +        let (revision, manifest_error) = {
 +            let state = self
@@ -12540,6 +12627,7 @@ index 000000000..c9e1bb9b1
 +            attempt_generation: slot.manifest.attempt_generation,
 +            operation_id,
 +            slot: slot.clone(),
++            _binding_transition: binding_transition,
 +        })
 +    }
 +
@@ -12585,7 +12673,7 @@ index 000000000..c9e1bb9b1
 +        self.changed_notification(&slot_id).await
 +    }
 +
-+    pub(super) async fn clear_logout_reservation(
++    pub(crate) async fn clear_logout_reservation(
 +        &self,
 +        reservation: &ReservedSlotLogout,
 +    ) -> Result<(), JSONRPCErrorError> {
@@ -12788,7 +12876,7 @@ index 000000000..c9e1bb9b1
 +    error
 +}
 diff --git a/codex-rs/app-server/src/account_registry_tests.rs b/codex-rs/app-server/src/account_registry_tests.rs
-index af7c65276..33208bac2 100644
+index af7c65276..f3a1c75a6 100644
 --- a/codex-rs/app-server/src/account_registry_tests.rs
 +++ b/codex-rs/app-server/src/account_registry_tests.rs
 @@ -1,10 +1,14 @@
@@ -12806,7 +12894,7 @@ index af7c65276..33208bac2 100644
  
  async fn registry_for_home(process_home: &Path) -> AccountRegistry {
      let config = Arc::new(
-@@ -159,3 +163,282 @@ async fn slot_snapshot_releases_registry_guard_before_capability_lookup() {
+@@ -159,3 +163,345 @@ async fn slot_snapshot_releases_registry_guard_before_capability_lookup() {
      assert_eq!(snapshot.account_slot_id, DEFAULT_SLOT_ID);
      assert!(snapshot.is_default);
  }
@@ -13088,6 +13176,69 @@ index af7c65276..33208bac2 100644
 +        .clear_logout_reservation(&second)
 +        .await
 +        .expect("clear second reservation");
++}
++
++#[tokio::test]
++async fn logout_reservation_blocks_only_the_target_slot_resolver() {
++    let process_home = tempdir().expect("temp process home");
++    let mut slots = manifest(process_home.path(), 7);
++    slots.slots[1].status = ManifestSlotStatus::Ready;
++    slots
++        .persist(&process_home.path().join(MANIFEST_FILE))
++        .expect("persist manifest");
++    let registry = registry_for_home(process_home.path()).await;
++    let slot_auth = AuthManager::from_auth_for_testing_with_home(
++        CodexAuth::from_api_key("slot-key"),
++        slots.slots[1].auth_home.clone(),
++    );
++    let slot_models = codex_core::build_models_manager(registry.config.as_ref(), slot_auth.clone());
++    let runtime = Arc::new(AccountRuntimeBundle {
++        auth_manager: slot_auth,
++        models_manager: slot_models,
++    });
++    let installed = registry
++        .state
++        .read()
++        .expect("registry state")
++        .slots
++        .iter()
++        .find(|slot| slot.manifest.account_slot_id == SECOND_SLOT_ID)
++        .expect("secondary slot")
++        .runtime
++        .set(runtime);
++    assert!(installed.is_ok());
++    let reservation = registry
++        .reserve_secondary_logout(AccountSlotLogoutParams {
++            account_slot_id: SECOND_SLOT_ID.to_string(),
++            expected_registry_revision: 7,
++            expected_attempt_generation: 2,
++        })
++        .await
++        .expect("reserve logout");
++
++    assert!(
++        registry
++            .resolve(ExecutionAccountBinding {
++                slot_id: SECOND_SLOT_ID.to_string(),
++                generation: 1,
++            })
++            .await
++            .is_err()
++    );
++    assert!(
++        registry
++            .resolve(ExecutionAccountBinding {
++                slot_id: DEFAULT_SLOT_ID.to_string(),
++                generation: 1,
++            })
++            .await
++            .is_ok()
++    );
++
++    registry
++        .clear_logout_reservation(&reservation)
++        .await
++        .expect("clear reservation");
 +}
 diff --git a/codex-rs/app-server/src/external_auth.rs b/codex-rs/app-server/src/external_auth.rs
 index d00777f71..8d5eccfb3 100644
@@ -13643,10 +13794,10 @@ index 94685ca71..bc285b9e6 100644
          Ok(LoginAccountResponse::Chatgpt {
 diff --git a/codex-rs/app-server/src/request_processors/account_processor/slot_login.rs b/codex-rs/app-server/src/request_processors/account_processor/slot_login.rs
 new file mode 100644
-index 000000000..7c7a6aa41
+index 000000000..639faf939
 --- /dev/null
 +++ b/codex-rs/app-server/src/request_processors/account_processor/slot_login.rs
-@@ -0,0 +1,588 @@
+@@ -0,0 +1,618 @@
 +use std::collections::HashMap;
 +use std::sync::Arc;
 +use std::sync::atomic::AtomicBool;
@@ -13786,21 +13937,34 @@ index 000000000..7c7a6aa41
 +            .await
 +            .map_err(|_| internal_error("account slot login coordinator is unavailable"))?;
 +        let (requested_slot, kind) = slot_request_identity(&params);
-+        if let Some(slot_id) = requested_slot.as_deref() {
++        let binding_transition = if let Some(slot_id) = requested_slot.as_deref() {
 +            self.await_previous_slot_login(slot_id).await?;
++            let binding_transition = self
++                .account_registry
++                .lock_slot_binding_transition(slot_id)
++                .await?;
 +            if self.session_runtime.account_slot_in_use(slot_id).await? {
 +                return Err(structured_invalid_request(
 +                    ERROR_SLOT_BOUND,
 +                    "account slot is bound to a thread",
 +                ));
 +            }
-+        }
++            Some(binding_transition)
++        } else {
++            None
++        };
++        let starts_async_login = matches!(
++            &params,
++            AccountSlotLoginStartParams::Chatgpt { .. }
++                | AccountSlotLoginStartParams::ChatgptDeviceCode { .. }
++        );
 +
 +        let operation_id = Uuid::new_v4().to_string();
 +        let prepared = self
 +            .account_registry
 +            .prepare_slot_login(requested_slot, operation_id)
 +            .await?;
++        drop(binding_transition);
 +        if let Err(error) = self
 +            .session_runtime
 +            .begin_operation(operation(
@@ -13815,7 +13979,8 @@ index 000000000..7c7a6aa41
 +                .await;
 +            return Err(error);
 +        }
-+        match params {
++        let failure_prepared = prepared.clone();
++        let result = match params {
 +            AccountSlotLoginStartParams::ApiKey { api_key, .. } => {
 +                let result = login_with_api_key(
 +                    &prepared.auth_home,
@@ -13943,7 +14108,12 @@ index 000000000..7c7a6aa41
 +                });
 +                self.slot_login_response(&prepared, kind, None).await
 +            }
++        };
++        if starts_async_login && result.is_err() {
++            self.finish_slot_failure(&failure_prepared, ERROR_LOGIN_FAILED)
++                .await;
 +        }
++        result
 +    }
 +
 +    async fn finish_slot_success(
@@ -13967,44 +14137,55 @@ index 000000000..7c7a6aa41
 +                .list_models(RefreshStrategy::Online, self.config.http_client_factory()),
 +        )
 +        .await;
-+        if let Some(notification) = self
++        let notification = match self
 +            .account_registry
 +            .finish_slot_login(prepared, ManifestSlotStatus::Ready, None)
-+            .await?
++            .await
 +        {
-+            self.thread_manager.clear_account_plugin_cache(
-+                &prepared.account_slot_id,
-+                &prepared.runtime.auth_manager,
-+            );
-+            self.outgoing
-+                .send_server_notification(ServerNotification::AccountSlotChanged(notification))
-+                .await;
-+            self.publish_slot_operation(prepared, SessionRuntimeOperationStatus::Ready, None)
-+                .await;
-+            return Ok(true);
-+        }
-+        Ok(false)
++            Ok(Some(notification)) => notification,
++            Ok(None) => {
++                self.finish_slot_failure(prepared, ERROR_LOGIN_CANCELED)
++                    .await;
++                return Ok(false);
++            }
++            Err(error) => {
++                self.finish_slot_failure(prepared, ERROR_LOGIN_FAILED).await;
++                return Err(error);
++            }
++        };
++        self.thread_manager
++            .clear_account_plugin_cache(&prepared.account_slot_id, &prepared.runtime.auth_manager);
++        self.outgoing
++            .send_server_notification(ServerNotification::AccountSlotChanged(notification))
++            .await;
++        self.publish_slot_operation(prepared, SessionRuntimeOperationStatus::Ready, None)
++            .await;
++        Ok(true)
 +    }
 +
 +    async fn finish_slot_failure(&self, prepared: &PreparedSlotLogin, error_code: &'static str) {
-+        if let Ok(Some(notification)) = self
++        let pending_failure = self
 +            .account_registry
 +            .finish_slot_login(prepared, ManifestSlotStatus::Failed, Some(error_code))
-+            .await
-+        {
++            .await;
++        let notification = match pending_failure {
++            Ok(Some(notification)) => Some(notification),
++            Ok(None) | Err(_) => None,
++        };
++        if let Some(notification) = notification {
 +            self.outgoing
 +                .send_server_notification(ServerNotification::AccountSlotChanged(notification))
 +                .await;
-+            self.publish_slot_operation(
-+                prepared,
-+                SessionRuntimeOperationStatus::Failed,
-+                Some(SessionRuntimeOperationError {
-+                    code: error_code.to_string(),
-+                    message: "account slot login failed".to_string(),
-+                }),
-+            )
-+            .await;
 +        }
++        self.publish_slot_operation(
++            prepared,
++            SessionRuntimeOperationStatus::Failed,
++            Some(SessionRuntimeOperationError {
++                code: error_code.to_string(),
++                message: "account slot login failed".to_string(),
++            }),
++        )
++        .await;
 +    }
 +
 +    async fn fail_external_slot(&self, prepared: &PreparedSlotLogin) {
@@ -14453,10 +14634,10 @@ index 000000000..caffc1c65
 +}
 diff --git a/codex-rs/app-server/src/request_processors/account_processor/slot_logout.rs b/codex-rs/app-server/src/request_processors/account_processor/slot_logout.rs
 new file mode 100644
-index 000000000..b3dcede71
+index 000000000..916b106dd
 --- /dev/null
 +++ b/codex-rs/app-server/src/request_processors/account_processor/slot_logout.rs
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,67 @@
 +use codex_app_server_protocol::AccountSlotLogoutParams;
 +use codex_app_server_protocol::ClientResponsePayload;
 +use codex_app_server_protocol::JSONRPCErrorError;
@@ -14477,18 +14658,39 @@ index 000000000..b3dcede71
 +                "default account logout must use account/logout",
 +            ));
 +        }
-+        if self
++        let account_slot_id = params.account_slot_id.clone();
++        let reservation = self
++            .account_registry
++            .reserve_secondary_logout(params)
++            .await?;
++        let slot_in_use = match self
 +            .session_runtime
-+            .account_slot_in_use(&params.account_slot_id)
-+            .await?
++            .account_slot_in_use(&account_slot_id)
++            .await
 +        {
++            Ok(slot_in_use) => slot_in_use,
++            Err(error) => {
++                let _ = self
++                    .account_registry
++                    .clear_logout_reservation(&reservation)
++                    .await;
++                return Err(error);
++            }
++        };
++        if slot_in_use {
++            self.account_registry
++                .clear_logout_reservation(&reservation)
++                .await?;
 +            return Err(structured_invalid_request(
 +                ERROR_SLOT_BOUND,
 +                "account slot is bound to a thread",
 +            ));
 +        }
 +
-+        let logged_out = self.account_registry.logout_secondary(params).await?;
++        let logged_out = self
++            .account_registry
++            .logout_reserved_secondary(reservation)
++            .await?;
 +        self.thread_manager.clear_account_plugin_cache(
 +            &logged_out.response.slot.account_slot_id,
 +            &logged_out.runtime.auth_manager,

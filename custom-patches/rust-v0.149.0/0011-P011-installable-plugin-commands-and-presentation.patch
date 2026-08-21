@@ -1,4 +1,4 @@
-From 6cdf406325d491eea8206ba3af01a5543596814a Mon Sep 17 00:00:00 2001
+From 18109f49cfcfe1869dd48d71c8b7c7a7456d95d5 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 20:14:51 +0900
 Subject: [PATCH 11/11] feat(custom): add structured plugin commands and TUI
@@ -42,8 +42,8 @@ Subject: [PATCH 11/11] feat(custom): add structured plugin commands and TUI
  codex-rs/app-server/src/main.rs               |   2 +
  codex-rs/app-server/src/message_processor.rs  |  21 +
  codex-rs/app-server/src/request_processors.rs |   2 +
- .../plugin_command_processor.rs               | 491 ++++++++++++++
- .../plugin_command_processor_tests.rs         |  59 ++
+ .../plugin_command_processor.rs               | 557 ++++++++++++++++
+ .../plugin_command_processor_tests.rs         |  78 +++
  .../thread_goal_processor.rs                  |  71 +-
  codex-rs/app-server/tests/suite/v2/mod.rs     |   1 +
  .../tests/suite/v2/plugin_command.rs          | 134 ++++
@@ -83,7 +83,7 @@ Subject: [PATCH 11/11] feat(custom): add structured plugin commands and TUI
  codex-rs/tui/src/history_cell/mod.rs          |   2 +
  .../tui/src/history_cell/plugin_surfaces.rs   | 158 +++++
  .../src/history_cell/plugin_surfaces_tests.rs |  42 ++
- 78 files changed, 5089 insertions(+), 39 deletions(-)
+ 78 files changed, 5174 insertions(+), 39 deletions(-)
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/PluginCommandInvokeParams.json
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/PluginCommandInvokeResponse.json
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/PluginCommandListParams.json
@@ -14437,17 +14437,17 @@ index 000000000..737644575
 +    Error,
 +}
 diff --git a/codex-rs/app-server/README.md b/codex-rs/app-server/README.md
-index 3e7fa9b57..25bd2b7fc 100644
+index 3e7fa9b57..7d2a68072 100644
 --- a/codex-rs/app-server/README.md
 +++ b/codex-rs/app-server/README.md
 @@ -188,6 +188,10 @@ Example with notification opt-out:
  - `thread/goal/clear` — clear the current persisted goal for a materialized thread; returns whether a goal was removed and emits `thread/goal/cleared` when state changes.
  - `thread/goal/updated` — notification emitted whenever a thread goal changes; includes the full current goal.
  - `thread/goal/cleared` — notification emitted whenever a thread goal is removed.
-+- `pluginCommand/list` — experimental; list the enabled plugins' structured commands for one loaded thread. Commands use opaque ids, always expose a canonical `/namespace:name`, and expose a short `/name` only when it is unambiguous and does not collide with a built-in command.
-+- `pluginCommand/invoke` — experimental; invoke one listed command by its opaque id. Prompt, declared MCP tool, goal, and packaged executable targets retain their respective thread, approval, sandbox, and size boundaries; clients cannot supply executable arguments, environment variables, or a working directory.
-+- `thread/presentation/append` — experimental; deliver a bounded, ephemeral card, notice, or progress item to the thread's current subscribers. Presentation items are not added to model context, rollout history, or persistent storage.
-+- `thread/presentation/appended` — experimental notification sent only to current subscribers of the exact thread.
++- `pluginCommand/list` — list the enabled plugins' structured commands for one loaded thread. Commands use opaque ids, always expose a canonical `/namespace:name`, and expose a short `/name` only when it is unambiguous and does not collide with a built-in command.
++- `pluginCommand/invoke` — invoke one listed command by its opaque id. Prompt, declared MCP tool, goal, and packaged executable targets retain their respective thread, approval, sandbox, and size boundaries; clients cannot supply executable arguments, environment variables, or a working directory.
++- `thread/presentation/append` — deliver a bounded, ephemeral card, notice, or progress item to the thread's current subscribers. Presentation items are not added to model context, rollout history, or persistent storage.
++- `thread/presentation/appended` — notification sent only to current subscribers of the exact thread.
  - `thread/queue/add` — experimental; persist a user turn for automatic FIFO submission when the thread next becomes idle.
  - `thread/queue/list` — experimental; return one page of a thread's queued turns.
  - `thread/queue/update` — experimental; edit a queued turn while preserving its stable submission ID, client message ID, and position.
@@ -14455,7 +14455,7 @@ index 3e7fa9b57..25bd2b7fc 100644
  { "method": "thread/goal/cleared", "params": { "threadId": "thr_123" } }
  ```
  
-+### Example: List and invoke plugin commands (experimental)
++### Example: List and invoke plugin commands
 +
 +List commands against the exact loaded thread, then invoke the selected opaque `id`. Clients should display `canonicalName` as the stable spelling and use `shortName` only when it is present.
 +
@@ -14468,9 +14468,9 @@ index 3e7fa9b57..25bd2b7fc 100644
 +{ "id": 31, "result": { "data": [{
 +    "id": "opaque-command-id",
 +    "pluginId": "example-plugin",
-+    "canonicalName": "/example:status",
-+    "shortName": "/status",
-+    "description": "Show plugin status",
++    "canonicalName": "/example:inspect",
++    "shortName": "/inspect",
++    "description": "Inspect plugin status",
 +    "target": { "type": "prompt" },
 +    "available": true,
 +    "denyReason": null
@@ -14483,7 +14483,7 @@ index 3e7fa9b57..25bd2b7fc 100644
 +{ "id": 32, "result": { "type": "prompt", "prompt": "Summarize plugin status." } }
 +```
 +
-+### Example: Append ephemeral thread presentation (experimental)
++### Example: Append ephemeral thread presentation
 +
 +Presentation delivery is subscriber-only and non-persistent. Reuse an item `id` when the client should update an existing card or progress row instead of adding another one.
 +
@@ -14613,10 +14613,10 @@ index 7775e0b97..dd24a18cb 100644
  pub(crate) use projects::ProjectRequestProcessor;
 diff --git a/codex-rs/app-server/src/request_processors/plugin_command_processor.rs b/codex-rs/app-server/src/request_processors/plugin_command_processor.rs
 new file mode 100644
-index 000000000..8b581fed7
+index 000000000..631e9c683
 --- /dev/null
 +++ b/codex-rs/app-server/src/request_processors/plugin_command_processor.rs
-@@ -0,0 +1,491 @@
+@@ -0,0 +1,557 @@
 +use std::collections::HashMap;
 +use std::sync::Arc;
 +
@@ -14663,6 +14663,72 @@ index 000000000..8b581fed7
 +const MAX_PRESENTATION_ID_LEN: usize = 128;
 +const MAX_PRESENTATION_TITLE_LEN: usize = 256;
 +const MAX_PRESENTATION_BODY_LEN: usize = 16 * 1024;
++// Keep this synchronized with the slash spellings recognized by the 0.149 TUI. Both canonical
++// spellings and accepted aliases are reserved because built-ins win slash-command dispatch.
++const RESERVED_BUILTIN_COMMAND_NAMES: &[&str] = &[
++    "model",
++    "ide",
++    "permissions",
++    "keymap",
++    "vim",
++    "setup-default-sandbox",
++    "sandbox-add-read-dir",
++    "experimental",
++    "approve",
++    "memories",
++    "skills",
++    "import",
++    "hooks",
++    "review",
++    "rename",
++    "new",
++    "archive",
++    "delete",
++    "resume",
++    "fork",
++    "app",
++    "init",
++    "compact",
++    "plan",
++    "goal",
++    "agents",
++    "side",
++    "btw",
++    "copy",
++    "export",
++    "raw",
++    "diff",
++    "mention",
++    "status",
++    "cd",
++    "pwd",
++    "cwd",
++    "usage",
++    "debug-config",
++    "title",
++    "statusline",
++    "theme",
++    "pets",
++    "pet",
++    "mcp",
++    "apps",
++    "account",
++    "plugins",
++    "logout",
++    "quit",
++    "exit",
++    "feedback",
++    "rollout",
++    "ps",
++    "stop",
++    "clean",
++    "clear",
++    "personality",
++    "test-approval",
++    "subagents",
++    "debug-m-drop",
++    "debug-m-update",
++];
 +
 +pub(crate) struct PluginCommandRequestProcessor {
 +    thread_manager: Arc<ThreadManager>,
@@ -15019,7 +15085,7 @@ index 000000000..8b581fed7
 +            .canonical_name
 +            .rsplit_once(':')
 +            .map_or(command.api.canonical_name.as_str(), |(_, name)| name);
-+        if short_counts[name] == 1 {
++        if short_counts[name] == 1 && !RESERVED_BUILTIN_COMMAND_NAMES.contains(&name) {
 +            command.api.short_name = Some(format!("/{name}"));
 +        }
 +    }
@@ -15110,10 +15176,10 @@ index 000000000..8b581fed7
 +mod tests;
 diff --git a/codex-rs/app-server/src/request_processors/plugin_command_processor_tests.rs b/codex-rs/app-server/src/request_processors/plugin_command_processor_tests.rs
 new file mode 100644
-index 000000000..e0d1e4580
+index 000000000..1260767dc
 --- /dev/null
 +++ b/codex-rs/app-server/src/request_processors/plugin_command_processor_tests.rs
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,78 @@
 +use pretty_assertions::assert_eq;
 +
 +use super::*;
@@ -15138,8 +15204,8 @@ index 000000000..e0d1e4580
 +#[test]
 +fn assigns_only_unambiguous_short_names_and_disables_canonical_collisions() {
 +    let mut commands = vec![
-+        resolved("alpha", "review"),
-+        resolved("beta", "review"),
++        resolved("alpha", "deploy"),
++        resolved("beta", "deploy"),
 +        resolved("alpha", "ship"),
 +        resolved("alpha", "ship"),
 +    ];
@@ -15150,6 +15216,25 @@ index 000000000..e0d1e4580
 +    assert_eq!(commands[1].api.short_name, None);
 +    assert!(!commands[2].api.available);
 +    assert!(!commands[3].api.available);
++}
++
++#[test]
++fn suppresses_builtin_and_builtin_alias_short_names() {
++    let mut commands = vec![
++        resolved("alpha", "review"),
++        resolved("alpha", "clean"),
++        resolved("alpha", "inspect"),
++    ];
++
++    assign_resolution_names(&mut commands);
++
++    assert_eq!(
++        commands
++            .iter()
++            .map(|command| command.api.short_name.as_deref())
++            .collect::<Vec<_>>(),
++        vec![None, None, Some("/inspect")]
++    );
 +}
 +
 +#[test]
@@ -15321,7 +15406,7 @@ index 40ee87194..2bf6d842e 100644
  mod plugin_read;
 diff --git a/codex-rs/app-server/tests/suite/v2/plugin_command.rs b/codex-rs/app-server/tests/suite/v2/plugin_command.rs
 new file mode 100644
-index 000000000..f2e07ce45
+index 000000000..c79c9dadf
 --- /dev/null
 +++ b/codex-rs/app-server/tests/suite/v2/plugin_command.rs
 @@ -0,0 +1,134 @@
@@ -15393,7 +15478,7 @@ index 000000000..f2e07ce45
 +    let command = commands.next().expect("prompt command");
 +    assert_eq!(goal_command.canonical_name, "/fixture:goal");
 +    assert_eq!(command.canonical_name, "/fixture:review");
-+    assert_eq!(command.short_name.as_deref(), Some("/review"));
++    assert_eq!(command.short_name, None);
 +    let invoked: PluginCommandInvokeResponse = app
 +        .request(|request_id| ClientRequest::PluginCommandInvoke {
 +            request_id,
