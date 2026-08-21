@@ -796,6 +796,38 @@ impl CodexThread {
             .await
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "plugin command admission and execution control share one transition fence"
+    )]
+    pub async fn execute_plugin_executable(
+        &self,
+        package_root: codex_utils_absolute_path::AbsolutePathBuf,
+        executable: codex_utils_absolute_path::AbsolutePathBuf,
+        argv: Vec<String>,
+    ) -> Result<crate::PluginExecutableOutput, String> {
+        let transition = self.session.execution_runtime_transition_lock.lock().await;
+        if self.session.execution_control_is_closing() {
+            return Err("thread runtime is closing".to_string());
+        }
+        if self.session.active_turn.lock().await.is_some() {
+            return Err("thread is busy".to_string());
+        }
+        let turn_context = self.session.new_default_turn().await;
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        self.session
+            .spawn_task(
+                turn_context,
+                Vec::new(),
+                crate::tasks::PluginExecutableTask::new(package_root, executable, argv, result_tx),
+            )
+            .await;
+        drop(transition);
+        result_rx
+            .await
+            .map_err(|_| "plugin executable task ended without a result".to_string())?
+    }
+
     pub fn enabled(&self, feature: Feature) -> bool {
         self.session.enabled(feature)
     }

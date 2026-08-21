@@ -1,5 +1,6 @@
 mod app_mcp_routing;
 mod artifact_operation;
+mod command_contributions;
 mod command_migration;
 mod discoverable;
 mod error_subtype;
@@ -53,6 +54,11 @@ pub type PluginLoadOutcome = codex_plugin::PluginLoadOutcome<codex_config::McpSe
 pub use app_mcp_routing::apps_route_available;
 pub use artifact_operation::ArtifactOperation;
 pub use artifact_operation::recognize_artifact_operation;
+pub use command_contributions::PluginCommandAction;
+pub use command_contributions::PluginCommandContribution;
+pub use command_contributions::PluginCommandTarget;
+pub use command_contributions::PluginGoalStatus;
+pub use command_contributions::load_plugin_command_contributions;
 pub use command_migration::CommandDescriptionMode;
 pub use command_migration::CommandMigrationProfile;
 pub use command_migration::RewriteProfile as CommandRewriteProfile;

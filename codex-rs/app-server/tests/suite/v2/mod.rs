@@ -58,6 +58,7 @@ mod otel;
 mod output_schema;
 mod permission_profile_list;
 mod plan_item;
+mod plugin_command;
 mod plugin_install;
 mod plugin_list;
 mod plugin_read;

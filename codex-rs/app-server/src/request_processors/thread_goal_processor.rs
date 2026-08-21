@@ -17,6 +17,11 @@ pub(crate) struct ThreadGoalRequestProcessor {
     goal_service: Arc<GoalService>,
 }
 
+enum GoalResponseDelivery {
+    AppServer(ConnectionRequestId),
+    Caller,
+}
+
 impl ThreadGoalRequestProcessor {
     pub(crate) fn new(
         thread_manager: Arc<ThreadManager>,
@@ -41,9 +46,9 @@ impl ThreadGoalRequestProcessor {
         request_id: ConnectionRequestId,
         params: ThreadGoalSetParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        self.thread_goal_set_inner(request_id, params)
-            .await
-            .map(|()| None)
+        self.thread_goal_set_inner(params, GoalResponseDelivery::AppServer(request_id))
+            .await?;
+        Ok(None)
     }
 
     pub(crate) async fn thread_goal_get(
@@ -60,9 +65,32 @@ impl ThreadGoalRequestProcessor {
         request_id: ConnectionRequestId,
         params: ThreadGoalClearParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        self.thread_goal_clear_inner(request_id, params)
+        self.thread_goal_clear_inner(params, GoalResponseDelivery::AppServer(request_id))
+            .await?;
+        Ok(None)
+    }
+
+    pub(crate) async fn plugin_goal_get(
+        &self,
+        params: ThreadGoalGetParams,
+    ) -> Result<ThreadGoalGetResponse, JSONRPCErrorError> {
+        self.thread_goal_get_inner(params).await
+    }
+
+    pub(crate) async fn plugin_goal_set(
+        &self,
+        params: ThreadGoalSetParams,
+    ) -> Result<ThreadGoalSetResponse, JSONRPCErrorError> {
+        self.thread_goal_set_inner(params, GoalResponseDelivery::Caller)
             .await
-            .map(|()| None)
+    }
+
+    pub(crate) async fn plugin_goal_clear(
+        &self,
+        params: ThreadGoalClearParams,
+    ) -> Result<ThreadGoalClearResponse, JSONRPCErrorError> {
+        self.thread_goal_clear_inner(params, GoalResponseDelivery::Caller)
+            .await
     }
 
     pub(crate) async fn emit_resume_goal_snapshot(&self, thread_id: ThreadId) {
@@ -111,9 +139,9 @@ impl ThreadGoalRequestProcessor {
 
     async fn thread_goal_set_inner(
         &self,
-        request_id: ConnectionRequestId,
         params: ThreadGoalSetParams,
-    ) -> Result<(), JSONRPCErrorError> {
+        delivery: GoalResponseDelivery,
+    ) -> Result<ThreadGoalSetResponse, JSONRPCErrorError> {
         if !self.config.features.enabled(Feature::Goals) {
             return Err(invalid_request("goals feature is disabled"));
         }
@@ -195,16 +223,16 @@ impl ThreadGoalRequestProcessor {
             warn!("failed to persist goal update for live thread {thread_id}: {err}");
         }
 
-        self.outgoing
-            .send_response(
-                request_id.clone(),
-                ThreadGoalSetResponse { goal: goal.clone() },
-            )
-            .await;
+        let response = ThreadGoalSetResponse { goal: goal.clone() };
+        if let GoalResponseDelivery::AppServer(request_id) = delivery {
+            self.outgoing
+                .send_response(request_id, response.clone())
+                .await;
+        }
         self.emit_thread_goal_updated_ordered(thread_id, goal, listener_command_tx)
             .await;
         outcome.apply_runtime_effects(&self.goal_service).await;
-        Ok(())
+        Ok(response)
     }
 
     async fn thread_goal_get_inner(
@@ -228,9 +256,9 @@ impl ThreadGoalRequestProcessor {
 
     async fn thread_goal_clear_inner(
         &self,
-        request_id: ConnectionRequestId,
         params: ThreadGoalClearParams,
-    ) -> Result<(), JSONRPCErrorError> {
+        delivery: GoalResponseDelivery,
+    ) -> Result<ThreadGoalClearResponse, JSONRPCErrorError> {
         if !self.config.features.enabled(Feature::Goals) {
             return Err(invalid_request("goals feature is disabled"));
         }
@@ -251,14 +279,17 @@ impl ThreadGoalRequestProcessor {
             .await
             .map_err(goal_service_error)?;
 
-        self.outgoing
-            .send_response(request_id, ThreadGoalClearResponse { cleared })
-            .await;
+        let response = ThreadGoalClearResponse { cleared };
+        if let GoalResponseDelivery::AppServer(request_id) = delivery {
+            self.outgoing
+                .send_response(request_id, response.clone())
+                .await;
+        }
         if cleared {
             self.emit_thread_goal_cleared_ordered(thread_id, listener_command_tx)
                 .await;
         }
-        Ok(())
+        Ok(response)
     }
 
     async fn state_db_for_materialized_thread(

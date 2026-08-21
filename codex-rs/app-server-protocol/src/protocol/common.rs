@@ -850,6 +850,16 @@ client_request_definitions! {
         serialization: None,
         response: v2::PluginListResponse,
     },
+    PluginCommandList => "pluginCommand/list" {
+        params: v2::PluginCommandListParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::PluginCommandListResponse,
+    },
+    PluginCommandInvoke => "pluginCommand/invoke" {
+        params: v2::PluginCommandInvokeParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::PluginCommandInvokeResponse,
+    },
     #[experimental("plugin/search")]
     PluginSearch => "plugin/search" {
         params: v2::PluginSearchParams,
@@ -978,6 +988,11 @@ client_request_definitions! {
         inspect_params: true,
         serialization: thread_id(params.thread_id),
         response: v2::TurnStartResponse,
+    },
+    ThreadPresentationAppend => "thread/presentation/append" {
+        params: v2::ThreadPresentationAppendParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadPresentationAppendResponse,
     },
     TurnSteer => "turn/steer" {
         params: v2::TurnSteerParams,
@@ -1903,6 +1918,7 @@ server_notification_definitions! {
     AccountSlotChanged => "accountSlot/changed" (v2::AccountSlotChangedNotification),
     SessionRuntimeChanged => "sessionRuntime/changed" (v2::SessionRuntimeChangedNotification),
     SessionRuntimeOperationUpdated => "sessionRuntime/operation/updated" (v2::SessionRuntimeOperationUpdatedNotification),
+    ThreadPresentationAppended => "thread/presentation/appended" (v2::ThreadPresentationAppendedNotification),
     AppListUpdated => "app/list/updated" (v2::AppListUpdatedNotification),
     RemoteControlStatusChanged => "remoteControl/status/changed" (v2::RemoteControlStatusChangedNotification),
     ExternalAgentConfigImportProgress => "externalAgentConfig/import/progress" (v2::ExternalAgentConfigImportProgressNotification),

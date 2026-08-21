@@ -329,6 +329,14 @@ export type { PermissionsRequestApprovalResponse } from "./PermissionsRequestApp
 export type { PlanDeltaNotification } from "./PlanDeltaNotification";
 export type { PluginAuthPolicy } from "./PluginAuthPolicy";
 export type { PluginAvailability } from "./PluginAvailability";
+export type { PluginCommand } from "./PluginCommand";
+export type { PluginCommandAction } from "./PluginCommandAction";
+export type { PluginCommandInvokeParams } from "./PluginCommandInvokeParams";
+export type { PluginCommandInvokeResponse } from "./PluginCommandInvokeResponse";
+export type { PluginCommandListParams } from "./PluginCommandListParams";
+export type { PluginCommandListResponse } from "./PluginCommandListResponse";
+export type { PluginCommandMcpToolResult } from "./PluginCommandMcpToolResult";
+export type { PluginCommandTarget } from "./PluginCommandTarget";
 export type { PluginDetail } from "./PluginDetail";
 export type { PluginDisabledReason } from "./PluginDisabledReason";
 export type { PluginHookSummary } from "./PluginHookSummary";
@@ -509,6 +517,11 @@ export type { ThreadMetadataGitInfoUpdateParams } from "./ThreadMetadataGitInfoU
 export type { ThreadMetadataUpdateParams } from "./ThreadMetadataUpdateParams";
 export type { ThreadMetadataUpdateResponse } from "./ThreadMetadataUpdateResponse";
 export type { ThreadNameUpdatedNotification } from "./ThreadNameUpdatedNotification";
+export type { ThreadPresentation } from "./ThreadPresentation";
+export type { ThreadPresentationAppendParams } from "./ThreadPresentationAppendParams";
+export type { ThreadPresentationAppendResponse } from "./ThreadPresentationAppendResponse";
+export type { ThreadPresentationAppendedNotification } from "./ThreadPresentationAppendedNotification";
+export type { ThreadPresentationNoticeLevel } from "./ThreadPresentationNoticeLevel";
 export type { ThreadProjectUpdatedNotification } from "./ThreadProjectUpdatedNotification";
 export type { ThreadQueueChangedNotification } from "./ThreadQueueChangedNotification";
 export type { ThreadReadParams } from "./ThreadReadParams";

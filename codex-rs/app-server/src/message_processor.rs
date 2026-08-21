@@ -34,6 +34,7 @@ use crate::request_processors::GitRequestProcessor;
 use crate::request_processors::InitializeRequestProcessor;
 use crate::request_processors::MarketplaceRequestProcessor;
 use crate::request_processors::McpRequestProcessor;
+use crate::request_processors::PluginCommandRequestProcessor;
 use crate::request_processors::PluginRequestProcessor;
 use crate::request_processors::ProcessExecRequestProcessor;
 use crate::request_processors::ProjectRequestProcessor;
@@ -150,6 +151,7 @@ pub(crate) struct MessageProcessor {
     marketplace_processor: MarketplaceRequestProcessor,
     mcp_processor: McpRequestProcessor,
     plugin_processor: PluginRequestProcessor,
+    plugin_command_processor: PluginCommandRequestProcessor,
     project_processor: ProjectRequestProcessor,
     remote_control_processor: RemoteControlRequestProcessor,
     search_processor: SearchRequestProcessor,
@@ -503,6 +505,13 @@ impl MessageProcessor {
             state_db.clone(),
             Arc::clone(&goal_service),
         );
+        let plugin_command_processor = PluginCommandRequestProcessor::new(
+            Arc::clone(&thread_manager),
+            config_manager.clone(),
+            outgoing.clone(),
+            thread_state_manager.clone(),
+            thread_goal_processor.clone(),
+        );
         let thread_queue_processor = ThreadQueueRequestProcessor::new(
             Arc::clone(&thread_manager),
             Arc::clone(&thread_store),
@@ -602,6 +611,7 @@ impl MessageProcessor {
             marketplace_processor,
             mcp_processor,
             plugin_processor,
+            plugin_command_processor,
             project_processor,
             remote_control_processor,
             search_processor,
@@ -1251,6 +1261,11 @@ impl MessageProcessor {
                     .thread_goal_clear(request_id.clone(), params)
                     .await
             }
+            ClientRequest::ThreadPresentationAppend { params, .. } => {
+                self.plugin_command_processor
+                    .append_presentation(params)
+                    .await
+            }
             ClientRequest::ThreadQueueAdd { params, .. } => self
                 .thread_queue_processor
                 .add(params)
@@ -1425,6 +1440,12 @@ impl MessageProcessor {
             }
             ClientRequest::PluginList { params, .. } => {
                 self.plugin_processor.plugin_list(params).await
+            }
+            ClientRequest::PluginCommandList { params, .. } => {
+                self.plugin_command_processor.list(params).await
+            }
+            ClientRequest::PluginCommandInvoke { params, .. } => {
+                self.plugin_command_processor.invoke(params).await
             }
             ClientRequest::PluginSearch { params, .. } => {
                 self.plugin_processor.plugin_search(params).await

@@ -1,5 +1,6 @@
 mod compact;
 mod lifecycle;
+mod plugin_executable;
 mod regular;
 mod review;
 mod user_shell;
@@ -57,6 +58,7 @@ use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ContentItem;
 pub(crate) use compact::CompactTask;
+pub(crate) use plugin_executable::PluginExecutableTask;
 pub(crate) use regular::RegularTask;
 pub(crate) use review::ReviewTask;
 pub(crate) use user_shell::UserShellCommandMode;

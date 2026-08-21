@@ -5661,6 +5661,128 @@
       ],
       "type": "object"
     },
+    "ThreadPresentation": {
+      "oneOf": [
+        {
+          "properties": {
+            "body": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "card"
+              ],
+              "title": "CardThreadPresentationType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "body",
+            "id",
+            "title",
+            "type"
+          ],
+          "title": "CardThreadPresentation",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "level": {
+              "$ref": "#/definitions/ThreadPresentationNoticeLevel"
+            },
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "notice"
+              ],
+              "title": "NoticeThreadPresentationType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "level",
+            "message",
+            "type"
+          ],
+          "title": "NoticeThreadPresentation",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "current": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "id": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "total": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "progress"
+              ],
+              "title": "ProgressThreadPresentationType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "current",
+            "id",
+            "label",
+            "type"
+          ],
+          "title": "ProgressThreadPresentation",
+          "type": "object"
+        }
+      ]
+    },
+    "ThreadPresentationAppendedNotification": {
+      "properties": {
+        "item": {
+          "$ref": "#/definitions/ThreadPresentation"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "item",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "ThreadPresentationNoticeLevel": {
+      "enum": [
+        "info",
+        "success",
+        "warning",
+        "error"
+      ],
+      "type": "string"
+    },
     "ThreadProjectUpdatedNotification": {
       "properties": {
         "projectId": {
@@ -7789,6 +7911,26 @@
         "params"
       ],
       "title": "SessionRuntime/operation/updatedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "thread/presentation/appended"
+          ],
+          "title": "Thread/presentation/appendedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadPresentationAppendedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Thread/presentation/appendedNotification",
       "type": "object"
     },
     {

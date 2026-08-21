@@ -2744,6 +2744,54 @@
             },
             "method": {
               "enum": [
+                "pluginCommand/list"
+              ],
+              "title": "PluginCommand/listRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/PluginCommandListParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "PluginCommand/listRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "pluginCommand/invoke"
+              ],
+              "title": "PluginCommand/invokeRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/PluginCommandInvokeParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "PluginCommand/invokeRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
                 "plugin/installed"
               ],
               "title": "Plugin/installedRequestMethod",
@@ -3311,6 +3359,30 @@
             "params"
           ],
           "title": "Turn/startRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "thread/presentation/append"
+              ],
+              "title": "Thread/presentation/appendRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ThreadPresentationAppendParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/presentation/appendRequest",
           "type": "object"
         },
         {
@@ -11596,6 +11668,386 @@
         }
       ]
     },
+    "PluginCommand": {
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "canonicalName": {
+          "type": "string"
+        },
+        "denyReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "pluginId": {
+          "type": "string"
+        },
+        "shortName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "$ref": "#/definitions/PluginCommandTarget"
+        }
+      },
+      "required": [
+        "available",
+        "canonicalName",
+        "description",
+        "id",
+        "pluginId",
+        "target"
+      ],
+      "type": "object"
+    },
+    "PluginCommandAction": {
+      "enum": [
+        "goalGet",
+        "goalSet",
+        "goalClear"
+      ],
+      "type": "string"
+    },
+    "PluginCommandInvokeParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "commandId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "commandId",
+        "threadId"
+      ],
+      "title": "PluginCommandInvokeParams",
+      "type": "object"
+    },
+    "PluginCommandInvokeResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "oneOf": [
+        {
+          "properties": {
+            "prompt": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "prompt"
+              ],
+              "title": "Promptv2::PluginCommandInvokeResponseType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "prompt",
+            "type"
+          ],
+          "title": "Promptv2::PluginCommandInvokeResponse",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "result": {
+              "$ref": "#/definitions/PluginCommandMcpToolResult"
+            },
+            "type": {
+              "enum": [
+                "mcpTool"
+              ],
+              "title": "McpToolv2::PluginCommandInvokeResponseType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "result",
+            "type"
+          ],
+          "title": "McpToolv2::PluginCommandInvokeResponse",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "goal": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ThreadGoal"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "enum": [
+                "goalGet"
+              ],
+              "title": "GoalGetv2::PluginCommandInvokeResponseType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "GoalGetv2::PluginCommandInvokeResponse",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "goal": {
+              "$ref": "#/definitions/ThreadGoal"
+            },
+            "type": {
+              "enum": [
+                "goalSet"
+              ],
+              "title": "GoalSetv2::PluginCommandInvokeResponseType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "goal",
+            "type"
+          ],
+          "title": "GoalSetv2::PluginCommandInvokeResponse",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "cleared": {
+              "type": "boolean"
+            },
+            "type": {
+              "enum": [
+                "goalClear"
+              ],
+              "title": "GoalClearv2::PluginCommandInvokeResponseType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "cleared",
+            "type"
+          ],
+          "title": "GoalClearv2::PluginCommandInvokeResponse",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "exit_code": {
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "output": {
+              "type": "string"
+            },
+            "timed_out": {
+              "type": "boolean"
+            },
+            "type": {
+              "enum": [
+                "executable"
+              ],
+              "title": "Executablev2::PluginCommandInvokeResponseType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "output",
+            "timed_out",
+            "type"
+          ],
+          "title": "Executablev2::PluginCommandInvokeResponse",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "deny_reason": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "unavailable"
+              ],
+              "title": "Unavailablev2::PluginCommandInvokeResponseType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "deny_reason",
+            "type"
+          ],
+          "title": "Unavailablev2::PluginCommandInvokeResponse",
+          "type": "object"
+        }
+      ],
+      "title": "PluginCommandInvokeResponse"
+    },
+    "PluginCommandListParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "title": "PluginCommandListParams",
+      "type": "object"
+    },
+    "PluginCommandListResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "data": {
+          "items": {
+            "$ref": "#/definitions/PluginCommand"
+          },
+          "type": "array"
+        },
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "title": "PluginCommandListResponse",
+      "type": "object"
+    },
+    "PluginCommandMcpToolResult": {
+      "properties": {
+        "_meta": true,
+        "content": {
+          "items": true,
+          "type": "array"
+        },
+        "isError": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "structuredContent": true
+      },
+      "required": [
+        "content"
+      ],
+      "type": "object"
+    },
+    "PluginCommandTarget": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "prompt"
+              ],
+              "title": "PromptPluginCommandTargetType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "PromptPluginCommandTarget",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "server": {
+              "type": "string"
+            },
+            "tool": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "mcpTool"
+              ],
+              "title": "McpToolPluginCommandTargetType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "server",
+            "tool",
+            "type"
+          ],
+          "title": "McpToolPluginCommandTarget",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "action": {
+              "$ref": "#/definitions/PluginCommandAction"
+            },
+            "type": {
+              "enum": [
+                "action"
+              ],
+              "title": "ActionPluginCommandTargetType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "type"
+          ],
+          "title": "ActionPluginCommandTarget",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "executable"
+              ],
+              "title": "ExecutablePluginCommandTargetType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "ExecutablePluginCommandTarget",
+          "type": "object"
+        }
+      ]
+    },
     "PluginDetail": {
       "properties": {
         "appTemplates": {
@@ -16106,6 +16558,26 @@
           "properties": {
             "method": {
               "enum": [
+                "thread/presentation/appended"
+              ],
+              "title": "Thread/presentation/appendedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ThreadPresentationAppendedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Thread/presentation/appendedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
                 "app/list/updated"
               ],
               "title": "App/list/updatedNotificationMethod",
@@ -19990,6 +20462,162 @@
       ],
       "title": "ThreadNameUpdatedNotification",
       "type": "object"
+    },
+    "ThreadPresentation": {
+      "oneOf": [
+        {
+          "properties": {
+            "body": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "card"
+              ],
+              "title": "CardThreadPresentationType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "body",
+            "id",
+            "title",
+            "type"
+          ],
+          "title": "CardThreadPresentation",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "level": {
+              "$ref": "#/definitions/ThreadPresentationNoticeLevel"
+            },
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "notice"
+              ],
+              "title": "NoticeThreadPresentationType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "level",
+            "message",
+            "type"
+          ],
+          "title": "NoticeThreadPresentation",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "current": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "id": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "total": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "progress"
+              ],
+              "title": "ProgressThreadPresentationType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "current",
+            "id",
+            "label",
+            "type"
+          ],
+          "title": "ProgressThreadPresentation",
+          "type": "object"
+        }
+      ]
+    },
+    "ThreadPresentationAppendParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "item": {
+          "$ref": "#/definitions/ThreadPresentation"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "item",
+        "threadId"
+      ],
+      "title": "ThreadPresentationAppendParams",
+      "type": "object"
+    },
+    "ThreadPresentationAppendResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "deliveredTo": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "deliveredTo"
+      ],
+      "title": "ThreadPresentationAppendResponse",
+      "type": "object"
+    },
+    "ThreadPresentationAppendedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "item": {
+          "$ref": "#/definitions/ThreadPresentation"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "item",
+        "threadId"
+      ],
+      "title": "ThreadPresentationAppendedNotification",
+      "type": "object"
+    },
+    "ThreadPresentationNoticeLevel": {
+      "enum": [
+        "info",
+        "success",
+        "warning",
+        "error"
+      ],
+      "type": "string"
     },
     "ThreadProjectUpdatedNotification": {
       "$schema": "http://json-schema.org/draft-07/schema#",
