@@ -95,6 +95,32 @@ impl Hooks {
         )
     }
 
+    /// Prepare a fresh async runtime and result channel for an execution-account transition.
+    ///
+    /// Unlike [`Self::reconfigured`], the returned hooks do not share in-flight command tasks or
+    /// their result channel with this instance. Preparing the replacement is non-destructive; the
+    /// caller can keep this instance operational when its account transition does not commit.
+    pub fn isolated_for_account_transition(
+        &self,
+        config: HooksConfig,
+    ) -> anyhow::Result<(Self, Receiver<codex_protocol::protocol::HookCompletedEvent>)> {
+        let (result_sender, result_receiver) = async_channel::unbounded();
+        let hooks = Self::from_config(
+            config,
+            Arc::clone(&self.engine.mcp_executor),
+            Arc::clone(&self.environment),
+            |shell| self.engine.command_runtime.isolated(shell, result_sender),
+        );
+        let required_load_errors = hooks.engine.required_load_errors();
+        if !required_load_errors.is_empty() {
+            anyhow::bail!(
+                "failed to load required managed hooks: {}",
+                required_load_errors.join("; ")
+            );
+        }
+        Ok((hooks, result_receiver))
+    }
+
     fn from_config(
         config: HooksConfig,
         mcp_executor: Arc<dyn HookMcpExecutor>,

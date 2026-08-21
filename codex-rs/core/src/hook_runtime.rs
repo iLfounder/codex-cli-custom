@@ -617,7 +617,8 @@ pub(crate) async fn drain_async_hook_results(
     turn_context: &Arc<TurnContext>,
     before_user_prompt: bool,
 ) {
-    while let Ok(result) = sess.async_hook_results.try_recv() {
+    let async_hook_results = sess.async_hook_results.load_full();
+    while let Ok(result) = async_hook_results.try_recv() {
         let additional_contexts = result
             .run
             .entries

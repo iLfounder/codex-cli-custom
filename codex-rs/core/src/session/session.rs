@@ -66,7 +66,7 @@ pub(crate) struct Session {
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
     pub(crate) execution_runtime_transition_lock: Mutex<()>,
     pub(crate) execution_control_closing: AtomicBool,
-    pub(crate) async_hook_results: async_channel::Receiver<HookCompletedEvent>,
+    pub(crate) async_hook_results: arc_swap::ArcSwap<async_channel::Receiver<HookCompletedEvent>>,
     pub(crate) input_queue: InputQueue,
     pub(crate) services: SessionServices,
     pub(super) git_enrichment_policy: GitEnrichmentPolicy,
@@ -76,7 +76,8 @@ pub(crate) struct Session {
 
 struct PreparedExecutionAccountRuntime {
     runtime: Arc<crate::execution_account::ExecutionAccountRuntime>,
-    hooks_config: HooksConfig,
+    hooks: Hooks,
+    async_hook_results: async_channel::Receiver<HookCompletedEvent>,
 }
 
 #[derive(Clone)]
@@ -706,6 +707,12 @@ impl Session {
             environments.single_local_environment(),
         )
         .await;
+        let (hooks, async_hook_results) = self
+            .hooks()
+            .isolated_for_account_transition(hooks_config)
+            .map_err(|_| {
+                crate::execution_account::ExecutionAccountSwitchError::PreparationFailed
+            })?;
         let auth = execution_account.auth_manager.auth().await;
         let auth_mode = auth
             .as_ref()
@@ -841,7 +848,8 @@ impl Session {
                 extension_runtimes,
                 guardian_review_session: Arc::new(GuardianReviewSessionManager::default()),
             }),
-            hooks_config,
+            hooks,
+            async_hook_results,
         })
     }
 
@@ -869,7 +877,8 @@ impl Session {
         }
         let PreparedExecutionAccountRuntime {
             runtime: prepared,
-            hooks_config: prepared_hooks_config,
+            hooks: prepared_hooks,
+            async_hook_results: prepared_async_hook_results,
         } = self
             .prepare_execution_account_runtime(Arc::clone(&target), services)
             .await?;
@@ -941,6 +950,15 @@ impl Session {
                 );
             }
 
+            let previous_hooks = self.hooks();
+            previous_hooks.shutdown().await;
+            let previous_async_hook_results = self.async_hook_results.load_full();
+            previous_async_hook_results.close();
+            while previous_async_hook_results.try_recv().is_ok() {}
+            self.async_hook_results
+                .store(Arc::new(prepared_async_hook_results));
+            self.services.hooks.store(Arc::new(prepared_hooks));
+
             previous.mcp_runtime.adopt_prepared(&prepared.mcp_runtime);
             self.services
                 .mcp_runtime
@@ -980,8 +998,6 @@ impl Session {
                     &self.services.thread_extension_data,
                 );
             }
-            let hooks = self.hooks().reconfigured(prepared_hooks_config);
-            self.services.hooks.store(Arc::new(hooks));
             self.execution_account_runtime.store(Arc::clone(&prepared));
             self.start_mcp_prewarm_worker(target_auth_changes);
             self.schedule_mcp_prewarm();
@@ -1868,7 +1884,7 @@ impl Session {
                 active_turn: Mutex::new(None),
                 execution_runtime_transition_lock: Mutex::new(()),
                 execution_control_closing: AtomicBool::new(false),
-                async_hook_results,
+                async_hook_results: arc_swap::ArcSwap::from_pointee(async_hook_results),
                 input_queue: InputQueue::new(),
                 services,
                 git_enrichment_policy,

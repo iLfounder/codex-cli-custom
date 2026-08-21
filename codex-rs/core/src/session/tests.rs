@@ -6050,7 +6050,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         active_turn: Mutex::new(None),
         execution_runtime_transition_lock: Mutex::new(()),
         execution_control_closing: std::sync::atomic::AtomicBool::new(false),
-        async_hook_results,
+        async_hook_results: arc_swap::ArcSwap::from_pointee(async_hook_results),
         input_queue: super::input_queue::InputQueue::new(),
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
@@ -7626,12 +7626,12 @@ async fn shutdown_complete_does_not_append_to_thread_store_after_shutdown() {
             .expect("valid buffered async hook result"),
         )
         .expect("buffer an async hook result before shutdown");
-    session.async_hook_results = result_receiver;
+    session.async_hook_results.store(Arc::new(result_receiver));
     let session = Arc::new(session);
 
     assert!(handlers::shutdown(&session, "sub-1".to_string()).await);
-    assert!(session.async_hook_results.is_closed());
-    assert!(session.async_hook_results.is_empty());
+    assert!(session.async_hook_results.load().is_closed());
+    assert!(session.async_hook_results.load().is_empty());
     assert!(result_sender.is_closed());
 
     assert_eq!(
@@ -8296,7 +8296,7 @@ where
         active_turn: Mutex::new(None),
         execution_runtime_transition_lock: Mutex::new(()),
         execution_control_closing: std::sync::atomic::AtomicBool::new(false),
-        async_hook_results,
+        async_hook_results: arc_swap::ArcSwap::from_pointee(async_hook_results),
         input_queue: super::input_queue::InputQueue::new(),
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,

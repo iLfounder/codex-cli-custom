@@ -423,6 +423,85 @@ print(os.environ["CODEX_HOOK_CAPTURED_ENV"])
 }
 
 #[tokio::test]
+async fn isolated_runtime_does_not_share_tasks_or_results_and_remains_usable() {
+    let temp = TempDir::new().expect("async test directory");
+    let (previous, previous_results) = runtime();
+    let started_path = temp.path().join("started");
+    let blocking_handler = write_handler(
+        &temp,
+        &format!(
+            r#"import json
+from pathlib import Path
+import sys
+import time
+
+json.load(sys.stdin)
+Path(r"{started}").write_text("started", encoding="utf-8")
+while True:
+    time.sleep(0.01)
+"#,
+            started = started_path.display(),
+        ),
+    );
+    schedule(&previous, blocking_handler, temp.path()).await;
+    timeout(ASYNC_HOOK_TEST_TIMEOUT, async {
+        while !started_path.exists() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("old async hook should start");
+
+    let (next_sender, next_results) = async_channel::unbounded();
+    let next = previous.isolated(
+        CommandShell {
+            program: String::new(),
+            args: Vec::new(),
+        },
+        next_sender,
+    );
+    assert!(!Arc::ptr_eq(&previous.state, &next.state));
+
+    previous.shutdown().await;
+    drop(previous);
+    assert!(
+        timeout(Duration::from_millis(150), previous_results.recv())
+            .await
+            .expect("old result channel should close")
+            .is_err()
+    );
+
+    let next_handler = write_handler(
+        &temp,
+        r#"import json
+import sys
+
+json.load(sys.stdin)
+print(json.dumps({
+    "hookSpecificOutput": {
+        "hookEventName": "UserPromptSubmit",
+        "additionalContext": "new account context"
+    }
+}))
+"#,
+    );
+    schedule(&next, next_handler, temp.path()).await;
+    let next_result = timeout(ASYNC_HOOK_TEST_TIMEOUT, next_results.recv())
+        .await
+        .expect("fresh runtime hook should finish")
+        .expect("fresh result channel should remain open");
+    assert_eq!(
+        next_result.run.entries,
+        vec![HookOutputEntry {
+            kind: HookOutputEntryKind::Context,
+            text: "new account context".to_string(),
+        }]
+    );
+
+    next.shutdown().await;
+}
+
+#[tokio::test]
 async fn async_hooks_limit_concurrent_processes_without_dropping_waiting_jobs() {
     let temp = TempDir::new().expect("async test directory");
     let (runtime, results) = runtime();

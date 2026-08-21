@@ -99,6 +99,20 @@ impl CommandHookRuntime {
         }
     }
 
+    pub(crate) fn isolated(
+        &self,
+        shell: CommandShell,
+        result_sender: Sender<HookCompletedEvent>,
+    ) -> Self {
+        Self {
+            shell,
+            environment: Arc::clone(&self.environment),
+            result_sender,
+            state: Arc::new(Mutex::new(CommandHookRuntimeState::default())),
+            output_spiller: self.output_spiller.clone(),
+        }
+    }
+
     pub(crate) fn output_spiller(&self) -> &HookOutputSpiller {
         &self.output_spiller
     }
