@@ -1,4 +1,4 @@
-From 1e1c15aa25d1dbbd0a0a910775eec9e2354e03dd Mon Sep 17 00:00:00 2001
+From d1c319b3b79e92624c43c84191b1878e71075689 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 20:14:51 +0900
 Subject: [PATCH] feat(custom): add structured plugin commands and TUI
@@ -61,7 +61,7 @@ Subject: [PATCH] feat(custom): add structured plugin commands and TUI
  codex-rs/tui/src/app/app_server_events.rs     |  19 +
  codex-rs/tui/src/app/event_dispatch.rs        |  30 +
  codex-rs/tui/src/app/history_ui.rs            |   1 +
- codex-rs/tui/src/app/plugin_commands.rs       | 303 +++++++++
+ codex-rs/tui/src/app/plugin_commands.rs       | 326 +++++++++
  codex-rs/tui/src/app/plugin_commands_tests.rs |  66 ++
  codex-rs/tui/src/app/session_lifecycle.rs     |   3 +
  codex-rs/tui/src/app/startup.rs               |   1 +
@@ -84,7 +84,7 @@ Subject: [PATCH] feat(custom): add structured plugin commands and TUI
  codex-rs/tui/src/history_cell/mod.rs          |   2 +
  .../tui/src/history_cell/plugin_surfaces.rs   | 158 +++++
  .../src/history_cell/plugin_surfaces_tests.rs |  42 ++
- 79 files changed, 5348 insertions(+), 39 deletions(-)
+ 79 files changed, 5371 insertions(+), 39 deletions(-)
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/PluginCommandInvokeParams.json
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/PluginCommandInvokeResponse.json
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/PluginCommandListParams.json
@@ -16577,10 +16577,10 @@ index 024288de5..fb20c6c64 100644
  
 diff --git a/codex-rs/tui/src/app/plugin_commands.rs b/codex-rs/tui/src/app/plugin_commands.rs
 new file mode 100644
-index 000000000..358c2627c
+index 000000000..300a51ae5
 --- /dev/null
 +++ b/codex-rs/tui/src/app/plugin_commands.rs
-@@ -0,0 +1,303 @@
+@@ -0,0 +1,326 @@
 +//! Exact-thread plugin command catalog, invocation, and ephemeral presentation projection.
 +
 +use super::*;
@@ -16593,6 +16593,9 @@ index 000000000..358c2627c
 +use codex_app_server_protocol::PluginCommandInvokeResponse;
 +use codex_app_server_protocol::ThreadPresentation;
 +use std::collections::HashMap;
++use std::collections::VecDeque;
++
++const MAX_PRESENTATIONS: usize = 128;
 +
 +#[derive(Debug, Default)]
 +pub(super) struct PluginCommandState {
@@ -16600,6 +16603,7 @@ index 000000000..358c2627c
 +    thread_id: Option<ThreadId>,
 +    commands: Vec<PluginSlashCommand>,
 +    presentations: HashMap<String, Arc<dyn HistoryCell>>,
++    presentation_order: VecDeque<String>,
 +}
 +
 +impl PluginCommandState {
@@ -16607,11 +16611,13 @@ index 000000000..358c2627c
 +        self.thread_id = None;
 +        self.commands.clear();
 +        self.presentations.clear();
++        self.presentation_order.clear();
 +        self.request_generation = self.request_generation.wrapping_add(1);
 +    }
 +
 +    pub(super) fn clear_presentations(&mut self) {
 +        self.presentations.clear();
++        self.presentation_order.clear();
 +    }
 +}
 +
@@ -16865,6 +16871,7 @@ index 000000000..358c2627c
 +        let cell = Arc::new(ThreadPresentationHistoryCell::new(item));
 +        let id = cell.id().to_string();
 +        let cell: Arc<dyn HistoryCell> = cell;
++        let is_replacement = self.plugin_command_state.presentations.contains_key(&id);
 +        if let Some(previous) = self.plugin_command_state.presentations.get(&id)
 +            && let Some(index) = self
 +                .transcript_cells
@@ -16875,7 +16882,23 @@ index 000000000..358c2627c
 +        } else {
 +            self.transcript_cells.push(cell.clone());
 +        }
-+        self.plugin_command_state.presentations.insert(id, cell);
++        self.plugin_command_state
++            .presentations
++            .insert(id.clone(), cell);
++        if !is_replacement {
++            self.plugin_command_state.presentation_order.push_back(id);
++            if self.plugin_command_state.presentation_order.len() > MAX_PRESENTATIONS
++                && let Some(oldest_id) = self.plugin_command_state.presentation_order.pop_front()
++                && let Some(oldest_cell) =
++                    self.plugin_command_state.presentations.remove(&oldest_id)
++                && let Some(index) = self
++                    .transcript_cells
++                    .iter()
++                    .position(|candidate| Arc::ptr_eq(candidate, &oldest_cell))
++            {
++                self.transcript_cells.remove(index);
++            }
++        }
 +        if let Some(Overlay::Transcript(overlay)) = &mut self.overlay {
 +            overlay.replace_cells(self.transcript_cells.clone());
 +        }

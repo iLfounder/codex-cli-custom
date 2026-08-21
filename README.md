@@ -28,9 +28,9 @@ The target is upstream [`rust-v0.149.0`](https://github.com/openai/codex/release
 | Area | Current status |
 |---|---|
 | P001–P011 implementation and focused checks | Complete |
-| Ordered 0.149 patch export and clean-apply verification | Complete; 11 patches reproduce tree `e5915796b021e81b88bd40406b62fa6c3bf89e76` |
-| macOS arm64 release build and artifacts | Complete; [run 32517743230](https://github.com/iLfounder/codex-cli-custom/actions/runs/32517743230), artifact `9462237252`, digest `sha256:4845802188c3f2a1bf3f030d1dcd8409d47278198015a205ceb55b9864ea0f42` |
-| Final independent reviews | In progress against the built final tree |
+| Ordered 0.149 patch export and clean-apply verification | Complete; 11 patches reproduce tree `60726621c5a599a513f76328a7791c332a2660bf` |
+| macOS arm64 release build and artifacts | Final review corrections pending rebuild; [run 32517743230](https://github.com/iLfounder/codex-cli-custom/actions/runs/32517743230) proves the preceding tree |
+| Final independent reviews | Pending against the rebuilt final tree |
 | 0.149 publication | Pending |
 
 The current candidate is [`custom-patches/rust-v0.149.0`](custom-patches/rust-v0.149.0/). The files under [`custom-patches/rust-v0.148.0`](custom-patches/rust-v0.148.0/) are retained only as the previous release series.
@@ -128,7 +128,7 @@ git checkout 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
 /path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD"
 ```
 
-The applier rejects a dirty or wrong-base worktree, verifies every patch digest, applies P001–P011 in order, and requires final tree `e5915796b021e81b88bd40406b62fa6c3bf89e76`.
+The applier rejects a dirty or wrong-base worktree, verifies every patch digest, applies P001–P011 in order, and requires final tree `60726621c5a599a513f76328a7791c332a2660bf`.
 
 This separation is the maintenance strategy: when upstream advances, each P-number can be inspected, adapted, and verified against its own feature boundary.
 
@@ -143,7 +143,7 @@ The following remains before 0.149 can be called fully reviewed and published:
 1. complete two independent fresh-context reviews of the built final candidate; and
 2. resolve any material findings, if any, and update the publication status.
 
-[Actions run 32517743230](https://github.com/iLfounder/codex-cli-custom/actions/runs/32517743230) built tree `e5915796b021e81b88bd40406b62fa6c3bf89e76` and uploaded artifact `9462237252` with digest `sha256:4845802188c3f2a1bf3f030d1dcd8409d47278198015a205ceb55b9864ea0f42`.
+[Actions run 32517743230](https://github.com/iLfounder/codex-cli-custom/actions/runs/32517743230) built the preceding review candidate. The final review corrections require a new artifact before publication is complete.
 
 ## Historical working notes
 

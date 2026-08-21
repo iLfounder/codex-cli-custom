@@ -1,4 +1,4 @@
-From 9074eee6f3da52964795371f5c9726c3d7e9df37 Mon Sep 17 00:00:00 2001
+From 551b9b2b213a225268080dc24c0ad4e7f882032d Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 19:45:26 +0900
 Subject: [PATCH] feat(custom): add release-aware TUI controls for 0.149
@@ -5295,10 +5295,10 @@ index b98b170df..96ae73825 100644
      pub session_source: SessionSource,
      pub history_mode: ThreadHistoryMode,
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
-index 614c3339a..cb089431d 100644
+index fbbbe5205..14cef6a73 100644
 --- a/codex-rs/core/src/session/session.rs
 +++ b/codex-rs/core/src/session/session.rs
-@@ -248,6 +248,7 @@ impl SessionConfiguration {
+@@ -249,6 +249,7 @@ impl SessionConfiguration {
              reasoning_effort: self.collaboration_mode.reasoning_effort(),
              reasoning_summary: self.model_reasoning_summary,
              personality: self.personality,

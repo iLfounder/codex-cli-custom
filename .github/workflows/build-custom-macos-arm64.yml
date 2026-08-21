@@ -23,7 +23,7 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
       CARGO_TERM_COLOR: always
       SOURCE_COMMIT: 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
-      PATCH_TREE: e5915796b021e81b88bd40406b62fa6c3bf89e76
+      PATCH_TREE: 60726621c5a599a513f76328a7791c332a2660bf
 
     steps:
       - name: Check out patch repository
@@ -67,6 +67,11 @@ jobs:
           # The release tag carries placeholder versions for workspace packages in Cargo.lock.
           # Normalize only those exact placeholders, then keep dependency resolution locked.
           perl -0pi -e 's/version = "0\.0\.0"/version = "0.149.0"/g' Cargo.lock
+          compiled_lock_sha256=$(shasum -a 256 Cargo.lock | awk '{print $1}')
+          git -C .. add codex-rs/Cargo.lock
+          compiled_tree=$(git -C .. write-tree)
+          printf 'COMPILED_LOCK_SHA256=%s\n' "$compiled_lock_sha256" >> "$GITHUB_ENV"
+          printf 'COMPILED_TREE=%s\n' "$compiled_tree" >> "$GITHUB_ENV"
           cargo build --locked --release -p codex-cli --bin codex
           cargo build --locked --release -p codex-app-server --bin codex-app-server
 
@@ -83,6 +88,8 @@ jobs:
           {
             printf 'upstream_commit=%s\n' "$SOURCE_COMMIT"
             printf 'patched_tree=%s\n' "$PATCH_TREE"
+            printf 'compiled_tree=%s\n' "$COMPILED_TREE"
+            printf 'compiled_cargo_lock_sha256=%s\n' "$COMPILED_LOCK_SHA256"
             printf 'runner_arch=%s\n' "$(uname -m)"
             rustc --version
             cargo --version

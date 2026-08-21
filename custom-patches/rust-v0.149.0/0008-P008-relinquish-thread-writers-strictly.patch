@@ -1,4 +1,4 @@
-From c575d3ff23a1ba98c7da20e8430751734cf71aa1 Mon Sep 17 00:00:00 2001
+From e5742169328c65028fa91f5d322cece93b2b4b03 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 18:06:29 +0900
 Subject: [PATCH] feat(custom): relinquish thread writers strictly for 0.149
@@ -75,7 +75,7 @@ index e58c9df42..25f068b6d 100644
                  .config_processor
                  .read(params)
 diff --git a/codex-rs/app-server/src/session_runtime/mod.rs b/codex-rs/app-server/src/session_runtime/mod.rs
-index ff783100c..75243382c 100644
+index 7fba3f742..a94e32e40 100644
 --- a/codex-rs/app-server/src/session_runtime/mod.rs
 +++ b/codex-rs/app-server/src/session_runtime/mod.rs
 @@ -1,6 +1,7 @@

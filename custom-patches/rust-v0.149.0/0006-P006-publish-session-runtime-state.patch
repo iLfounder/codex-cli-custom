@@ -1,4 +1,4 @@
-From 5d89643bd8efdedae980c604ec6edb45d77f8778 Mon Sep 17 00:00:00 2001
+From 447b1e41e38ffae9c20522d073bf22541a114ba2 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 16:46:40 +0900
 Subject: [PATCH] feat(custom): publish session runtime state for 0.149
@@ -8,11 +8,11 @@ Subject: [PATCH] feat(custom): publish session runtime state for 0.149
  codex-rs/app-server/src/message_processor.rs  |  23 +-
  .../request_processors/thread_lifecycle.rs    | 159 ++++--
  .../thread_lifecycle_tests.rs                 |  19 +
- .../app-server/src/session_runtime/mod.rs     | 259 +++++++++
+ .../app-server/src/session_runtime/mod.rs     | 272 ++++++++++
  .../src/session_runtime/operations.rs         | 235 ++++++++
- .../src/session_runtime/pagination.rs         | 141 +++++
+ .../src/session_runtime/pagination.rs         | 160 ++++++
  .../src/session_runtime/snapshot.rs           | 509 ++++++++++++++++++
- .../app-server/src/session_runtime/tests.rs   | 194 +++++++
+ .../app-server/src/session_runtime/tests.rs   | 228 ++++++++
  codex-rs/app-server/src/thread_state.rs       | 283 +++++++++-
  codex-rs/app-server/src/thread_status.rs      |  36 ++
  codex-rs/rollout/src/lib.rs                   |   1 +
@@ -23,7 +23,7 @@ Subject: [PATCH] feat(custom): publish session runtime state for 0.149
  codex-rs/thread-store/src/local/mod.rs        | 122 +++++
  .../src/local/runtime_snapshot_tests.rs       | 107 ++++
  codex-rs/thread-store/src/store.rs            |  81 +++
- 19 files changed, 2252 insertions(+), 79 deletions(-)
+ 19 files changed, 2318 insertions(+), 79 deletions(-)
  create mode 100644 codex-rs/app-server/src/request_processors/thread_lifecycle_tests.rs
  create mode 100644 codex-rs/app-server/src/session_runtime/mod.rs
  create mode 100644 codex-rs/app-server/src/session_runtime/operations.rs
@@ -472,10 +472,10 @@ index 000000000..efb9a2590
 +}
 diff --git a/codex-rs/app-server/src/session_runtime/mod.rs b/codex-rs/app-server/src/session_runtime/mod.rs
 new file mode 100644
-index 000000000..f91e3c88e
+index 000000000..de9695c2e
 --- /dev/null
 +++ b/codex-rs/app-server/src/session_runtime/mod.rs
-@@ -0,0 +1,259 @@
+@@ -0,0 +1,272 @@
 +#[allow(dead_code)]
 +mod operations;
 +mod pagination;
@@ -610,14 +610,27 @@ index 000000000..f91e3c88e
 +        }
 +        if changed {
 +            state.sequence = state.sequence.saturating_add(1);
++            state.pages.clear();
 +        }
 +        let sequence = state.sequence;
++        if params.thread_id.is_none()
++            && let Some(response) = state.pages.first_page(
++                &self.instance_epoch,
++                sequence,
++                limit,
++                capabilities.clone(),
++            )?
++        {
++            return Ok(response);
++        }
 +        let cached = CachedSnapshot::new(sequence, snapshots);
 +        let response = cached.first_page(&self.instance_epoch, limit, capabilities)?;
-+        if response.next_cursor.is_some() {
-+            state.pages.insert(cached);
-+        } else {
-+            state.pages.clear();
++        if params.thread_id.is_none() {
++            if response.next_cursor.is_some() {
++                state.pages.insert(cached);
++            } else {
++                state.pages.clear();
++            }
 +        }
 +        Ok(response)
 +    }
@@ -978,10 +991,10 @@ index 000000000..ddf861d02
 +}
 diff --git a/codex-rs/app-server/src/session_runtime/pagination.rs b/codex-rs/app-server/src/session_runtime/pagination.rs
 new file mode 100644
-index 000000000..b1b5c4ee4
+index 000000000..fd3fd6e46
 --- /dev/null
 +++ b/codex-rs/app-server/src/session_runtime/pagination.rs
-@@ -0,0 +1,141 @@
+@@ -0,0 +1,160 @@
 +use base64::Engine;
 +use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 +use codex_app_server_protocol::JSONRPCErrorError;
@@ -1023,6 +1036,25 @@ index 000000000..b1b5c4ee4
 +
 +    pub(super) fn clear(&mut self) {
 +        self.snapshot = None;
++    }
++
++    pub(super) fn first_page(
++        &self,
++        instance_epoch: &str,
++        current_sequence: u64,
++        limit: usize,
++        capabilities: Vec<SessionRuntimeCapability>,
++    ) -> Result<Option<SessionRuntimeListResponse>, JSONRPCErrorError> {
++        let Some(snapshot) = self
++            .snapshot
++            .as_ref()
++            .filter(|snapshot| snapshot.sequence == current_sequence)
++        else {
++            return Ok(None);
++        };
++        snapshot
++            .first_page(instance_epoch, limit, capabilities)
++            .map(Some)
 +    }
 +
 +    pub(super) fn page(
@@ -1640,10 +1672,10 @@ index 000000000..96be01563
 +}
 diff --git a/codex-rs/app-server/src/session_runtime/tests.rs b/codex-rs/app-server/src/session_runtime/tests.rs
 new file mode 100644
-index 000000000..09edc7a69
+index 000000000..838ae77f7
 --- /dev/null
 +++ b/codex-rs/app-server/src/session_runtime/tests.rs
-@@ -0,0 +1,194 @@
+@@ -0,0 +1,228 @@
 +use std::collections::VecDeque;
 +
 +use codex_app_server_protocol::SessionRuntimeAccountBinding;
@@ -1764,6 +1796,40 @@ index 000000000..09edc7a69
 +    let replacement = CachedSnapshot::new(7, vec![snapshot(ThreadId::new())]);
 +    cache.insert(replacement);
 +    assert!(cache.page(&cursor, "epoch-a", 7, 1, Vec::new()).is_err());
++}
++
++#[test]
++fn cursorless_clients_reuse_the_same_snapshot_at_the_same_sequence() {
++    let snapshots = (0..3)
++        .map(|_index| snapshot(ThreadId::new()))
++        .collect::<Vec<_>>();
++    let cached = CachedSnapshot::new(7, snapshots);
++    let mut cache = SnapshotCache::default();
++    cache.insert(cached);
++
++    let first = cache
++        .first_page("epoch-a", 7, 1, Vec::new())
++        .expect("first client page")
++        .expect("cached snapshot");
++    let second = cache
++        .first_page("epoch-a", 7, 2, Vec::new())
++        .expect("second client page")
++        .expect("cached snapshot");
++    let first_cursor = first.next_cursor.expect("first client cursor");
++    let second_cursor = second.next_cursor.expect("second client cursor");
++
++    assert_eq!(first.data.len(), 1);
++    assert_eq!(second.data.len(), 2);
++    assert!(
++        cache
++            .page(&first_cursor, "epoch-a", 7, 1, Vec::new())
++            .is_ok()
++    );
++    assert!(
++        cache
++            .page(&second_cursor, "epoch-a", 7, 1, Vec::new())
++            .is_ok()
++    );
 +}
 +
 +#[test]

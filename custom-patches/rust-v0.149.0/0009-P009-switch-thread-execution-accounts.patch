@@ -1,4 +1,4 @@
-From c4565aaf4dab07d88e6a463b4deed9e5ca590b9d Mon Sep 17 00:00:00 2001
+From ff939ffc9c0957c9053068825126f8c3e3a4e8a9 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 19:13:43 +0900
 Subject: [PATCH] feat(custom): switch thread accounts without restart for
@@ -27,15 +27,15 @@ Subject: [PATCH] feat(custom): switch thread accounts without restart for
  codex-rs/core/src/guardian/review.rs          |   7 +-
  codex-rs/core/src/guardian/tests.rs           |   4 +-
  codex-rs/core/src/hook_mcp_executor.rs        |   6 +-
- codex-rs/core/src/hook_runtime.rs             |   2 +-
+ codex-rs/core/src/hook_runtime.rs             |   5 +-
  codex-rs/core/src/realtime_conversation.rs    |  11 +-
- codex-rs/core/src/session/handlers.rs         |   6 +-
+ codex-rs/core/src/session/handlers.rs         |  11 +-
  codex-rs/core/src/session/mcp.rs              |  57 ++-
  codex-rs/core/src/session/mcp_prewarm.rs      |  13 +-
  codex-rs/core/src/session/mcp_runtime.rs      |  86 +++-
  codex-rs/core/src/session/mod.rs              |  35 +-
- codex-rs/core/src/session/session.rs          | 454 ++++++++++++++++--
- codex-rs/core/src/session/tests.rs            |  62 ++-
+ codex-rs/core/src/session/session.rs          | 474 ++++++++++++++++--
+ codex-rs/core/src/session/tests.rs            |  72 ++-
  codex-rs/core/src/session/turn.rs             |  18 +-
  codex-rs/core/src/session/turn_context.rs     |  29 +-
  codex-rs/core/src/session_startup_prewarm.rs  |  16 +-
@@ -63,10 +63,13 @@ Subject: [PATCH] feat(custom): switch thread accounts without restart for
  .../guardian-v2/src/async_scorer/extension.rs | 129 +++++
  .../guardian-v2/src/async_scorer/sampler.rs   |  20 +
  codex-rs/ext/skills/src/extension.rs          |  39 ++
+ codex-rs/hooks/src/engine/command_runner.rs   |  14 +
+ .../hooks/src/engine/command_runner_tests.rs  |  79 +++
+ codex-rs/hooks/src/registry.rs                |  26 +
  codex-rs/network-proxy/src/proxy.rs           |   6 +-
  .../network-proxy/src/remote_config_tests.rs  |  24 +-
  codex-rs/network-proxy/src/runtime.rs         |  21 +-
- 61 files changed, 2155 insertions(+), 401 deletions(-)
+ 64 files changed, 2302 insertions(+), 411 deletions(-)
  create mode 100644 codex-rs/app-server/src/session_runtime/switch_account.rs
  create mode 100644 codex-rs/app-server/tests/suite/v2/thread_account_switch.rs
  create mode 100644 codex-rs/ext/extension-api/src/contributors/execution_account.rs
@@ -430,7 +433,7 @@ index 25f068b6d..688bacc85 100644
                  .session_runtime
                  .relinquish(connection_id, params)
 diff --git a/codex-rs/app-server/src/session_runtime/mod.rs b/codex-rs/app-server/src/session_runtime/mod.rs
-index 75243382c..dcdde0a7b 100644
+index a94e32e40..6da6e4e37 100644
 --- a/codex-rs/app-server/src/session_runtime/mod.rs
 +++ b/codex-rs/app-server/src/session_runtime/mod.rs
 @@ -3,6 +3,7 @@ mod operations;
@@ -1598,10 +1601,20 @@ index ea1252f93..9edfbb2cf 100644
                      &call.server,
                      &call.tool,
 diff --git a/codex-rs/core/src/hook_runtime.rs b/codex-rs/core/src/hook_runtime.rs
-index af2a31e94..c2506f886 100644
+index af2a31e94..589a53ef4 100644
 --- a/codex-rs/core/src/hook_runtime.rs
 +++ b/codex-rs/core/src/hook_runtime.rs
-@@ -776,7 +776,7 @@ fn track_hook_completed_analytics(
+@@ -617,7 +617,8 @@ pub(crate) async fn drain_async_hook_results(
+     turn_context: &Arc<TurnContext>,
+     before_user_prompt: bool,
+ ) {
+-    while let Ok(result) = sess.async_hook_results.try_recv() {
++    let async_hook_results = sess.async_hook_results.load_full();
++    while let Ok(result) = async_hook_results.try_recv() {
+         let additional_contexts = result
+             .run
+             .entries
+@@ -776,7 +777,7 @@ fn track_hook_completed_analytics(
  ) {
      let (tracking, hook) =
          hook_run_analytics_payload(sess.thread_id.to_string(), turn_context, completed);
@@ -1663,7 +1676,7 @@ index 6b76b7be0..3c0e050e3 100644
      };
      let start_output = sess.conversation.start(start, mode_instructions).await?;
 diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
-index 35c1182aa..f016ce319 100644
+index 35c1182aa..7a8512411 100644
 --- a/codex-rs/core/src/session/handlers.rs
 +++ b/codex-rs/core/src/session/handlers.rs
 @@ -356,7 +356,7 @@ pub async fn thread_rollback(sess: &Arc<Session>, sub_id: String, num_turns: u32
@@ -1675,7 +1688,19 @@ index 35c1182aa..f016ce319 100644
              .invalidate_for_node_repl_evidence()
              .await;
      }
-@@ -441,7 +441,7 @@ async fn shutdown_session_runtime(sess: &Arc<Session>) {
+@@ -426,8 +426,9 @@ async fn shutdown_session_runtime(sess: &Arc<Session>) {
+     let _ = sess.conversation.shutdown().await;
+     sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+     sess.hooks().shutdown().await;
+-    sess.async_hook_results.close();
+-    while sess.async_hook_results.try_recv().is_ok() {}
++    let async_hook_results = sess.async_hook_results.load_full();
++    async_hook_results.close();
++    while async_hook_results.try_recv().is_ok() {}
+     sess.services
+         .unified_exec_manager
+         .terminate_all_processes()
+@@ -441,7 +442,7 @@ async fn shutdown_session_runtime(sess: &Arc<Session>) {
          sess.mcp_refresh.close();
          sess.services.mcp_runtime.shutdown().await;
      }
@@ -1684,7 +1709,7 @@ index 35c1182aa..f016ce319 100644
  
      crate::hook_runtime::run_session_end_hooks(sess).await;
  }
-@@ -465,7 +465,7 @@ pub async fn shutdown(sess: &Arc<Session>, sub_id: String) -> bool {
+@@ -465,7 +466,7 @@ pub async fn shutdown(sess: &Arc<Session>, sub_id: String) -> bool {
          .raw_items()
          .filter(|item| is_user_turn_boundary(item))
          .count();
@@ -2147,7 +2172,7 @@ index 6fe06e2f9..a87eaa634 100644
                  .recommended_plugin_candidates_for_config(RecommendedPluginCandidatesInput {
                      plugins_config: &plugins_config,
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
-index fdd096e50..614c3339a 100644
+index fdd096e50..fbbbe5205 100644
 --- a/codex-rs/core/src/session/session.rs
 +++ b/codex-rs/core/src/session/session.rs
 @@ -39,7 +39,8 @@ use tokio::sync::Semaphore;
@@ -2160,7 +2185,7 @@ index fdd096e50..614c3339a 100644
      pub(crate) installation_id: String,
      pub(super) tx_event: Sender<Event>,
      pub(super) agent_status: watch::Sender<AgentStatus>,
-@@ -58,7 +59,8 @@ pub(crate) struct Session {
+@@ -58,21 +59,27 @@ pub(crate) struct Session {
      pub(super) mcp_elicitation_reviewer_handle: OnceLock<codex_mcp::ElicitationReviewerHandle>,
      pub(super) mcp_elicitation_lifecycle_handle: OnceLock<codex_mcp::ElicitationLifecycle>,
      pub(super) mcp_prewarm_tx: async_channel::Sender<()>,
@@ -2170,9 +2195,10 @@ index fdd096e50..614c3339a 100644
      pub(super) mcp_prewarm_task: std::sync::Mutex<Option<JoinHandle<()>>>,
      pub(crate) conversation: Arc<RealtimeConversationManager>,
      pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
-@@ -66,13 +68,17 @@ pub(crate) struct Session {
+     pub(crate) execution_runtime_transition_lock: Mutex<()>,
      pub(crate) execution_control_closing: AtomicBool,
-     pub(crate) async_hook_results: async_channel::Receiver<HookCompletedEvent>,
+-    pub(crate) async_hook_results: async_channel::Receiver<HookCompletedEvent>,
++    pub(crate) async_hook_results: arc_swap::ArcSwap<async_channel::Receiver<HookCompletedEvent>>,
      pub(crate) input_queue: InputQueue,
 -    pub(crate) guardian_review_session: GuardianReviewSessionManager,
      pub(crate) services: SessionServices,
@@ -2183,13 +2209,14 @@ index fdd096e50..614c3339a 100644
  
 +struct PreparedExecutionAccountRuntime {
 +    runtime: Arc<crate::execution_account::ExecutionAccountRuntime>,
-+    hooks_config: HooksConfig,
++    hooks: Hooks,
++    async_hook_results: async_channel::Receiver<HookCompletedEvent>,
 +}
 +
  #[derive(Clone)]
  pub(crate) struct SessionConfiguration {
      /// Runtime provider and its provider-specific execution policy.
-@@ -647,7 +653,361 @@ impl Session {
+@@ -647,7 +654,376 @@ impl Session {
      pub(crate) fn execution_account(
          &self,
      ) -> Arc<crate::execution_account::ExecutionAccountContext> {
@@ -2246,6 +2273,12 @@ index fdd096e50..614c3339a 100644
 +            environments.single_local_environment(),
 +        )
 +        .await;
++        let (hooks, async_hook_results) = self
++            .hooks()
++            .isolated_for_account_transition(hooks_config)
++            .map_err(|_| {
++                crate::execution_account::ExecutionAccountSwitchError::PreparationFailed
++            })?;
 +        let auth = execution_account.auth_manager.auth().await;
 +        let auth_mode = auth
 +            .as_ref()
@@ -2381,7 +2414,8 @@ index fdd096e50..614c3339a 100644
 +                extension_runtimes,
 +                guardian_review_session: Arc::new(GuardianReviewSessionManager::default()),
 +            }),
-+            hooks_config,
++            hooks,
++            async_hook_results,
 +        })
 +    }
 +
@@ -2409,7 +2443,8 @@ index fdd096e50..614c3339a 100644
 +        }
 +        let PreparedExecutionAccountRuntime {
 +            runtime: prepared,
-+            hooks_config: prepared_hooks_config,
++            hooks: prepared_hooks,
++            async_hook_results: prepared_async_hook_results,
 +        } = self
 +            .prepare_execution_account_runtime(Arc::clone(&target), services)
 +            .await?;
@@ -2481,6 +2516,15 @@ index fdd096e50..614c3339a 100644
 +                );
 +            }
 +
++            let previous_hooks = self.hooks();
++            previous_hooks.shutdown().await;
++            let previous_async_hook_results = self.async_hook_results.load_full();
++            previous_async_hook_results.close();
++            while previous_async_hook_results.try_recv().is_ok() {}
++            self.async_hook_results
++                .store(Arc::new(prepared_async_hook_results));
++            self.services.hooks.store(Arc::new(prepared_hooks));
++
 +            previous.mcp_runtime.adopt_prepared(&prepared.mcp_runtime);
 +            self.services
 +                .mcp_runtime
@@ -2520,8 +2564,6 @@ index fdd096e50..614c3339a 100644
 +                    &self.services.thread_extension_data,
 +                );
 +            }
-+            let hooks = self.hooks().reconfigured(prepared_hooks_config);
-+            self.services.hooks.store(Arc::new(hooks));
 +            self.execution_account_runtime.store(Arc::clone(&prepared));
 +            self.start_mcp_prewarm_worker(target_auth_changes);
 +            self.schedule_mcp_prewarm();
@@ -2552,7 +2594,7 @@ index fdd096e50..614c3339a 100644
      }
  
      /// Close the idle input boundary immediately before a writer-control commit.
-@@ -1199,7 +1559,7 @@ impl Session {
+@@ -1199,7 +1575,7 @@ impl Session {
                  environment_manager,
                  default_shell.clone(),
                  session_configuration.inferred_environment_config(),
@@ -2561,7 +2603,7 @@ index fdd096e50..614c3339a 100644
                  inherited_environments.unwrap_or_default(),
                  config.features.enabled(Feature::DeferredExecutor),
              ));
-@@ -1308,6 +1668,7 @@ impl Session {
+@@ -1308,6 +1684,7 @@ impl Session {
              let mcp_runtime = Arc::new(McpRuntime::empty(
                  mcp_projection.config.prefix_mcp_tool_names,
              ));
@@ -2569,7 +2611,7 @@ index fdd096e50..614c3339a 100644
              let hooks_config = build_hooks_config(
                  &config,
                  plugins_manager.as_ref(),
-@@ -1318,7 +1679,7 @@ impl Session {
+@@ -1318,7 +1695,7 @@ impl Session {
                  hooks_config,
                  thread_id,
                  Arc::new(CoreHookMcpExecutor {
@@ -2578,7 +2620,7 @@ index fdd096e50..614c3339a 100644
                      thread_id,
                  }),
              )?;
-@@ -1380,6 +1741,50 @@ impl Session {
+@@ -1380,6 +1757,50 @@ impl Session {
                  .features
                  .enabled(Feature::ExecutedToolCallMetadata)
                  .then(|| Arc::new(crate::state::ExecutedToolCallRecorder::default()));
@@ -2629,7 +2671,7 @@ index fdd096e50..614c3339a 100644
              let services = SessionServices {
                  // Start with an empty connection set. The initialized set is
                  // published after SessionConfigured so MCP events follow it.
-@@ -1393,6 +1798,7 @@ impl Session {
+@@ -1393,6 +1814,7 @@ impl Session {
                  main_execve_wrapper_exe: config.main_execve_wrapper_exe.clone(),
                  analytics_events_client,
                  hooks: arc_swap::ArcSwap::from_pointee(hooks),
@@ -2637,7 +2679,7 @@ index fdd096e50..614c3339a 100644
                  rollout_thread_trace,
                  user_shell: Arc::new(default_shell),
                  show_raw_agent_reasoning: config.show_raw_agent_reasoning,
-@@ -1429,33 +1835,7 @@ impl Session {
+@@ -1429,33 +1851,7 @@ impl Session {
                  thread_store: Arc::clone(&thread_store),
                  attestation_provider: attestation_provider.clone(),
                  time_provider,
@@ -2672,7 +2714,7 @@ index fdd096e50..614c3339a 100644
                  executed_tool_calls,
                  code_mode_service: crate::tools::code_mode::CodeModeService::new(
                      Arc::clone(&code_mode_session_provider),
-@@ -1467,7 +1847,7 @@ impl Session {
+@@ -1467,7 +1863,7 @@ impl Session {
              let (mcp_prewarm_tx, mcp_prewarm_rx) = async_channel::bounded(1);
              let sess = Arc::new(Session {
                  thread_id,
@@ -2681,7 +2723,7 @@ index fdd096e50..614c3339a 100644
                  installation_id,
                  tx_event: tx_event.clone(),
                  agent_status,
-@@ -1480,7 +1860,8 @@ impl Session {
+@@ -1480,15 +1876,15 @@ impl Session {
                  mcp_elicitation_reviewer_handle: OnceLock::new(),
                  mcp_elicitation_lifecycle_handle: OnceLock::new(),
                  mcp_prewarm_tx,
@@ -2691,15 +2733,16 @@ index fdd096e50..614c3339a 100644
                  mcp_prewarm_task: std::sync::Mutex::new(None),
                  conversation: Arc::new(RealtimeConversationManager::new()),
                  active_turn: Mutex::new(None),
-@@ -1488,7 +1869,6 @@ impl Session {
+                 execution_runtime_transition_lock: Mutex::new(()),
                  execution_control_closing: AtomicBool::new(false),
-                 async_hook_results,
+-                async_hook_results,
++                async_hook_results: arc_swap::ArcSwap::from_pointee(async_hook_results),
                  input_queue: InputQueue::new(),
 -                guardian_review_session: GuardianReviewSessionManager::default(),
                  services,
                  git_enrichment_policy,
                  fork_persistence,
-@@ -1572,7 +1952,7 @@ impl Session {
+@@ -1572,7 +1968,7 @@ impl Session {
                  mcp_runtime_cwd,
              )
              .await?;
@@ -2709,7 +2752,7 @@ index fdd096e50..614c3339a 100644
                  .await;
              let session_start_source = match &initial_history {
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 4e584db22..0a55d0b02 100644
+index 4e584db22..9d0ecd531 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -92,6 +92,28 @@ fn default_execution_account(
@@ -2790,7 +2833,7 @@ index 4e584db22..0a55d0b02 100644
          installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
          tx_event,
          agent_status: agent_status_tx,
-@@ -6013,7 +6043,8 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+@@ -6013,15 +6043,15 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
          mcp_elicitation_reviewer_handle: OnceLock::new(),
          mcp_elicitation_lifecycle_handle: OnceLock::new(),
          mcp_prewarm_tx: async_channel::bounded(1).0,
@@ -2800,14 +2843,31 @@ index 4e584db22..0a55d0b02 100644
          mcp_prewarm_task: std::sync::Mutex::new(None),
          conversation: Arc::new(RealtimeConversationManager::new()),
          active_turn: Mutex::new(None),
-@@ -6021,7 +6052,6 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+         execution_runtime_transition_lock: Mutex::new(()),
          execution_control_closing: std::sync::atomic::AtomicBool::new(false),
-         async_hook_results,
+-        async_hook_results,
++        async_hook_results: arc_swap::ArcSwap::from_pointee(async_hook_results),
          input_queue: super::input_queue::InputQueue::new(),
 -        guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
          services,
          git_enrichment_policy: GitEnrichmentPolicy::Fresh,
          fork_persistence: ForkPersistence::Copied,
+@@ -7596,12 +7626,12 @@ async fn shutdown_complete_does_not_append_to_thread_store_after_shutdown() {
+             .expect("valid buffered async hook result"),
+         )
+         .expect("buffer an async hook result before shutdown");
+-    session.async_hook_results = result_receiver;
++    session.async_hook_results.store(Arc::new(result_receiver));
+     let session = Arc::new(session);
+ 
+     assert!(handlers::shutdown(&session, "sub-1".to_string()).await);
+-    assert!(session.async_hook_results.is_closed());
+-    assert!(session.async_hook_results.is_empty());
++    assert!(session.async_hook_results.load().is_closed());
++    assert!(session.async_hook_results.load().is_empty());
+     assert!(result_sender.is_closed());
+ 
+     assert_eq!(
 @@ -7904,7 +7934,7 @@ async fn shutdown_and_wait_shuts_down_cached_guardian_subagent() {
          session_loop_termination: session_loop_termination_from_handle(child_session_loop_handle),
      };
@@ -2880,7 +2940,7 @@ index 4e584db22..0a55d0b02 100644
          installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
          tx_event,
          agent_status: agent_status_tx,
-@@ -8253,7 +8289,8 @@ where
+@@ -8253,15 +8289,15 @@ where
          mcp_elicitation_reviewer_handle: OnceLock::new(),
          mcp_elicitation_lifecycle_handle: OnceLock::new(),
          mcp_prewarm_tx: async_channel::bounded(1).0,
@@ -2890,9 +2950,10 @@ index 4e584db22..0a55d0b02 100644
          mcp_prewarm_task: std::sync::Mutex::new(None),
          conversation: Arc::new(RealtimeConversationManager::new()),
          active_turn: Mutex::new(None),
-@@ -8261,7 +8298,6 @@ where
+         execution_runtime_transition_lock: Mutex::new(()),
          execution_control_closing: std::sync::atomic::AtomicBool::new(false),
-         async_hook_results,
+-        async_hook_results,
++        async_hook_results: arc_swap::ArcSwap::from_pointee(async_hook_results),
          input_queue: super::input_queue::InputQueue::new(),
 -        guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
          services,
@@ -4410,6 +4471,158 @@ index 0ac722182..f28a76f30 100644
      registry.config_contributor(extension.clone());
      registry.prompt_contributor(extension.clone());
      registry.turn_input_contributor(extension.clone());
+diff --git a/codex-rs/hooks/src/engine/command_runner.rs b/codex-rs/hooks/src/engine/command_runner.rs
+index 6f9a6560c..5d2ed2d75 100644
+--- a/codex-rs/hooks/src/engine/command_runner.rs
++++ b/codex-rs/hooks/src/engine/command_runner.rs
+@@ -99,6 +99,20 @@ impl CommandHookRuntime {
+         }
+     }
+ 
++    pub(crate) fn isolated(
++        &self,
++        shell: CommandShell,
++        result_sender: Sender<HookCompletedEvent>,
++    ) -> Self {
++        Self {
++            shell,
++            environment: Arc::clone(&self.environment),
++            result_sender,
++            state: Arc::new(Mutex::new(CommandHookRuntimeState::default())),
++            output_spiller: self.output_spiller.clone(),
++        }
++    }
++
+     pub(crate) fn output_spiller(&self) -> &HookOutputSpiller {
+         &self.output_spiller
+     }
+diff --git a/codex-rs/hooks/src/engine/command_runner_tests.rs b/codex-rs/hooks/src/engine/command_runner_tests.rs
+index 952048de8..bf8dfe605 100644
+--- a/codex-rs/hooks/src/engine/command_runner_tests.rs
++++ b/codex-rs/hooks/src/engine/command_runner_tests.rs
+@@ -422,6 +422,85 @@ print(os.environ["CODEX_HOOK_CAPTURED_ENV"])
+     reconfigured.shutdown().await;
+ }
+ 
++#[tokio::test]
++async fn isolated_runtime_does_not_share_tasks_or_results_and_remains_usable() {
++    let temp = TempDir::new().expect("async test directory");
++    let (previous, previous_results) = runtime();
++    let started_path = temp.path().join("started");
++    let blocking_handler = write_handler(
++        &temp,
++        &format!(
++            r#"import json
++from pathlib import Path
++import sys
++import time
++
++json.load(sys.stdin)
++Path(r"{started}").write_text("started", encoding="utf-8")
++while True:
++    time.sleep(0.01)
++"#,
++            started = started_path.display(),
++        ),
++    );
++    schedule(&previous, blocking_handler, temp.path()).await;
++    timeout(ASYNC_HOOK_TEST_TIMEOUT, async {
++        while !started_path.exists() {
++            sleep(Duration::from_millis(10)).await;
++        }
++    })
++    .await
++    .expect("old async hook should start");
++
++    let (next_sender, next_results) = async_channel::unbounded();
++    let next = previous.isolated(
++        CommandShell {
++            program: String::new(),
++            args: Vec::new(),
++        },
++        next_sender,
++    );
++    assert!(!Arc::ptr_eq(&previous.state, &next.state));
++
++    previous.shutdown().await;
++    drop(previous);
++    assert!(
++        timeout(Duration::from_millis(150), previous_results.recv())
++            .await
++            .expect("old result channel should close")
++            .is_err()
++    );
++
++    let next_handler = write_handler(
++        &temp,
++        r#"import json
++import sys
++
++json.load(sys.stdin)
++print(json.dumps({
++    "hookSpecificOutput": {
++        "hookEventName": "UserPromptSubmit",
++        "additionalContext": "new account context"
++    }
++}))
++"#,
++    );
++    schedule(&next, next_handler, temp.path()).await;
++    let next_result = timeout(ASYNC_HOOK_TEST_TIMEOUT, next_results.recv())
++        .await
++        .expect("fresh runtime hook should finish")
++        .expect("fresh result channel should remain open");
++    assert_eq!(
++        next_result.run.entries,
++        vec![HookOutputEntry {
++            kind: HookOutputEntryKind::Context,
++            text: "new account context".to_string(),
++        }]
++    );
++
++    next.shutdown().await;
++}
++
+ #[tokio::test]
+ async fn async_hooks_limit_concurrent_processes_without_dropping_waiting_jobs() {
+     let temp = TempDir::new().expect("async test directory");
+diff --git a/codex-rs/hooks/src/registry.rs b/codex-rs/hooks/src/registry.rs
+index 82d26ee90..8f3140357 100644
+--- a/codex-rs/hooks/src/registry.rs
++++ b/codex-rs/hooks/src/registry.rs
+@@ -95,6 +95,32 @@ impl Hooks {
+         )
+     }
+ 
++    /// Prepare a fresh async runtime and result channel for an execution-account transition.
++    ///
++    /// Unlike [`Self::reconfigured`], the returned hooks do not share in-flight command tasks or
++    /// their result channel with this instance. Preparing the replacement is non-destructive; the
++    /// caller can keep this instance operational when its account transition does not commit.
++    pub fn isolated_for_account_transition(
++        &self,
++        config: HooksConfig,
++    ) -> anyhow::Result<(Self, Receiver<codex_protocol::protocol::HookCompletedEvent>)> {
++        let (result_sender, result_receiver) = async_channel::unbounded();
++        let hooks = Self::from_config(
++            config,
++            Arc::clone(&self.engine.mcp_executor),
++            Arc::clone(&self.environment),
++            |shell| self.engine.command_runtime.isolated(shell, result_sender),
++        );
++        let required_load_errors = hooks.engine.required_load_errors();
++        if !required_load_errors.is_empty() {
++            anyhow::bail!(
++                "failed to load required managed hooks: {}",
++                required_load_errors.join("; ")
++            );
++        }
++        Ok((hooks, result_receiver))
++    }
++
+     fn from_config(
+         config: HooksConfig,
+         mcp_executor: Arc<dyn HookMcpExecutor>,
 diff --git a/codex-rs/network-proxy/src/proxy.rs b/codex-rs/network-proxy/src/proxy.rs
 index 657725940..e7b40df69 100644
 --- a/codex-rs/network-proxy/src/proxy.rs
