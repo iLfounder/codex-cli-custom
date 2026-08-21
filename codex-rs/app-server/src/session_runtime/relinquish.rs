@@ -250,6 +250,7 @@ impl SessionRuntimeEngine {
                 Self::apply_runtime_state(&mut state, &mut snapshot, RuntimeActivity::Observe);
             changed.then(|| {
                 state.sequence = state.sequence.saturating_add(1);
+                state.pages.clear();
                 SessionRuntimeChangedNotification {
                     instance_epoch: self.instance_epoch.clone(),
                     sequence: state.sequence,
@@ -313,6 +314,7 @@ impl SessionRuntimeEngine {
             );
             Self::apply_runtime_state(&mut state, &mut snapshot, RuntimeActivity::Activity);
             state.sequence = state.sequence.saturating_add(1);
+            state.pages.clear();
             let runtime_notification = SessionRuntimeChangedNotification {
                 instance_epoch: self.instance_epoch.clone(),
                 sequence: state.sequence,
@@ -330,6 +332,7 @@ impl SessionRuntimeEngine {
             operation.error = None;
             operation.updated_at = unix_timestamp();
             state.sequence = state.sequence.saturating_add(1);
+            state.pages.clear();
             state
                 .operations
                 .terminal_order

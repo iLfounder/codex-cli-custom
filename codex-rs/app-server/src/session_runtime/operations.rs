@@ -70,6 +70,7 @@ impl SessionRuntimeEngine {
                 ));
             }
             state.sequence = state.sequence.saturating_add(1);
+            state.pages.clear();
             state
                 .operations
                 .operations
@@ -113,6 +114,7 @@ impl SessionRuntimeEngine {
                 return Ok(existing);
             }
             state.sequence = state.sequence.saturating_add(1);
+            state.pages.clear();
             if !is_terminal(existing.status) && is_terminal(operation.status) {
                 state
                     .operations

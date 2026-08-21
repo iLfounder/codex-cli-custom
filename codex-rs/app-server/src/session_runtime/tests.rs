@@ -114,6 +114,10 @@ fn pagination_cursor_is_stable_and_restarts_after_sequence_change() {
     assert_eq!(second.data.len(), 1);
     assert!(cache.page(&cursor, "epoch-a", 8, 1, Vec::new()).is_err());
     assert!(cache.page(&cursor, "epoch-b", 7, 1, Vec::new()).is_err());
+
+    let replacement = CachedSnapshot::new(7, vec![snapshot(ThreadId::new())]);
+    cache.insert(replacement);
+    assert!(cache.page(&cursor, "epoch-a", 7, 1, Vec::new()).is_err());
 }
 
 #[test]

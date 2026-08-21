@@ -1,5 +1,3 @@
-use std::collections::VecDeque;
-
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use codex_app_server_protocol::JSONRPCErrorError;
@@ -14,11 +12,9 @@ use crate::error_code::invalid_params;
 
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 100;
-const MAX_CACHED_SNAPSHOTS: usize = 16;
-
 #[derive(Default)]
 pub(super) struct SnapshotCache {
-    snapshots: VecDeque<CachedSnapshot>,
+    snapshot: Option<CachedSnapshot>,
 }
 
 pub(super) struct CachedSnapshot {
@@ -38,10 +34,11 @@ struct RuntimeCursor {
 
 impl SnapshotCache {
     pub(super) fn insert(&mut self, snapshot: CachedSnapshot) {
-        self.snapshots.push_back(snapshot);
-        while self.snapshots.len() > MAX_CACHED_SNAPSHOTS {
-            self.snapshots.pop_front();
-        }
+        self.snapshot = Some(snapshot);
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.snapshot = None;
     }
 
     pub(super) fn page(
@@ -56,13 +53,10 @@ impl SnapshotCache {
         if cursor.instance_epoch != instance_epoch || cursor.snapshot_sequence != current_sequence {
             return Err(stale_cursor());
         }
-        let snapshot = self
-            .snapshots
-            .iter()
-            .find(|snapshot| {
-                snapshot.id == cursor.snapshot_id && snapshot.sequence == cursor.snapshot_sequence
-            })
-            .ok_or_else(stale_cursor)?;
+        let snapshot = self.snapshot.as_ref().ok_or_else(stale_cursor)?;
+        if snapshot.id != cursor.snapshot_id || snapshot.sequence != cursor.snapshot_sequence {
+            return Err(stale_cursor());
+        }
         let start = snapshot
             .snapshots
             .iter()

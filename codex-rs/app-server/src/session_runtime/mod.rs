@@ -143,7 +143,11 @@ impl SessionRuntimeEngine {
         let sequence = state.sequence;
         let cached = CachedSnapshot::new(sequence, snapshots);
         let response = cached.first_page(&self.instance_epoch, limit, capabilities)?;
-        state.pages.insert(cached);
+        if response.next_cursor.is_some() {
+            state.pages.insert(cached);
+        } else {
+            state.pages.clear();
+        }
         Ok(response)
     }
 
@@ -182,6 +186,7 @@ impl SessionRuntimeEngine {
             let mut state = self.state.lock().await;
             Self::apply_runtime_state(&mut state, &mut snapshot, RuntimeActivity::Activity);
             state.sequence = state.sequence.saturating_add(1);
+            state.pages.clear();
             SessionRuntimeChangedNotification {
                 instance_epoch: self.instance_epoch.clone(),
                 sequence: state.sequence,
