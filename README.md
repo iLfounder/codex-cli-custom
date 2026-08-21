@@ -28,7 +28,7 @@ The target is upstream [`rust-v0.149.0`](https://github.com/openai/codex/release
 | Area | Current status |
 |---|---|
 | P001–P011 implementation and focused checks | Complete |
-| Ordered 0.149 patch export and clean-apply verification | Complete; 11 patches reproduce tree `85d7f4039b29096250faa772e67f240d9f7a4a90` |
+| Ordered 0.149 patch export and clean-apply verification | Complete; 11 patches reproduce tree `096164cc5236699b0a7257f272d402ca4bf3ce09` |
 | macOS arm64 release build and artifacts | Pending |
 | Final independent reviews | Pending |
 | 0.149 publication | Pending |
@@ -128,7 +128,7 @@ git checkout 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
 /path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD"
 ```
 
-The applier rejects a dirty or wrong-base worktree, verifies every patch digest, applies P001–P011 in order, and requires final tree `85d7f4039b29096250faa772e67f240d9f7a4a90`.
+The applier rejects a dirty or wrong-base worktree, verifies every patch digest, applies P001–P011 in order, and requires final tree `096164cc5236699b0a7257f272d402ca4bf3ce09`.
 
 This separation is the maintenance strategy: when upstream advances, each P-number can be inspected, adapted, and verified against its own feature boundary.
 
