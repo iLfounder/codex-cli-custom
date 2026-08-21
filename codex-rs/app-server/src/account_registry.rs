@@ -18,6 +18,8 @@ use codex_core::ExecutionAccountContext;
 use codex_core::ExecutionAccountResolver;
 use codex_core::ExecutionAccountResolverFuture;
 use codex_core::config::Config;
+use codex_core::execution_account::ExecutionAccountTransitionResolverFuture;
+use codex_core::execution_account::ResolvedExecutionAccountTransition;
 use codex_core::path_utils::write_atomically;
 use codex_login::AuthConfig;
 use codex_login::AuthManager;
@@ -531,6 +533,100 @@ impl AccountRegistry {
                     .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
             })
     }
+
+    async fn resolve_execution_account(
+        &self,
+        binding: ExecutionAccountBinding,
+    ) -> Result<(Arc<ExecutionAccountContext>, OwnedMutexGuard<()>), CodexErr> {
+        self.reconcile().await.map_err(|error| {
+            CodexErr::Fatal(format!(
+                "account slot reconciliation failed: {}",
+                error.message
+            ))
+        })?;
+        let binding_transition = {
+            let state = self
+                .state
+                .read()
+                .map_err(|_| CodexErr::Fatal("account slot registry is unavailable".to_string()))?;
+            let slot = state
+                .slots
+                .iter()
+                .find(|slot| slot.manifest.account_slot_id == binding.slot_id)
+                .ok_or_else(|| {
+                    CodexErr::InvalidRequest(format!(
+                        "execution account slot `{}` is unavailable",
+                        binding.slot_id
+                    ))
+                })?;
+            if slot.active_logout_operation_id.is_some() {
+                return Err(CodexErr::InvalidRequest(format!(
+                    "execution account slot `{}` is being logged out",
+                    binding.slot_id
+                )));
+            }
+            Arc::clone(&slot.binding_transition)
+        };
+        let binding_transition = binding_transition.lock_owned().await;
+        let (slot, manifest_error) = {
+            let state = self
+                .state
+                .read()
+                .map_err(|_| CodexErr::Fatal("account slot registry is unavailable".to_string()))?;
+            (
+                state
+                    .slots
+                    .iter()
+                    .find(|slot| slot.manifest.account_slot_id == binding.slot_id)
+                    .cloned(),
+                state.manifest_error,
+            )
+        };
+        let slot = slot.ok_or_else(|| {
+            CodexErr::InvalidRequest(format!(
+                "execution account slot `{}` is unavailable",
+                binding.slot_id
+            ))
+        })?;
+        let capability = self.capability(manifest_error);
+        if !slot.manifest.is_default && !capability.available {
+            return Err(CodexErr::InvalidRequest(format!(
+                "execution account slot `{}` is unavailable: {}",
+                binding.slot_id,
+                capability
+                    .deny_reason
+                    .as_deref()
+                    .unwrap_or("multi_account_unavailable")
+            )));
+        }
+        if !slot.manifest.is_default && slot.manifest.status != ManifestSlotStatus::Ready {
+            return Err(CodexErr::InvalidRequest(format!(
+                "execution account slot `{}` is not ready",
+                binding.slot_id
+            )));
+        }
+        if slot.active_logout_operation_id.is_some() {
+            return Err(CodexErr::InvalidRequest(format!(
+                "execution account slot `{}` is being logged out",
+                binding.slot_id
+            )));
+        }
+        let runtime = self.runtime(&slot).await;
+        if !slot.manifest.is_default && runtime.auth_manager.auth().await.is_none() {
+            return Err(CodexErr::InvalidRequest(format!(
+                "execution account slot `{}` is not ready",
+                binding.slot_id
+            )));
+        }
+        Ok((
+            Arc::new(ExecutionAccountContext {
+                binding,
+                auth_manager: Arc::clone(&runtime.auth_manager),
+                models_manager: Arc::clone(&runtime.models_manager),
+            }),
+            binding_transition,
+        ))
+    }
 }
 
 pub(crate) mod live_registration;
@@ -538,83 +634,23 @@ pub(crate) mod live_registration;
 impl ExecutionAccountResolver for AccountRegistry {
     fn resolve(&self, binding: ExecutionAccountBinding) -> ExecutionAccountResolverFuture<'_> {
         Box::pin(async move {
-            self.reconcile().await.map_err(|error| {
-                CodexErr::Fatal(format!(
-                    "account slot reconciliation failed: {}",
-                    error.message
-                ))
-            })?;
-            let slot = {
-                let state = self.state.read().map_err(|_| {
-                    CodexErr::Fatal("account slot registry is unavailable".to_string())
-                })?;
-                state
-                    .slots
-                    .iter()
-                    .find(|slot| slot.manifest.account_slot_id == binding.slot_id)
-                    .cloned()
-            };
-            let slot = slot.ok_or_else(|| {
-                CodexErr::InvalidRequest(format!(
-                    "execution account slot `{}` is unavailable",
-                    binding.slot_id
-                ))
-            })?;
-            if slot.active_logout_operation_id.is_some() {
-                return Err(CodexErr::InvalidRequest(format!(
-                    "execution account slot `{}` is being logged out",
-                    binding.slot_id
-                )));
-            }
-            let _binding_transition = Arc::clone(&slot.binding_transition).lock_owned().await;
-            let (slot, manifest_error) = {
-                let state = self.state.read().map_err(|_| {
-                    CodexErr::Fatal("account slot registry is unavailable".to_string())
-                })?;
-                (
-                    state
-                        .slots
-                        .iter()
-                        .find(|slot| slot.manifest.account_slot_id == binding.slot_id)
-                        .cloned(),
-                    state.manifest_error,
-                )
-            };
-            let slot = slot.ok_or_else(|| {
-                CodexErr::InvalidRequest(format!(
-                    "execution account slot `{}` is unavailable",
-                    binding.slot_id
-                ))
-            })?;
-            let capability = self.capability(manifest_error);
-            if !slot.manifest.is_default && !capability.available {
-                return Err(CodexErr::InvalidRequest(format!(
-                    "execution account slot `{}` is unavailable: {}",
-                    binding.slot_id,
-                    capability
-                        .deny_reason
-                        .as_deref()
-                        .unwrap_or("multi_account_unavailable")
-                )));
-            }
-            if !slot.manifest.is_default && slot.manifest.status != ManifestSlotStatus::Ready {
-                return Err(CodexErr::InvalidRequest(format!(
-                    "execution account slot `{}` is not ready",
-                    binding.slot_id
-                )));
-            }
-            if slot.active_logout_operation_id.is_some() {
-                return Err(CodexErr::InvalidRequest(format!(
-                    "execution account slot `{}` is being logged out",
-                    binding.slot_id
-                )));
-            }
-            let runtime = self.runtime(&slot).await;
-            Ok(Arc::new(ExecutionAccountContext {
-                binding,
-                auth_manager: Arc::clone(&runtime.auth_manager),
-                models_manager: Arc::clone(&runtime.models_manager),
-            }))
+            let (execution_account, _binding_transition) =
+                self.resolve_execution_account(binding).await?;
+            Ok(execution_account)
+        })
+    }
+
+    fn resolve_for_transition(
+        &self,
+        binding: ExecutionAccountBinding,
+    ) -> ExecutionAccountTransitionResolverFuture<'_> {
+        Box::pin(async move {
+            let (execution_account, binding_transition) =
+                self.resolve_execution_account(binding).await?;
+            Ok(ResolvedExecutionAccountTransition::with_readiness_lease(
+                execution_account,
+                binding_transition,
+            ))
         })
     }
 }

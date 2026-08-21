@@ -266,7 +266,7 @@ async fn run_remote_compact_task_inner_impl(
             )
             .await;
             record_model_fallback(
-                &sess.services.session_telemetry,
+                &fallback_step_context.session_telemetry,
                 turn_context.model_info.slug.as_str(),
                 fallback_turn_context.model_info.slug.as_str(),
                 compaction_metadata.reason(),

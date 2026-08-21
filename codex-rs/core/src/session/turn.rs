@@ -829,7 +829,6 @@ async fn build_skills_and_plugins(
         warnings: host_skill_warnings,
     } = skills_snapshot.load_skill_prompts(&mentioned_skills).await;
     emit_explicit_skill_invocations(
-        sess,
         turn_context,
         &mentioned_skills,
         &injected_host_skills,
@@ -865,16 +864,15 @@ async fn build_skills_and_plugins(
             invocation_type: Some(InvocationType::Explicit),
         })
         .collect::<Vec<_>>();
-    sess.services
+    turn_context
         .analytics_events_client
         .track_app_mentioned(tracking.clone(), mentioned_app_invocations);
     for summary in mentioned_plugins {
-        if let Some(plugin) = sess
-            .services
+        if let Some(plugin) = turn_context
             .plugins_manager
             .telemetry_metadata_for_capability_summary(summary)
         {
-            sess.services
+            turn_context
                 .analytics_events_client
                 .track_plugin_used(tracking.clone(), plugin);
         }
@@ -971,7 +969,7 @@ async fn track_turn_resolved_config_analytics(
         let mut state = sess.state.lock().await;
         state.take_next_turn_is_first()
     };
-    sess.services
+    turn_context
         .analytics_events_client
         .track_turn_resolved_config(TurnResolvedConfigFact {
             turn_id: turn_context.sub_id.clone(),
@@ -1213,7 +1211,7 @@ async fn run_auto_compact(
                 .enabled(Feature::RemoteCompactionV2) =>
         {
             emit_compact_metric(
-                &sess.services.session_telemetry,
+                &step_context.session_telemetry,
                 "remote_v2",
                 /*manual*/ false,
             );
@@ -1230,7 +1228,7 @@ async fn run_auto_compact(
         }
         RemoteCompactionSupport::V1 | RemoteCompactionSupport::V2 => {
             emit_compact_metric(
-                &sess.services.session_telemetry,
+                &step_context.session_telemetry,
                 "remote",
                 /*manual*/ false,
             );
@@ -1247,7 +1245,7 @@ async fn run_auto_compact(
         }
         RemoteCompactionSupport::Unsupported => {
             emit_compact_metric(
-                &sess.services.session_telemetry,
+                &step_context.session_telemetry,
                 "local",
                 /*manual*/ false,
             );
@@ -2290,7 +2288,7 @@ async fn try_run_sampling_request(
             }
         };
 
-        sess.services
+        step_context
             .session_telemetry
             .record_responses(&handle_responses, &event);
         record_turn_ttft_metric(&turn_context, &event).await;

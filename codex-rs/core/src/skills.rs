@@ -34,7 +34,6 @@ pub(crate) fn skills_load_input_from_config(
 }
 
 pub(crate) fn emit_explicit_skill_invocations(
-    sess: &Session,
     turn_context: &TurnContext,
     mentioned_skills: &[SkillMetadata],
     injected_skills: &[SkillMetadata],
@@ -75,7 +74,7 @@ pub(crate) fn emit_explicit_skill_invocations(
             invocation_type: InvocationType::Explicit,
         })
         .collect();
-    sess.services
+    turn_context
         .analytics_events_client
         .track_skill_invocations(tracking, invocations);
 }
@@ -146,7 +145,7 @@ pub(crate) async fn maybe_emit_implicit_skill_invocation(
             ("invoke_type", "implicit"),
         ],
     );
-    sess.services
+    turn_context
         .analytics_events_client
         .track_skill_invocations(
             build_track_events_context(

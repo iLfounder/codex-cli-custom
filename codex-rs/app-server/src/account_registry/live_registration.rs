@@ -84,6 +84,10 @@ impl AccountRegistry {
             {
                 continue;
             }
+            let Ok(binding_transition) = Arc::clone(&slot.binding_transition).try_lock_owned()
+            else {
+                continue;
+            };
             let runtime = self.runtime(slot).await;
             let has_auth = runtime.auth_manager.auth().await.is_some();
             let next = match (slot.manifest.status, has_auth) {
@@ -97,7 +101,11 @@ impl AccountRegistry {
                 _ => None,
             };
             if let Some(next) = next {
-                changed.push((slot.manifest.account_slot_id.clone(), next));
+                changed.push((
+                    binding_transition,
+                    slot.manifest.account_slot_id.clone(),
+                    next,
+                ));
             }
         }
         if changed.is_empty() {
@@ -118,14 +126,14 @@ impl AccountRegistry {
         let next_revision = revision.saturating_add(1);
         let now = Utc::now().timestamp();
         let mut applied = false;
-        for (slot_id, (status, error_code)) in changed {
+        for (_binding_transition, slot_id, (status, error_code)) in &changed {
             if let Some(slot) = next_slots
                 .iter_mut()
                 .find(|slot| slot.manifest.account_slot_id == slot_id)
                 && slot.active_logout_operation_id.is_none()
             {
-                slot.manifest.status = status;
-                slot.manifest.error_code = error_code;
+                slot.manifest.status = *status;
+                slot.manifest.error_code = error_code.clone();
                 slot.manifest.updated_at = now;
                 slot.active_login_operation_id = None;
                 slot.completed_login_operation_id = None;
@@ -499,6 +507,22 @@ impl AccountRegistry {
         prepared: &PreparedSlotLogin,
         error_code: &'static str,
     ) -> Result<Option<AccountSlotChangedNotification>, JSONRPCErrorError> {
+        let binding_transition = {
+            let state = self
+                .state
+                .read()
+                .map_err(|_| internal_error("account slot registry is unavailable"))?;
+            let Some(slot) = state.slots.iter().find(|slot| {
+                slot.manifest.account_slot_id == prepared.account_slot_id
+                    && slot.manifest.attempt_generation == prepared.attempt_generation
+                    && slot.manifest.status == ManifestSlotStatus::Ready
+                    && slot.completed_login_operation_id.as_deref() == Some(&prepared.operation_id)
+            }) else {
+                return Ok(None);
+            };
+            Arc::clone(&slot.binding_transition)
+        };
+        let _binding_transition = binding_transition.lock_owned().await;
         let mutation = self.mutation_lock.lock().await;
         let (revision, mut slots) = {
             let state = self

@@ -20,6 +20,7 @@ use crate::session::turn::get_last_assistant_message_from_turn;
 use crate::session::turn_context::TurnContext;
 use crate::state::AutoCompactWindowIds;
 use crate::util::backoff;
+use codex_analytics::AnalyticsEventsClient;
 use codex_analytics::CodexCompactionEvent;
 use codex_analytics::CompactionImplementation;
 use codex_analytics::CompactionPhase;
@@ -394,6 +395,7 @@ async fn run_compact_task_inner_impl(
 }
 
 pub(crate) struct CompactionAnalyticsAttempt {
+    analytics_events_client: AnalyticsEventsClient,
     thread_id: String,
     turn_id: String,
     trigger: CompactionTrigger,
@@ -425,6 +427,7 @@ impl CompactionAnalyticsAttempt {
     ) -> Self {
         let active_context_tokens_before = sess.get_total_token_usage().await;
         Self {
+            analytics_events_client: turn_context.analytics_events_client.clone(),
             thread_id: sess.thread_id.to_string(),
             turn_id: turn_context.sub_id.clone(),
             trigger,
@@ -454,8 +457,7 @@ impl CompactionAnalyticsAttempt {
         let active_context_tokens_before =
             active_context_tokens_before.unwrap_or(self.active_context_tokens_before);
         let active_context_tokens_after = sess.get_total_token_usage().await;
-        sess.services
-            .analytics_events_client
+        self.analytics_events_client
             .track_compaction(CodexCompactionEvent {
                 thread_id: self.thread_id,
                 turn_id: self.turn_id,

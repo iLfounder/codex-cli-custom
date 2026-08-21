@@ -74,6 +74,11 @@ pub(crate) struct Session {
     pub(super) next_internal_sub_id: AtomicU64,
 }
 
+struct PreparedExecutionAccountRuntime {
+    runtime: Arc<crate::execution_account::ExecutionAccountRuntime>,
+    hooks_config: HooksConfig,
+}
+
 #[derive(Clone)]
 pub(crate) struct SessionConfiguration {
     /// Runtime provider and its provider-specific execution policy.
@@ -682,7 +687,7 @@ impl Session {
         execution_account: Arc<crate::execution_account::ExecutionAccountContext>,
         services: crate::execution_account::ExecutionAccountServices,
     ) -> Result<
-        Arc<crate::execution_account::ExecutionAccountRuntime>,
+        PreparedExecutionAccountRuntime,
         crate::execution_account::ExecutionAccountSwitchError,
     > {
         let session_configuration = self.state.lock().await.session_configuration.clone();
@@ -693,6 +698,12 @@ impl Session {
             Arc::clone(&services.plugins_manager),
             Arc::clone(&self.services.skills_service),
             &environments,
+        )
+        .await;
+        let hooks_config = build_hooks_config(
+            config.as_ref(),
+            services.plugins_manager.as_ref(),
+            environments.single_local_environment(),
         )
         .await;
         let auth = execution_account.auth_manager.auth().await;
@@ -817,8 +828,8 @@ impl Session {
                 })?;
             extension_runtimes.push(prepared);
         }
-        Ok(Arc::new(
-            crate::execution_account::ExecutionAccountRuntime {
+        Ok(PreparedExecutionAccountRuntime {
+            runtime: Arc::new(crate::execution_account::ExecutionAccountRuntime {
                 execution_account,
                 services,
                 mcp_runtime,
@@ -829,8 +840,9 @@ impl Session {
                 shell_snapshot,
                 extension_runtimes,
                 guardian_review_session: Arc::new(GuardianReviewSessionManager::default()),
-            },
-        ))
+            }),
+            hooks_config,
+        })
     }
 
     #[expect(
@@ -855,7 +867,10 @@ impl Session {
         {
             return Err(crate::execution_account::ExecutionAccountSwitchError::ThreadBusy);
         }
-        let prepared = self
+        let PreparedExecutionAccountRuntime {
+            runtime: prepared,
+            hooks_config: prepared_hooks_config,
+        } = self
             .prepare_execution_account_runtime(Arc::clone(&target), services)
             .await?;
         if self.execution_account().binding != expected
@@ -965,6 +980,8 @@ impl Session {
                     &self.services.thread_extension_data,
                 );
             }
+            let hooks = self.hooks().reconfigured(prepared_hooks_config);
+            self.services.hooks.store(Arc::new(hooks));
             self.execution_account_runtime.store(Arc::clone(&prepared));
             self.start_mcp_prewarm_worker(target_auth_changes);
             self.schedule_mcp_prewarm();

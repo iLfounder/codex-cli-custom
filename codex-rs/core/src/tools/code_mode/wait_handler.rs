@@ -136,16 +136,13 @@ impl CodeModeWaitHandler {
                             .services
                             .code_mode_service
                             .finish_cell_dispatch(runtime_cell_id);
-                        exec.session
-                            .services
-                            .analytics_events_client
-                            .track_code_mode_tool_call(
-                                codex_analytics::CodeModeToolCallFact::CellClosed {
-                                    thread_id: exec.session.thread_id.to_string(),
-                                    turn_id: exec.turn.sub_id.clone(),
-                                    cell_id: runtime_cell_id.to_string(),
-                                },
-                            );
+                        exec.turn.analytics_events_client.track_code_mode_tool_call(
+                            codex_analytics::CodeModeToolCallFact::CellClosed {
+                                thread_id: exec.session.thread_id.to_string(),
+                                turn_id: exec.turn.sub_id.clone(),
+                                cell_id: runtime_cell_id.to_string(),
+                            },
+                        );
                     }
                 }
                 exec.session.services.elicitations.wait_until_clear().await;

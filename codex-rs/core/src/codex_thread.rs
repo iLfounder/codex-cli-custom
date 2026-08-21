@@ -778,6 +778,10 @@ impl CodexThread {
         Ok(serde_json::to_value(result)?)
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "out-of-turn MCP calls and execution control share one transition fence"
+    )]
     pub async fn call_mcp_tool(
         &self,
         server: &str,
@@ -785,10 +789,13 @@ impl CodexThread {
         arguments: Option<serde_json::Value>,
         meta: Option<serde_json::Value>,
     ) -> anyhow::Result<CallToolResult> {
+        let _transition = self.session.execution_runtime_transition_lock.lock().await;
+        if self.session.execution_control_is_closing() {
+            anyhow::bail!("thread runtime is closing");
+        }
         self.session.refresh_mcp_if_dirty().await;
-        self.session
-            .services
-            .mcp_runtime
+        let mcp_runtime = Arc::clone(&self.session.execution_account_runtime().mcp_runtime);
+        mcp_runtime
             .latest_call_tool(
                 server, tool, arguments, meta, /*requested_timeout*/ None,
                 /*wait_for_server*/ true,

@@ -42,27 +42,15 @@ impl SessionTask for CompactTask {
             RemoteCompactionSupport::V2
                 if ctx.config.features.enabled(Feature::RemoteCompactionV2) =>
             {
-                emit_compact_metric(
-                    &session.services.session_telemetry,
-                    "remote_v2",
-                    /*manual*/ true,
-                );
+                emit_compact_metric(&ctx.session_telemetry, "remote_v2", /*manual*/ true);
                 crate::compact_remote_v2::run_remote_compact_task(session.clone(), ctx).await
             }
             RemoteCompactionSupport::V1 | RemoteCompactionSupport::V2 => {
-                emit_compact_metric(
-                    &session.services.session_telemetry,
-                    "remote",
-                    /*manual*/ true,
-                );
+                emit_compact_metric(&ctx.session_telemetry, "remote", /*manual*/ true);
                 crate::compact_remote::run_remote_compact_task(session.clone(), ctx).await
             }
             RemoteCompactionSupport::Unsupported => {
-                emit_compact_metric(
-                    &session.services.session_telemetry,
-                    "local",
-                    /*manual*/ true,
-                );
+                emit_compact_metric(&ctx.session_telemetry, "local", /*manual*/ true);
                 let input = vec![UserInput::Text {
                     text: ctx
                         .config

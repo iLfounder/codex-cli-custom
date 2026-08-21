@@ -1787,9 +1787,10 @@ impl Session {
 
     pub(crate) async fn refresh_hooks(&self, config: Arc<Config>) {
         let environments = self.services.turn_environments.snapshot().await;
+        let account_runtime = self.execution_account_runtime();
         let hooks_config = build_hooks_config(
             config.as_ref(),
-            self.services.plugins_manager.as_ref(),
+            account_runtime.services.plugins_manager.as_ref(),
             environments.single_local_environment(),
         )
         .await;
@@ -1800,7 +1801,8 @@ impl Session {
         if Arc::ptr_eq(
             &state.session_configuration.original_config_do_not_use,
             &config,
-        ) {
+        ) && Arc::ptr_eq(&self.execution_account_runtime(), &account_runtime)
+        {
             let hooks = self.hooks().reconfigured(hooks_config);
             self.services.hooks.store(Arc::new(hooks));
         }
@@ -1919,19 +1921,22 @@ impl Session {
             config
         };
         self.services.skills_service.clear_cache();
-        self.services.plugins_manager.clear_cache();
+        self.execution_account_runtime()
+            .services
+            .plugins_manager
+            .clear_cache();
         self.refresh_runtime_config(next_config).await;
     }
 
     /// Record a terminal CodexErr before the app-server completion notification is reduced.
     pub(crate) fn track_turn_codex_error(&self, turn_context: &TurnContext, error: &CodexErr) {
-        self.services
-            .analytics_events_client
-            .track_turn_codex_error(TurnCodexErrorFact::from_codex_err(
+        turn_context.analytics_events_client.track_turn_codex_error(
+            TurnCodexErrorFact::from_codex_err(
                 self.thread_id.to_string(),
                 turn_context.sub_id.clone(),
                 error,
-            ));
+            ),
+        );
     }
 
     /// Persist the event to rollout and send it to clients.
@@ -3101,7 +3106,7 @@ impl Session {
                 .record_annotated_items(&items, turn_context.model_info.truncation_policy.into());
         }
         for image in image_preparations {
-            self.services
+            turn_context
                 .analytics_events_client
                 .track_image_preparation(ImagePreparationFact {
                     turn_id: turn_context.sub_id.clone(),

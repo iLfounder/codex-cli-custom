@@ -212,27 +212,24 @@ impl RequestPluginInstallHandler {
                     PluginInstallRequestSource::EndpointRecommendation
                 }
             };
-            session
-                .services
-                .analytics_events_client
-                .track_plugin_install_requested(
-                    build_track_events_context(
-                        turn.model_info.slug.clone(),
-                        session.thread_id.to_string(),
-                        turn.sub_id.clone(),
-                        turn.originator.clone(),
-                    ),
-                    PluginInstallRequested {
-                        suggestion_id: suggestion_id.clone(),
-                        plugins: vec![PluginInstallRequestedPlugin {
-                            plugin_id: plugin.id.clone(),
-                            remote_plugin_id: plugin.remote_plugin_id.clone(),
-                            plugin_name: plugin.name.clone(),
-                            connector_ids: plugin.app_connector_ids.clone(),
-                        }],
-                        source,
-                    },
-                );
+            turn.analytics_events_client.track_plugin_install_requested(
+                build_track_events_context(
+                    turn.model_info.slug.clone(),
+                    session.thread_id.to_string(),
+                    turn.sub_id.clone(),
+                    turn.originator.clone(),
+                ),
+                PluginInstallRequested {
+                    suggestion_id: suggestion_id.clone(),
+                    plugins: vec![PluginInstallRequestedPlugin {
+                        plugin_id: plugin.id.clone(),
+                        remote_plugin_id: plugin.remote_plugin_id.clone(),
+                        plugin_name: plugin.name.clone(),
+                        connector_ids: plugin.app_connector_ids.clone(),
+                    }],
+                    source,
+                },
+            );
         }
 
         let request_id = RequestId::String(suggestion_id.into());

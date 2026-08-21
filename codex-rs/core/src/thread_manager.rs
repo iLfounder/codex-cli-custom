@@ -850,19 +850,21 @@ impl ThreadManager {
         let target = self
             .state
             .execution_account_resolver
-            .resolve(target_binding)
+            .resolve_for_transition(target_binding)
             .await
             .map_err(|_| {
                 crate::execution_account::ExecutionAccountSwitchError::TargetUnavailable
             })?;
-        let services = self.execution_account_services(&target);
+        let services = self.execution_account_services(target.execution_account());
         let thread = self
             .get_thread(thread_id)
             .await
             .map_err(|_| crate::execution_account::ExecutionAccountSwitchError::StaleGeneration)?;
-        thread
-            .switch_execution_account(expected, target, services)
-            .await
+        let result = thread
+            .switch_execution_account(expected, Arc::clone(target.execution_account()), services)
+            .await;
+        drop(target);
+        result
     }
 
     pub fn clear_all_account_plugin_caches(&self) {

@@ -716,23 +716,29 @@ impl Session {
                     .into_iter()
                     .map(|key| (key, &policy_fingerprint))
                     .collect();
-                with_cached_approval(&self.services, tool_name, cache_keys, || async {
-                    self.request_command_approval(
-                        ctx.review_context.turn(),
-                        ctx.call_id.clone(),
-                        /*approval_id*/ None,
-                        Some(environment_id.clone()),
-                        command.clone(),
-                        cwd,
-                        reason,
-                        ctx.network_approval_context.clone(),
-                        proposed_execpolicy_amendment.clone(),
-                        additional_permissions.clone(),
-                        /*available_decisions*/ None,
-                        /*plugin_attribution_override*/ None,
-                    )
-                    .await
-                })
+                with_cached_approval(
+                    &self.services,
+                    &ctx.review_context.turn().session_telemetry,
+                    tool_name,
+                    cache_keys,
+                    || async {
+                        self.request_command_approval(
+                            ctx.review_context.turn(),
+                            ctx.call_id.clone(),
+                            /*approval_id*/ None,
+                            Some(environment_id.clone()),
+                            command.clone(),
+                            cwd,
+                            reason,
+                            ctx.network_approval_context.clone(),
+                            proposed_execpolicy_amendment.clone(),
+                            additional_permissions.clone(),
+                            /*available_decisions*/ None,
+                            /*plugin_attribution_override*/ None,
+                        )
+                        .await
+                    },
+                )
                 .await
             }
             #[cfg(unix)]
@@ -785,6 +791,7 @@ impl Session {
                 }
                 with_cached_approval(
                     &self.services,
+                    &ctx.review_context.turn().session_telemetry,
                     "apply_patch",
                     action.cache_keys(),
                     || async {

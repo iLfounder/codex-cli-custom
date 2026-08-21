@@ -79,9 +79,53 @@ impl std::fmt::Debug for ExecutionAccountContext {
 pub type ExecutionAccountResolverFuture<'a> =
     Pin<Box<dyn Future<Output = CodexResult<Arc<ExecutionAccountContext>>> + Send + 'a>>;
 
+/// Resolved execution resources whose readiness remains valid for an account transition.
+///
+/// Host-managed resolvers can attach an opaque lease that prevents the target slot from becoming
+/// unavailable while the thread prepares and durably commits its new account binding.
+pub struct ResolvedExecutionAccountTransition {
+    execution_account: Arc<ExecutionAccountContext>,
+    _readiness_lease: Option<Box<dyn Send + 'static>>,
+}
+
+impl ResolvedExecutionAccountTransition {
+    pub fn new(execution_account: Arc<ExecutionAccountContext>) -> Self {
+        Self {
+            execution_account,
+            _readiness_lease: None,
+        }
+    }
+
+    pub fn with_readiness_lease(
+        execution_account: Arc<ExecutionAccountContext>,
+        readiness_lease: impl Send + 'static,
+    ) -> Self {
+        Self {
+            execution_account,
+            _readiness_lease: Some(Box::new(readiness_lease)),
+        }
+    }
+
+    pub fn execution_account(&self) -> &Arc<ExecutionAccountContext> {
+        &self.execution_account
+    }
+}
+
+/// Future returned by [`ExecutionAccountResolver::resolve_for_transition`].
+pub type ExecutionAccountTransitionResolverFuture<'a> =
+    Pin<Box<dyn Future<Output = CodexResult<ResolvedExecutionAccountTransition>> + Send + 'a>>;
+
 /// Resolves host-managed account slots into immutable execution resources.
 pub trait ExecutionAccountResolver: Send + Sync {
     fn resolve(&self, binding: ExecutionAccountBinding) -> ExecutionAccountResolverFuture<'_>;
+
+    fn resolve_for_transition(
+        &self,
+        binding: ExecutionAccountBinding,
+    ) -> ExecutionAccountTransitionResolverFuture<'_> {
+        let resolved = self.resolve(binding);
+        Box::pin(async move { resolved.await.map(ResolvedExecutionAccountTransition::new) })
+    }
 }
 
 pub(crate) struct DefaultExecutionAccountResolver {

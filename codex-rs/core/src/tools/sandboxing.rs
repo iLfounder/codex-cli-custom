@@ -14,6 +14,7 @@ use crate::tools::hook_names::HookToolName;
 use crate::tools::network_approval::NetworkApprovalSpec;
 use codex_file_system::FileSystemSandboxContext;
 use codex_network_proxy::NetworkProxy;
+use codex_otel::SessionTelemetry;
 use codex_protocol::approvals::ExecPolicyAmendment;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::error::CodexErr;
@@ -69,6 +70,7 @@ impl ApprovalStore {
 ///   so future requests touching any subset can also skip prompting.
 pub(crate) async fn with_cached_approval<K, F, Fut>(
     services: &SessionServices,
+    session_telemetry: &SessionTelemetry,
     // Name of the tool, used for metrics collection.
     tool_name: &str,
     keys: Vec<K>,
@@ -96,7 +98,7 @@ where
 
     let decision = fetch().await;
 
-    services.session_telemetry.counter(
+    session_telemetry.counter(
         "codex.approval.requested",
         /*inc*/ 1,
         &[

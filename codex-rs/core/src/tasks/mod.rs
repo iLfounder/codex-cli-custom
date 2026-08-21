@@ -665,11 +665,11 @@ impl Session {
                 None => false,
             };
             emit_turn_network_proxy_metric(
-                &self.services.session_telemetry,
+                &turn_context.session_telemetry,
                 network_proxy_active,
                 tmp_mem,
             );
-            self.services.session_telemetry.histogram(
+            turn_context.session_telemetry.histogram(
                 TURN_TOOL_CALL_METRIC,
                 i64::try_from(turn_tool_calls).unwrap_or(i64::MAX),
                 &[tmp_mem],
@@ -725,51 +725,51 @@ impl Session {
                 "codex.turn.token_usage.total_tokens",
                 turn_token_usage.total_tokens,
             );
-            self.services
+            turn_context
                 .analytics_events_client
                 .track_turn_token_usage(TurnTokenUsageFact {
                     turn_id: turn_context.sub_id.clone(),
                     thread_id: self.thread_id.to_string(),
                     token_usage: turn_token_usage.clone(),
                 });
-            self.services.session_telemetry.histogram(
+            turn_context.session_telemetry.histogram(
                 TURN_TOKEN_USAGE_METRIC,
                 turn_token_usage.total_tokens,
                 &[("token_type", "total"), tmp_mem],
             );
-            self.services.session_telemetry.histogram(
+            turn_context.session_telemetry.histogram(
                 TURN_TOKEN_USAGE_METRIC,
                 turn_token_usage.input_tokens,
                 &[("token_type", "input"), tmp_mem],
             );
-            self.services.session_telemetry.histogram(
+            turn_context.session_telemetry.histogram(
                 TURN_TOKEN_USAGE_METRIC,
                 turn_token_usage.cached_input(),
                 &[("token_type", "cached_input"), tmp_mem],
             );
-            self.services.session_telemetry.histogram(
+            turn_context.session_telemetry.histogram(
                 TURN_TOKEN_USAGE_METRIC,
                 turn_token_usage.cache_write_input_tokens,
                 &[("token_type", "cache_write_input"), tmp_mem],
             );
-            self.services.session_telemetry.histogram(
+            turn_context.session_telemetry.histogram(
                 TURN_TOKEN_USAGE_METRIC,
                 turn_token_usage.output_tokens,
                 &[("token_type", "output"), tmp_mem],
             );
-            self.services.session_telemetry.histogram(
+            turn_context.session_telemetry.histogram(
                 TURN_TOKEN_USAGE_METRIC,
                 turn_token_usage.reasoning_output_tokens,
                 &[("token_type", "reasoning_output"), tmp_mem],
             );
         }
         emit_turn_memory_metric(
-            &self.services.session_telemetry,
+            &turn_context.session_telemetry,
             turn_context.config.features.enabled(Feature::MemoryTool),
             turn_context.config.memories.use_memories,
             turn_had_memory_citation,
         );
-        self.services.session_telemetry.counter(
+        turn_context.session_telemetry.counter(
             TURN_UNIFIED_EXEC_RUNNING_PROCESSES_METRIC,
             i64::try_from(self.list_background_terminals().await.len()).unwrap_or(i64::MAX),
             &[],
@@ -779,7 +779,7 @@ impl Session {
             .turn_timing_state
             .complete_profile_and_duration_ms()
             .await;
-        self.services
+        turn_context
             .analytics_events_client
             .track_turn_profile(TurnProfileFact {
                 turn_id: turn_context.sub_id.clone(),
@@ -956,7 +956,7 @@ impl Session {
             .turn_timing_state
             .complete_profile_and_duration_ms()
             .await;
-        self.services
+        task.turn_context
             .analytics_events_client
             .track_turn_profile(TurnProfileFact {
                 turn_id: task.turn_context.sub_id.clone(),
