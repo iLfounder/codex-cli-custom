@@ -41,6 +41,7 @@ fn suppresses_builtin_and_builtin_alias_short_names() {
     let mut commands = vec![
         resolved("alpha", "review"),
         resolved("alpha", "clean"),
+        resolved("alpha", "goooooal"),
         resolved("alpha", "inspect"),
     ];
 
@@ -51,8 +52,59 @@ fn suppresses_builtin_and_builtin_alias_short_names() {
             .iter()
             .map(|command| command.api.short_name.as_deref())
             .collect::<Vec<_>>(),
-        vec![None, None, Some("/inspect")]
+        vec![None, None, None, Some("/inspect")]
     );
+}
+
+#[test]
+fn command_id_changes_with_resolved_target() {
+    let original = resolved("alpha", "deploy");
+    let changed = resolved_command(
+        "alpha",
+        "alpha",
+        PluginCommandContribution {
+            id: "deploy".to_string(),
+            name: "deploy".to_string(),
+            description: String::new(),
+            target: PluginCommandTarget::Prompt {
+                prompt: "changed".to_string(),
+            },
+        },
+        true,
+        None,
+    );
+
+    assert_ne!(original.api.id, changed.api.id);
+}
+
+#[test]
+fn command_id_normalizes_mcp_argument_object_order() {
+    let contribution = |arguments| PluginCommandContribution {
+        id: "deploy".to_string(),
+        name: "deploy".to_string(),
+        description: String::new(),
+        target: PluginCommandTarget::McpTool {
+            server: "fixture".to_string(),
+            tool: "deploy".to_string(),
+            arguments: Some(arguments),
+        },
+    };
+    let first = resolved_command(
+        "alpha",
+        "alpha",
+        contribution(serde_json::from_str(r#"{"b":2,"a":1}"#).expect("arguments")),
+        true,
+        None,
+    );
+    let reordered = resolved_command(
+        "alpha",
+        "alpha",
+        contribution(serde_json::from_str(r#"{"a":1,"b":2}"#).expect("arguments")),
+        true,
+        None,
+    );
+
+    assert_eq!(first.api.id, reordered.api.id);
 }
 
 #[test]

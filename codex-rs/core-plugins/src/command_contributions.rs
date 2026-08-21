@@ -8,12 +8,13 @@ use anyhow::Result;
 use anyhow::bail;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 
 const MAX_COMMANDS_PER_PLUGIN: usize = 128;
 const MAX_ID_LEN: usize = 64;
 const MAX_DESCRIPTION_LEN: usize = 512;
-const MAX_PROMPT_LEN: usize = 16 * 1024;
+const MAX_PROMPT_BYTES: usize = 8 * 1024;
 const MAX_MCP_ARGUMENTS_LEN: usize = 64 * 1024;
 const MAX_FIXED_ARGUMENTS: usize = 64;
 const MAX_FIXED_ARGUMENT_LEN: usize = 1024;
@@ -26,7 +27,7 @@ pub struct PluginCommandContribution {
     pub target: PluginCommandTarget,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum PluginCommandTarget {
     Prompt {
         prompt: String,
@@ -44,7 +45,7 @@ pub enum PluginCommandTarget {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum PluginCommandAction {
     GoalGet,
     GoalSet {
@@ -55,7 +56,7 @@ pub enum PluginCommandAction {
     GoalClear,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PluginGoalStatus {
     Active,
@@ -196,8 +197,8 @@ fn normalize_command(plugin_root: &Path, command: RawCommand) -> Result<PluginCo
 
     let target = match command.target {
         RawTarget::Prompt { prompt } => {
-            if prompt.is_empty() || prompt.chars().count() > MAX_PROMPT_LEN {
-                bail!("command prompt must contain 1..={MAX_PROMPT_LEN} characters");
+            if prompt.is_empty() || prompt.len() > MAX_PROMPT_BYTES {
+                bail!("command prompt must contain 1..={MAX_PROMPT_BYTES} UTF-8 bytes");
             }
             PluginCommandTarget::Prompt { prompt }
         }

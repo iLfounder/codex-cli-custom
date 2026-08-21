@@ -27,6 +27,7 @@ use codex_core_plugins::PluginCommandTarget;
 use codex_core_plugins::PluginGoalStatus;
 use codex_core_plugins::load_plugin_command_contributions;
 use codex_protocol::ThreadId;
+use serde_json::Value;
 use sha2::Digest;
 use sha2::Sha256;
 
@@ -406,9 +407,18 @@ fn resolved_command(
     deny_reason: Option<String>,
 ) -> ResolvedCommand {
     let mut hasher = Sha256::new();
-    hasher.update(plugin_id.as_bytes());
-    hasher.update([0]);
-    hasher.update(contribution.id.as_bytes());
+    let identity = serde_json::to_value((
+        plugin_id,
+        namespace,
+        &contribution.id,
+        &contribution.name,
+        &contribution.target,
+    ))
+    .expect("plugin command identity must serialize");
+    hasher.update(
+        serde_json::to_vec(&canonicalize_json(identity))
+            .expect("plugin command identity must encode"),
+    );
     let digest = hasher.finalize();
     let id = format!("pc_{}", encode_hex(&digest[..16]));
     let target = match &contribution.target {
@@ -466,9 +476,39 @@ fn assign_resolution_names(commands: &mut [ResolvedCommand]) {
             .canonical_name
             .rsplit_once(':')
             .map_or(command.api.canonical_name.as_str(), |(_, name)| name);
-        if short_counts[name] == 1 && !RESERVED_BUILTIN_COMMAND_NAMES.contains(&name) {
+        if short_counts[name] == 1 && !is_reserved_builtin_command_name(name) {
             command.api.short_name = Some(format!("/{name}"));
         }
+    }
+}
+
+fn is_reserved_builtin_command_name(name: &str) -> bool {
+    RESERVED_BUILTIN_COMMAND_NAMES.contains(&name)
+        || name
+            .strip_prefix('g')
+            .and_then(|name| name.strip_suffix("al"))
+            .is_some_and(|repeated_os| {
+                !repeated_os.is_empty() && repeated_os.bytes().all(|byte| byte == b'o')
+            })
+}
+
+fn canonicalize_json(value: Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(values.into_iter().map(canonicalize_json).collect()),
+        Value::Object(values) => {
+            let mut values = values.into_iter().collect::<Vec<_>>();
+            values.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            Value::Object(
+                values
+                    .into_iter()
+                    .map(|(key, value)| (key, canonicalize_json(value)))
+                    .collect(),
+            )
+        }
+        Value::Null => Value::Null,
+        Value::Bool(value) => Value::Bool(value),
+        Value::Number(value) => Value::Number(value),
+        Value::String(value) => Value::String(value),
     }
 }
 

@@ -10,7 +10,10 @@ impl ChatWidget {
     }
 
     pub(crate) fn submit_plugin_prompt(&mut self, prompt: String) {
-        self.submit_user_message(prompt.into());
+        let _ = self.submit_user_message_with_shell_escape_policy(
+            prompt.into(),
+            ShellEscapePolicy::Disallow,
+        );
     }
 
     pub(crate) fn add_plugin_command_result(
@@ -22,3 +25,7 @@ impl ChatWidget {
         self.add_to_history(PluginCommandResultHistoryCell::new(title, body, is_error));
     }
 }
+
+#[cfg(test)]
+#[path = "plugin_commands_tests.rs"]
+mod tests;

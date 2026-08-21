@@ -72,3 +72,48 @@ fn rejects_executable_escape() {
         "executable path must be package-relative"
     );
 }
+
+#[test]
+fn bounds_prompt_by_utf8_bytes() {
+    let root = tempfile::tempdir().expect("tempdir");
+    fs::create_dir(root.path().join(".codex-plugin")).expect("manifest directory");
+    let prompt_at_limit = "é".repeat(MAX_PROMPT_BYTES / 2);
+    fs::write(
+        root.path().join(".codex-plugin/plugin.json"),
+        serde_json::json!({
+            "contributions": {"commands": [{
+                "id": "bounded",
+                "name": "bounded",
+                "target": {"type": "prompt", "prompt": prompt_at_limit.clone()},
+            }]},
+        })
+        .to_string(),
+    )
+    .expect("manifest");
+    assert_eq!(
+        load_plugin_command_contributions(root.path())
+            .expect("prompt at byte limit")
+            .len(),
+        1
+    );
+
+    let prompt_over_limit = format!("{prompt_at_limit}a");
+    fs::write(
+        root.path().join(".codex-plugin/plugin.json"),
+        serde_json::json!({
+            "contributions": {"commands": [{
+                "id": "oversized",
+                "name": "oversized",
+                "target": {"type": "prompt", "prompt": prompt_over_limit},
+            }]},
+        })
+        .to_string(),
+    )
+    .expect("manifest");
+
+    let error = load_plugin_command_contributions(root.path()).expect_err("oversized prompt");
+    assert_eq!(
+        error.to_string(),
+        format!("command prompt must contain 1..={MAX_PROMPT_BYTES} UTF-8 bytes")
+    );
+}

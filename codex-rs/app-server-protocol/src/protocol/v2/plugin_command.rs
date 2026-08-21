@@ -147,7 +147,9 @@ pub enum ThreadPresentation {
     Progress {
         id: String,
         label: String,
+        #[ts(type = "number")]
         current: u64,
+        #[ts(type = "number | null")]
         total: Option<u64>,
     },
 }
