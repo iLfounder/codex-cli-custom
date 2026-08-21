@@ -9,7 +9,9 @@ use codex_app_server_protocol::AccountSlotLogoutParams;
 use codex_app_server_protocol::AccountSlotLogoutResponse;
 use codex_app_server_protocol::AccountSlotSnapshot;
 use codex_app_server_protocol::JSONRPCErrorError;
+use tokio::sync::Mutex;
 use tokio::sync::OnceCell;
+use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
 
 use super::AccountRegistry;
@@ -49,11 +51,12 @@ pub(crate) struct LoggedOutSlot {
     pub(crate) runtime: Arc<AccountRuntimeBundle>,
 }
 
-pub(super) struct ReservedSlotLogout {
+pub(crate) struct ReservedSlotLogout {
     account_slot_id: String,
     attempt_generation: u64,
     operation_id: String,
     slot: AccountSlotRecord,
+    _binding_transition: OwnedMutexGuard<()>,
 }
 
 impl AccountRegistry {
@@ -228,6 +231,7 @@ impl AccountRegistry {
                         error_code: None,
                     },
                     runtime: Arc::new(OnceCell::new()),
+                    binding_transition: Arc::new(Mutex::new(())),
                     active_login_operation_id: None,
                     active_logout_operation_id: None,
                     completed_login_operation_id: None,
@@ -309,12 +313,19 @@ impl AccountRegistry {
         self.changed_notification(&changed_slot_id).await.map(Some)
     }
 
+    #[cfg(test)]
     pub(crate) async fn logout_secondary(
         &self,
         params: AccountSlotLogoutParams,
     ) -> Result<LoggedOutSlot, JSONRPCErrorError> {
-        self.reconcile().await?;
         let reservation = self.reserve_secondary_logout(params).await?;
+        self.logout_reserved_secondary(reservation).await
+    }
+
+    pub(crate) async fn logout_reserved_secondary(
+        &self,
+        reservation: ReservedSlotLogout,
+    ) -> Result<LoggedOutSlot, JSONRPCErrorError> {
         let runtime = self.runtime(&reservation.slot).await;
         if runtime.auth_manager.logout_with_revoke().await.is_err() {
             self.clear_logout_reservation(&reservation).await?;
@@ -334,10 +345,30 @@ impl AccountRegistry {
         })
     }
 
-    pub(super) async fn reserve_secondary_logout(
+    pub(crate) async fn reserve_secondary_logout(
         &self,
         params: AccountSlotLogoutParams,
     ) -> Result<ReservedSlotLogout, JSONRPCErrorError> {
+        self.reconcile().await?;
+        let binding_transition = {
+            let state = self
+                .state
+                .read()
+                .map_err(|_| internal_error("account slot registry is unavailable"))?;
+            let slot = state
+                .slots
+                .iter()
+                .find(|slot| slot.manifest.account_slot_id == params.account_slot_id)
+                .ok_or_else(|| invalid_request("account slot is unavailable"))?;
+            if slot.active_logout_operation_id.is_some() {
+                return Err(structured_invalid_request(
+                    ERROR_LOGOUT_BUSY,
+                    "account slot logout is active",
+                ));
+            }
+            Arc::clone(&slot.binding_transition)
+        };
+        let binding_transition = binding_transition.lock_owned().await;
         let _mutation = self.mutation_lock.lock().await;
         let (revision, manifest_error) = {
             let state = self
@@ -398,6 +429,7 @@ impl AccountRegistry {
             attempt_generation: slot.manifest.attempt_generation,
             operation_id,
             slot: slot.clone(),
+            _binding_transition: binding_transition,
         })
     }
 
@@ -443,7 +475,7 @@ impl AccountRegistry {
         self.changed_notification(&slot_id).await
     }
 
-    pub(super) async fn clear_logout_reservation(
+    pub(crate) async fn clear_logout_reservation(
         &self,
         reservation: &ReservedSlotLogout,
     ) -> Result<(), JSONRPCErrorError> {

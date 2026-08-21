@@ -30,11 +30,13 @@ use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::Mutex;
 use tokio::sync::OnceCell;
+use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
 
 use crate::auth_mode::auth_mode_to_api;
 use crate::error_code::internal_error;
 use crate::error_code::invalid_params;
+use crate::error_code::invalid_request;
 
 const MANIFEST_FILE: &str = "account-slots.toml";
 const PRIVATE_HOMES_DIR: &str = "accounts";
@@ -246,6 +248,7 @@ fn valid_manifest_token(value: &str) -> bool {
 struct AccountSlotRecord {
     manifest: AccountSlotManifest,
     runtime: Arc<OnceCell<Arc<AccountRuntimeBundle>>>,
+    binding_transition: Arc<Mutex<()>>,
     active_login_operation_id: Option<String>,
     active_logout_operation_id: Option<String>,
     completed_login_operation_id: Option<String>,
@@ -309,6 +312,7 @@ impl AccountRegistry {
                 AccountSlotRecord {
                     manifest,
                     runtime,
+                    binding_transition: Arc::new(Mutex::new(())),
                     active_login_operation_id: None,
                     active_logout_operation_id: None,
                     completed_login_operation_id: None,
@@ -389,6 +393,27 @@ impl AccountRegistry {
             .map_err(|_| internal_error("account slot registry is unavailable"))?
             .manifest_error;
         Ok(self.capability(manifest_error))
+    }
+
+    pub(crate) async fn lock_slot_binding_transition(
+        &self,
+        account_slot_id: &str,
+    ) -> Result<OwnedMutexGuard<()>, JSONRPCErrorError> {
+        let binding_transition = {
+            let state = self
+                .state
+                .read()
+                .map_err(|_| internal_error("account slot registry is unavailable"))?;
+            Arc::clone(
+                &state
+                    .slots
+                    .iter()
+                    .find(|slot| slot.manifest.account_slot_id == account_slot_id)
+                    .ok_or_else(|| invalid_request("account slot is unavailable"))?
+                    .binding_transition,
+            )
+        };
+        Ok(binding_transition.lock_owned().await)
     }
 
     async fn snapshot(
@@ -519,6 +544,29 @@ impl ExecutionAccountResolver for AccountRegistry {
                     error.message
                 ))
             })?;
+            let slot = {
+                let state = self.state.read().map_err(|_| {
+                    CodexErr::Fatal("account slot registry is unavailable".to_string())
+                })?;
+                state
+                    .slots
+                    .iter()
+                    .find(|slot| slot.manifest.account_slot_id == binding.slot_id)
+                    .cloned()
+            };
+            let slot = slot.ok_or_else(|| {
+                CodexErr::InvalidRequest(format!(
+                    "execution account slot `{}` is unavailable",
+                    binding.slot_id
+                ))
+            })?;
+            if slot.active_logout_operation_id.is_some() {
+                return Err(CodexErr::InvalidRequest(format!(
+                    "execution account slot `{}` is being logged out",
+                    binding.slot_id
+                )));
+            }
+            let _binding_transition = Arc::clone(&slot.binding_transition).lock_owned().await;
             let (slot, manifest_error) = {
                 let state = self.state.read().map_err(|_| {
                     CodexErr::Fatal("account slot registry is unavailable".to_string())
@@ -552,6 +600,12 @@ impl ExecutionAccountResolver for AccountRegistry {
             if !slot.manifest.is_default && slot.manifest.status != ManifestSlotStatus::Ready {
                 return Err(CodexErr::InvalidRequest(format!(
                     "execution account slot `{}` is not ready",
+                    binding.slot_id
+                )));
+            }
+            if slot.active_logout_operation_id.is_some() {
+                return Err(CodexErr::InvalidRequest(format!(
+                    "execution account slot `{}` is being logged out",
                     binding.slot_id
                 )));
             }

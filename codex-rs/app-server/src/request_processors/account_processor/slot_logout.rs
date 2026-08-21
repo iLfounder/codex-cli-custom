@@ -18,18 +18,39 @@ impl AccountRequestProcessor {
                 "default account logout must use account/logout",
             ));
         }
-        if self
+        let account_slot_id = params.account_slot_id.clone();
+        let reservation = self
+            .account_registry
+            .reserve_secondary_logout(params)
+            .await?;
+        let slot_in_use = match self
             .session_runtime
-            .account_slot_in_use(&params.account_slot_id)
-            .await?
+            .account_slot_in_use(&account_slot_id)
+            .await
         {
+            Ok(slot_in_use) => slot_in_use,
+            Err(error) => {
+                let _ = self
+                    .account_registry
+                    .clear_logout_reservation(&reservation)
+                    .await;
+                return Err(error);
+            }
+        };
+        if slot_in_use {
+            self.account_registry
+                .clear_logout_reservation(&reservation)
+                .await?;
             return Err(structured_invalid_request(
                 ERROR_SLOT_BOUND,
                 "account slot is bound to a thread",
             ));
         }
 
-        let logged_out = self.account_registry.logout_secondary(params).await?;
+        let logged_out = self
+            .account_registry
+            .logout_reserved_secondary(reservation)
+            .await?;
         self.thread_manager.clear_account_plugin_cache(
             &logged_out.response.slot.account_slot_id,
             &logged_out.runtime.auth_manager,

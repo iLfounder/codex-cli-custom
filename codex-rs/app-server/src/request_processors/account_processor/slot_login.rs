@@ -137,21 +137,34 @@ impl AccountRequestProcessor {
             .await
             .map_err(|_| internal_error("account slot login coordinator is unavailable"))?;
         let (requested_slot, kind) = slot_request_identity(&params);
-        if let Some(slot_id) = requested_slot.as_deref() {
+        let binding_transition = if let Some(slot_id) = requested_slot.as_deref() {
             self.await_previous_slot_login(slot_id).await?;
+            let binding_transition = self
+                .account_registry
+                .lock_slot_binding_transition(slot_id)
+                .await?;
             if self.session_runtime.account_slot_in_use(slot_id).await? {
                 return Err(structured_invalid_request(
                     ERROR_SLOT_BOUND,
                     "account slot is bound to a thread",
                 ));
             }
-        }
+            Some(binding_transition)
+        } else {
+            None
+        };
+        let starts_async_login = matches!(
+            &params,
+            AccountSlotLoginStartParams::Chatgpt { .. }
+                | AccountSlotLoginStartParams::ChatgptDeviceCode { .. }
+        );
 
         let operation_id = Uuid::new_v4().to_string();
         let prepared = self
             .account_registry
             .prepare_slot_login(requested_slot, operation_id)
             .await?;
+        drop(binding_transition);
         if let Err(error) = self
             .session_runtime
             .begin_operation(operation(
@@ -166,7 +179,8 @@ impl AccountRequestProcessor {
                 .await;
             return Err(error);
         }
-        match params {
+        let failure_prepared = prepared.clone();
+        let result = match params {
             AccountSlotLoginStartParams::ApiKey { api_key, .. } => {
                 let result = login_with_api_key(
                     &prepared.auth_home,
@@ -294,7 +308,12 @@ impl AccountRequestProcessor {
                 });
                 self.slot_login_response(&prepared, kind, None).await
             }
+        };
+        if starts_async_login && result.is_err() {
+            self.finish_slot_failure(&failure_prepared, ERROR_LOGIN_FAILED)
+                .await;
         }
+        result
     }
 
     async fn finish_slot_success(
@@ -318,44 +337,55 @@ impl AccountRequestProcessor {
                 .list_models(RefreshStrategy::Online, self.config.http_client_factory()),
         )
         .await;
-        if let Some(notification) = self
+        let notification = match self
             .account_registry
             .finish_slot_login(prepared, ManifestSlotStatus::Ready, None)
-            .await?
+            .await
         {
-            self.thread_manager.clear_account_plugin_cache(
-                &prepared.account_slot_id,
-                &prepared.runtime.auth_manager,
-            );
-            self.outgoing
-                .send_server_notification(ServerNotification::AccountSlotChanged(notification))
-                .await;
-            self.publish_slot_operation(prepared, SessionRuntimeOperationStatus::Ready, None)
-                .await;
-            return Ok(true);
-        }
-        Ok(false)
+            Ok(Some(notification)) => notification,
+            Ok(None) => {
+                self.finish_slot_failure(prepared, ERROR_LOGIN_CANCELED)
+                    .await;
+                return Ok(false);
+            }
+            Err(error) => {
+                self.finish_slot_failure(prepared, ERROR_LOGIN_FAILED).await;
+                return Err(error);
+            }
+        };
+        self.thread_manager
+            .clear_account_plugin_cache(&prepared.account_slot_id, &prepared.runtime.auth_manager);
+        self.outgoing
+            .send_server_notification(ServerNotification::AccountSlotChanged(notification))
+            .await;
+        self.publish_slot_operation(prepared, SessionRuntimeOperationStatus::Ready, None)
+            .await;
+        Ok(true)
     }
 
     async fn finish_slot_failure(&self, prepared: &PreparedSlotLogin, error_code: &'static str) {
-        if let Ok(Some(notification)) = self
+        let pending_failure = self
             .account_registry
             .finish_slot_login(prepared, ManifestSlotStatus::Failed, Some(error_code))
-            .await
-        {
+            .await;
+        let notification = match pending_failure {
+            Ok(Some(notification)) => Some(notification),
+            Ok(None) | Err(_) => None,
+        };
+        if let Some(notification) = notification {
             self.outgoing
                 .send_server_notification(ServerNotification::AccountSlotChanged(notification))
                 .await;
-            self.publish_slot_operation(
-                prepared,
-                SessionRuntimeOperationStatus::Failed,
-                Some(SessionRuntimeOperationError {
-                    code: error_code.to_string(),
-                    message: "account slot login failed".to_string(),
-                }),
-            )
-            .await;
         }
+        self.publish_slot_operation(
+            prepared,
+            SessionRuntimeOperationStatus::Failed,
+            Some(SessionRuntimeOperationError {
+                code: error_code.to_string(),
+                message: "account slot login failed".to_string(),
+            }),
+        )
+        .await;
     }
 
     async fn fail_external_slot(&self, prepared: &PreparedSlotLogin) {

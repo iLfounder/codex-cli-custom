@@ -442,3 +442,66 @@ async fn logout_reservation_is_exact_and_allows_other_slot_mutation() {
         .await
         .expect("clear second reservation");
 }
+
+#[tokio::test]
+async fn logout_reservation_blocks_only_the_target_slot_resolver() {
+    let process_home = tempdir().expect("temp process home");
+    let mut slots = manifest(process_home.path(), 7);
+    slots.slots[1].status = ManifestSlotStatus::Ready;
+    slots
+        .persist(&process_home.path().join(MANIFEST_FILE))
+        .expect("persist manifest");
+    let registry = registry_for_home(process_home.path()).await;
+    let slot_auth = AuthManager::from_auth_for_testing_with_home(
+        CodexAuth::from_api_key("slot-key"),
+        slots.slots[1].auth_home.clone(),
+    );
+    let slot_models = codex_core::build_models_manager(registry.config.as_ref(), slot_auth.clone());
+    let runtime = Arc::new(AccountRuntimeBundle {
+        auth_manager: slot_auth,
+        models_manager: slot_models,
+    });
+    let installed = registry
+        .state
+        .read()
+        .expect("registry state")
+        .slots
+        .iter()
+        .find(|slot| slot.manifest.account_slot_id == SECOND_SLOT_ID)
+        .expect("secondary slot")
+        .runtime
+        .set(runtime);
+    assert!(installed.is_ok());
+    let reservation = registry
+        .reserve_secondary_logout(AccountSlotLogoutParams {
+            account_slot_id: SECOND_SLOT_ID.to_string(),
+            expected_registry_revision: 7,
+            expected_attempt_generation: 2,
+        })
+        .await
+        .expect("reserve logout");
+
+    assert!(
+        registry
+            .resolve(ExecutionAccountBinding {
+                slot_id: SECOND_SLOT_ID.to_string(),
+                generation: 1,
+            })
+            .await
+            .is_err()
+    );
+    assert!(
+        registry
+            .resolve(ExecutionAccountBinding {
+                slot_id: DEFAULT_SLOT_ID.to_string(),
+                generation: 1,
+            })
+            .await
+            .is_ok()
+    );
+
+    registry
+        .clear_logout_reservation(&reservation)
+        .await
+        .expect("clear reservation");
+}
