@@ -54,11 +54,11 @@ use codex_app_server_protocol::MemoryResetResponse;
 use codex_app_server_protocol::Model as ApiModel;
 use codex_app_server_protocol::ModelListParams;
 use codex_app_server_protocol::ModelListResponse;
+use codex_app_server_protocol::NewThreadModelDefaults;
 use codex_app_server_protocol::PluginCommandInvokeParams;
 use codex_app_server_protocol::PluginCommandInvokeResponse;
 use codex_app_server_protocol::PluginCommandListParams;
 use codex_app_server_protocol::PluginCommandListResponse;
-use codex_app_server_protocol::NewThreadModelDefaults;
 use codex_app_server_protocol::RateLimitSnapshot;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ReviewDelivery;
@@ -1571,7 +1571,10 @@ pub(crate) async fn list_plugin_commands(
     for _ in 0..PLUGIN_COMMAND_MAX_PAGES {
         let response: PluginCommandListResponse = request_handle
             .request_typed(ClientRequest::PluginCommandList {
-                request_id: RequestId::String(format!("tui-plugin-command-list-{}", Uuid::new_v4())),
+                request_id: RequestId::String(format!(
+                    "tui-plugin-command-list-{}",
+                    Uuid::new_v4()
+                )),
                 params: PluginCommandListParams {
                     thread_id: thread_id.to_string(),
                     cursor,

@@ -11,7 +11,7 @@ fn bounded(value: &str, max_chars: usize) -> String {
     let mut chars = value.chars();
     let mut result = chars.by_ref().take(max_chars).collect::<String>();
     if chars.next().is_some() {
-        result.push_str("…");
+        result.push('…');
     }
     result
 }
@@ -20,7 +20,7 @@ fn wrapped_lines(value: &str, width: u16) -> Vec<String> {
     let width = usize::from(width.saturating_sub(4)).max(1);
     textwrap::wrap(&bounded(value, MAX_PRESENTATION_CHARS), width)
         .into_iter()
-        .map(|line| line.into_owned())
+        .map(std::borrow::Cow::into_owned)
         .collect()
 }
 
@@ -64,7 +64,7 @@ impl ThreadPresentationHistoryCell {
                 let (label, marker) = match level {
                     ThreadPresentationNoticeLevel::Info => ("Info", "●".cyan()),
                     ThreadPresentationNoticeLevel::Success => ("Success", "●".green()),
-                    ThreadPresentationNoticeLevel::Warning => ("Warning", "▲".yellow()),
+                    ThreadPresentationNoticeLevel::Warning => ("Warning", "▲".magenta()),
                     ThreadPresentationNoticeLevel::Error => ("Error", "■".red()),
                 };
                 wrapped_lines(message, width)
@@ -90,10 +90,8 @@ impl ThreadPresentationHistoryCell {
                 ..
             } => {
                 let label = bounded(label, MAX_TITLE_CHARS);
-                let progress = total.map_or_else(
-                    || current.to_string(),
-                    |total| format!("{current}/{total}"),
-                );
+                let progress =
+                    total.map_or_else(|| current.to_string(), |total| format!("{current}/{total}"));
                 vec![if rich {
                     vec!["◒ ".magenta(), label.bold(), "  ".into(), progress.cyan()].into()
                 } else {

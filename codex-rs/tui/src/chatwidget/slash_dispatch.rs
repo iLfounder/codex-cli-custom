@@ -1029,8 +1029,7 @@ impl ChatWidget {
             self.bottom_pane
                 .plugin_command(name)
                 .map(SlashCommandItem::Plugin)
-        })
-        else {
+        }) else {
             self.add_info_message(
                 format!(
                     r#"Unrecognized command '/{name}'. Type "/" for a list of supported commands."#

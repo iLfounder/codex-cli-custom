@@ -213,6 +213,7 @@ impl ChatWidget {
             | ServerNotification::AccountSlotChanged(_)
             | ServerNotification::SessionRuntimeChanged(_)
             | ServerNotification::SessionRuntimeOperationUpdated(_)
+            | ServerNotification::ThreadPresentationAppended(_)
             | ServerNotification::ThreadStarted(_)
             | ServerNotification::ThreadStatusChanged(_)
             | ServerNotification::ThreadReverted(_)

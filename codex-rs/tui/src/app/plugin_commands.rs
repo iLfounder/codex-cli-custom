@@ -45,7 +45,7 @@ fn project_commands(commands: Vec<PluginCommand>) -> Vec<PluginSlashCommand> {
     let mut short_counts = HashMap::new();
     for command in &commands {
         if let Some(short_name) = &command.short_name {
-            *short_counts.entry(short_name.as_str()).or_insert(0usize) += 1;
+            *short_counts.entry(short_name.clone()).or_insert(0usize) += 1;
         }
     }
 
@@ -57,19 +57,23 @@ fn project_commands(commands: Vec<PluginCommand>) -> Vec<PluginSlashCommand> {
                 name: command.canonical_name,
                 description: bounded(&command.description, 240),
                 available: command.available,
-                deny_reason: command.deny_reason.as_deref().map(|value| bounded(value, 240)),
+                deny_reason: command
+                    .deny_reason
+                    .as_deref()
+                    .map(|value| bounded(value, 240)),
                 canonical: true,
             };
             let short = command.short_name.and_then(|name| {
-                (short_counts.get(name.as_str()) == Some(&1) && !is_builtin_command_name(&name))
-                    .then(|| PluginSlashCommand {
+                (short_counts.get(&name) == Some(&1) && !is_builtin_command_name(&name)).then(
+                    || PluginSlashCommand {
                         id: command.id,
                         name,
                         description: canonical.description.clone(),
                         available: canonical.available,
                         deny_reason: canonical.deny_reason.clone(),
                         canonical: false,
-                    })
+                    },
+                )
             });
             std::iter::once(canonical).chain(short)
         })
@@ -83,10 +87,8 @@ impl App {
             self.chat_widget.set_plugin_commands(Vec::new());
             return;
         };
-        self.plugin_command_state.request_generation = self
-            .plugin_command_state
-            .request_generation
-            .wrapping_add(1);
+        self.plugin_command_state.request_generation =
+            self.plugin_command_state.request_generation.wrapping_add(1);
         let request_generation = self.plugin_command_state.request_generation;
         self.plugin_command_state.thread_id = Some(thread_id);
         self.plugin_command_state.commands.clear();
@@ -221,7 +223,11 @@ impl App {
                 );
             }
             Ok(PluginCommandInvokeResponse::GoalClear { cleared }) => {
-                let body = if cleared { "Goal cleared." } else { "No goal was set." };
+                let body = if cleared {
+                    "Goal cleared."
+                } else {
+                    "No goal was set."
+                };
                 self.chat_widget
                     .add_plugin_command_result(title, body.to_string(), false);
             }
