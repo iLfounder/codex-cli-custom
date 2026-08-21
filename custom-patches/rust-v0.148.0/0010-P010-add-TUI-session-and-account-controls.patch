@@ -1,0 +1,2166 @@
+From d867dc17ae12b0cdb739b2dc19a9f5a471f0d48f Mon Sep 17 00:00:00 2001
+From: Codex CLI Custom <codex-cli-custom@users.noreply.github.com>
+Date: Fri, 21 Aug 2026 10:19:40 +0900
+Subject: [PATCH 10/11] P010: add TUI session and account controls
+
+---
+ codex-rs/tui/src/app.rs                       |  10 +-
+ codex-rs/tui/src/app/account_picker.rs        | 630 ++++++++++++++++++
+ codex-rs/tui/src/app/app_server_events.rs     |  32 +-
+ codex-rs/tui/src/app/background_requests.rs   |   1 +
+ codex-rs/tui/src/app/event_dispatch.rs        |  98 +--
+ codex-rs/tui/src/app/runtime_controls.rs      | 395 +++++++++++
+ codex-rs/tui/src/app/startup.rs               |  12 +-
+ codex-rs/tui/src/app/test_support.rs          |   8 +-
+ codex-rs/tui/src/app/tests.rs                 | 293 +++++++-
+ codex-rs/tui/src/app/thread_routing.rs        |  23 +-
+ codex-rs/tui/src/app_event.rs                 |  47 ++
+ codex-rs/tui/src/app_server_session.rs        | 131 ++++
+ codex-rs/tui/src/bottom_pane/chat_composer.rs |   1 +
+ codex-rs/tui/src/chatwidget.rs                |   5 +
+ codex-rs/tui/src/chatwidget/slash_dispatch.rs |   4 +
+ .../src/chatwidget/tests/slash_commands.rs    |   9 +
+ codex-rs/tui/src/slash_command.rs             |   3 +
+ ...picker_current_default_and_add_denial.snap |  15 +
+ ...hutdown_release_waiting_after_timeout.snap |  11 +
+ 19 files changed, 1652 insertions(+), 76 deletions(-)
+ create mode 100644 codex-rs/tui/src/app/account_picker.rs
+ create mode 100644 codex-rs/tui/src/app/runtime_controls.rs
+ create mode 100644 codex-rs/tui/src/snapshots/codex_tui__app__tests__account_picker_current_default_and_add_denial.snap
+ create mode 100644 codex-rs/tui/src/snapshots/codex_tui__app__tests__shutdown_release_waiting_after_timeout.snap
+
+diff --git a/codex-rs/tui/src/app.rs b/codex-rs/tui/src/app.rs
+index a947f24..9b2ca06 100644
+--- a/codex-rs/tui/src/app.rs
++++ b/codex-rs/tui/src/app.rs
+@@ -203,6 +203,7 @@ use tokio::sync::mpsc::unbounded_channel;
+ use tokio::task::JoinHandle;
+ use toml::Value as TomlValue;
+ use uuid::Uuid;
++pub(crate) mod account_picker;
+ mod agent_message_consolidation;
+ mod agent_navigation;
+ mod agent_picker;
+@@ -223,6 +224,7 @@ mod platform_actions;
+ mod plugin_mentions;
+ mod replay_filter;
+ mod resize_reflow;
++pub(crate) mod runtime_controls;
+ mod safety_buffering;
+ mod session_lifecycle;
+ mod side;
+@@ -580,7 +582,13 @@ pub(crate) struct App {
+     ///
+     /// This is thread-scoped state (`Option<ThreadId>`) instead of a global bool
+     /// so shutdown events from other threads still take the normal failover path.
+-    pending_shutdown_exit_thread_id: Option<ThreadId>,
++    pending_shutdown_exit: Option<runtime_controls::PendingShutdownExit>,
++    shutdown_lookup_in_flight: bool,
++    account_slots: Vec<codex_app_server_protocol::AccountSlotSnapshot>,
++    account_slot_capability: Option<codex_app_server_protocol::AccountSlotCapability>,
++    account_runtime: Option<(String, codex_app_server_protocol::SessionRuntimeSnapshot)>,
++    account_picker_request_generation: u64,
++    pending_account_switch: Option<account_picker::PendingAccountSwitch>,
+ 
+     windows_sandbox: WindowsSandboxState,
+ 
+diff --git a/codex-rs/tui/src/app/account_picker.rs b/codex-rs/tui/src/app/account_picker.rs
+new file mode 100644
+index 0000000..b920bef
+--- /dev/null
++++ b/codex-rs/tui/src/app/account_picker.rs
+@@ -0,0 +1,630 @@
++//! Account-slot picker and same-thread account-switch flow.
++
++use super::*;
++use crate::app_server_session::SessionRuntimeLookup;
++use crate::app_server_session::list_account_slots;
++use crate::app_server_session::session_runtime_for_thread;
++use crate::app_server_session::start_account_slot_login;
++use crate::app_server_session::switch_thread_account;
++use codex_app_server_protocol::AccountSlotAction;
++use codex_app_server_protocol::AccountSlotCapability;
++use codex_app_server_protocol::AccountSlotLoginChallenge;
++use codex_app_server_protocol::AccountSlotLoginStartParams;
++use codex_app_server_protocol::AccountSlotLoginStartResponse;
++use codex_app_server_protocol::AccountSlotSnapshot;
++use codex_app_server_protocol::AccountSlotStatus;
++use codex_app_server_protocol::SessionRuntimeAccountSwitchState;
++use codex_app_server_protocol::SessionRuntimeAction;
++use codex_app_server_protocol::SessionRuntimeOperation;
++use codex_app_server_protocol::SessionRuntimeOperationStatus;
++use codex_app_server_protocol::SessionRuntimeSnapshot;
++use codex_app_server_protocol::ThreadAccountSwitchParams;
++
++const ACCOUNT_PICKER_VIEW_ID: &str = "account-picker";
++const ACCOUNT_LOGIN_VIEW_ID: &str = "account-login";
++
++#[derive(Debug)]
++pub(crate) struct AccountPickerSnapshot {
++    pub(crate) slots: Vec<AccountSlotSnapshot>,
++    pub(crate) capability: AccountSlotCapability,
++    pub(crate) runtime: Option<(String, SessionRuntimeSnapshot)>,
++}
++
++#[derive(Debug)]
++pub(super) struct PendingAccountSwitch {
++    operation_id: String,
++    source_thread_id: ThreadId,
++    target_slot_id: String,
++    ready_generation: Option<u64>,
++    validation_in_flight: bool,
++}
++
++impl PendingAccountSwitch {
++    fn matches_operation(&self, operation: &SessionRuntimeOperation) -> bool {
++        operation.operation_id == self.operation_id
++            && operation.thread_id.as_deref() == Some(self.source_thread_id.to_string().as_str())
++    }
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) enum AccountLoginMethod {
++    Browser,
++    DeviceCode,
++}
++
++impl App {
++    pub(super) fn open_account_picker(&mut self, app_server: &AppServerSession) {
++        let Some(thread_id) = self.current_displayed_thread_id() else {
++            self.chat_widget
++                .add_error_message("A session must start before choosing an account.".to_string());
++            return;
++        };
++        let request_generation = self.begin_account_picker_request();
++        self.chat_widget.show_selection_view(SelectionViewParams {
++            view_id: Some(ACCOUNT_PICKER_VIEW_ID),
++            title: Some("Accounts".to_string()),
++            subtitle: Some("Loading account slots...".to_string()),
++            items: vec![SelectionItem {
++                name: "Loading...".to_string(),
++                is_disabled: true,
++                ..Default::default()
++            }],
++            ..Default::default()
++        });
++        let request_handle = app_server.request_handle();
++        let runtime_handle = request_handle.clone();
++        let app_event_tx = self.app_event_tx.clone();
++        tokio::spawn(async move {
++            let (slots, runtime) = tokio::join!(
++                list_account_slots(request_handle),
++                session_runtime_for_thread(runtime_handle, thread_id)
++            );
++            let result = match (slots, runtime) {
++                (Ok(slots), Ok(SessionRuntimeLookup::Supported(runtime))) => {
++                    let runtime = runtime
++                        .data
++                        .into_iter()
++                        .find(|snapshot| snapshot.thread_id == thread_id.to_string())
++                        .map(|snapshot| (runtime.instance_epoch, snapshot));
++                    Ok(AccountPickerSnapshot {
++                        capability: slots.multi_account,
++                        slots: slots.data,
++                        runtime,
++                    })
++                }
++                (Ok(slots), Ok(SessionRuntimeLookup::Unsupported)) => Ok(AccountPickerSnapshot {
++                    capability: slots.multi_account,
++                    slots: slots.data,
++                    runtime: None,
++                }),
++                (Err(error), _) | (_, Err(error)) => Err(error.to_string()),
++            };
++            app_event_tx.send(AppEvent::AccountPickerLoaded {
++                thread_id,
++                request_generation,
++                result,
++            });
++        });
++    }
++
++    pub(super) fn handle_account_picker_loaded(
++        &mut self,
++        thread_id: ThreadId,
++        request_generation: u64,
++        result: Result<AccountPickerSnapshot, String>,
++    ) {
++        if request_generation != self.account_picker_request_generation {
++            return;
++        }
++        if self.current_displayed_thread_id() != Some(thread_id) {
++            if self
++                .pending_account_switch
++                .as_ref()
++                .is_some_and(|pending| pending.source_thread_id == thread_id)
++            {
++                self.pending_account_switch = None;
++            }
++            return;
++        }
++        if self
++            .pending_account_switch
++            .as_ref()
++            .is_some_and(|pending| pending.source_thread_id != thread_id)
++        {
++            self.pending_account_switch = None;
++        }
++        match result {
++            Ok(snapshot) => {
++                self.account_slots = snapshot.slots;
++                self.account_slot_capability = Some(snapshot.capability);
++                self.replace_account_runtime(snapshot.runtime);
++                if self
++                    .pending_account_switch
++                    .as_ref()
++                    .is_some_and(|pending| pending.validation_in_flight)
++                {
++                    let Some(pending) = self.pending_account_switch.take() else {
++                        return;
++                    };
++                    let switched = self.account_runtime.as_ref().is_some_and(|(_, runtime)| {
++                        runtime.account.switch_state == SessionRuntimeAccountSwitchState::Stable
++                            && runtime.account.current.as_ref().is_some_and(|current| {
++                                current.account_slot_id == pending.target_slot_id
++                                    && Some(current.execution_generation)
++                                        == pending.ready_generation
++                            })
++                    });
++                    if switched {
++                        self.chat_widget.add_info_message(
++                            "Account switched for the next turn.".to_string(),
++                            /*hint*/ None,
++                        );
++                    } else {
++                        self.chat_widget.add_error_message(
++                            "The account switch response did not match the refreshed runtime."
++                                .to_string(),
++                        );
++                    }
++                }
++                self.show_account_picker();
++            }
++            Err(error) => {
++                if self
++                    .pending_account_switch
++                    .as_ref()
++                    .is_some_and(|pending| pending.validation_in_flight)
++                {
++                    self.pending_account_switch = None;
++                }
++                self.chat_widget
++                    .add_error_message(format!("Could not load account slots: {error}"));
++            }
++        }
++    }
++
++    fn account_selection_view_params(&self) -> SelectionViewParams {
++        let current_slot_id = self
++            .account_runtime
++            .as_ref()
++            .and_then(|(_, runtime)| runtime.account.current.as_ref())
++            .map(|account| account.account_slot_id.as_str());
++        let switch_action = self.account_runtime.as_ref().and_then(|(_, runtime)| {
++            runtime
++                .actions
++                .iter()
++                .find(|action| action.action == SessionRuntimeAction::SwitchAccount)
++        });
++        let mut initial_selected_idx = None;
++        let mut items = Vec::with_capacity(self.account_slots.len() + 1);
++        for slot in &self.account_slots {
++            let is_current = current_slot_id == Some(slot.account_slot_id.as_str());
++            if is_current {
++                initial_selected_idx = Some(items.len());
++            }
++            let slot_id = slot.account_slot_id.clone();
++            let login_action = match slot.status {
++                AccountSlotStatus::LoginRequired => AccountSlotAction::Login,
++                AccountSlotStatus::Failed => AccountSlotAction::RetryLogin,
++                AccountSlotStatus::Ready => AccountSlotAction::SwitchTo,
++            };
++            let slot_action = slot
++                .actions
++                .iter()
++                .find(|action| action.action == login_action);
++            let (is_disabled, disabled_reason, action): (
++                _,
++                _,
++                Option<crate::bottom_pane::SelectionAction>,
++            ) = if is_current {
++                (true, Some("Current account".to_string()), None)
++            } else if slot.status == AccountSlotStatus::Ready {
++                let allowed = slot_action.is_some_and(|action| action.allowed)
++                    && switch_action.is_some_and(|action| action.allowed);
++                let reason = slot_action
++                    .and_then(|action| action.deny_reason.clone())
++                    .or_else(|| switch_action.and_then(|action| action.deny_reason.clone()));
++                let action = allowed.then(|| {
++                    Box::new(move |tx: &AppEventSender| {
++                        tx.send(AppEvent::SwitchAccountSlot {
++                            slot_id: slot_id.clone(),
++                        });
++                    }) as crate::bottom_pane::SelectionAction
++                });
++                (!allowed, reason, action)
++            } else {
++                let allowed = slot_action.is_some_and(|action| action.allowed)
++                    && slot.active_login_operation_id.is_none();
++                let reason = if slot.active_login_operation_id.is_some() {
++                    Some("Login in progress".to_string())
++                } else {
++                    slot_action.and_then(|action| action.deny_reason.clone())
++                };
++                let action = allowed.then(|| {
++                    Box::new(move |tx: &AppEventSender| {
++                        tx.send(AppEvent::OpenAccountLoginMethods {
++                            slot_id: Some(slot_id.clone()),
++                        });
++                    }) as crate::bottom_pane::SelectionAction
++                });
++                (!allowed, reason, action)
++            };
++            let status = match slot.status {
++                AccountSlotStatus::LoginRequired => "Login required",
++                AccountSlotStatus::Ready => "Ready",
++                AccountSlotStatus::Failed => "Login failed",
++            };
++            items.push(SelectionItem {
++                name: slot.label.clone(),
++                description: Some(status.to_string()),
++                is_current,
++                is_default: slot.is_default,
++                is_disabled,
++                disabled_reason,
++                actions: action.into_iter().collect(),
++                dismiss_on_select: true,
++                ..Default::default()
++            });
++        }
++        let multi_account = self.account_slot_capability.as_ref();
++        let add_allowed = multi_account.is_some_and(|capability| capability.available);
++        items.push(SelectionItem {
++            name: "Add account".to_string(),
++            description: Some("Sign in with a browser or device code".to_string()),
++            is_disabled: !add_allowed,
++            disabled_reason: multi_account.and_then(|capability| capability.deny_reason.clone()),
++            actions: add_allowed
++                .then(|| {
++                    Box::new(|tx: &AppEventSender| {
++                        tx.send(AppEvent::OpenAccountLoginMethods { slot_id: None });
++                    }) as crate::bottom_pane::SelectionAction
++                })
++                .into_iter()
++                .collect(),
++            dismiss_on_select: true,
++            ..Default::default()
++        });
++        SelectionViewParams {
++            view_id: Some(ACCOUNT_PICKER_VIEW_ID),
++            title: Some("Accounts".to_string()),
++            subtitle: Some("Choose the account used by the next turn.".to_string()),
++            footer_hint: Some(standard_popup_hint_line()),
++            items,
++            initial_selected_idx,
++            ..Default::default()
++        }
++    }
++
++    fn show_account_picker(&mut self) {
++        let params = self.account_selection_view_params();
++        if !self
++            .chat_widget
++            .replace_selection_view_if_present(ACCOUNT_PICKER_VIEW_ID, params)
++        {
++            self.chat_widget
++                .show_selection_view(self.account_selection_view_params());
++        }
++    }
++
++    fn refresh_account_picker_if_present(&mut self) {
++        let params = self.account_selection_view_params();
++        self.chat_widget
++            .replace_selection_view_if_present(ACCOUNT_PICKER_VIEW_ID, params);
++    }
++
++    pub(super) fn show_account_login_methods(&mut self, slot_id: Option<String>) {
++        let browser_slot = slot_id.clone();
++        self.chat_widget.show_selection_view(SelectionViewParams {
++            view_id: Some(ACCOUNT_LOGIN_VIEW_ID),
++            title: Some("Add account".to_string()),
++            subtitle: Some("Choose a sign-in method.".to_string()),
++            footer_hint: Some(standard_popup_hint_line()),
++            items: vec![
++                SelectionItem {
++                    name: "Continue in browser".to_string(),
++                    actions: vec![Box::new(move |tx| {
++                        tx.send(AppEvent::StartAccountSlotLogin {
++                            slot_id: browser_slot.clone(),
++                            method: AccountLoginMethod::Browser,
++                        });
++                    })],
++                    dismiss_on_select: true,
++                    ..Default::default()
++                },
++                SelectionItem {
++                    name: "Use device code".to_string(),
++                    actions: vec![Box::new(move |tx| {
++                        tx.send(AppEvent::StartAccountSlotLogin {
++                            slot_id: slot_id.clone(),
++                            method: AccountLoginMethod::DeviceCode,
++                        });
++                    })],
++                    dismiss_on_select: true,
++                    ..Default::default()
++                },
++            ],
++            ..Default::default()
++        });
++    }
++
++    pub(super) fn start_account_login(
++        &mut self,
++        app_server: &AppServerSession,
++        slot_id: Option<String>,
++        method: AccountLoginMethod,
++    ) {
++        let params = match method {
++            AccountLoginMethod::Browser => AccountSlotLoginStartParams::Chatgpt {
++                slot_id,
++                codex_streamlined_login: false,
++                use_hosted_login_success_page: false,
++                app_brand: None,
++            },
++            AccountLoginMethod::DeviceCode => {
++                AccountSlotLoginStartParams::ChatgptDeviceCode { slot_id }
++            }
++        };
++        let request_handle = app_server.request_handle();
++        let app_event_tx = self.app_event_tx.clone();
++        tokio::spawn(async move {
++            let result = start_account_slot_login(request_handle, params)
++                .await
++                .map_err(|error| error.to_string());
++            app_event_tx.send(AppEvent::AccountSlotLoginStarted { result });
++        });
++    }
++
++    pub(super) fn handle_account_slot_login_started(
++        &mut self,
++        result: Result<AccountSlotLoginStartResponse, String>,
++    ) {
++        match result {
++            Ok(response) => {
++                self.upsert_account_slot(response.slot);
++                match response.challenge {
++                    Some(AccountSlotLoginChallenge::Browser { auth_url, .. }) => {
++                        self.open_url_in_browser(auth_url);
++                    }
++                    Some(AccountSlotLoginChallenge::DeviceCode {
++                        verification_url,
++                        user_code,
++                        ..
++                    }) => {
++                        self.chat_widget.add_info_message(
++                            format!("Open {verification_url} and enter code {user_code}."),
++                            /*hint*/ None,
++                        );
++                    }
++                    None => {}
++                }
++                self.show_account_picker();
++            }
++            Err(error) => self
++                .chat_widget
++                .add_error_message(format!("Account login failed: {error}")),
++        }
++    }
++
++    pub(super) fn handle_account_slot_changed(&mut self, slot: AccountSlotSnapshot) {
++        self.upsert_account_slot(slot);
++        self.refresh_account_picker_if_present();
++    }
++
++    fn upsert_account_slot(&mut self, slot: AccountSlotSnapshot) {
++        if let Some(existing) = self
++            .account_slots
++            .iter_mut()
++            .find(|existing| existing.account_slot_id == slot.account_slot_id)
++        {
++            *existing = slot;
++        } else {
++            self.account_slots.push(slot);
++        }
++    }
++
++    pub(super) fn switch_account_slot(&mut self, app_server: &AppServerSession, slot_id: String) {
++        let Some(source_thread_id) = self.current_displayed_thread_id() else {
++            self.chat_widget
++                .add_error_message("The current session is unavailable.".to_string());
++            return;
++        };
++        let Some((instance_epoch, runtime)) = self.account_runtime.as_ref() else {
++            self.chat_widget.add_error_message(
++                "Account switching is not supported by this server.".to_string(),
++            );
++            return;
++        };
++        if runtime.thread_id != source_thread_id.to_string() {
++            self.chat_widget.add_error_message(
++                "The account runtime no longer matches the displayed session.".to_string(),
++            );
++            return;
++        }
++        let Some(current) = runtime.account.current.as_ref() else {
++            self.chat_widget
++                .add_error_message("The current account binding is unavailable.".to_string());
++            return;
++        };
++        let operation_id = format!("tui-account-switch-{}", Uuid::new_v4());
++        self.pending_account_switch = Some(PendingAccountSwitch {
++            operation_id: operation_id.clone(),
++            source_thread_id,
++            target_slot_id: slot_id.clone(),
++            ready_generation: None,
++            validation_in_flight: false,
++        });
++        let params = ThreadAccountSwitchParams {
++            operation_id: operation_id.clone(),
++            thread_id: runtime.thread_id.clone(),
++            target_account_slot_id: slot_id,
++            expected_instance_epoch: instance_epoch.clone(),
++            expected_state_revision: runtime.state_revision,
++            expected_execution_generation: current.execution_generation,
++        };
++        let request_handle = app_server.request_handle();
++        let app_event_tx = self.app_event_tx.clone();
++        tokio::spawn(async move {
++            let result = switch_thread_account(request_handle, params)
++                .await
++                .map(|response| response.operation)
++                .map_err(|error| error.to_string());
++            app_event_tx.send(AppEvent::AccountSwitchFinished {
++                operation_id,
++                result,
++            });
++        });
++    }
++
++    pub(super) fn handle_account_switch_finished(
++        &mut self,
++        app_server: &AppServerSession,
++        operation_id: String,
++        result: Result<SessionRuntimeOperation, String>,
++    ) {
++        let pending_is_current = self.pending_account_switch.as_ref().is_some_and(|pending| {
++            pending.operation_id == operation_id
++                && self.current_displayed_thread_id() == Some(pending.source_thread_id)
++        });
++        if !pending_is_current {
++            if self
++                .pending_account_switch
++                .as_ref()
++                .is_some_and(|pending| pending.operation_id == operation_id)
++            {
++                self.pending_account_switch = None;
++            }
++            return;
++        }
++        match result {
++            Ok(operation)
++                if operation.status == SessionRuntimeOperationStatus::Ready
++                    && self
++                        .pending_account_switch
++                        .as_ref()
++                        .is_some_and(|pending| pending.matches_operation(&operation)) =>
++            {
++                if let Some(pending) = self.pending_account_switch.as_mut()
++                    && pending.operation_id == operation_id
++                {
++                    self.begin_account_switch_validation(
++                        app_server,
++                        operation.execution_generation,
++                    );
++                }
++            }
++            Ok(operation) => {
++                self.pending_account_switch = None;
++                let message = operation
++                    .error
++                    .map(|error| error.message)
++                    .unwrap_or_else(|| "Account switch did not complete.".to_string());
++                self.chat_widget.add_error_message(message);
++                self.open_account_picker(app_server);
++            }
++            Err(error) => {
++                self.pending_account_switch = None;
++                self.chat_widget
++                    .add_error_message(format!("Account switch failed: {error}"));
++                self.open_account_picker(app_server);
++            }
++        }
++    }
++
++    pub(super) fn handle_account_switch_operation(
++        &mut self,
++        app_server: &AppServerSession,
++        operation: &SessionRuntimeOperation,
++    ) -> bool {
++        let current_thread_id = self.current_displayed_thread_id();
++        let Some(pending) = self.pending_account_switch.as_mut() else {
++            return false;
++        };
++        if !pending.matches_operation(operation) {
++            return false;
++        }
++        if current_thread_id != Some(pending.source_thread_id) {
++            self.pending_account_switch = None;
++            return true;
++        }
++        match operation.status {
++            SessionRuntimeOperationStatus::Ready => {
++                self.begin_account_switch_validation(app_server, operation.execution_generation);
++            }
++            SessionRuntimeOperationStatus::Failed => {
++                let message = operation
++                    .error
++                    .as_ref()
++                    .map(|error| error.message.clone())
++                    .unwrap_or_else(|| "Account switch failed.".to_string());
++                self.pending_account_switch = None;
++                self.chat_widget.add_error_message(message);
++                self.open_account_picker(app_server);
++            }
++            SessionRuntimeOperationStatus::Accepted | SessionRuntimeOperationStatus::Running => {}
++            SessionRuntimeOperationStatus::Released => return false,
++        }
++        true
++    }
++
++    fn begin_account_switch_validation(
++        &mut self,
++        app_server: &AppServerSession,
++        execution_generation: Option<u64>,
++    ) {
++        let Some(execution_generation) = execution_generation else {
++            self.pending_account_switch = None;
++            self.chat_widget.add_error_message(
++                "The account switch response did not include an execution generation.".to_string(),
++            );
++            return;
++        };
++        let Some(pending) = self.pending_account_switch.as_mut() else {
++            return;
++        };
++        if let Some(ready_generation) = pending.ready_generation
++            && ready_generation != execution_generation
++        {
++            self.pending_account_switch = None;
++            self.chat_widget.add_error_message(
++                "The account switch completed with inconsistent execution generations.".to_string(),
++            );
++            return;
++        }
++        pending.ready_generation = Some(execution_generation);
++        if pending.validation_in_flight {
++            return;
++        }
++        pending.validation_in_flight = true;
++        self.open_account_picker(app_server);
++    }
++
++    pub(super) fn handle_account_runtime_changed(
++        &mut self,
++        instance_epoch: String,
++        snapshot: SessionRuntimeSnapshot,
++    ) {
++        let is_current = self
++            .current_displayed_thread_id()
++            .is_some_and(|thread_id| snapshot.thread_id == thread_id.to_string());
++        if !is_current {
++            return;
++        }
++        if self
++            .pending_account_switch
++            .as_ref()
++            .is_some_and(|pending| pending.source_thread_id.to_string() != snapshot.thread_id)
++        {
++            self.pending_account_switch = None;
++        }
++        self.replace_account_runtime(Some((instance_epoch, snapshot)));
++        self.refresh_account_picker_if_present();
++    }
++
++    fn replace_account_runtime(&mut self, runtime: Option<(String, SessionRuntimeSnapshot)>) {
++        self.account_runtime = runtime;
++    }
++    pub(super) fn begin_account_picker_request(&mut self) -> u64 {
++        self.account_picker_request_generation =
++            self.account_picker_request_generation.saturating_add(1);
++        self.account_picker_request_generation
++    }
++}
+diff --git a/codex-rs/tui/src/app/app_server_events.rs b/codex-rs/tui/src/app/app_server_events.rs
+index b3605b3..cfec85b 100644
+--- a/codex-rs/tui/src/app/app_server_events.rs
++++ b/codex-rs/tui/src/app/app_server_events.rs
+@@ -80,6 +80,31 @@ impl App {
+         notification: ServerNotification,
+     ) {
+         match &notification {
++            ServerNotification::SessionRuntimeOperationUpdated(notification)
++                if (self.handle_shutdown_operation(&notification.operation)
++                    || self.handle_account_switch_operation(
++                        app_server_client,
++                        &notification.operation,
++                    )) =>
++            {
++                return;
++            }
++            ServerNotification::SessionRuntimeChanged(notification) => {
++                self.handle_account_runtime_changed(
++                    notification.instance_epoch.clone(),
++                    notification.snapshot.clone(),
++                );
++                return;
++            }
++            ServerNotification::AccountSlotChanged(notification) => {
++                self.handle_account_slot_changed(notification.slot.clone());
++                return;
++            }
++            ServerNotification::ThreadClosed(notification)
++                if self.handle_pending_shutdown_thread_closed(&notification.thread_id) =>
++            {
++                return;
++            }
+             ServerNotification::ServerRequestResolved(notification) => {
+                 if let Some(request) = self
+                     .pending_app_server_requests
+@@ -161,7 +186,12 @@ impl App {
+                 return;
+             }
+             ServerNotification::AppListUpdated(notification) => {
+-                if self.current_displayed_thread_id().is_some() {
++                let current_thread_id = self.current_displayed_thread_id();
++                let belongs_to_current_thread = current_thread_id
++                    .map(|thread_id| thread_id.to_string())
++                    .as_deref()
++                    == notification.thread_id.as_deref();
++                if belongs_to_current_thread {
+                     self.chat_widget
+                         .refresh_connector_directory_after_notification(
+                             notification
+diff --git a/codex-rs/tui/src/app/background_requests.rs b/codex-rs/tui/src/app/background_requests.rs
+index 4f14c69..fe919e8 100644
+--- a/codex-rs/tui/src/app/background_requests.rs
++++ b/codex-rs/tui/src/app/background_requests.rs
+@@ -896,6 +896,7 @@ pub(super) async fn fetch_skills_list(
+         .request_typed(ClientRequest::SkillsList {
+             request_id,
+             params: SkillsListParams {
++                thread_id: None,
+                 cwds: vec![cwd],
+                 force_reload: true,
+             },
+diff --git a/codex-rs/tui/src/app/event_dispatch.rs b/codex-rs/tui/src/app/event_dispatch.rs
+index 1a23f6f..905cdc7 100644
+--- a/codex-rs/tui/src/app/event_dispatch.rs
++++ b/codex-rs/tui/src/app/event_dispatch.rs
+@@ -13,8 +13,6 @@ use crate::pager_overlay::TranscriptHistoryState;
+ #[cfg(target_os = "windows")]
+ use codex_config::types::WindowsSandboxModeToml;
+ 
+-const SHUTDOWN_FIRST_EXIT_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 2);
+-
+ impl App {
+     pub(super) async fn handle_event(
+         &mut self,
+@@ -23,6 +21,52 @@ impl App {
+         event: AppEvent,
+     ) -> Result<AppRunControl> {
+         match event {
++            AppEvent::OpenAccountPicker => self.open_account_picker(app_server),
++            AppEvent::AccountPickerLoaded {
++                thread_id,
++                request_generation,
++                result,
++            } => {
++                self.handle_account_picker_loaded(thread_id, request_generation, result);
++            }
++            AppEvent::OpenAccountLoginMethods { slot_id } => {
++                self.show_account_login_methods(slot_id);
++            }
++            AppEvent::StartAccountSlotLogin { slot_id, method } => {
++                self.start_account_login(app_server, slot_id, method);
++            }
++            AppEvent::AccountSlotLoginStarted { result } => {
++                self.handle_account_slot_login_started(result);
++            }
++            AppEvent::SwitchAccountSlot { slot_id } => {
++                self.switch_account_slot(app_server, slot_id);
++            }
++            AppEvent::AccountSwitchFinished {
++                operation_id,
++                result,
++            } => self.handle_account_switch_finished(app_server, operation_id, result),
++            AppEvent::ShutdownRuntimeLoaded {
++                thread_id,
++                intent,
++                result,
++                slots,
++            } => {
++                return Ok(self
++                    .handle_shutdown_runtime_loaded(app_server, thread_id, intent, result, slots)
++                    .await);
++            }
++            AppEvent::ShutdownRelinquishFinished {
++                operation_id,
++                result,
++            } => self.handle_shutdown_relinquish_finished(&operation_id, result),
++            AppEvent::ShutdownReleaseTimedOut { operation_id } => {
++                self.handle_shutdown_release_timeout(&operation_id);
++            }
++            AppEvent::LogoutAfterRelease => self.begin_stock_logout(app_server),
++            AppEvent::LogoutFinished { result } => match result {
++                Ok(()) => return Ok(AppRunControl::Exit(ExitReason::UserRequested)),
++                Err(error) => self.shutdown_control_failed(format!("Logout failed: {error}")),
++            },
+             AppEvent::NewSession { name } => {
+                 self.start_fresh_session_with_summary_hint(
+                     tui, app_server, /*session_start_source*/ None,
+@@ -589,19 +633,13 @@ impl App {
+                     }
+                 }
+             },
+-            AppEvent::Logout => match app_server.logout_account().await {
+-                Ok(()) => {
+-                    self.show_shutdown_feedback(tui)?;
+-                    return Ok(self
+-                        .handle_exit_mode(app_server, ExitMode::ShutdownFirst)
+-                        .await);
+-                }
+-                Err(err) => {
+-                    tracing::error!("failed to logout: {err}");
+-                    self.chat_widget
+-                        .add_error_message(format!("Logout failed: {err}"));
+-                }
+-            },
++            AppEvent::Logout => {
++                self.show_shutdown_feedback(tui)?;
++                self.begin_shutdown_runtime_lookup(
++                    app_server,
++                    super::runtime_controls::ShutdownIntent::LogoutDefault,
++                );
++            }
+             AppEvent::FatalExitRequest(message) => {
+                 return Ok(AppRunControl::Exit(ExitReason::Fatal(message)));
+             }
+@@ -2729,31 +2767,15 @@ impl App {
+     ) -> AppRunControl {
+         match mode {
+             ExitMode::ShutdownFirst => {
+-                // Mark the thread we are explicitly shutting down for exit so
+-                // its shutdown completion does not trigger agent failover.
+-                self.pending_shutdown_exit_thread_id =
+-                    self.active_thread_id.or(self.chat_widget.thread_id());
+-                if self.pending_shutdown_exit_thread_id.is_some() {
+-                    // This is a UI escape-hatch budget, not a protocol
+-                    // deadline. A healthy local thread/unsubscribe round trip
+-                    // should finish comfortably inside two seconds, while a
+-                    // longer wait makes Ctrl+C feel broken when the app-server
+-                    // is already wedged.
+-                    if tokio::time::timeout(
+-                        SHUTDOWN_FIRST_EXIT_TIMEOUT,
+-                        self.shutdown_current_thread(app_server),
+-                    )
+-                    .await
+-                    .is_err()
+-                    {
+-                        tracing::warn!("timed out waiting for app-server thread shutdown");
+-                    }
+-                }
+-                self.pending_shutdown_exit_thread_id = None;
+-                AppRunControl::Exit(ExitReason::UserRequested)
++                self.begin_shutdown_runtime_lookup(
++                    app_server,
++                    super::runtime_controls::ShutdownIntent::Exit,
++                );
++                AppRunControl::Continue
+             }
+             ExitMode::Immediate => {
+-                self.pending_shutdown_exit_thread_id = None;
++                self.pending_shutdown_exit = None;
++                self.shutdown_lookup_in_flight = false;
+                 AppRunControl::Exit(ExitReason::UserRequested)
+             }
+         }
+diff --git a/codex-rs/tui/src/app/runtime_controls.rs b/codex-rs/tui/src/app/runtime_controls.rs
+new file mode 100644
+index 0000000..0652b34
+--- /dev/null
++++ b/codex-rs/tui/src/app/runtime_controls.rs
+@@ -0,0 +1,395 @@
++//! Release-aware app-server controls used by explicit TUI exit and logout actions.
++
++use super::*;
++use crate::app_server_session::AccountSlotsSnapshot;
++use crate::app_server_session::SessionRuntimeLookup;
++use crate::app_server_session::list_account_slots;
++use crate::app_server_session::logout_account_with_request_handle;
++use crate::app_server_session::relinquish_thread;
++use crate::app_server_session::session_runtime_for_thread;
++use codex_app_server_protocol::SessionRuntimeOperation;
++use codex_app_server_protocol::SessionRuntimeOperationAction;
++use codex_app_server_protocol::SessionRuntimeOperationStatus;
++use codex_app_server_protocol::ThreadRelinquishParams;
++
++pub(super) const SHUTDOWN_RELEASE_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 2);
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) enum ShutdownIntent {
++    Exit,
++    LogoutDefault,
++}
++
++#[derive(Debug)]
++pub(super) struct PendingShutdownExit {
++    pub(super) intent: ShutdownIntent,
++    pub(super) thread_id: ThreadId,
++    pub(super) operation_id: String,
++    pub(super) instance_epoch: String,
++    pub(super) state_revision: u64,
++    pub(super) writer_generation: u64,
++    pub(super) released: bool,
++    pub(super) thread_closed: bool,
++}
++
++impl PendingShutdownExit {
++    fn matches_operation(&self, operation: &SessionRuntimeOperation) -> bool {
++        operation.operation_id == self.operation_id
++            && operation.thread_id.as_deref() == Some(self.thread_id.to_string().as_str())
++            && operation.action == SessionRuntimeOperationAction::ThreadRelinquish
++    }
++}
++
++impl App {
++    pub(super) fn begin_shutdown_runtime_lookup(
++        &mut self,
++        app_server: &AppServerSession,
++        intent: ShutdownIntent,
++    ) {
++        if self.pending_shutdown_exit.is_some() {
++            self.show_shutdown_waiting_picker();
++            return;
++        }
++        if self.shutdown_lookup_in_flight {
++            return;
++        }
++        let Some(thread_id) = self.current_displayed_thread_id() else {
++            self.finish_shutdown_without_thread(app_server, intent);
++            return;
++        };
++        self.shutdown_lookup_in_flight = true;
++        let request_handle = app_server.request_handle();
++        let slot_request_handle = request_handle.clone();
++        let app_event_tx = self.app_event_tx.clone();
++        tokio::spawn(async move {
++            let (result, slots) = match intent {
++                ShutdownIntent::Exit => (
++                    session_runtime_for_thread(request_handle, thread_id)
++                        .await
++                        .map_err(|error| error.to_string()),
++                    None,
++                ),
++                ShutdownIntent::LogoutDefault => {
++                    let (runtime, slots) = tokio::join!(
++                        session_runtime_for_thread(request_handle, thread_id),
++                        list_account_slots(slot_request_handle)
++                    );
++                    (
++                        runtime.map_err(|error| error.to_string()),
++                        Some(slots.map_err(|error| error.to_string())),
++                    )
++                }
++            };
++            app_event_tx.send(AppEvent::ShutdownRuntimeLoaded {
++                thread_id,
++                intent,
++                result,
++                slots,
++            });
++        });
++    }
++
++    fn finish_shutdown_without_thread(
++        &self,
++        app_server: &AppServerSession,
++        intent: ShutdownIntent,
++    ) {
++        match intent {
++            ShutdownIntent::Exit => self.app_event_tx.send(AppEvent::Exit(ExitMode::Immediate)),
++            ShutdownIntent::LogoutDefault => {
++                self.begin_stock_logout(app_server);
++            }
++        }
++    }
++
++    pub(super) async fn handle_shutdown_runtime_loaded(
++        &mut self,
++        app_server: &mut AppServerSession,
++        thread_id: ThreadId,
++        intent: ShutdownIntent,
++        result: Result<SessionRuntimeLookup, String>,
++        slots: Option<Result<AccountSlotsSnapshot, String>>,
++    ) -> AppRunControl {
++        self.shutdown_lookup_in_flight = false;
++        let response = match result {
++            Ok(SessionRuntimeLookup::Supported(response)) => response,
++            Ok(SessionRuntimeLookup::Unsupported) => {
++                return self.handle_stock_shutdown(app_server, intent).await;
++            }
++            Err(error) => {
++                self.shutdown_control_failed(format!("Could not verify session release: {error}"));
++                return AppRunControl::Continue;
++            }
++        };
++        let Some(snapshot) = response
++            .data
++            .into_iter()
++            .find(|snapshot| snapshot.thread_id == thread_id.to_string())
++        else {
++            self.shutdown_control_failed("The active session runtime is unavailable.".to_string());
++            return AppRunControl::Continue;
++        };
++        if intent == ShutdownIntent::LogoutDefault {
++            let slots = match slots {
++                Some(Ok(slots)) => slots.data,
++                Some(Err(error)) => {
++                    self.shutdown_control_failed(format!(
++                        "Could not verify the default account: {error}"
++                    ));
++                    return AppRunControl::Continue;
++                }
++                None => Vec::new(),
++            };
++            if !slots.iter().any(|slot| {
++                slot.is_default
++                    && snapshot
++                        .account
++                        .current
++                        .as_ref()
++                        .is_some_and(|account| account.account_slot_id == slot.account_slot_id)
++            }) {
++                self.shutdown_control_failed(
++                    "Logout is available only for the default account. Switch to the default account first."
++                        .to_string(),
++                );
++                return AppRunControl::Continue;
++            }
++        }
++        let Some(writer_generation) = snapshot.writer.writer_generation else {
++            self.shutdown_control_failed(
++                snapshot
++                    .writer
++                    .deny_reason
++                    .unwrap_or_else(|| "The session writer fence is unavailable.".to_string()),
++            );
++            return AppRunControl::Continue;
++        };
++        let operation_id = format!("tui-relinquish-{}", Uuid::new_v4());
++        self.pending_shutdown_exit = Some(PendingShutdownExit {
++            intent,
++            thread_id,
++            operation_id: operation_id.clone(),
++            instance_epoch: response.instance_epoch.clone(),
++            state_revision: snapshot.state_revision,
++            writer_generation,
++            released: false,
++            thread_closed: false,
++        });
++        let params = ThreadRelinquishParams {
++            operation_id: operation_id.clone(),
++            thread_id: thread_id.to_string(),
++            expected_instance_epoch: response.instance_epoch,
++            expected_state_revision: snapshot.state_revision,
++            expected_writer_generation: writer_generation,
++        };
++        let request_handle = app_server.request_handle();
++        let app_event_tx = self.app_event_tx.clone();
++        tokio::spawn(async move {
++            let result = relinquish_thread(request_handle, params)
++                .await
++                .map(|response| response.operation)
++                .map_err(|error| error.to_string());
++            app_event_tx.send(AppEvent::ShutdownRelinquishFinished {
++                operation_id,
++                result,
++            });
++        });
++        let app_event_tx = self.app_event_tx.clone();
++        let timeout_operation_id = self
++            .pending_shutdown_exit
++            .as_ref()
++            .map(|pending| pending.operation_id.clone())
++            .unwrap_or_default();
++        tokio::spawn(async move {
++            tokio::time::sleep(SHUTDOWN_RELEASE_TIMEOUT).await;
++            app_event_tx.send(AppEvent::ShutdownReleaseTimedOut {
++                operation_id: timeout_operation_id,
++            });
++        });
++        AppRunControl::Continue
++    }
++
++    pub(super) fn handle_shutdown_operation(
++        &mut self,
++        operation: &SessionRuntimeOperation,
++    ) -> bool {
++        let Some(pending) = self.pending_shutdown_exit.as_mut() else {
++            return false;
++        };
++        if !pending.matches_operation(operation) {
++            return false;
++        }
++        match operation.status {
++            SessionRuntimeOperationStatus::Released => pending.released = true,
++            SessionRuntimeOperationStatus::Failed => {
++                let message = operation
++                    .error
++                    .as_ref()
++                    .map(|error| error.message.clone())
++                    .unwrap_or_else(|| "Session release failed.".to_string());
++                self.shutdown_control_failed(message);
++                return true;
++            }
++            SessionRuntimeOperationStatus::Accepted | SessionRuntimeOperationStatus::Running => {}
++            SessionRuntimeOperationStatus::Ready => return false,
++        }
++        self.maybe_finish_pending_shutdown();
++        true
++    }
++
++    pub(super) fn handle_pending_shutdown_thread_closed(&mut self, thread_id: &str) -> bool {
++        let Some(pending) = self.pending_shutdown_exit.as_mut() else {
++            return false;
++        };
++        if pending.thread_id.to_string() != thread_id {
++            return false;
++        }
++        pending.thread_closed = true;
++        self.maybe_finish_pending_shutdown();
++        true
++    }
++
++    pub(super) fn handle_shutdown_relinquish_finished(
++        &mut self,
++        operation_id: &str,
++        result: Result<SessionRuntimeOperation, String>,
++    ) {
++        if self
++            .pending_shutdown_exit
++            .as_ref()
++            .is_none_or(|pending| pending.operation_id != operation_id)
++        {
++            return;
++        }
++        match result {
++            Ok(operation) => {
++                self.handle_shutdown_operation(&operation);
++            }
++            Err(error) => self.shutdown_control_failed(format!("Session release failed: {error}")),
++        }
++    }
++
++    pub(super) fn handle_shutdown_release_timeout(&mut self, operation_id: &str) {
++        let Some(pending) = self.pending_shutdown_exit.as_ref() else {
++            return;
++        };
++        if pending.operation_id != operation_id || pending.released && pending.thread_closed {
++            return;
++        }
++        tracing::warn!(
++            thread_id = %pending.thread_id,
++            instance_epoch = pending.instance_epoch,
++            state_revision = pending.state_revision,
++            writer_generation = pending.writer_generation,
++            released = pending.released,
++            thread_closed = pending.thread_closed,
++            "timed out waiting for verified session release"
++        );
++        self.chat_widget.add_info_message(
++            "Session release is still pending. Codex will exit after release completes."
++                .to_string(),
++            /*hint*/ None,
++        );
++        self.show_shutdown_waiting_picker();
++    }
++
++    fn maybe_finish_pending_shutdown(&mut self) {
++        let ready = self
++            .pending_shutdown_exit
++            .as_ref()
++            .is_some_and(|pending| pending.released && pending.thread_closed);
++        if !ready {
++            return;
++        }
++        let Some(pending) = self.pending_shutdown_exit.take() else {
++            return;
++        };
++        match pending.intent {
++            ShutdownIntent::Exit => self.app_event_tx.send(AppEvent::Exit(ExitMode::Immediate)),
++            ShutdownIntent::LogoutDefault => {
++                self.app_event_tx.send(AppEvent::LogoutAfterRelease);
++            }
++        }
++    }
++
++    pub(super) fn shutdown_control_failed(&mut self, message: String) {
++        self.shutdown_lookup_in_flight = false;
++        self.pending_shutdown_exit = None;
++        self.chat_widget.restore_after_shutdown_failure();
++        self.chat_widget.add_error_message(message);
++        self.show_shutdown_recovery_picker();
++    }
++
++    fn show_shutdown_recovery_picker(&mut self) {
++        self.chat_widget.show_selection_view(SelectionViewParams {
++            title: Some("Session is still open".to_string()),
++            subtitle: Some("Retry the safe release or exit immediately.".to_string()),
++            footer_hint: Some(standard_popup_hint_line()),
++            items: vec![
++                SelectionItem {
++                    name: "Retry safe exit".to_string(),
++                    actions: vec![Box::new(|tx| {
++                        tx.send(AppEvent::Exit(ExitMode::ShutdownFirst));
++                    })],
++                    dismiss_on_select: true,
++                    ..Default::default()
++                },
++                SelectionItem {
++                    name: "Exit immediately".to_string(),
++                    description: Some("Skip verified writer release".to_string()),
++                    actions: vec![Box::new(|tx| {
++                        tx.send(AppEvent::Exit(ExitMode::Immediate));
++                    })],
++                    dismiss_on_select: true,
++                    ..Default::default()
++                },
++                SelectionItem {
++                    name: "Stay in Codex".to_string(),
++                    dismiss_on_select: true,
++                    ..Default::default()
++                },
++            ],
++            ..Default::default()
++        });
++    }
++
++    fn show_shutdown_waiting_picker(&mut self) {
++        self.chat_widget.show_selection_view(SelectionViewParams {
++            title: Some("Waiting for session release".to_string()),
++            subtitle: Some("Input remains locked until the server operation finishes.".to_string()),
++            footer_hint: Some(standard_popup_hint_line()),
++            items: vec![SelectionItem {
++                name: "Keep waiting".to_string(),
++                dismiss_on_select: true,
++                ..Default::default()
++            }],
++            ..Default::default()
++        });
++    }
++
++    pub(super) fn begin_stock_logout(&self, app_server: &AppServerSession) {
++        let request_handle = app_server.request_handle();
++        let app_event_tx = self.app_event_tx.clone();
++        tokio::spawn(async move {
++            let result = logout_account_with_request_handle(request_handle)
++                .await
++                .map_err(|error| error.to_string());
++            app_event_tx.send(AppEvent::LogoutFinished { result });
++        });
++    }
++
++    pub(super) async fn handle_stock_shutdown(
++        &mut self,
++        app_server: &mut AppServerSession,
++        intent: ShutdownIntent,
++    ) -> AppRunControl {
++        if intent == ShutdownIntent::LogoutDefault
++            && let Err(error) = app_server.logout_account().await
++        {
++            self.shutdown_control_failed(format!("Logout failed: {error}"));
++            return AppRunControl::Continue;
++        }
++        self.shutdown_current_thread(app_server).await;
++        AppRunControl::Exit(ExitReason::UserRequested)
++    }
++}
+diff --git a/codex-rs/tui/src/app/startup.rs b/codex-rs/tui/src/app/startup.rs
+index 97d5bb6..43bce5f 100644
+--- a/codex-rs/tui/src/app/startup.rs
++++ b/codex-rs/tui/src/app/startup.rs
+@@ -428,7 +428,13 @@ See the Codex keymap documentation for supported actions and examples."
+             environment_manager,
+             app_server_target,
+             pending_update_action: None,
+-            pending_shutdown_exit_thread_id: None,
++            pending_shutdown_exit: None,
++            shutdown_lookup_in_flight: false,
++            account_slots: Vec::new(),
++            account_slot_capability: None,
++            account_runtime: None,
++            account_picker_request_generation: 0,
++            pending_account_switch: None,
+             windows_sandbox: WindowsSandboxState::default(),
+             thread_event_channels: HashMap::new(),
+             thread_event_listener_tasks: HashMap::new(),
+@@ -677,8 +683,8 @@ See the Codex keymap documentation for supported actions and examples."
+                                 Err(err) => break Err(err),
+                             }
+                         } else {
+-                            tracing::warn!("terminal input stream closed; shutting down active thread");
+-                            app.handle_exit_mode(&mut app_server, ExitMode::ShutdownFirst).await
++                            tracing::warn!("terminal input stream closed; using stock app-server shutdown");
++                            app.handle_exit_mode(&mut app_server, ExitMode::Immediate).await
+                         }
+                     }
+                     app_server_event = app_server.next_event(), if listen_for_app_server_events => {
+diff --git a/codex-rs/tui/src/app/test_support.rs b/codex-rs/tui/src/app/test_support.rs
+index 45ab311..735725a 100644
+--- a/codex-rs/tui/src/app/test_support.rs
++++ b/codex-rs/tui/src/app/test_support.rs
+@@ -56,7 +56,13 @@ pub(super) async fn make_test_app() -> App {
+         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
+         app_server_target: crate::AppServerTarget::Embedded,
+         pending_update_action: None,
+-        pending_shutdown_exit_thread_id: None,
++        pending_shutdown_exit: None,
++        shutdown_lookup_in_flight: false,
++        account_slots: Vec::new(),
++        account_slot_capability: None,
++        account_runtime: None,
++        account_picker_request_generation: 0,
++        pending_account_switch: None,
+         windows_sandbox: WindowsSandboxState::default(),
+         thread_event_channels: HashMap::new(),
+         thread_event_listener_tasks: HashMap::new(),
+diff --git a/codex-rs/tui/src/app/tests.rs b/codex-rs/tui/src/app/tests.rs
+index 95fbd2f..2ed679f 100644
+--- a/codex-rs/tui/src/app/tests.rs
++++ b/codex-rs/tui/src/app/tests.rs
+@@ -4609,7 +4609,16 @@ async fn active_non_primary_shutdown_target_returns_none_when_shutdown_exit_is_p
+     let primary_thread_id = ThreadId::new();
+     app.active_thread_id = Some(active_thread_id);
+     app.primary_thread_id = Some(primary_thread_id);
+-    app.pending_shutdown_exit_thread_id = Some(active_thread_id);
++    app.pending_shutdown_exit = Some(runtime_controls::PendingShutdownExit {
++        intent: runtime_controls::ShutdownIntent::Exit,
++        thread_id: active_thread_id,
++        operation_id: "test-operation".to_string(),
++        instance_epoch: "test-epoch".to_string(),
++        state_revision: 1,
++        writer_generation: 1,
++        released: false,
++        thread_closed: false,
++    });
+ 
+     assert_eq!(
+         app.active_non_primary_shutdown_target(&thread_closed_notification(active_thread_id)),
+@@ -4626,7 +4635,16 @@ async fn active_non_primary_shutdown_target_still_switches_for_other_pending_exi
+     let primary_thread_id = ThreadId::new();
+     app.active_thread_id = Some(active_thread_id);
+     app.primary_thread_id = Some(primary_thread_id);
+-    app.pending_shutdown_exit_thread_id = Some(ThreadId::new());
++    app.pending_shutdown_exit = Some(runtime_controls::PendingShutdownExit {
++        intent: runtime_controls::ShutdownIntent::Exit,
++        thread_id: ThreadId::new(),
++        operation_id: "test-operation".to_string(),
++        instance_epoch: "test-epoch".to_string(),
++        state_revision: 1,
++        writer_generation: 1,
++        released: false,
++        thread_closed: false,
++    });
+ 
+     assert_eq!(
+         app.active_non_primary_shutdown_target(&thread_closed_notification(active_thread_id)),
+@@ -4635,6 +4653,239 @@ async fn active_non_primary_shutdown_target_still_switches_for_other_pending_exi
+     Ok(())
+ }
+ 
++fn test_relinquish_operation(
++    thread_id: ThreadId,
++    status: codex_app_server_protocol::SessionRuntimeOperationStatus,
++) -> codex_app_server_protocol::SessionRuntimeOperation {
++    codex_app_server_protocol::SessionRuntimeOperation {
++        operation_id: "test-operation".to_string(),
++        request_fingerprint: "test-fingerprint".to_string(),
++        action: codex_app_server_protocol::SessionRuntimeOperationAction::ThreadRelinquish,
++        status,
++        thread_id: Some(thread_id.to_string()),
++        account_slot_id: None,
++        state_revision: Some(1),
++        writer_generation: Some(1),
++        execution_generation: None,
++        error: None,
++        updated_at: 1,
++    }
++}
++
++fn test_pending_shutdown(thread_id: ThreadId) -> runtime_controls::PendingShutdownExit {
++    runtime_controls::PendingShutdownExit {
++        intent: runtime_controls::ShutdownIntent::Exit,
++        thread_id,
++        operation_id: "test-operation".to_string(),
++        instance_epoch: "test-epoch".to_string(),
++        state_revision: 1,
++        writer_generation: 1,
++        released: false,
++        thread_closed: false,
++    }
++}
++
++#[tokio::test]
++async fn shutdown_exit_requires_matching_release_and_thread_closed() {
++    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
++    let thread_id = ThreadId::new();
++    app.pending_shutdown_exit = Some(test_pending_shutdown(thread_id));
++
++    assert!(app.handle_shutdown_operation(&test_relinquish_operation(
++        thread_id,
++        codex_app_server_protocol::SessionRuntimeOperationStatus::Released,
++    )));
++    assert!(app_event_rx.try_recv().is_err());
++    assert!(app.handle_pending_shutdown_thread_closed(&thread_id.to_string()));
++    assert_matches!(
++        app_event_rx.try_recv(),
++        Ok(AppEvent::Exit(ExitMode::Immediate))
++    );
++    assert!(app.pending_shutdown_exit.is_none());
++}
++
++#[tokio::test]
++async fn shutdown_timeout_keeps_pending_and_accepts_late_terminals() {
++    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
++    let thread_id = ThreadId::new();
++    app.pending_shutdown_exit = Some(test_pending_shutdown(thread_id));
++
++    app.handle_shutdown_release_timeout("test-operation");
++
++    assert!(app.pending_shutdown_exit.is_some());
++    assert_app_snapshot!(
++        "shutdown_release_waiting_after_timeout",
++        render_bottom_popup(&app.chat_widget, /*width*/ 80)
++    );
++    while let Ok(event) = app_event_rx.try_recv() {
++        assert!(!matches!(event, AppEvent::Exit(_)));
++    }
++    assert!(app.handle_shutdown_operation(&test_relinquish_operation(
++        thread_id,
++        codex_app_server_protocol::SessionRuntimeOperationStatus::Released,
++    )));
++    assert!(app_event_rx.try_recv().is_err());
++    assert!(app.handle_pending_shutdown_thread_closed(&thread_id.to_string()));
++    assert_matches!(
++        app_event_rx.try_recv(),
++        Ok(AppEvent::Exit(ExitMode::Immediate))
++    );
++    assert!(app.pending_shutdown_exit.is_none());
++}
++
++#[tokio::test]
++async fn account_slot_notification_does_not_open_picker() -> Result<()> {
++    let mut app = make_test_app().await;
++    let before = render_bottom_popup(&app.chat_widget, /*width*/ 80);
++    let slot = serde_json::from_value(serde_json::json!({
++        "accountSlotId": "slot-secondary",
++        "label": "Secondary",
++        "isDefault": false,
++        "status": "ready",
++        "authMode": null,
++        "attemptGeneration": 1,
++        "registryRevision": 2,
++        "activeLoginOperationId": null,
++        "errorCode": null,
++        "actions": [],
++        "updatedAt": 1
++    }))?;
++
++    app.handle_account_slot_changed(slot);
++
++    assert_eq!(render_bottom_popup(&app.chat_widget, /*width*/ 80), before);
++    Ok(())
++}
++
++#[tokio::test]
++async fn account_picker_snapshot_shows_current_default_and_add_denial() -> Result<()> {
++    let mut app = make_test_app().await;
++    let thread_id = ThreadId::new();
++    app.active_thread_id = Some(thread_id);
++    let slots = serde_json::from_value(serde_json::json!([
++        {
++            "accountSlotId": "slot-default",
++            "label": "Default account",
++            "isDefault": true,
++            "status": "ready",
++            "authMode": null,
++            "attemptGeneration": 1,
++            "registryRevision": 2,
++            "activeLoginOperationId": null,
++            "errorCode": null,
++            "actions": [{"action": "switchTo", "allowed": true, "denyReason": null}],
++            "updatedAt": 1
++        },
++        {
++            "accountSlotId": "slot-secondary",
++            "label": "Secondary",
++            "isDefault": false,
++            "status": "loginRequired",
++            "authMode": null,
++            "attemptGeneration": 1,
++            "registryRevision": 2,
++            "activeLoginOperationId": null,
++            "errorCode": null,
++            "actions": [{"action": "login", "allowed": true, "denyReason": null}],
++            "updatedAt": 1
++        }
++    ]))?;
++    let runtime = serde_json::from_value(serde_json::json!({
++        "threadId": thread_id.to_string(),
++        "stateRevision": 3,
++        "identity": {
++            "sessionId": thread_id.to_string(), "forkedFromId": null,
++            "parentThreadId": null, "name": null, "source": "cli", "cwd": "/tmp",
++            "gitInfo": null, "settings": null
++        },
++        "lifecycle": {
++            "state": "idle", "activeTurnId": null, "waitingOn": [], "subscriberCount": 1,
++            "clientIncarnations": [], "lastActivityAt": null, "unloadAt": null
++        },
++        "writer": {
++            "state": "ownedHere", "storeId": "store", "writerGeneration": 4,
++            "denyReason": null
++        },
++        "persistence": {
++            "jsonl": null, "sqlite": null, "lag": null, "flushHealth": "healthy",
++            "materializeHealth": "healthy", "flushedAt": null, "materializedAt": null,
++            "denyReason": null
++        },
++        "account": {
++            "current": {"accountSlotId": "slot-default", "executionGeneration": 5},
++            "activeTurn": null, "switchState": "stable", "switchTargetSlotId": null,
++            "denyReason": null
++        },
++        "actions": [{"action": "switchAccount", "allowed": true, "denyReason": null}]
++    }))?;
++    let request_generation = app.begin_account_picker_request();
++    app.handle_account_picker_loaded(
++        thread_id,
++        request_generation,
++        Ok(account_picker::AccountPickerSnapshot {
++            slots,
++            capability: codex_app_server_protocol::AccountSlotCapability {
++                available: false,
++                deny_reason: Some("No free account slot".to_string()),
++            },
++            runtime: Some(("test-epoch".to_string(), runtime)),
++        }),
++    );
++
++    assert_app_snapshot!(
++        "account_picker_current_default_and_add_denial",
++        render_bottom_popup(&app.chat_widget, /*width*/ 80)
++    );
++    Ok(())
++}
++
++#[tokio::test]
++async fn account_picker_accepts_only_latest_request_for_displayed_thread() -> Result<()> {
++    let mut app = make_test_app().await;
++    let displayed_thread_id = ThreadId::new();
++    let other_thread_id = ThreadId::new();
++    app.active_thread_id = Some(displayed_thread_id);
++    let slot: codex_app_server_protocol::AccountSlotSnapshot =
++        serde_json::from_value(serde_json::json!({
++        "accountSlotId": "slot-secondary",
++        "label": "Secondary",
++        "isDefault": false,
++        "status": "ready",
++        "authMode": null,
++        "attemptGeneration": 1,
++        "registryRevision": 2,
++        "activeLoginOperationId": null,
++        "errorCode": null,
++        "actions": [],
++        "updatedAt": 1
++        }))?;
++    let snapshot = || account_picker::AccountPickerSnapshot {
++        slots: vec![slot.clone()],
++        capability: codex_app_server_protocol::AccountSlotCapability {
++            available: true,
++            deny_reason: None,
++        },
++        runtime: None,
++    };
++
++    let stale_generation = app.begin_account_picker_request();
++    let latest_generation = app.begin_account_picker_request();
++    app.handle_account_picker_loaded(displayed_thread_id, stale_generation, Ok(snapshot()));
++    assert!(app.account_slots.is_empty());
++
++    let wrong_thread_generation = app.begin_account_picker_request();
++    app.handle_account_picker_loaded(other_thread_id, wrong_thread_generation, Ok(snapshot()));
++    assert!(app.account_slots.is_empty());
++
++    let current_generation = app.begin_account_picker_request();
++    app.handle_account_picker_loaded(displayed_thread_id, latest_generation, Ok(snapshot()));
++    assert!(app.account_slots.is_empty());
++
++    app.handle_account_picker_loaded(displayed_thread_id, current_generation, Ok(snapshot()));
++    assert_eq!(app.account_slots, vec![slot]);
++    Ok(())
++}
++
+ async fn render_clear_ui_header_after_long_transcript_for_snapshot() -> String {
+     let mut app = make_test_app().await;
+     app.config.cwd = test_path_buf("/tmp/project").abs();
+@@ -4853,7 +5104,13 @@ async fn make_test_app() -> App {
+         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
+         app_server_target: crate::AppServerTarget::Embedded,
+         pending_update_action: None,
+-        pending_shutdown_exit_thread_id: None,
++        pending_shutdown_exit: None,
++        shutdown_lookup_in_flight: false,
++        account_slots: Vec::new(),
++        account_slot_capability: None,
++        account_runtime: None,
++        account_picker_request_generation: 0,
++        pending_account_switch: None,
+         windows_sandbox: WindowsSandboxState::default(),
+         thread_event_channels: HashMap::new(),
+         thread_event_listener_tasks: HashMap::new(),
+@@ -4928,7 +5185,13 @@ async fn make_test_app_with_channels() -> (
+             environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
+             app_server_target: crate::AppServerTarget::Embedded,
+             pending_update_action: None,
+-            pending_shutdown_exit_thread_id: None,
++            pending_shutdown_exit: None,
++            shutdown_lookup_in_flight: false,
++            account_slots: Vec::new(),
++            account_slot_capability: None,
++            account_runtime: None,
++            account_picker_request_generation: 0,
++            pending_account_switch: None,
+             windows_sandbox: WindowsSandboxState::default(),
+             thread_event_channels: HashMap::new(),
+             thread_event_listener_tasks: HashMap::new(),
+@@ -7134,7 +7397,7 @@ async fn new_session_requests_shutdown_for_previous_conversation() {
+ }
+ 
+ #[tokio::test]
+-async fn shutdown_first_exit_returns_immediate_exit_when_shutdown_submit_fails() {
++async fn shutdown_first_exit_starts_runtime_lookup_without_exiting() {
+     let mut app = make_test_app().await;
+     let thread_id = ThreadId::new();
+     app.active_thread_id = Some(thread_id);
+@@ -7146,15 +7409,13 @@ async fn shutdown_first_exit_returns_immediate_exit_when_shutdown_submit_fails()
+     .expect("embedded app server");
+     let control = Box::pin(app.handle_exit_mode(&mut app_server, ExitMode::ShutdownFirst)).await;
+ 
+-    assert_eq!(app.pending_shutdown_exit_thread_id, None);
+-    assert!(matches!(
+-        control,
+-        AppRunControl::Exit(ExitReason::UserRequested)
+-    ));
++    assert!(matches!(control, AppRunControl::Continue));
++    assert!(app.shutdown_lookup_in_flight);
++    assert!(app.pending_shutdown_exit.is_none());
+ }
+ 
+ #[tokio::test]
+-async fn shutdown_first_exit_uses_app_server_shutdown_without_submitting_op() {
++async fn repeated_shutdown_first_exit_is_fenced_without_submitting_op() {
+     let (mut app, _app_event_rx, mut op_rx) = Box::pin(make_test_app_with_channels()).await;
+     let thread_id = ThreadId::new();
+     app.active_thread_id = Some(thread_id);
+@@ -7165,12 +7426,12 @@ async fn shutdown_first_exit_uses_app_server_shutdown_without_submitting_op() {
+     .await
+     .expect("embedded app server");
+     let control = Box::pin(app.handle_exit_mode(&mut app_server, ExitMode::ShutdownFirst)).await;
++    let repeated = Box::pin(app.handle_exit_mode(&mut app_server, ExitMode::ShutdownFirst)).await;
+ 
+-    assert_eq!(app.pending_shutdown_exit_thread_id, None);
+-    assert!(matches!(
+-        control,
+-        AppRunControl::Exit(ExitReason::UserRequested)
+-    ));
++    assert!(matches!(control, AppRunControl::Continue));
++    assert!(matches!(repeated, AppRunControl::Continue));
++    assert!(app.shutdown_lookup_in_flight);
++    assert!(app.pending_shutdown_exit.is_none());
+     assert!(
+         op_rx.try_recv().is_err(),
+         "shutdown should not submit Op::Shutdown"
+diff --git a/codex-rs/tui/src/app/thread_routing.rs b/codex-rs/tui/src/app/thread_routing.rs
+index cee5594..8c05fc8 100644
+--- a/codex-rs/tui/src/app/thread_routing.rs
++++ b/codex-rs/tui/src/app/thread_routing.rs
+@@ -770,6 +770,7 @@ impl App {
+                 self.handle_skills_list_result(
+                     app_server
+                         .skills_list(codex_app_server_protocol::SkillsListParams {
++                            thread_id: Some(thread_id.to_string()),
+                             cwds: cwds.clone(),
+                             force_reload: *force_reload,
+                         })
+@@ -1452,7 +1453,7 @@ impl App {
+     /// thread has died and we should fail over to the primary thread.
+     ///
+     /// A user-requested shutdown (`ExitMode::ShutdownFirst`) sets
+-    /// `pending_shutdown_exit_thread_id`; matching shutdown completions are ignored
++    /// `pending_shutdown_exit`; matching shutdown completions are ignored
+     /// here so Ctrl+C-like exits don't accidentally resurrect the main thread.
+     ///
+     /// Failover is only eligible when all of these are true:
+@@ -1468,7 +1469,11 @@ impl App {
+         }
+         let active_thread_id = self.active_thread_id?;
+         let primary_thread_id = self.primary_thread_id?;
+-        if self.pending_shutdown_exit_thread_id == Some(active_thread_id) {
++        if self
++            .pending_shutdown_exit
++            .as_ref()
++            .is_some_and(|pending| pending.thread_id == active_thread_id)
++        {
+             return None;
+         }
+         (active_thread_id != primary_thread_id).then_some((active_thread_id, primary_thread_id))
+@@ -1677,15 +1682,6 @@ impl App {
+         app_server: &mut AppServerSession,
+         event: ThreadBufferedEvent,
+     ) -> Result<()> {
+-        // Capture this before any potential thread switch: we only want to clear
+-        // the exit marker when the currently active thread acknowledges shutdown.
+-        let pending_shutdown_exit_completed = matches!(
+-            &event,
+-            ThreadBufferedEvent::Notification(notification)
+-                if matches!(notification.as_ref(), ServerNotification::ThreadClosed(_))
+-        ) && self.pending_shutdown_exit_thread_id
+-            == self.active_thread_id;
+-
+         // Processing order matters:
+         //
+         // 1. handle unexpected non-primary shutdown failover first;
+@@ -1723,11 +1719,6 @@ impl App {
+             return Ok(());
+         }
+ 
+-        if pending_shutdown_exit_completed {
+-            // Clear only after seeing the shutdown completion for the tracked
+-            // thread, so unrelated shutdowns cannot consume this marker.
+-            self.pending_shutdown_exit_thread_id = None;
+-        }
+         let had_active_view = self.chat_widget.has_active_view();
+         self.handle_thread_event_now(event);
+         if !had_active_view
+diff --git a/codex-rs/tui/src/app_event.rs b/codex-rs/tui/src/app_event.rs
+index 6fde075..38ebdb3 100644
+--- a/codex-rs/tui/src/app_event.rs
++++ b/codex-rs/tui/src/app_event.rs
+@@ -13,6 +13,7 @@ use std::sync::Arc;
+ use std::sync::atomic::AtomicBool;
+ 
+ use crate::inline_visualization::InlineVisualizationContext;
++use codex_app_server_protocol::AccountSlotLoginStartResponse;
+ use codex_app_server_protocol::AddCreditsNudgeCreditType;
+ use codex_app_server_protocol::AddCreditsNudgeEmailStatus;
+ use codex_app_server_protocol::ConsumeAccountRateLimitResetCreditResponse;
+@@ -29,6 +30,7 @@ use codex_app_server_protocol::PluginMarketplaceEntry;
+ use codex_app_server_protocol::PluginReadParams;
+ use codex_app_server_protocol::PluginReadResponse;
+ use codex_app_server_protocol::PluginUninstallResponse;
++use codex_app_server_protocol::SessionRuntimeOperation;
+ use codex_app_server_protocol::SkillsListResponse;
+ use codex_app_server_protocol::Thread;
+ use codex_app_server_protocol::ThreadGoalStatus;
+@@ -42,8 +44,13 @@ use codex_utils_absolute_path::AbsolutePathBuf;
+ use codex_utils_approval_presets::ApprovalPreset;
+ use uuid::Uuid;
+ 
++use crate::app::account_picker::AccountLoginMethod;
++use crate::app::account_picker::AccountPickerSnapshot;
++use crate::app::runtime_controls::ShutdownIntent;
+ use crate::app_command::AppCommand;
++use crate::app_server_session::AccountSlotsSnapshot;
+ use crate::app_server_session::AppServerStartedThread;
++use crate::app_server_session::SessionRuntimeLookup;
+ use crate::bottom_pane::ApprovalRequest;
+ use crate::bottom_pane::StatusLineItem;
+ use crate::bottom_pane::TerminalTitleItem;
+@@ -195,6 +202,46 @@ pub(crate) enum TranscriptExportDestination {
+ #[allow(clippy::large_enum_variant)]
+ #[derive(Debug)]
+ pub(crate) enum AppEvent {
++    OpenAccountPicker,
++    AccountPickerLoaded {
++        thread_id: ThreadId,
++        request_generation: u64,
++        result: Result<AccountPickerSnapshot, String>,
++    },
++    OpenAccountLoginMethods {
++        slot_id: Option<String>,
++    },
++    StartAccountSlotLogin {
++        slot_id: Option<String>,
++        method: AccountLoginMethod,
++    },
++    AccountSlotLoginStarted {
++        result: Result<AccountSlotLoginStartResponse, String>,
++    },
++    SwitchAccountSlot {
++        slot_id: String,
++    },
++    AccountSwitchFinished {
++        operation_id: String,
++        result: Result<SessionRuntimeOperation, String>,
++    },
++    ShutdownRuntimeLoaded {
++        thread_id: ThreadId,
++        intent: ShutdownIntent,
++        result: Result<SessionRuntimeLookup, String>,
++        slots: Option<Result<AccountSlotsSnapshot, String>>,
++    },
++    ShutdownRelinquishFinished {
++        operation_id: String,
++        result: Result<SessionRuntimeOperation, String>,
++    },
++    ShutdownReleaseTimedOut {
++        operation_id: String,
++    },
++    LogoutAfterRelease,
++    LogoutFinished {
++        result: Result<(), String>,
++    },
+     /// Open the agent picker for switching active threads.
+     OpenAgentPicker,
+     /// Merge a completed root-scoped agent-picker refresh without blocking terminal input.
+diff --git a/codex-rs/tui/src/app_server_session.rs b/codex-rs/tui/src/app_server_session.rs
+index 2c10b3d..9d53ceb 100644
+--- a/codex-rs/tui/src/app_server_session.rs
++++ b/codex-rs/tui/src/app_server_session.rs
+@@ -27,6 +27,12 @@ use codex_app_server_client::AppServerPath;
+ use codex_app_server_client::AppServerRequestHandle;
+ use codex_app_server_client::TypedRequestError;
+ use codex_app_server_protocol::Account;
++use codex_app_server_protocol::AccountSlotCapability;
++use codex_app_server_protocol::AccountSlotListParams;
++use codex_app_server_protocol::AccountSlotListResponse;
++use codex_app_server_protocol::AccountSlotLoginStartParams;
++use codex_app_server_protocol::AccountSlotLoginStartResponse;
++use codex_app_server_protocol::AccountSlotSnapshot;
+ use codex_app_server_protocol::AskForApproval;
+ use codex_app_server_protocol::AuthMode;
+ use codex_app_server_protocol::ClientRequest;
+@@ -54,10 +60,14 @@ use codex_app_server_protocol::ReviewDelivery;
+ use codex_app_server_protocol::ReviewStartParams;
+ use codex_app_server_protocol::ReviewStartResponse;
+ use codex_app_server_protocol::ReviewTarget;
++use codex_app_server_protocol::SessionRuntimeListParams;
++use codex_app_server_protocol::SessionRuntimeListResponse;
+ use codex_app_server_protocol::SessionSource;
+ use codex_app_server_protocol::SkillsListParams;
+ use codex_app_server_protocol::SkillsListResponse;
+ use codex_app_server_protocol::Thread;
++use codex_app_server_protocol::ThreadAccountSwitchParams;
++use codex_app_server_protocol::ThreadAccountSwitchResponse;
+ use codex_app_server_protocol::ThreadApproveGuardianDeniedActionParams;
+ use codex_app_server_protocol::ThreadApproveGuardianDeniedActionResponse;
+ use codex_app_server_protocol::ThreadArchiveParams;
+@@ -92,6 +102,8 @@ use codex_app_server_protocol::ThreadMetadataUpdateParams;
+ use codex_app_server_protocol::ThreadMetadataUpdateResponse;
+ use codex_app_server_protocol::ThreadReadParams;
+ use codex_app_server_protocol::ThreadReadResponse;
++use codex_app_server_protocol::ThreadRelinquishParams;
++use codex_app_server_protocol::ThreadRelinquishResponse;
+ use codex_app_server_protocol::ThreadResumeParams;
+ use codex_app_server_protocol::ThreadResumeResponse;
+ use codex_app_server_protocol::ThreadSetNameParams;
+@@ -148,6 +160,7 @@ const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
+ const JSONRPC_INVALID_PARAMS: i64 = -32602;
+ pub(crate) const EXTERNAL_AGENT_CONFIG_IMPORT_IN_PROGRESS_MESSAGE: &str = "A previous external agent import is still running. Wait for it to finish before importing again.";
+ const THREAD_SETTINGS_UPDATE_METHOD: &str = "thread/settings/update";
++pub(crate) const SESSION_RUNTIME_CONTROL_CAPABILITY: &str = "ananke_session_control_v1";
+ 
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+ pub(crate) enum ForkGoalContinuation {
+@@ -155,6 +168,18 @@ pub(crate) enum ForkGoalContinuation {
+     DeferUntilNextTurn,
+ }
+ 
++#[derive(Debug)]
++pub(crate) enum SessionRuntimeLookup {
++    Supported(SessionRuntimeListResponse),
++    Unsupported,
++}
++
++#[derive(Debug)]
++pub(crate) struct AccountSlotsSnapshot {
++    pub(crate) data: Vec<AccountSlotSnapshot>,
++    pub(crate) multi_account: AccountSlotCapability,
++}
++
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+ enum ForkPresentation {
+     Regular,
+@@ -1412,6 +1437,112 @@ impl AppServerSession {
+     }
+ }
+ 
++pub(crate) async fn session_runtime_for_thread(
++    request_handle: AppServerRequestHandle,
++    thread_id: ThreadId,
++) -> std::result::Result<SessionRuntimeLookup, TypedRequestError> {
++    let request_id = RequestId::String(format!("session-runtime-{}", Uuid::new_v4()));
++    let result = request_handle
++        .request_typed::<SessionRuntimeListResponse>(ClientRequest::SessionRuntimeList {
++            request_id,
++            params: SessionRuntimeListParams {
++                cursor: None,
++                limit: Some(1),
++                thread_id: Some(thread_id.to_string()),
++            },
++        })
++        .await;
++    match result {
++        Ok(response) => {
++            let supported = response.capabilities.iter().any(|capability| {
++                capability.name == SESSION_RUNTIME_CONTROL_CAPABILITY && capability.available
++            });
++            if supported {
++                Ok(SessionRuntimeLookup::Supported(response))
++            } else {
++                Ok(SessionRuntimeLookup::Unsupported)
++            }
++        }
++        Err(TypedRequestError::Server { source, .. })
++            if source.code == JSONRPC_METHOD_NOT_FOUND =>
++        {
++            Ok(SessionRuntimeLookup::Unsupported)
++        }
++        Err(error) => Err(error),
++    }
++}
++
++pub(crate) async fn relinquish_thread(
++    request_handle: AppServerRequestHandle,
++    params: ThreadRelinquishParams,
++) -> std::result::Result<ThreadRelinquishResponse, TypedRequestError> {
++    let request_id = RequestId::String(format!("thread-relinquish-{}", Uuid::new_v4()));
++    request_handle
++        .request_typed(ClientRequest::ThreadRelinquish { request_id, params })
++        .await
++}
++
++pub(crate) async fn switch_thread_account(
++    request_handle: AppServerRequestHandle,
++    params: ThreadAccountSwitchParams,
++) -> std::result::Result<ThreadAccountSwitchResponse, TypedRequestError> {
++    let request_id = RequestId::String(format!("thread-account-switch-{}", Uuid::new_v4()));
++    request_handle
++        .request_typed(ClientRequest::ThreadAccountSwitch { request_id, params })
++        .await
++}
++
++pub(crate) async fn list_account_slots(
++    request_handle: AppServerRequestHandle,
++) -> std::result::Result<AccountSlotsSnapshot, TypedRequestError> {
++    let mut cursor = None;
++    let mut slots = Vec::new();
++    loop {
++        let request_id = RequestId::String(format!("account-slot-list-{}", Uuid::new_v4()));
++        let response: AccountSlotListResponse = request_handle
++            .request_typed(ClientRequest::AccountSlotList {
++                request_id,
++                params: AccountSlotListParams {
++                    cursor,
++                    limit: Some(100),
++                },
++            })
++            .await?;
++        slots.extend(response.data);
++        let multi_account = response.multi_account;
++        let Some(next_cursor) = response.next_cursor else {
++            return Ok(AccountSlotsSnapshot {
++                data: slots,
++                multi_account,
++            });
++        };
++        cursor = Some(next_cursor);
++    }
++}
++
++pub(crate) async fn start_account_slot_login(
++    request_handle: AppServerRequestHandle,
++    params: AccountSlotLoginStartParams,
++) -> std::result::Result<AccountSlotLoginStartResponse, TypedRequestError> {
++    let request_id = RequestId::String(format!("account-slot-login-{}", Uuid::new_v4()));
++    request_handle
++        .request_typed(ClientRequest::AccountSlotLoginStart { request_id, params })
++        .await
++}
++
++pub(crate) async fn logout_account_with_request_handle(
++    request_handle: AppServerRequestHandle,
++) -> std::result::Result<(), TypedRequestError> {
++    let request_id = RequestId::String(format!("account-logout-{}", Uuid::new_v4()));
++    let _: LogoutAccountResponse = request_handle
++        .request_typed(ClientRequest::LogoutAccount {
++            request_id,
++            params: None,
++        })
++        .await?;
++    Ok(())
++}
++
+ pub(crate) async fn start_thread_with_request_handle(
+     request_handle: AppServerRequestHandle,
+     config: Config,
+diff --git a/codex-rs/tui/src/bottom_pane/chat_composer.rs b/codex-rs/tui/src/bottom_pane/chat_composer.rs
+index 63b5bd4..45ce8ec 100644
+--- a/codex-rs/tui/src/bottom_pane/chat_composer.rs
++++ b/codex-rs/tui/src/bottom_pane/chat_composer.rs
+@@ -394,6 +394,7 @@ fn parent_owned_command_is_allowed(command: SlashCommand, args: &str) -> bool {
+                 | SlashCommand::Quit
+                 | SlashCommand::Exit
+                 | SlashCommand::Logout
++                | SlashCommand::Account
+                 | SlashCommand::Copy
+                 | SlashCommand::Raw
+                 | SlashCommand::Diff
+diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
+index 2e31278..6c3c438 100644
+--- a/codex-rs/tui/src/chatwidget.rs
++++ b/codex-rs/tui/src/chatwidget.rs
+@@ -1374,6 +1374,11 @@ impl ChatWidget {
+         self.bottom_pane.show_shutdown_in_progress();
+     }
+ 
++    pub(crate) fn restore_after_shutdown_failure(&mut self) {
++        self.bottom_pane
++            .set_composer_input_enabled(/*enabled*/ true, /*placeholder*/ None);
++    }
++
+     fn request_redraw(&mut self) {
+         self.frame_requester.schedule_frame();
+     }
+diff --git a/codex-rs/tui/src/chatwidget/slash_dispatch.rs b/codex-rs/tui/src/chatwidget/slash_dispatch.rs
+index fafe2e0..d4ac25e 100644
+--- a/codex-rs/tui/src/chatwidget/slash_dispatch.rs
++++ b/codex-rs/tui/src/chatwidget/slash_dispatch.rs
+@@ -397,6 +397,9 @@ impl ChatWidget {
+             SlashCommand::Logout => {
+                 self.app_event_tx.send(AppEvent::Logout);
+             }
++            SlashCommand::Account => {
++                self.app_event_tx.send(AppEvent::OpenAccountPicker);
++            }
+             SlashCommand::Copy => {
+                 self.copy_last_agent_markdown();
+             }
+@@ -1131,6 +1134,7 @@ impl ChatWidget {
+             | SlashCommand::Quit
+             | SlashCommand::Exit
+             | SlashCommand::Logout
++            | SlashCommand::Account
+             | SlashCommand::Mention
+             | SlashCommand::Skills
+             | SlashCommand::Import
+diff --git a/codex-rs/tui/src/chatwidget/tests/slash_commands.rs b/codex-rs/tui/src/chatwidget/tests/slash_commands.rs
+index bb62505..60df625 100644
+--- a/codex-rs/tui/src/chatwidget/tests/slash_commands.rs
++++ b/codex-rs/tui/src/chatwidget/tests/slash_commands.rs
+@@ -1703,6 +1703,15 @@ async fn slash_logout_requests_app_server_logout() {
+     assert_matches!(rx.try_recv(), Ok(AppEvent::Logout));
+ }
+ 
++#[tokio::test]
++async fn slash_account_requests_account_picker() {
++    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
++
++    chat.dispatch_command(SlashCommand::Account);
++
++    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenAccountPicker));
++}
++
+ #[tokio::test]
+ async fn slash_copy_state_tracks_turn_complete_final_reply() {
+     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+diff --git a/codex-rs/tui/src/slash_command.rs b/codex-rs/tui/src/slash_command.rs
+index b369870..6b6567d 100644
+--- a/codex-rs/tui/src/slash_command.rs
++++ b/codex-rs/tui/src/slash_command.rs
+@@ -59,6 +59,7 @@ pub enum SlashCommand {
+     Mcp,
+     Apps,
+     Plugins,
++    Account,
+     Logout,
+     Quit,
+     Exit,
+@@ -139,6 +140,7 @@ impl SlashCommand {
+             SlashCommand::Mcp => "list configured MCP tools; use /mcp verbose for details",
+             SlashCommand::Apps => "manage apps",
+             SlashCommand::Plugins => "browse plugins",
++            SlashCommand::Account => "choose the account used by this session",
+             SlashCommand::Logout => "log out of Codex",
+             SlashCommand::Rollout => "print the rollout file path",
+             SlashCommand::TestApproval => "test approval request",
+@@ -235,6 +237,7 @@ impl SlashCommand {
+             | SlashCommand::Mcp
+             | SlashCommand::Apps
+             | SlashCommand::Plugins
++            | SlashCommand::Account
+             | SlashCommand::Title
+             | SlashCommand::Statusline
+             | SlashCommand::AutoReview
+diff --git a/codex-rs/tui/src/snapshots/codex_tui__app__tests__account_picker_current_default_and_add_denial.snap b/codex-rs/tui/src/snapshots/codex_tui__app__tests__account_picker_current_default_and_add_denial.snap
+new file mode 100644
+index 0000000..a82e3c2
+--- /dev/null
++++ b/codex-rs/tui/src/snapshots/codex_tui__app__tests__account_picker_current_default_and_add_denial.snap
+@@ -0,0 +1,15 @@
++---
++source: tui/src/app/tests.rs
++assertion_line: 4817
++expression: "render_bottom_popup(&app.chat_widget, 80)"
++---
++  Accounts
++  Choose the account used by the next turn.
++
++     Default account (current) (disabled)  Ready (disabled: Current account)
++› 1. Secondary                             Login required
++     Add account (disabled)                Sign in with a browser or device
++                                           code (disabled: No free account
++                                           slot)
++
++  Press enter to confirm or esc to go back
+diff --git a/codex-rs/tui/src/snapshots/codex_tui__app__tests__shutdown_release_waiting_after_timeout.snap b/codex-rs/tui/src/snapshots/codex_tui__app__tests__shutdown_release_waiting_after_timeout.snap
+new file mode 100644
+index 0000000..f5df901
+--- /dev/null
++++ b/codex-rs/tui/src/snapshots/codex_tui__app__tests__shutdown_release_waiting_after_timeout.snap
+@@ -0,0 +1,11 @@
++---
++source: tui/src/app/tests.rs
++assertion_line: 4716
++expression: "render_bottom_popup(&app.chat_widget, 80)"
++---
++  Waiting for session release
++  Input remains locked until the server operation finishes.
++
++› 1. Keep waiting
++
++  Press enter to confirm or esc to go back
+-- 
+2.50.1 (Apple Git-155)
+

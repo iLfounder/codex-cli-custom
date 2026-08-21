@@ -1,0 +1,2640 @@
+From d6a89185d67a4cdb43ca1f81789779a3d9c906a3 Mon Sep 17 00:00:00 2001
+From: Codex CLI Custom <codex-cli-custom@users.noreply.github.com>
+Date: Fri, 21 Aug 2026 10:14:28 +0900
+Subject: [PATCH 07/11] P007: add live account registration
+
+---
+ codex-rs/app-server/src/account_registry.rs   |  68 +-
+ .../src/account_registry/live_registration.rs | 460 +++++++++++
+ .../app-server/src/account_registry_tests.rs  | 288 +++++++
+ codex-rs/app-server/src/external_auth.rs      |  50 +-
+ codex-rs/app-server/src/in_process.rs         |   6 +-
+ codex-rs/app-server/src/lib.rs                |   4 +-
+ codex-rs/app-server/src/message_processor.rs  |  30 +-
+ codex-rs/app-server/src/outgoing_message.rs   | 120 ++-
+ codex-rs/app-server/src/request_processors.rs |   2 +-
+ .../request_processors/account_processor.rs   |  86 +-
+ .../account_processor/slot_login.rs           | 749 ++++++++++++++++++
+ .../app-server/tests/suite/account_slot.rs    | 179 +++++
+ codex-rs/app-server/tests/suite/mod.rs        |   1 +
+ codex-rs/login/src/lib.rs                     |   1 +
+ codex-rs/login/src/server.rs                  |  72 +-
+ 15 files changed, 2048 insertions(+), 68 deletions(-)
+ create mode 100644 codex-rs/app-server/src/account_registry/live_registration.rs
+ create mode 100644 codex-rs/app-server/src/request_processors/account_processor/slot_login.rs
+ create mode 100644 codex-rs/app-server/tests/suite/account_slot.rs
+
+diff --git a/codex-rs/app-server/src/account_registry.rs b/codex-rs/app-server/src/account_registry.rs
+index 49e71a1..a2b5579 100644
+--- a/codex-rs/app-server/src/account_registry.rs
++++ b/codex-rs/app-server/src/account_registry.rs
+@@ -3,11 +3,11 @@ use std::io;
+ use std::path::Path;
+ use std::path::PathBuf;
+ use std::sync::Arc;
++use std::sync::Mutex;
+ use std::sync::RwLock;
+ 
+ use base64::Engine;
+ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+-use codex_app_server_protocol::AccountSlotActionAvailability;
+ use codex_app_server_protocol::AccountSlotCapability;
+ use codex_app_server_protocol::AccountSlotListParams;
+ use codex_app_server_protocol::AccountSlotListResponse;
+@@ -245,6 +245,7 @@ fn valid_manifest_token(value: &str) -> bool {
+ struct AccountSlotRecord {
+     manifest: AccountSlotManifest,
+     runtime: Arc<OnceCell<Arc<AccountRuntimeBundle>>>,
++    active_login_operation_id: Option<String>,
+ }
+ 
+ pub(crate) struct AccountRuntimeBundle {
+@@ -256,12 +257,21 @@ struct AccountRegistryState {
+     revision: u64,
+     slots: Vec<AccountSlotRecord>,
+     manifest_error: Option<&'static str>,
++    manifest_present: bool,
+ }
+ 
+ pub(crate) struct AccountRegistry {
+     config: Arc<Config>,
+     auth_config_template: AuthConfig,
+     state: RwLock<AccountRegistryState>,
++    mutation_lock: Mutex<()>,
++    browser_login: Mutex<Option<BrowserLoginOwner>>,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub(crate) enum BrowserLoginOwner {
++    Default(String),
++    Slot(String),
+ }
+ 
+ impl AccountRegistry {
+@@ -271,13 +281,14 @@ impl AccountRegistry {
+         default_models_manager: SharedModelsManager,
+     ) -> Self {
+         let manifest_path = config.codex_home.join(MANIFEST_FILE);
+-        let (manifest, manifest_error) =
++        let (manifest, manifest_error, manifest_present) =
+             match AccountSlotsManifest::load(&manifest_path, &config.codex_home) {
+-                Ok(Some(manifest)) => (manifest, None),
+-                Ok(None) => (virtual_default_manifest(&config.codex_home), None),
++                Ok(Some(manifest)) => (manifest, None, true),
++                Ok(None) => (virtual_default_manifest(&config.codex_home), None, false),
+                 Err(_) => (
+                     virtual_default_manifest(&config.codex_home),
+                     Some(DENY_MANIFEST_INVALID),
++                    false,
+                 ),
+             };
+         let default_runtime = Arc::new(AccountRuntimeBundle {
+@@ -292,7 +303,11 @@ impl AccountRegistry {
+                 if manifest.is_default {
+                     let _ = runtime.set(Arc::clone(&default_runtime));
+                 }
+-                AccountSlotRecord { manifest, runtime }
++                AccountSlotRecord {
++                    manifest,
++                    runtime,
++                    active_login_operation_id: None,
++                }
+             })
+             .collect::<Vec<_>>();
+         slots.sort_by(|left, right| {
+@@ -308,7 +323,10 @@ impl AccountRegistry {
+                 revision: manifest.revision,
+                 slots,
+                 manifest_error,
++                manifest_present,
+             }),
++            mutation_lock: Mutex::new(()),
++            browser_login: Mutex::new(None),
+         }
+     }
+ 
+@@ -316,6 +334,7 @@ impl AccountRegistry {
+         &self,
+         params: AccountSlotListParams,
+     ) -> Result<AccountSlotListResponse, JSONRPCErrorError> {
++        self.reconcile().await?;
+         let (revision, slots, manifest_error) = {
+             let state = self
+                 .state
+@@ -358,6 +377,7 @@ impl AccountRegistry {
+     pub(crate) async fn runtime_capability(
+         &self,
+     ) -> Result<AccountSlotCapability, JSONRPCErrorError> {
++        self.reconcile().await?;
+         let manifest_error = self
+             .state
+             .read()
+@@ -366,27 +386,6 @@ impl AccountRegistry {
+         Ok(self.capability(manifest_error))
+     }
+ 
+-    pub(crate) async fn slot_snapshot(
+-        &self,
+-        account_slot_id: &str,
+-    ) -> Result<AccountSlotSnapshot, JSONRPCErrorError> {
+-        let (slot, revision, manifest_error) = {
+-            let state = self
+-                .state
+-                .read()
+-                .map_err(|_| internal_error("account slot registry is unavailable"))?;
+-            let slot = state
+-                .slots
+-                .iter()
+-                .find(|slot| slot.manifest.account_slot_id == account_slot_id)
+-                .cloned()
+-                .ok_or_else(|| invalid_params("account slot is unavailable"))?;
+-            (slot, state.revision, state.manifest_error)
+-        };
+-        let capability = self.capability(manifest_error);
+-        Ok(self.snapshot(&slot, revision, &capability).await)
+-    }
+-
+     async fn snapshot(
+         &self,
+         slot: &AccountSlotRecord,
+@@ -418,9 +417,14 @@ impl AccountRegistry {
+             auth_mode,
+             attempt_generation: slot.manifest.attempt_generation,
+             registry_revision: revision,
+-            active_login_operation_id: None,
++            active_login_operation_id: slot.active_login_operation_id.clone(),
+             error_code,
+-            actions: Vec::<AccountSlotActionAvailability>::new(),
++            actions: live_registration::available_actions(
++                slot.manifest.status,
++                capability,
++                slot.manifest.is_default,
++                slot.active_login_operation_id.is_some(),
++            ),
+             updated_at: slot.manifest.updated_at,
+         }
+     }
+@@ -498,9 +502,17 @@ impl AccountRegistry {
+     }
+ }
+ 
++pub(crate) mod live_registration;
++
+ impl ExecutionAccountResolver for AccountRegistry {
+     fn resolve(&self, binding: ExecutionAccountBinding) -> ExecutionAccountResolverFuture<'_> {
+         Box::pin(async move {
++            self.reconcile().await.map_err(|error| {
++                CodexErr::Fatal(format!(
++                    "account slot reconciliation failed: {}",
++                    error.message
++                ))
++            })?;
+             let (slot, manifest_error) = {
+                 let state = self.state.read().map_err(|_| {
+                     CodexErr::Fatal("account slot registry is unavailable".to_string())
+diff --git a/codex-rs/app-server/src/account_registry/live_registration.rs b/codex-rs/app-server/src/account_registry/live_registration.rs
+new file mode 100644
+index 0000000..e33fc11
+--- /dev/null
++++ b/codex-rs/app-server/src/account_registry/live_registration.rs
+@@ -0,0 +1,460 @@
++use std::sync::Arc;
++
++use chrono::Utc;
++use codex_app_server_protocol::AccountSlotAction;
++use codex_app_server_protocol::AccountSlotActionAvailability;
++use codex_app_server_protocol::AccountSlotCapability;
++use codex_app_server_protocol::AccountSlotChangedNotification;
++use codex_app_server_protocol::AccountSlotSnapshot;
++use codex_app_server_protocol::JSONRPCErrorError;
++use tokio::sync::OnceCell;
++use uuid::Uuid;
++
++use super::AccountRegistry;
++use super::AccountRuntimeBundle;
++use super::AccountSlotManifest;
++use super::AccountSlotRecord;
++use super::AccountSlotsManifest;
++use super::BrowserLoginOwner;
++use super::DENY_LOGIN_NOT_AVAILABLE;
++use super::MANIFEST_FILE;
++use super::MANIFEST_SCHEMA_VERSION;
++use super::ManifestSlotStatus;
++use super::PRIVATE_HOMES_DIR;
++use crate::error_code::internal_error;
++use crate::error_code::invalid_request;
++
++pub(crate) const ERROR_AUTH_UNAVAILABLE: &str = "authUnavailable";
++pub(crate) const ERROR_BROWSER_LOGIN_BUSY: &str = "browserLoginBusy";
++pub(crate) const ERROR_LOGIN_BUSY: &str = "accountSlotLoginBusy";
++pub(crate) const ERROR_LOGIN_CANCELED: &str = "loginCanceled";
++pub(crate) const ERROR_LOGIN_FAILED: &str = "loginFailed";
++pub(crate) const ERROR_REFRESH_UNAVAILABLE: &str = "refreshUnavailable";
++
++#[derive(Clone)]
++pub(crate) struct PreparedSlotLogin {
++    pub(crate) account_slot_id: String,
++    pub(crate) attempt_generation: u64,
++    pub(crate) operation_id: String,
++    pub(crate) auth_home: std::path::PathBuf,
++    pub(crate) runtime: Arc<AccountRuntimeBundle>,
++}
++
++impl AccountRegistry {
++    pub(crate) async fn reconcile(&self) -> Result<(), JSONRPCErrorError> {
++        let (revision, slots, manifest_error, manifest_present) = {
++            let state = self
++                .state
++                .read()
++                .map_err(|_| internal_error("account slot registry is unavailable"))?;
++            (
++                state.revision,
++                state.slots.clone(),
++                state.manifest_error,
++                state.manifest_present,
++            )
++        };
++        if manifest_error.is_some() || !manifest_present {
++            return Ok(());
++        }
++
++        let mut changed = Vec::new();
++        for slot in &slots {
++            if slot.manifest.status == ManifestSlotStatus::Failed {
++                continue;
++            }
++            let runtime = self.runtime(slot).await;
++            let has_auth = runtime.auth_manager.auth().await.is_some();
++            let next = match (slot.manifest.status, has_auth) {
++                (ManifestSlotStatus::Ready, false) => Some((
++                    ManifestSlotStatus::Failed,
++                    Some(ERROR_AUTH_UNAVAILABLE.to_string()),
++                )),
++                (ManifestSlotStatus::LoginRequired, true) => {
++                    Some((ManifestSlotStatus::Ready, None))
++                }
++                _ => None,
++            };
++            if let Some(next) = next {
++                changed.push((slot.manifest.account_slot_id.clone(), next));
++            }
++        }
++        if changed.is_empty() {
++            return Ok(());
++        }
++
++        let _mutation = self
++            .mutation_lock
++            .lock()
++            .map_err(|_| internal_error("account slot registry is unavailable"))?;
++        if self
++            .state
++            .read()
++            .map_err(|_| internal_error("account slot registry is unavailable"))?
++            .revision
++            != revision
++        {
++            return Ok(());
++        }
++        let next_revision = revision.saturating_add(1);
++        let now = Utc::now().timestamp();
++        let mut next_slots = slots;
++        for (slot_id, (status, error_code)) in changed {
++            if let Some(slot) = next_slots
++                .iter_mut()
++                .find(|slot| slot.manifest.account_slot_id == slot_id)
++            {
++                slot.manifest.status = status;
++                slot.manifest.error_code = error_code;
++                slot.manifest.updated_at = now;
++                slot.active_login_operation_id = None;
++            }
++        }
++        self.persist_slots(next_revision, &next_slots)?;
++        let mut state = self
++            .state
++            .write()
++            .map_err(|_| internal_error("account slot registry is unavailable"))?;
++        state.revision = next_revision;
++        state.slots = next_slots;
++        Ok(())
++    }
++
++    pub(crate) async fn prepare_slot_login(
++        &self,
++        requested_slot_id: Option<String>,
++        operation_id: String,
++    ) -> Result<PreparedSlotLogin, JSONRPCErrorError> {
++        if requested_slot_id.is_none()
++            && self
++                .state
++                .read()
++                .map_err(|_| internal_error("account slot registry is unavailable"))?
++                .slots
++                .len()
++                >= super::MAX_MANIFEST_SLOTS
++        {
++            return Err(invalid_request("account slot limit has been reached"));
++        }
++        self.reconcile().await?;
++        let _mutation = self
++            .mutation_lock
++            .lock()
++            .map_err(|_| internal_error("account slot registry is unavailable"))?;
++        let (revision, mut slots, manifest_error) = {
++            let state = self
++                .state
++                .read()
++                .map_err(|_| internal_error("account slot registry is unavailable"))?;
++            (state.revision, state.slots.clone(), state.manifest_error)
++        };
++        let capability = self.capability(manifest_error);
++        if !capability.available {
++            return Err(structured_invalid_request(
++                capability
++                    .deny_reason
++                    .as_deref()
++                    .unwrap_or(DENY_LOGIN_NOT_AVAILABLE),
++                "multi-account login is unavailable",
++            ));
++        }
++
++        let slot_index = match requested_slot_id {
++            Some(slot_id) => {
++                let index = slots
++                    .iter()
++                    .position(|slot| slot.manifest.account_slot_id == slot_id)
++                    .ok_or_else(|| invalid_request("account slot is unavailable"))?;
++                let slot = &slots[index];
++                if slot.manifest.is_default {
++                    return Err(invalid_request(
++                        "default account login must use account/login/start",
++                    ));
++                }
++                if slot.manifest.status == ManifestSlotStatus::Ready {
++                    return Err(invalid_request("account slot is already ready"));
++                }
++                index
++            }
++            None => {
++                if slots.len() >= super::MAX_MANIFEST_SLOTS {
++                    return Err(invalid_request("account slot limit has been reached"));
++                }
++                let account_slot_id = Uuid::new_v4().simple().to_string();
++                let ordinal = slots
++                    .iter()
++                    .filter(|slot| !slot.manifest.is_default)
++                    .count()
++                    + 2;
++                slots.push(AccountSlotRecord {
++                    manifest: AccountSlotManifest {
++                        auth_home: self
++                            .config
++                            .codex_home
++                            .join(PRIVATE_HOMES_DIR)
++                            .join(&account_slot_id)
++                            .to_path_buf(),
++                        account_slot_id,
++                        label: format!("Account {ordinal}"),
++                        is_default: false,
++                        status: ManifestSlotStatus::LoginRequired,
++                        attempt_generation: 0,
++                        updated_at: 0,
++                        error_code: None,
++                    },
++                    runtime: Arc::new(OnceCell::new()),
++                    active_login_operation_id: None,
++                });
++                slots.len() - 1
++            }
++        };
++
++        let slot = &mut slots[slot_index];
++        slot.manifest.attempt_generation = slot.manifest.attempt_generation.saturating_add(1);
++        slot.manifest.status = ManifestSlotStatus::LoginRequired;
++        slot.manifest.error_code = None;
++        slot.manifest.updated_at = Utc::now().timestamp();
++        slot.active_login_operation_id = Some(operation_id.clone());
++        let next_revision = revision.saturating_add(1);
++        self.persist_slots(next_revision, &slots)?;
++
++        let prepared_record = slots[slot_index].clone();
++        {
++            let mut state = self
++                .state
++                .write()
++                .map_err(|_| internal_error("account slot registry is unavailable"))?;
++            state.revision = next_revision;
++            state.slots = slots;
++            state.manifest_present = true;
++        }
++        drop(_mutation);
++        let runtime = self.runtime(&prepared_record).await;
++        Ok(PreparedSlotLogin {
++            account_slot_id: prepared_record.manifest.account_slot_id,
++            attempt_generation: prepared_record.manifest.attempt_generation,
++            operation_id,
++            auth_home: prepared_record.manifest.auth_home,
++            runtime,
++        })
++    }
++
++    pub(crate) async fn finish_slot_login(
++        &self,
++        prepared: &PreparedSlotLogin,
++        status: ManifestSlotStatus,
++        error_code: Option<&str>,
++    ) -> Result<Option<AccountSlotChangedNotification>, JSONRPCErrorError> {
++        let mutation = self
++            .mutation_lock
++            .lock()
++            .map_err(|_| internal_error("account slot registry is unavailable"))?;
++        let (revision, mut slots) = {
++            let state = self
++                .state
++                .read()
++                .map_err(|_| internal_error("account slot registry is unavailable"))?;
++            (state.revision, state.slots.clone())
++        };
++        let Some(slot) = slots.iter_mut().find(|slot| {
++            slot.manifest.account_slot_id == prepared.account_slot_id
++                && slot.manifest.attempt_generation == prepared.attempt_generation
++                && slot.active_login_operation_id.as_deref() == Some(&prepared.operation_id)
++        }) else {
++            return Ok(None);
++        };
++        slot.manifest.status = status;
++        slot.manifest.error_code = error_code.map(str::to_string);
++        slot.manifest.updated_at = Utc::now().timestamp();
++        slot.active_login_operation_id = None;
++        let changed_slot_id = slot.manifest.account_slot_id.clone();
++        let next_revision = revision.saturating_add(1);
++        self.persist_slots(next_revision, &slots)?;
++        {
++            let mut state = self
++                .state
++                .write()
++                .map_err(|_| internal_error("account slot registry is unavailable"))?;
++            state.revision = next_revision;
++            state.slots = slots;
++        }
++        drop(mutation);
++        self.changed_notification(&changed_slot_id).await.map(Some)
++    }
++
++    pub(crate) async fn fail_ready_slot(
++        &self,
++        prepared: &PreparedSlotLogin,
++        error_code: &'static str,
++    ) -> Result<Option<AccountSlotChangedNotification>, JSONRPCErrorError> {
++        let mutation = self
++            .mutation_lock
++            .lock()
++            .map_err(|_| internal_error("account slot registry is unavailable"))?;
++        let (revision, mut slots) = {
++            let state = self
++                .state
++                .read()
++                .map_err(|_| internal_error("account slot registry is unavailable"))?;
++            (state.revision, state.slots.clone())
++        };
++        let Some(slot) = slots.iter_mut().find(|slot| {
++            slot.manifest.account_slot_id == prepared.account_slot_id
++                && slot.manifest.attempt_generation == prepared.attempt_generation
++                && slot.manifest.status == ManifestSlotStatus::Ready
++        }) else {
++            return Ok(None);
++        };
++        slot.manifest.status = ManifestSlotStatus::Failed;
++        slot.manifest.error_code = Some(error_code.to_string());
++        slot.manifest.updated_at = Utc::now().timestamp();
++        let changed_slot_id = slot.manifest.account_slot_id.clone();
++        let next_revision = revision.saturating_add(1);
++        self.persist_slots(next_revision, &slots)?;
++        {
++            let mut state = self
++                .state
++                .write()
++                .map_err(|_| internal_error("account slot registry is unavailable"))?;
++            state.revision = next_revision;
++            state.slots = slots;
++        }
++        drop(mutation);
++        self.changed_notification(&changed_slot_id).await.map(Some)
++    }
++
++    pub(crate) async fn slot_snapshot(
++        &self,
++        slot_id: &str,
++    ) -> Result<AccountSlotSnapshot, JSONRPCErrorError> {
++        let (revision, slot, manifest_error) = {
++            let state = self
++                .state
++                .read()
++                .map_err(|_| internal_error("account slot registry is unavailable"))?;
++            let slot = state
++                .slots
++                .iter()
++                .find(|slot| slot.manifest.account_slot_id == slot_id)
++                .cloned()
++                .ok_or_else(|| invalid_request("account slot is unavailable"))?;
++            (state.revision, slot, state.manifest_error)
++        };
++        let capability = self.capability(manifest_error);
++        Ok(self.snapshot(&slot, revision, &capability).await)
++    }
++
++    pub(crate) async fn try_begin_browser_login(
++        &self,
++        owner: BrowserLoginOwner,
++    ) -> Result<(), JSONRPCErrorError> {
++        let mut active = self
++            .browser_login
++            .lock()
++            .map_err(|_| internal_error("browser login coordinator is unavailable"))?;
++        if active.is_some() {
++            return Err(structured_invalid_request(
++                ERROR_BROWSER_LOGIN_BUSY,
++                "a browser login is already active",
++            ));
++        }
++        *active = Some(owner);
++        Ok(())
++    }
++
++    pub(crate) async fn finish_browser_login(&self, owner: &BrowserLoginOwner) {
++        if let Ok(mut active) = self.browser_login.lock()
++            && active.as_ref() == Some(owner)
++        {
++            *active = None;
++        }
++    }
++
++    fn persist_slots(
++        &self,
++        revision: u64,
++        slots: &[AccountSlotRecord],
++    ) -> Result<(), JSONRPCErrorError> {
++        AccountSlotsManifest {
++            schema_version: MANIFEST_SCHEMA_VERSION,
++            revision,
++            slots: slots.iter().map(|slot| slot.manifest.clone()).collect(),
++        }
++        .persist(&self.config.codex_home.join(MANIFEST_FILE))
++        .map_err(|_| internal_error("account slot manifest could not be persisted"))
++    }
++
++    async fn changed_notification(
++        &self,
++        slot_id: &str,
++    ) -> Result<AccountSlotChangedNotification, JSONRPCErrorError> {
++        let slot = self.slot_snapshot(slot_id).await?;
++        Ok(AccountSlotChangedNotification {
++            registry_revision: slot.registry_revision,
++            slot,
++        })
++    }
++}
++
++pub(super) fn available_actions(
++    status: ManifestSlotStatus,
++    capability: &AccountSlotCapability,
++    is_default: bool,
++    active_operation: bool,
++) -> Vec<AccountSlotActionAvailability> {
++    let unavailable = |action, reason: &str| AccountSlotActionAvailability {
++        action,
++        allowed: false,
++        deny_reason: Some(reason.to_string()),
++    };
++    if let Some(reason) = capability.deny_reason.as_deref() {
++        return vec![
++            unavailable(AccountSlotAction::Login, reason),
++            unavailable(AccountSlotAction::RetryLogin, reason),
++            unavailable(AccountSlotAction::SwitchTo, reason),
++        ];
++    }
++    if is_default {
++        return vec![
++            unavailable(AccountSlotAction::Login, DENY_LOGIN_NOT_AVAILABLE),
++            unavailable(AccountSlotAction::RetryLogin, DENY_LOGIN_NOT_AVAILABLE),
++            unavailable(
++                AccountSlotAction::SwitchTo,
++                super::DENY_SWITCH_NOT_AVAILABLE,
++            ),
++        ];
++    }
++    if active_operation {
++        return vec![
++            unavailable(AccountSlotAction::Login, ERROR_LOGIN_BUSY),
++            unavailable(AccountSlotAction::RetryLogin, ERROR_LOGIN_BUSY),
++            unavailable(AccountSlotAction::SwitchTo, ERROR_LOGIN_BUSY),
++        ];
++    }
++    vec![
++        AccountSlotActionAvailability {
++            action: AccountSlotAction::Login,
++            allowed: status == ManifestSlotStatus::LoginRequired,
++            deny_reason: (status != ManifestSlotStatus::LoginRequired)
++                .then(|| DENY_LOGIN_NOT_AVAILABLE.to_string()),
++        },
++        AccountSlotActionAvailability {
++            action: AccountSlotAction::RetryLogin,
++            allowed: status == ManifestSlotStatus::Failed,
++            deny_reason: (status != ManifestSlotStatus::Failed)
++                .then(|| DENY_LOGIN_NOT_AVAILABLE.to_string()),
++        },
++        AccountSlotActionAvailability {
++            action: AccountSlotAction::SwitchTo,
++            allowed: status == ManifestSlotStatus::Ready,
++            deny_reason: (status != ManifestSlotStatus::Ready)
++                .then(|| super::DENY_SWITCH_NOT_AVAILABLE.to_string()),
++        },
++    ]
++}
++
++pub(crate) fn structured_invalid_request(code: &str, message: &str) -> JSONRPCErrorError {
++    let mut error = invalid_request(message);
++    error.data = Some(serde_json::json!({ "reason": code }));
++    error
++}
+diff --git a/codex-rs/app-server/src/account_registry_tests.rs b/codex-rs/app-server/src/account_registry_tests.rs
+index af7c652..db6bf13 100644
+--- a/codex-rs/app-server/src/account_registry_tests.rs
++++ b/codex-rs/app-server/src/account_registry_tests.rs
+@@ -146,6 +146,72 @@ fn cursor_is_bound_to_registry_revision() {
+     ));
+ }
+ 
++#[tokio::test]
++async fn resolver_rejects_non_default_when_multi_account_is_unavailable() {
++    let process_home = tempdir().expect("temp process home");
++    let mut slots = manifest(process_home.path(), 1);
++    slots.slots[1].status = ManifestSlotStatus::Ready;
++    slots
++        .persist(&process_home.path().join(MANIFEST_FILE))
++        .expect("persist manifest");
++    let config = Arc::new(
++        ConfigBuilder::default()
++            .codex_home(process_home.path().to_path_buf())
++            .build()
++            .await
++            .expect("build config"),
++    );
++    let auth_manager = AuthManager::from_auth_for_testing_with_home(
++        CodexAuth::from_api_key("dummy"),
++        process_home.path().to_path_buf(),
++    );
++    let models_manager = codex_core::build_models_manager(config.as_ref(), auth_manager.clone());
++    let registry = AccountRegistry::new(config, auth_manager, models_manager);
++    registry
++        .state
++        .write()
++        .expect("registry state")
++        .manifest_error = Some(DENY_MANIFEST_INVALID);
++
++    let result = registry
++        .resolve(ExecutionAccountBinding {
++            slot_id: SECOND_SLOT_ID.to_string(),
++            generation: 1,
++        })
++        .await;
++    let err = match result {
++        Ok(_) => panic!("disabled multi-account capability must reject a non-default slot"),
++        Err(err) => err,
++    };
++    assert!(err.to_string().contains(DENY_MANIFEST_INVALID));
++}
++
++#[tokio::test]
++async fn preparing_new_slot_persists_login_required_before_transport() {
++    let process_home = tempdir().expect("temp process home");
++    let registry = registry_for_home(process_home.path()).await;
++
++    let prepared = registry
++        .prepare_slot_login(/*requested_slot_id*/ None, "operation-1".to_string())
++        .await
++        .expect("prepare slot");
++
++    let persisted = AccountSlotsManifest::load(
++        &process_home.path().join(MANIFEST_FILE),
++        process_home.path(),
++    )
++    .expect("load manifest")
++    .expect("manifest exists");
++    let slot = persisted
++        .slots
++        .iter()
++        .find(|slot| slot.account_slot_id == prepared.account_slot_id)
++        .expect("new slot persisted");
++    assert_eq!(slot.status, ManifestSlotStatus::LoginRequired);
++    assert_eq!(slot.attempt_generation, 1);
++    assert_eq!(slot.auth_home, prepared.auth_home);
++}
++
+ #[tokio::test]
+ async fn slot_snapshot_releases_registry_guard_before_capability_lookup() {
+     let process_home = tempdir().expect("temp process home");
+@@ -159,3 +225,225 @@ async fn slot_snapshot_releases_registry_guard_before_capability_lookup() {
+     assert_eq!(snapshot.account_slot_id, DEFAULT_SLOT_ID);
+     assert!(snapshot.is_default);
+ }
++
++#[tokio::test]
++async fn creating_slot_past_manifest_limit_preserves_restartable_manifest() {
++    let process_home = tempdir().expect("temp process home");
++    let mut full_manifest = virtual_default_manifest(process_home.path());
++    full_manifest.slots[0].status = ManifestSlotStatus::Ready;
++    for index in 1..MAX_MANIFEST_SLOTS {
++        let account_slot_id = format!("{index:032x}");
++        let ordinal = index + 1;
++        full_manifest.slots.push(AccountSlotManifest {
++            auth_home: process_home
++                .path()
++                .join(PRIVATE_HOMES_DIR)
++                .join(&account_slot_id),
++            account_slot_id,
++            label: format!("Account {ordinal}"),
++            is_default: false,
++            status: ManifestSlotStatus::Failed,
++            attempt_generation: 1,
++            updated_at: 10,
++            error_code: Some("loginFailed".to_string()),
++        });
++    }
++    full_manifest.slots[1].status = ManifestSlotStatus::Ready;
++    full_manifest.slots[1].error_code = None;
++    let manifest_path = process_home.path().join(MANIFEST_FILE);
++    full_manifest
++        .persist(&manifest_path)
++        .expect("persist full manifest");
++    let before = AccountSlotsManifest::load(&manifest_path, process_home.path())
++        .expect("load full manifest")
++        .expect("manifest exists");
++    let registry = registry_for_home(process_home.path()).await;
++
++    let result = registry
++        .prepare_slot_login(
++            /*requested_slot_id*/ None,
++            "operation-over-limit".to_string(),
++        )
++        .await;
++    assert!(result.is_err(), "new slot past manifest limit must fail");
++
++    let after = AccountSlotsManifest::load(&manifest_path, process_home.path())
++        .expect("reload full manifest")
++        .expect("manifest remains valid");
++    assert_eq!(after, before);
++    let restarted = registry_for_home(process_home.path()).await;
++    let state = restarted.state.read().expect("restarted registry state");
++    assert_eq!(state.manifest_error, None);
++    assert_eq!(state.slots.len(), MAX_MANIFEST_SLOTS);
++}
++
++#[tokio::test]
++async fn persist_failure_leaves_virtual_default_and_does_not_allocate_home() {
++    let process_home = tempdir().expect("temp process home");
++    let registry = registry_for_home(process_home.path()).await;
++    std::fs::create_dir(process_home.path().join(MANIFEST_FILE))
++        .expect("block manifest path with directory");
++
++    let result = registry
++        .prepare_slot_login(/*requested_slot_id*/ None, "operation-1".to_string())
++        .await;
++
++    assert!(result.is_err());
++    assert!(!process_home.path().join(PRIVATE_HOMES_DIR).exists());
++    let state = registry.state.read().expect("registry state");
++    assert_eq!(state.slots.len(), 1);
++    assert!(!state.manifest_present);
++}
++
++#[tokio::test]
++async fn reconciliation_fails_persisted_ready_slot_without_managed_auth() {
++    let process_home = tempdir().expect("temp process home");
++    let mut slots = manifest(process_home.path(), 1);
++    slots.slots[1].status = ManifestSlotStatus::Ready;
++    slots
++        .persist(&process_home.path().join(MANIFEST_FILE))
++        .expect("persist manifest");
++    let registry = registry_for_home(process_home.path()).await;
++
++    registry.reconcile().await.expect("reconcile");
++
++    let snapshot = registry
++        .slot_snapshot(SECOND_SLOT_ID)
++        .await
++        .expect("snapshot");
++    assert_eq!(snapshot.status, AccountSlotStatus::Failed);
++    assert_eq!(snapshot.error_code.as_deref(), Some("authUnavailable"));
++}
++
++#[tokio::test]
++async fn reconciliation_promotes_interrupted_slot_with_usable_auth() {
++    let process_home = tempdir().expect("temp process home");
++    let slots = manifest(process_home.path(), 1);
++    slots
++        .persist(&process_home.path().join(MANIFEST_FILE))
++        .expect("persist manifest");
++    let registry = registry_for_home(process_home.path()).await;
++    let config = registry.config.clone();
++    let slot_auth = AuthManager::from_auth_for_testing_with_home(
++        CodexAuth::from_api_key("slot-key"),
++        slots.slots[1].auth_home.clone(),
++    );
++    let slot_models = codex_core::build_models_manager(config.as_ref(), slot_auth.clone());
++    let runtime = Arc::new(AccountRuntimeBundle {
++        auth_manager: slot_auth,
++        models_manager: slot_models,
++    });
++    let installed = registry
++        .state
++        .read()
++        .expect("registry state")
++        .slots
++        .iter()
++        .find(|slot| slot.manifest.account_slot_id == SECOND_SLOT_ID)
++        .expect("slot")
++        .runtime
++        .set(runtime);
++    assert!(installed.is_ok());
++
++    registry.reconcile().await.expect("reconcile");
++
++    let snapshot = registry
++        .slot_snapshot(SECOND_SLOT_ID)
++        .await
++        .expect("snapshot");
++    assert_eq!(snapshot.status, AccountSlotStatus::Ready);
++    assert_eq!(snapshot.error_code, None);
++
++    {
++        let mut state = registry.state.write().expect("registry state");
++        let slot = state
++            .slots
++            .iter_mut()
++            .find(|slot| slot.manifest.account_slot_id == SECOND_SLOT_ID)
++            .expect("slot");
++        slot.manifest.status = ManifestSlotStatus::Failed;
++        slot.manifest.error_code = Some("refreshUnavailable".to_string());
++    }
++    let failed = registry
++        .slot_snapshot(SECOND_SLOT_ID)
++        .await
++        .expect("failed snapshot");
++    assert_eq!(failed.status, AccountSlotStatus::Failed);
++    assert_eq!(failed.error_code.as_deref(), Some("refreshUnavailable"));
++    assert_eq!(
++        failed.auth_mode,
++        Some(codex_app_server_protocol::AuthMode::ApiKey)
++    );
++}
++
++#[tokio::test]
++async fn browser_coordinator_rejects_every_second_owner_until_exact_release() {
++    let process_home = tempdir().expect("temp process home");
++    let registry = registry_for_home(process_home.path()).await;
++    let first = BrowserLoginOwner::Default("default-login".to_string());
++    let slot = BrowserLoginOwner::Slot("slot-login".to_string());
++
++    registry
++        .try_begin_browser_login(first.clone())
++        .await
++        .expect("first browser owner");
++    let default_retry = registry
++        .try_begin_browser_login(BrowserLoginOwner::Default("retry".to_string()))
++        .await
++        .expect_err("default retry must be busy");
++    let slot_attempt = registry
++        .try_begin_browser_login(slot.clone())
++        .await
++        .expect_err("slot attempt must be busy");
++    assert_eq!(
++        default_retry.data,
++        Some(serde_json::json!({"reason":"browserLoginBusy"}))
++    );
++    assert_eq!(slot_attempt.data, default_retry.data);
++
++    registry.finish_browser_login(&slot).await;
++    assert!(
++        registry
++            .try_begin_browser_login(slot.clone())
++            .await
++            .is_err()
++    );
++    registry.finish_browser_login(&first).await;
++    registry
++        .try_begin_browser_login(slot.clone())
++        .await
++        .expect("slot after exact release");
++    registry.finish_browser_login(&slot).await;
++}
++
++#[tokio::test]
++async fn owner_disconnect_before_ready_wins_attempt_cas() {
++    let process_home = tempdir().expect("temp process home");
++    let registry = registry_for_home(process_home.path()).await;
++    let prepared = registry
++        .prepare_slot_login(/*requested_slot_id*/ None, "operation-1".to_string())
++        .await
++        .expect("prepare slot");
++
++    let failed = registry
++        .finish_slot_login(
++            &prepared,
++            ManifestSlotStatus::Failed,
++            Some("refreshUnavailable"),
++        )
++        .await
++        .expect("disconnect transition");
++    let stale_ready = registry
++        .finish_slot_login(&prepared, ManifestSlotStatus::Ready, None)
++        .await
++        .expect("stale ready CAS");
++
++    assert!(failed.is_some());
++    assert_eq!(stale_ready, None);
++    let snapshot = registry
++        .slot_snapshot(&prepared.account_slot_id)
++        .await
++        .expect("slot snapshot");
++    assert_eq!(snapshot.status, AccountSlotStatus::Failed);
++    assert_eq!(snapshot.error_code.as_deref(), Some("refreshUnavailable"));
++}
+diff --git a/codex-rs/app-server/src/external_auth.rs b/codex-rs/app-server/src/external_auth.rs
+index d00777f..8d5eccf 100644
+--- a/codex-rs/app-server/src/external_auth.rs
++++ b/codex-rs/app-server/src/external_auth.rs
+@@ -12,7 +12,9 @@ use codex_login::auth::ExternalAuthRefreshContext;
+ use codex_login::auth::ExternalAuthRefreshReason;
+ use tokio::time::Duration;
+ use tokio::time::timeout;
++use tokio_util::sync::CancellationToken;
+ 
++use crate::outgoing_message::ConnectionId;
+ use crate::outgoing_message::OutgoingMessageSender;
+ 
+ const EXTERNAL_AUTH_REFRESH_TIMEOUT: Duration = Duration::from_secs(10);
+@@ -20,6 +22,8 @@ const EXTERNAL_AUTH_REFRESH_TIMEOUT: Duration = Duration::from_secs(10);
+ pub(crate) struct ExternalAuthBridge {
+     outgoing: Arc<OutgoingMessageSender>,
+     auth: RwLock<CodexAuth>,
++    owner_connection: Option<ConnectionId>,
++    refresh_unavailable: Option<CancellationToken>,
+ }
+ 
+ impl ExternalAuthBridge {
+@@ -27,10 +31,39 @@ impl ExternalAuthBridge {
+         Self {
+             outgoing,
+             auth: RwLock::new(auth),
++            owner_connection: None,
++            refresh_unavailable: None,
++        }
++    }
++
++    pub(crate) fn new_for_connection(
++        outgoing: Arc<OutgoingMessageSender>,
++        auth: CodexAuth,
++        owner_connection: ConnectionId,
++        refresh_unavailable: CancellationToken,
++    ) -> Self {
++        Self {
++            outgoing,
++            auth: RwLock::new(auth),
++            owner_connection: Some(owner_connection),
++            refresh_unavailable: Some(refresh_unavailable),
+         }
+     }
+ 
+     async fn refresh(&self, context: ExternalAuthRefreshContext) -> std::io::Result<CodexAuth> {
++        let result = self.refresh_inner(context).await;
++        if result.is_err()
++            && let Some(refresh_unavailable) = self.refresh_unavailable.as_ref()
++        {
++            refresh_unavailable.cancel();
++        }
++        result
++    }
++
++    async fn refresh_inner(
++        &self,
++        context: ExternalAuthRefreshContext,
++    ) -> std::io::Result<CodexAuth> {
+         let reason = match context.reason {
+             ExternalAuthRefreshReason::Unauthorized => ChatgptAuthTokensRefreshReason::Unauthorized,
+         };
+@@ -39,10 +72,19 @@ impl ExternalAuthBridge {
+             previous_account_id: context.previous_account_id,
+         };
+ 
+-        let (request_id, rx) = self
+-            .outgoing
+-            .send_request(ServerRequestPayload::ChatgptAuthTokensRefresh(params))
+-            .await;
++        let payload = ServerRequestPayload::ChatgptAuthTokensRefresh(params);
++        let (request_id, rx) = match self.owner_connection {
++            Some(connection_id) => {
++                self.outgoing
++                    .send_request_to_connections(
++                        Some(&[connection_id]),
++                        payload,
++                        /*thread_id*/ None,
++                    )
++                    .await
++            }
++            None => self.outgoing.send_request(payload).await,
++        };
+         let result = match timeout(EXTERNAL_AUTH_REFRESH_TIMEOUT, rx).await {
+             Ok(result) => {
+                 let result = result.map_err(|err| {
+diff --git a/codex-rs/app-server/src/in_process.rs b/codex-rs/app-server/src/in_process.rs
+index 59c160d..73a8686 100644
+--- a/codex-rs/app-server/src/in_process.rs
++++ b/codex-rs/app-server/src/in_process.rs
+@@ -619,12 +619,12 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
+                         }
+                         Some(InProcessClientMessage::ServerRequestResponse { request_id, result }) => {
+                             outgoing_message_sender
+-                                .notify_client_response(request_id, result)
++                                .notify_client_response(IN_PROCESS_CONNECTION_ID, request_id, result)
+                                 .await;
+                         }
+                         Some(InProcessClientMessage::ServerRequestError { request_id, error }) => {
+                             outgoing_message_sender
+-                                .notify_client_error(request_id, error)
++                                .notify_client_error(IN_PROCESS_CONNECTION_ID, request_id, error)
+                                 .await;
+                         }
+                         Some(InProcessClientMessage::Shutdown { done_tx }) => {
+@@ -693,7 +693,7 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
+                                     _ => unreachable!("we just sent a ServerRequest variant"),
+                                 };
+                                 outgoing_message_sender
+-                                    .notify_client_error(request_id, error)
++                                    .notify_client_error(IN_PROCESS_CONNECTION_ID, request_id, error)
+                                     .await;
+                             }
+                         }
+diff --git a/codex-rs/app-server/src/lib.rs b/codex-rs/app-server/src/lib.rs
+index 27ae128..077180d 100644
+--- a/codex-rs/app-server/src/lib.rs
++++ b/codex-rs/app-server/src/lib.rs
+@@ -1108,7 +1108,7 @@ pub async fn run_main_with_transport_options(
+                                             warn!("dropping response from unknown connection: {connection_id:?}");
+                                             continue;
+                                         }
+-                                        processor.process_response(response).await;
++                                        processor.process_response(connection_id, response).await;
+                                     }
+                                     JSONRPCMessage::Notification(notification) => {
+                                         if !connections.contains_key(&connection_id) {
+@@ -1122,7 +1122,7 @@ pub async fn run_main_with_transport_options(
+                                             warn!("dropping error from unknown connection: {connection_id:?}");
+                                             continue;
+                                         }
+-                                        processor.process_error(err).await;
++                                        processor.process_error(connection_id, err).await;
+                                     }
+                                 }
+                             }
+diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
+index e6ffa70..a31b482 100644
+--- a/codex-rs/app-server/src/message_processor.rs
++++ b/codex-rs/app-server/src/message_processor.rs
+@@ -387,11 +387,12 @@ impl MessageProcessor {
+             );
+         let account_processor = AccountRequestProcessor::new(
+             auth_manager.clone(),
+-            account_registry,
++            Arc::clone(&account_registry),
+             Arc::clone(&thread_manager),
+             outgoing.clone(),
+             Arc::clone(&config),
+             config_manager.clone(),
++            Arc::clone(&session_runtime),
+         );
+         let apps_processor = AppsRequestProcessor::new(
+             auth_manager.clone(),
+@@ -786,6 +787,9 @@ impl MessageProcessor {
+                 "timed out waiting for connection RPCs to drain"
+             );
+         }
++        self.account_processor
++            .slot_login_connection_closed(connection_id)
++            .await;
+         self.outgoing.connection_closed(connection_id).await;
+         self.fs_processor.connection_closed(connection_id).await;
+         self.command_exec_processor
+@@ -803,16 +807,24 @@ impl MessageProcessor {
+     }
+ 
+     /// Handle a standalone JSON-RPC response originating from the peer.
+-    pub(crate) async fn process_response(&self, response: JSONRPCResponse) {
++    pub(crate) async fn process_response(
++        &self,
++        connection_id: ConnectionId,
++        response: JSONRPCResponse,
++    ) {
+         tracing::info!("<- response: {:?}", response);
+         let JSONRPCResponse { id, result, .. } = response;
+-        self.outgoing.notify_client_response(id, result).await
++        self.outgoing
++            .notify_client_response(connection_id, id, result)
++            .await
+     }
+ 
+     /// Handle an error object received from the peer.
+-    pub(crate) async fn process_error(&self, err: JSONRPCError) {
++    pub(crate) async fn process_error(&self, connection_id: ConnectionId, err: JSONRPCError) {
+         tracing::error!("<- error: {:?}", err);
+-        self.outgoing.notify_client_error(err.id, err.error).await;
++        self.outgoing
++            .notify_client_error(connection_id, err.id, err.error)
++            .await;
+     }
+ 
+     async fn handle_client_request(
+@@ -955,9 +967,11 @@ impl MessageProcessor {
+                 .list_account_slots(params)
+                 .await
+                 .map(|response| Some(response.into())),
+-            ClientRequest::AccountSlotLoginStart { .. } => Err(method_not_found(
+-                "accountSlot/login/start is not implemented yet",
+-            )),
++            ClientRequest::AccountSlotLoginStart { params, .. } => {
++                self.account_processor
++                    .login_account_slot(request_id.clone(), params)
++                    .await
++            }
+             ClientRequest::ThreadAccountSwitch { .. } => Err(method_not_found(
+                 "thread/account/switch is not implemented yet",
+             )),
+diff --git a/codex-rs/app-server/src/outgoing_message.rs b/codex-rs/app-server/src/outgoing_message.rs
+index d0dc22a..0a5a6be 100644
+--- a/codex-rs/app-server/src/outgoing_message.rs
++++ b/codex-rs/app-server/src/outgoing_message.rs
+@@ -122,6 +122,7 @@ pub(crate) struct ThreadScopedOutgoingMessageSender {
+ struct PendingCallbackEntry {
+     callback: oneshot::Sender<ClientRequestResult>,
+     thread_id: Option<ThreadId>,
++    expected_responder: Option<ConnectionId>,
+     request: ServerRequest,
+     _diagnostics_guard: GaugeGuard,
+ }
+@@ -240,8 +241,22 @@ impl OutgoingMessageSender {
+     }
+ 
+     pub(crate) async fn connection_closed(&self, connection_id: ConnectionId) {
+-        let mut request_contexts = self.request_contexts.lock().await;
+-        request_contexts.retain(|request_id, _| request_id.connection_id != connection_id);
++        {
++            let mut request_contexts = self.request_contexts.lock().await;
++            request_contexts.retain(|request_id, _| request_id.connection_id != connection_id);
++        }
++        let callbacks = {
++            let mut callbacks = self.request_id_to_callback.lock().await;
++            callbacks
++                .extract_if(|_, entry| entry.expected_responder == Some(connection_id))
++                .map(|(_, entry)| entry)
++                .collect::<Vec<_>>()
++        };
++        for entry in callbacks {
++            let _ = entry.callback.send(Err(internal_error(
++                "client connection closed before responding to server request",
++            )));
++        }
+     }
+ 
+     pub(crate) async fn request_trace_context(
+@@ -310,6 +325,10 @@ impl OutgoingMessageSender {
+                 PendingCallbackEntry {
+                     callback: tx_approve,
+                     thread_id,
++                    expected_responder: connection_ids.and_then(|ids| match ids {
++                        [connection_id] => Some(*connection_id),
++                        _ => None,
++                    }),
+                     request: request.clone(),
+                     _diagnostics_guard: PENDING_SERVER_REQUESTS.track(),
+                 },
+@@ -380,8 +399,13 @@ impl OutgoingMessageSender {
+         }
+     }
+ 
+-    pub(crate) async fn notify_client_response(&self, id: RequestId, result: Result) {
+-        let entry = self.take_request_callback(&id).await;
++    pub(crate) async fn notify_client_response(
++        &self,
++        connection_id: ConnectionId,
++        id: RequestId,
++        result: Result,
++    ) {
++        let entry = self.take_request_callback(&id, Some(connection_id)).await;
+ 
+         match entry {
+             Some((id, entry)) => {
+@@ -402,8 +426,13 @@ impl OutgoingMessageSender {
+         }
+     }
+ 
+-    pub(crate) async fn notify_client_error(&self, id: RequestId, error: JSONRPCErrorError) {
+-        let entry = self.take_request_callback(&id).await;
++    pub(crate) async fn notify_client_error(
++        &self,
++        connection_id: ConnectionId,
++        id: RequestId,
++        error: JSONRPCErrorError,
++    ) {
++        let entry = self.take_request_callback(&id, Some(connection_id)).await;
+ 
+         match entry {
+             Some((id, entry)) => {
+@@ -421,7 +450,7 @@ impl OutgoingMessageSender {
+     }
+ 
+     pub(crate) async fn cancel_request(&self, id: &RequestId) -> bool {
+-        let entry = self.take_request_callback(id).await;
++        let entry = self.take_request_callback(id, None).await;
+         if let Some((request_id, _entry)) = entry {
+             self.analytics_events_client
+                 .track_server_request_aborted(now_unix_timestamp_ms(), request_id);
+@@ -455,8 +484,20 @@ impl OutgoingMessageSender {
+     async fn take_request_callback(
+         &self,
+         id: &RequestId,
++        responder: Option<ConnectionId>,
+     ) -> Option<(RequestId, PendingCallbackEntry)> {
+         let mut request_id_to_callback = self.request_id_to_callback.lock().await;
++        if let Some(entry) = request_id_to_callback.get(id)
++            && entry.expected_responder.is_some()
++            && entry.expected_responder != responder
++        {
++            warn!(
++                ?id,
++                ?responder,
++                "ignored response from unexpected connection"
++            );
++            return None;
++        }
+         request_id_to_callback.remove_entry(id)
+     }
+ 
+@@ -1311,7 +1352,7 @@ mod tests {
+         let error = internal_error("refresh failed");
+ 
+         outgoing
+-            .notify_client_error(request_id, error.clone())
++            .notify_client_error(ConnectionId(0), request_id, error.clone())
+             .await;
+ 
+         let result = timeout(Duration::from_secs(1), wait_for_result)
+@@ -1321,6 +1362,69 @@ mod tests {
+         assert_eq!(result, Err(error));
+     }
+ 
++    #[tokio::test]
++    async fn targeted_request_ignores_wrong_responder_then_accepts_owner() {
++        let (tx, _rx) = mpsc::channel::<OutgoingEnvelope>(4);
++        let outgoing =
++            OutgoingMessageSender::new(tx, codex_analytics::AnalyticsEventsClient::disabled());
++        let (request_id, wait_for_result) = outgoing
++            .send_request_to_connections(
++                Some(&[ConnectionId(7)]),
++                ServerRequestPayload::ApplyPatchApproval(ApplyPatchApprovalParams {
++                    conversation_id: ThreadId::new(),
++                    call_id: "call-id".to_string(),
++                    file_changes: HashMap::new(),
++                    reason: None,
++                    grant_root: None,
++                }),
++                /*thread_id*/ None,
++            )
++            .await;
++
++        outgoing
++            .notify_client_response(
++                ConnectionId(8),
++                request_id.clone(),
++                serde_json::json!({"decision":"denied"}),
++            )
++            .await;
++        outgoing
++            .notify_client_response(
++                ConnectionId(7),
++                request_id,
++                serde_json::json!({"decision":"approved"}),
++            )
++            .await;
++
++        let result = wait_for_result.await.expect("owner response");
++        assert_eq!(result, Ok(serde_json::json!({"decision":"approved"})));
++    }
++
++    #[tokio::test]
++    async fn targeted_request_is_failed_when_owner_disconnects() {
++        let (tx, _rx) = mpsc::channel::<OutgoingEnvelope>(4);
++        let outgoing =
++            OutgoingMessageSender::new(tx, codex_analytics::AnalyticsEventsClient::disabled());
++        let (_request_id, wait_for_result) = outgoing
++            .send_request_to_connections(
++                Some(&[ConnectionId(7)]),
++                ServerRequestPayload::ApplyPatchApproval(ApplyPatchApprovalParams {
++                    conversation_id: ThreadId::new(),
++                    call_id: "call-id".to_string(),
++                    file_changes: HashMap::new(),
++                    reason: None,
++                    grant_root: None,
++                }),
++                /*thread_id*/ None,
++            )
++            .await;
++
++        outgoing.connection_closed(ConnectionId(7)).await;
++
++        let result = wait_for_result.await.expect("disconnect response");
++        assert!(result.is_err());
++    }
++
+     #[tokio::test]
+     async fn pending_requests_for_thread_returns_thread_requests_in_request_id_order() {
+         let (tx, _rx) = mpsc::channel::<OutgoingEnvelope>(8);
+diff --git a/codex-rs/app-server/src/request_processors.rs b/codex-rs/app-server/src/request_processors.rs
+index 12a3cca..8eebd42 100644
+--- a/codex-rs/app-server/src/request_processors.rs
++++ b/codex-rs/app-server/src/request_processors.rs
+@@ -415,7 +415,7 @@ use codex_login::login_with_api_key;
+ use codex_login::login_with_bedrock_api_key;
+ use codex_login::oauth_client_id;
+ use codex_login::request_device_code;
+-use codex_login::run_login_server;
++use codex_login::run_login_server_fail_if_busy;
+ use codex_mcp::McpRuntimeContext;
+ use codex_mcp::McpServerStatusSnapshot;
+ use codex_mcp::McpSnapshotDetail;
+diff --git a/codex-rs/app-server/src/request_processors/account_processor.rs b/codex-rs/app-server/src/request_processors/account_processor.rs
+index d4f1168..634953d 100644
+--- a/codex-rs/app-server/src/request_processors/account_processor.rs
++++ b/codex-rs/app-server/src/request_processors/account_processor.rs
+@@ -2,14 +2,19 @@ use super::bedrock_auth::clear_user_model_provider_if_bedrock;
+ use super::bedrock_auth::set_user_model_provider_to_bedrock;
+ use super::*;
+ use crate::account_registry::AccountRegistry;
++use crate::account_registry::BrowserLoginOwner;
++use crate::account_registry::live_registration::ERROR_BROWSER_LOGIN_BUSY;
++use crate::account_registry::live_registration::structured_invalid_request;
+ use crate::auth_mode::auth_mode_to_api;
+ use crate::external_auth::ExternalAuthBridge;
++use crate::session_runtime::SessionRuntimeEngine;
+ use chrono::DateTime;
+ use codex_app_server_protocol::DesktopOnboardingEntrypoint;
+ use codex_login::LoginOnboardingEntrypoint;
+ use codex_model_provider::is_supported_amazon_bedrock_region;
+ 
+ mod rate_limit_resets;
++mod slot_login;
+ 
+ // Duration before a browser ChatGPT login attempt is abandoned.
+ const LOGIN_CHATGPT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+@@ -79,6 +84,8 @@ pub(crate) struct AccountRequestProcessor {
+     config: Arc<Config>,
+     config_manager: ConfigManager,
+     active_login: Arc<Mutex<Option<ActiveLogin>>>,
++    slot_logins: Arc<slot_login::SlotLoginCoordinator>,
++    session_runtime: Arc<SessionRuntimeEngine>,
+ }
+ 
+ impl AccountRequestProcessor {
+@@ -89,6 +96,7 @@ impl AccountRequestProcessor {
+         outgoing: Arc<OutgoingMessageSender>,
+         config: Arc<Config>,
+         config_manager: ConfigManager,
++        session_runtime: Arc<SessionRuntimeEngine>,
+     ) -> Self {
+         Self {
+             auth_manager,
+@@ -98,6 +106,8 @@ impl AccountRequestProcessor {
+             config,
+             config_manager,
+             active_login: Arc::new(Mutex::new(None)),
++            slot_logins: Arc::new(slot_login::SlotLoginCoordinator::default()),
++            session_runtime,
+         }
+     }
+ 
+@@ -127,6 +137,14 @@ impl AccountRequestProcessor {
+         &self,
+         params: CancelLoginAccountParams,
+     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
++        if self.cancel_slot_login(&params.login_id).await? {
++            return Ok(Some(
++                CancelLoginAccountResponse {
++                    status: CancelLoginAccountStatus::Canceled,
++                }
++                .into(),
++            ));
++        }
+         self.cancel_login_response(params)
+             .await
+             .map(|response| Some(response.into()))
+@@ -185,6 +203,7 @@ impl AccountRequestProcessor {
+     }
+ 
+     pub(crate) async fn cancel_active_login(&self) {
++        self.cancel_all_slot_logins().await;
+         let mut guard = self.active_login.lock().await;
+         if let Some(active_login) = guard.take() {
+             drop(active_login);
+@@ -282,7 +301,7 @@ impl AccountRequestProcessor {
+         config_manager: ConfigManager,
+     ) {
+         tokio::spawn(async move {
+-            thread_manager.plugins_manager().clear_cache();
++            thread_manager.clear_all_account_plugin_caches();
+             thread_manager.skills_service().clear_cache();
+             crate::mcp_refresh::reload_mcp_config_best_effort(&thread_manager, &config_manager)
+                 .await;
+@@ -560,9 +579,26 @@ impl AccountRequestProcessor {
+         let opts = self
+             .login_chatgpt_common(codex_streamlined_login, login_success_page)
+             .await?;
+-        let server = run_login_server(opts)
+-            .map_err(|err| internal_error(format!("failed to start login server: {err}")))?;
+         let login_id = Uuid::new_v4();
++        let browser_owner = BrowserLoginOwner::Default(login_id.to_string());
++        self.account_registry
++            .try_begin_browser_login(browser_owner.clone())
++            .await?;
++        let server = match run_login_server_fail_if_busy(opts) {
++            Ok(server) => server,
++            Err(err) => {
++                self.account_registry
++                    .finish_browser_login(&browser_owner)
++                    .await;
++                if err.kind() == std::io::ErrorKind::AddrInUse {
++                    return Err(structured_invalid_request(
++                        ERROR_BROWSER_LOGIN_BUSY,
++                        "browser login callback is unavailable",
++                    ));
++                }
++                return Err(internal_error("failed to start login server"));
++            }
++        };
+         let shutdown_handle = server.cancel_handle();
+ 
+         // Replace active login if present.
+@@ -582,6 +618,7 @@ impl AccountRequestProcessor {
+         let thread_manager = Arc::clone(&self.thread_manager);
+         let config = Arc::clone(&self.config);
+         let active_login = self.active_login.clone();
++        let account_registry = Arc::clone(&self.account_registry);
+         let auth_url = server.auth_url.clone();
+         tokio::spawn(async move {
+             let (success, error_msg, onboarding_entrypoint) = match tokio::time::timeout(
+@@ -621,10 +658,13 @@ impl AccountRequestProcessor {
+             .await;
+ 
+             // Clear the active login if it matches this attempt. It may have been replaced or cancelled.
+-            let mut guard = active_login.lock().await;
+-            if guard.as_ref().map(ActiveLogin::login_id) == Some(login_id) {
+-                *guard = None;
++            {
++                let mut guard = active_login.lock().await;
++                if guard.as_ref().map(ActiveLogin::login_id) == Some(login_id) {
++                    *guard = None;
++                }
+             }
++            account_registry.finish_browser_login(&browser_owner).await;
+         });
+ 
+         Ok(LoginAccountResponse::Chatgpt {
+@@ -1159,7 +1199,35 @@ impl AccountRequestProcessor {
+             })
+             .transpose()?;
+ 
+-        let Some(auth) = self.auth_manager.auth().await else {
++        let (auth_manager, config) = match thread_id {
++            Some(thread_id) => {
++                let execution_account = self
++                    .thread_manager
++                    .execution_account_for_thread(thread_id)
++                    .await
++                    .map_err(|err| {
++                        internal_error(format!(
++                            "failed to resolve token-usage execution account: {err}"
++                        ))
++                    })?;
++                let config = match self.thread_manager.get_thread(thread_id).await {
++                    Ok(thread) => {
++                        let thread_config = thread.config().await;
++                        self.config_manager
++                            .load_latest_config_for_thread(thread_config.as_ref())
++                            .await
++                            .map_err(|err| {
++                                internal_error(format!("failed to reload config: {err}"))
++                            })?
++                    }
++                    Err(_) => self.config.as_ref().clone(),
++                };
++                (Arc::clone(&execution_account.auth_manager), config)
++            }
++            None => (Arc::clone(&self.auth_manager), self.config.as_ref().clone()),
++        };
++
++        let Some(auth) = auth_manager.auth().await else {
+             return Err(invalid_request(
+                 "codex account authentication required to read token usage",
+             ));
+@@ -1172,9 +1240,9 @@ impl AccountRequestProcessor {
+         }
+ 
+         let client = BackendClient::from_auth(
+-            self.config.chatgpt_base_url.clone(),
++            config.chatgpt_base_url.clone(),
+             &auth,
+-            self.config.http_client_factory(),
++            config.http_client_factory(),
+         );
+         if let Some(thread_id) = thread_id {
+             let thread_id = thread_id.to_string();
+diff --git a/codex-rs/app-server/src/request_processors/account_processor/slot_login.rs b/codex-rs/app-server/src/request_processors/account_processor/slot_login.rs
+new file mode 100644
+index 0000000..ef009fb
+--- /dev/null
++++ b/codex-rs/app-server/src/request_processors/account_processor/slot_login.rs
+@@ -0,0 +1,749 @@
++use std::collections::HashMap;
++use std::io::ErrorKind;
++use std::sync::Arc;
++use std::sync::atomic::AtomicBool;
++use std::sync::atomic::Ordering;
++
++use codex_app_server_protocol::AccountSlotLoginChallenge;
++use codex_app_server_protocol::AccountSlotLoginStartParams;
++use codex_app_server_protocol::AccountSlotLoginStartResponse;
++use codex_app_server_protocol::ClientResponsePayload;
++use codex_app_server_protocol::JSONRPCErrorError;
++use codex_app_server_protocol::ServerNotification;
++use codex_app_server_protocol::SessionRuntimeOperation;
++use codex_app_server_protocol::SessionRuntimeOperationAction;
++use codex_app_server_protocol::SessionRuntimeOperationError;
++use codex_app_server_protocol::SessionRuntimeOperationStatus;
++use codex_login::CodexAuth;
++use codex_login::LoginSuccessPage;
++use codex_login::LoginSuccessPageBrand;
++use codex_login::ServerOptions as LoginServerOptions;
++use codex_login::ShutdownHandle;
++use codex_login::complete_device_code_login;
++use codex_login::login_with_api_key;
++use codex_login::oauth_client_id;
++use codex_login::request_device_code;
++use codex_login::run_login_server_fail_if_busy;
++use codex_models_manager::manager::RefreshStrategy;
++use sha2::Digest;
++use sha2::Sha256;
++use tokio::sync::Mutex;
++use tokio::sync::Notify;
++use tokio::sync::Semaphore;
++use tokio::time::Duration;
++use tokio::time::timeout;
++use tokio_util::sync::CancellationToken;
++use uuid::Uuid;
++
++use super::ACCOUNT_TOKEN_USAGE_FETCH_TIMEOUT;
++use super::AccountRequestProcessor;
++use super::ConnectionId;
++use super::ConnectionRequestId;
++use super::LOGIN_CHATGPT_TIMEOUT;
++use crate::account_registry::BrowserLoginOwner;
++use crate::account_registry::ManifestSlotStatus;
++use crate::account_registry::live_registration::ERROR_AUTH_UNAVAILABLE;
++use crate::account_registry::live_registration::ERROR_BROWSER_LOGIN_BUSY;
++use crate::account_registry::live_registration::ERROR_LOGIN_BUSY;
++use crate::account_registry::live_registration::ERROR_LOGIN_CANCELED;
++use crate::account_registry::live_registration::ERROR_LOGIN_FAILED;
++use crate::account_registry::live_registration::ERROR_REFRESH_UNAVAILABLE;
++use crate::account_registry::live_registration::PreparedSlotLogin;
++use crate::account_registry::live_registration::structured_invalid_request;
++use crate::error_code::internal_error;
++use crate::external_auth::ExternalAuthBridge;
++
++const SLOT_RETRY_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
++
++pub(super) struct SlotLoginCoordinator {
++    active: Mutex<HashMap<String, ActiveSlotLogin>>,
++    external_owners: Mutex<HashMap<String, ExternalSlotOwner>>,
++    start_lock: Semaphore,
++}
++
++impl Default for SlotLoginCoordinator {
++    fn default() -> Self {
++        Self {
++            active: Mutex::new(HashMap::new()),
++            external_owners: Mutex::new(HashMap::new()),
++            start_lock: Semaphore::new(/*permits*/ 1),
++        }
++    }
++}
++
++#[derive(Clone)]
++struct ExternalSlotOwner {
++    prepared: PreparedSlotLogin,
++    owner_connection: ConnectionId,
++    refresh_unavailable: CancellationToken,
++}
++
++#[derive(Clone)]
++struct ActiveSlotLogin {
++    prepared: PreparedSlotLogin,
++    owner_connection: ConnectionId,
++    cancel: SlotLoginCancel,
++    completion: Arc<SlotLoginCompletion>,
++}
++
++#[derive(Clone)]
++enum SlotLoginCancel {
++    Browser(ShutdownHandle),
++    Device(CancellationToken),
++}
++
++impl SlotLoginCancel {
++    fn cancel(&self) {
++        match self {
++            Self::Browser(handle) => handle.shutdown(),
++            Self::Device(token) => token.cancel(),
++        }
++    }
++}
++
++#[derive(Default)]
++struct SlotLoginCompletion {
++    completed: AtomicBool,
++    notify: Notify,
++}
++
++impl SlotLoginCompletion {
++    async fn wait(&self) {
++        let notified = self.notify.notified();
++        if !self.completed.load(Ordering::Acquire) {
++            notified.await;
++        }
++    }
++
++    fn complete(&self) {
++        self.completed.store(true, Ordering::Release);
++        self.notify.notify_waiters();
++    }
++}
++
++impl AccountRequestProcessor {
++    pub(crate) async fn login_account_slot(
++        &self,
++        request_id: ConnectionRequestId,
++        params: AccountSlotLoginStartParams,
++    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
++        let response = self
++            .login_account_slot_response(request_id.connection_id, params)
++            .await?;
++        Ok(Some(response.into()))
++    }
++
++    async fn login_account_slot_response(
++        &self,
++        owner_connection: ConnectionId,
++        params: AccountSlotLoginStartParams,
++    ) -> Result<AccountSlotLoginStartResponse, JSONRPCErrorError> {
++        let _start = self
++            .slot_logins
++            .start_lock
++            .acquire()
++            .await
++            .map_err(|_| internal_error("account slot login coordinator is unavailable"))?;
++        let (requested_slot, kind) = slot_request_identity(&params);
++        if let Some(slot_id) = requested_slot.as_deref() {
++            self.await_previous_slot_login(slot_id).await?;
++        }
++
++        let operation_id = Uuid::new_v4().to_string();
++        let prepared = self
++            .account_registry
++            .prepare_slot_login(requested_slot, operation_id)
++            .await?;
++        self.session_runtime
++            .begin_operation(operation(
++                &prepared,
++                kind,
++                SessionRuntimeOperationStatus::Accepted,
++                None,
++            ))
++            .await?;
++        match params {
++            AccountSlotLoginStartParams::ApiKey { api_key, .. } => {
++                let result = login_with_api_key(
++                    &prepared.auth_home,
++                    &api_key,
++                    self.config.cli_auth_credentials_store_mode,
++                    self.config.auth_keyring_backend_kind(),
++                );
++                if result.is_err() {
++                    self.finish_slot_failure(&prepared, ERROR_LOGIN_FAILED)
++                        .await;
++                    return Err(internal_error("failed to save account slot API key"));
++                }
++                if !self.finish_slot_success(&prepared).await? {
++                    return Err(structured_invalid_request(
++                        ERROR_LOGIN_CANCELED,
++                        "account slot login was superseded",
++                    ));
++                }
++                self.slot_login_response(&prepared, kind, None).await
++            }
++            AccountSlotLoginStartParams::Chatgpt {
++                codex_streamlined_login,
++                use_hosted_login_success_page,
++                app_brand,
++                ..
++            } => {
++                self.start_slot_browser_login(
++                    prepared,
++                    owner_connection,
++                    codex_streamlined_login,
++                    use_hosted_login_success_page,
++                    app_brand,
++                    kind,
++                )
++                .await
++            }
++            AccountSlotLoginStartParams::ChatgptDeviceCode { .. } => {
++                self.start_slot_device_login(prepared, owner_connection, kind)
++                    .await
++            }
++            AccountSlotLoginStartParams::ChatgptAuthTokens {
++                access_token,
++                chatgpt_account_id,
++                chatgpt_plan_type,
++                ..
++            } => {
++                if let Some(workspaces) =
++                    prepared.runtime.auth_manager.effective_chatgpt_workspaces()
++                    && !workspaces.contains(&chatgpt_account_id)
++                {
++                    self.finish_slot_failure(&prepared, ERROR_LOGIN_FAILED)
++                        .await;
++                    return Err(structured_invalid_request(
++                        ERROR_LOGIN_FAILED,
++                        "external auth account is not allowed for this host",
++                    ));
++                }
++                let auth = match CodexAuth::from_external_chatgpt_tokens(
++                    &access_token,
++                    &chatgpt_account_id,
++                    chatgpt_plan_type.as_deref(),
++                ) {
++                    Ok(auth) => auth,
++                    Err(_) => {
++                        self.finish_slot_failure(&prepared, ERROR_LOGIN_FAILED)
++                            .await;
++                        return Err(internal_error("failed to set external account slot auth"));
++                    }
++                };
++                let refresh_unavailable = CancellationToken::new();
++                if prepared
++                    .runtime
++                    .auth_manager
++                    .set_external_auth(Arc::new(ExternalAuthBridge::new_for_connection(
++                        Arc::clone(&self.outgoing),
++                        auth,
++                        owner_connection,
++                        refresh_unavailable.clone(),
++                    )))
++                    .await
++                    .is_err()
++                {
++                    self.finish_slot_failure(&prepared, ERROR_LOGIN_FAILED)
++                        .await;
++                    return Err(internal_error("failed to set external account slot auth"));
++                }
++                self.slot_logins.external_owners.lock().await.insert(
++                    prepared.operation_id.clone(),
++                    ExternalSlotOwner {
++                        prepared: prepared.clone(),
++                        owner_connection,
++                        refresh_unavailable: refresh_unavailable.clone(),
++                    },
++                );
++                let ready = self.finish_slot_success(&prepared).await;
++                if !matches!(ready, Ok(true)) {
++                    self.slot_logins
++                        .external_owners
++                        .lock()
++                        .await
++                        .remove(&prepared.operation_id);
++                    refresh_unavailable.cancel();
++                    return match ready {
++                        Ok(false) => Err(structured_invalid_request(
++                            ERROR_REFRESH_UNAVAILABLE,
++                            "external account owner is unavailable",
++                        )),
++                        Err(error) => Err(error),
++                        Ok(true) => unreachable!("handled above"),
++                    };
++                }
++                let processor = self.clone();
++                let operation_id = prepared.operation_id.clone();
++                tokio::spawn(async move {
++                    refresh_unavailable.cancelled().await;
++                    let owner = processor
++                        .slot_logins
++                        .external_owners
++                        .lock()
++                        .await
++                        .remove(&operation_id);
++                    if let Some(owner) = owner {
++                        processor.fail_external_slot(&owner.prepared).await;
++                    }
++                });
++                self.slot_login_response(&prepared, kind, None).await
++            }
++        }
++    }
++
++    async fn start_slot_browser_login(
++        &self,
++        prepared: PreparedSlotLogin,
++        owner_connection: ConnectionId,
++        codex_streamlined_login: bool,
++        use_hosted_login_success_page: bool,
++        app_brand: Option<codex_app_server_protocol::LoginAppBrand>,
++        kind: &'static str,
++    ) -> Result<AccountSlotLoginStartResponse, JSONRPCErrorError> {
++        let owner = BrowserLoginOwner::Slot(prepared.operation_id.clone());
++        if let Err(error) = self
++            .account_registry
++            .try_begin_browser_login(owner.clone())
++            .await
++        {
++            self.finish_slot_failure(&prepared, ERROR_BROWSER_LOGIN_BUSY)
++                .await;
++            return Err(error);
++        }
++        let success_page = if use_hosted_login_success_page {
++            let app_brand = match app_brand.unwrap_or_default() {
++                codex_app_server_protocol::LoginAppBrand::Codex => LoginSuccessPageBrand::Codex,
++                codex_app_server_protocol::LoginAppBrand::Chatgpt => LoginSuccessPageBrand::Chatgpt,
++            };
++            LoginSuccessPage::Hosted {
++                url: codex_login::CODEX_OPEN_APP_URL
++                    .parse()
++                    .map_err(|_| internal_error("invalid Codex open app URL"))?,
++                app_brand,
++            }
++        } else {
++            LoginSuccessPage::default()
++        };
++        let opts = self.slot_login_options(&prepared, codex_streamlined_login, success_page);
++        let server = match run_login_server_fail_if_busy(opts) {
++            Ok(server) => server,
++            Err(error) => {
++                self.account_registry.finish_browser_login(&owner).await;
++                let code = if error.kind() == ErrorKind::AddrInUse {
++                    ERROR_BROWSER_LOGIN_BUSY
++                } else {
++                    ERROR_LOGIN_FAILED
++                };
++                self.finish_slot_failure(&prepared, code).await;
++                return Err(structured_invalid_request(
++                    code,
++                    "browser login callback is unavailable",
++                ));
++            }
++        };
++        let challenge = AccountSlotLoginChallenge::Browser {
++            login_id: prepared.operation_id.clone(),
++            auth_url: server.auth_url.clone(),
++        };
++        let completion = Arc::new(SlotLoginCompletion::default());
++        let active = ActiveSlotLogin {
++            prepared: prepared.clone(),
++            owner_connection,
++            cancel: SlotLoginCancel::Browser(server.cancel_handle()),
++            completion: Arc::clone(&completion),
++        };
++        self.slot_logins
++            .active
++            .lock()
++            .await
++            .insert(prepared.operation_id.clone(), active);
++
++        let processor = self.clone();
++        let operation_id = prepared.operation_id.clone();
++        let task_prepared = prepared.clone();
++        tokio::spawn(async move {
++            let success = matches!(
++                timeout(
++                    LOGIN_CHATGPT_TIMEOUT,
++                    server.block_until_done_with_callback_result()
++                )
++                .await,
++                Ok(Ok(_))
++            );
++            if success {
++                let _ = processor.finish_slot_success(&task_prepared).await;
++            } else {
++                processor
++                    .finish_slot_failure(&task_prepared, ERROR_LOGIN_FAILED)
++                    .await;
++            }
++            processor
++                .account_registry
++                .finish_browser_login(&owner)
++                .await;
++            processor.complete_active_slot_login(&operation_id).await;
++            completion.complete();
++        });
++
++        self.slot_login_response(&prepared, kind, Some(challenge))
++            .await
++    }
++
++    async fn start_slot_device_login(
++        &self,
++        prepared: PreparedSlotLogin,
++        owner_connection: ConnectionId,
++        kind: &'static str,
++    ) -> Result<AccountSlotLoginStartResponse, JSONRPCErrorError> {
++        let opts = self.slot_login_options(
++            &prepared,
++            /*codex_streamlined_login*/ false,
++            LoginSuccessPage::default(),
++        );
++        let device_code = match request_device_code(&opts).await {
++            Ok(device_code) => device_code,
++            Err(_) => {
++                self.finish_slot_failure(&prepared, ERROR_LOGIN_FAILED)
++                    .await;
++                return Err(internal_error("failed to request account slot device code"));
++            }
++        };
++        let challenge = AccountSlotLoginChallenge::DeviceCode {
++            login_id: prepared.operation_id.clone(),
++            verification_url: device_code.verification_url.clone(),
++            user_code: device_code.user_code.clone(),
++        };
++        let cancel = CancellationToken::new();
++        let completion = Arc::new(SlotLoginCompletion::default());
++        let active = ActiveSlotLogin {
++            prepared: prepared.clone(),
++            owner_connection,
++            cancel: SlotLoginCancel::Device(cancel.clone()),
++            completion: Arc::clone(&completion),
++        };
++        self.slot_logins
++            .active
++            .lock()
++            .await
++            .insert(prepared.operation_id.clone(), active);
++
++        let processor = self.clone();
++        let operation_id = prepared.operation_id.clone();
++        let task_prepared = prepared.clone();
++        tokio::spawn(async move {
++            let success = tokio::select! {
++                _ = cancel.cancelled() => false,
++                result = complete_device_code_login(opts, device_code) => result.is_ok(),
++            };
++            if success {
++                let _ = processor.finish_slot_success(&task_prepared).await;
++            } else {
++                processor
++                    .finish_slot_failure(&task_prepared, ERROR_LOGIN_FAILED)
++                    .await;
++            }
++            processor.complete_active_slot_login(&operation_id).await;
++            completion.complete();
++        });
++
++        self.slot_login_response(&prepared, kind, Some(challenge))
++            .await
++    }
++
++    fn slot_login_options(
++        &self,
++        prepared: &PreparedSlotLogin,
++        codex_streamlined_login: bool,
++        login_success_page: LoginSuccessPage,
++    ) -> LoginServerOptions {
++        LoginServerOptions {
++            open_browser: false,
++            codex_streamlined_login,
++            login_success_page,
++            ..LoginServerOptions::new(
++                prepared.auth_home.clone(),
++                oauth_client_id(),
++                prepared.runtime.auth_manager.effective_chatgpt_workspaces(),
++                self.config.cli_auth_credentials_store_mode,
++                self.config.auth_keyring_backend_kind(),
++                self.config.auth_route_config(),
++            )
++        }
++    }
++
++    async fn finish_slot_success(
++        &self,
++        prepared: &PreparedSlotLogin,
++    ) -> Result<bool, JSONRPCErrorError> {
++        prepared.runtime.auth_manager.reload().await;
++        if prepared.runtime.auth_manager.auth().await.is_none() {
++            self.finish_slot_failure(prepared, ERROR_AUTH_UNAVAILABLE)
++                .await;
++            return Err(structured_invalid_request(
++                ERROR_AUTH_UNAVAILABLE,
++                "account slot authentication is unavailable",
++            ));
++        }
++        let _ = timeout(
++            ACCOUNT_TOKEN_USAGE_FETCH_TIMEOUT,
++            prepared
++                .runtime
++                .models_manager
++                .list_models(RefreshStrategy::Online, self.config.http_client_factory()),
++        )
++        .await;
++        if let Some(notification) = self
++            .account_registry
++            .finish_slot_login(prepared, ManifestSlotStatus::Ready, None)
++            .await?
++        {
++            self.thread_manager
++                .clear_account_plugin_cache(&prepared.account_slot_id);
++            self.outgoing
++                .send_server_notification(ServerNotification::AccountSlotChanged(notification))
++                .await;
++            self.publish_slot_operation(prepared, SessionRuntimeOperationStatus::Ready, None)
++                .await;
++            return Ok(true);
++        }
++        Ok(false)
++    }
++
++    async fn finish_slot_failure(&self, prepared: &PreparedSlotLogin, error_code: &'static str) {
++        if let Ok(Some(notification)) = self
++            .account_registry
++            .finish_slot_login(prepared, ManifestSlotStatus::Failed, Some(error_code))
++            .await
++        {
++            self.outgoing
++                .send_server_notification(ServerNotification::AccountSlotChanged(notification))
++                .await;
++        }
++        self.publish_slot_operation(
++            prepared,
++            SessionRuntimeOperationStatus::Failed,
++            Some(SessionRuntimeOperationError {
++                code: error_code.to_string(),
++                message: "account slot login failed".to_string(),
++            }),
++        )
++        .await;
++    }
++
++    async fn fail_external_slot(&self, prepared: &PreparedSlotLogin) {
++        let pending_failure = self
++            .account_registry
++            .finish_slot_login(
++                prepared,
++                ManifestSlotStatus::Failed,
++                Some(ERROR_REFRESH_UNAVAILABLE),
++            )
++            .await;
++        let notification = match pending_failure {
++            Ok(Some(notification)) => Some(notification),
++            Ok(None) => self
++                .account_registry
++                .fail_ready_slot(prepared, ERROR_REFRESH_UNAVAILABLE)
++                .await
++                .ok()
++                .flatten(),
++            Err(_) => None,
++        };
++        if let Some(notification) = notification {
++            self.outgoing
++                .send_server_notification(ServerNotification::AccountSlotChanged(notification))
++                .await;
++        }
++        self.publish_slot_operation(
++            prepared,
++            SessionRuntimeOperationStatus::Failed,
++            Some(SessionRuntimeOperationError {
++                code: ERROR_REFRESH_UNAVAILABLE.to_string(),
++                message: "external account owner is unavailable".to_string(),
++            }),
++        )
++        .await;
++    }
++
++    async fn slot_login_response(
++        &self,
++        prepared: &PreparedSlotLogin,
++        kind: &'static str,
++        challenge: Option<AccountSlotLoginChallenge>,
++    ) -> Result<AccountSlotLoginStartResponse, JSONRPCErrorError> {
++        let slot = self
++            .account_registry
++            .slot_snapshot(&prepared.account_slot_id)
++            .await?;
++        let status = if challenge.is_some() {
++            SessionRuntimeOperationStatus::Running
++        } else {
++            SessionRuntimeOperationStatus::Ready
++        };
++        let operation = self
++            .session_runtime
++            .update_operation(operation(prepared, kind, status, None))
++            .await?;
++        Ok(AccountSlotLoginStartResponse {
++            operation,
++            slot,
++            challenge,
++        })
++    }
++
++    async fn publish_slot_operation(
++        &self,
++        prepared: &PreparedSlotLogin,
++        status: SessionRuntimeOperationStatus,
++        error: Option<SessionRuntimeOperationError>,
++    ) {
++        if let Err(error) = self
++            .session_runtime
++            .update_operation_status(&prepared.operation_id, status, error)
++            .await
++        {
++            tracing::warn!(
++                operation_id = %prepared.operation_id,
++                "failed to publish account slot operation state: {}",
++                error.message
++            );
++        }
++    }
++
++    async fn await_previous_slot_login(&self, slot_id: &str) -> Result<(), JSONRPCErrorError> {
++        let active = self
++            .slot_logins
++            .active
++            .lock()
++            .await
++            .values()
++            .find(|active| active.prepared.account_slot_id == slot_id)
++            .cloned();
++        let Some(active) = active else {
++            return Ok(());
++        };
++        active.cancel.cancel();
++        if timeout(SLOT_RETRY_JOIN_TIMEOUT, active.completion.wait())
++            .await
++            .is_err()
++        {
++            return Err(structured_invalid_request(
++                ERROR_LOGIN_BUSY,
++                "the previous account slot login is still stopping",
++            ));
++        }
++        Ok(())
++    }
++
++    async fn complete_active_slot_login(&self, operation_id: &str) {
++        self.slot_logins.active.lock().await.remove(operation_id);
++    }
++
++    pub(super) async fn cancel_slot_login(
++        &self,
++        login_id: &str,
++    ) -> Result<bool, JSONRPCErrorError> {
++        let active = self.slot_logins.active.lock().await.get(login_id).cloned();
++        let Some(active) = active else {
++            return Ok(false);
++        };
++        active.cancel.cancel();
++        self.finish_slot_failure(&active.prepared, ERROR_LOGIN_CANCELED)
++            .await;
++        Ok(true)
++    }
++
++    pub(super) async fn cancel_all_slot_logins(&self) {
++        let active = self
++            .slot_logins
++            .active
++            .lock()
++            .await
++            .values()
++            .cloned()
++            .collect::<Vec<_>>();
++        for login in active {
++            login.cancel.cancel();
++        }
++        let external_owners = self
++            .slot_logins
++            .external_owners
++            .lock()
++            .await
++            .drain()
++            .map(|(_, owner)| owner)
++            .collect::<Vec<_>>();
++        for owner in external_owners {
++            owner.refresh_unavailable.cancel();
++            self.fail_external_slot(&owner.prepared).await;
++        }
++    }
++
++    pub(crate) async fn slot_login_connection_closed(&self, connection_id: ConnectionId) {
++        let active = self
++            .slot_logins
++            .active
++            .lock()
++            .await
++            .values()
++            .filter(|active| active.owner_connection == connection_id)
++            .cloned()
++            .collect::<Vec<_>>();
++        for login in active {
++            login.cancel.cancel();
++            self.finish_slot_failure(&login.prepared, ERROR_REFRESH_UNAVAILABLE)
++                .await;
++        }
++        let external_owners = {
++            let mut owners = self.slot_logins.external_owners.lock().await;
++            owners
++                .extract_if(|_, owner| owner.owner_connection == connection_id)
++                .map(|(_, owner)| owner)
++                .collect::<Vec<_>>()
++        };
++        for owner in external_owners {
++            owner.refresh_unavailable.cancel();
++            self.fail_external_slot(&owner.prepared).await;
++        }
++    }
++}
++
++fn slot_request_identity(params: &AccountSlotLoginStartParams) -> (Option<String>, &'static str) {
++    match params {
++        AccountSlotLoginStartParams::ApiKey { slot_id, .. } => (slot_id.clone(), "apiKey"),
++        AccountSlotLoginStartParams::Chatgpt { slot_id, .. } => (slot_id.clone(), "chatgpt"),
++        AccountSlotLoginStartParams::ChatgptDeviceCode { slot_id } => {
++            (slot_id.clone(), "chatgptDeviceCode")
++        }
++        AccountSlotLoginStartParams::ChatgptAuthTokens { slot_id, .. } => {
++            (slot_id.clone(), "chatgptAuthTokens")
++        }
++    }
++}
++
++fn operation(
++    prepared: &PreparedSlotLogin,
++    kind: &str,
++    status: SessionRuntimeOperationStatus,
++    error: Option<SessionRuntimeOperationError>,
++) -> SessionRuntimeOperation {
++    let fingerprint_input = format!(
++        "accountSlot/login/start:{kind}:{}:{}",
++        prepared.account_slot_id, prepared.attempt_generation
++    );
++    SessionRuntimeOperation {
++        operation_id: prepared.operation_id.clone(),
++        request_fingerprint: format!("{:x}", Sha256::digest(fingerprint_input.as_bytes())),
++        action: SessionRuntimeOperationAction::AccountSlotLogin,
++        status,
++        thread_id: None,
++        account_slot_id: Some(prepared.account_slot_id.clone()),
++        state_revision: None,
++        writer_generation: None,
++        execution_generation: Some(prepared.attempt_generation),
++        error,
++        updated_at: chrono::Utc::now().timestamp(),
++    }
++}
+diff --git a/codex-rs/app-server/tests/suite/account_slot.rs b/codex-rs/app-server/tests/suite/account_slot.rs
+new file mode 100644
+index 0000000..eed3202
+--- /dev/null
++++ b/codex-rs/app-server/tests/suite/account_slot.rs
+@@ -0,0 +1,179 @@
++use std::time::Duration;
++
++use anyhow::Result;
++use app_test_support::TestAppServer;
++use codex_app_server_protocol::AccountSlotAction;
++use codex_app_server_protocol::AccountSlotActionAvailability;
++use codex_app_server_protocol::AccountSlotCapability;
++use codex_app_server_protocol::AccountSlotChangedNotification;
++use codex_app_server_protocol::AccountSlotListParams;
++use codex_app_server_protocol::AccountSlotListResponse;
++use codex_app_server_protocol::AccountSlotLoginStartParams;
++use codex_app_server_protocol::AccountSlotLoginStartResponse;
++use codex_app_server_protocol::AccountSlotSnapshot;
++use codex_app_server_protocol::AccountSlotStatus;
++use codex_app_server_protocol::SessionRuntimeOperationStatus;
++use codex_app_server_protocol::SessionRuntimeOperationUpdatedNotification;
++use pretty_assertions::assert_eq;
++use tempfile::TempDir;
++use tokio::time::timeout;
++
++const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
++
++#[tokio::test]
++async fn account_slot_list_wraps_stock_auth_without_creating_a_manifest() -> Result<()> {
++    let codex_home = TempDir::new()?;
++    std::fs::write(
++        codex_home.path().join("config.toml"),
++        r#"
++model = "mock-model"
++approval_policy = "never"
++sandbox_mode = "danger-full-access"
++
++[features]
++shell_snapshot = false
++"#,
++    )?;
++    let manifest_path = codex_home.path().join("account-slots.toml");
++    let mut app_server = TestAppServer::builder()
++        .with_codex_home(codex_home.path())
++        .without_auto_env()
++        .with_env_overrides(&[
++            ("CODEX_API_KEY", None),
++            ("CODEX_ACCESS_TOKEN", None),
++            ("OPENAI_API_KEY", None),
++        ])
++        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
++        .await?;
++
++    let request_id = app_server
++        .send_raw_request(
++            "accountSlot/list",
++            Some(serde_json::to_value(AccountSlotListParams {
++                cursor: None,
++                limit: None,
++            })?),
++        )
++        .await?;
++    let response: AccountSlotListResponse =
++        timeout(DEFAULT_TIMEOUT, app_server.read_response(request_id)).await??;
++
++    assert_eq!(
++        response,
++        AccountSlotListResponse {
++            data: vec![AccountSlotSnapshot {
++                account_slot_id: "default".to_string(),
++                label: "Default account".to_string(),
++                is_default: true,
++                status: AccountSlotStatus::LoginRequired,
++                auth_mode: None,
++                attempt_generation: 0,
++                registry_revision: 1,
++                active_login_operation_id: None,
++                error_code: None,
++                actions: vec![
++                    AccountSlotActionAvailability {
++                        action: AccountSlotAction::Login,
++                        allowed: false,
++                        deny_reason: Some("account_slot_login_not_available".to_string()),
++                    },
++                    AccountSlotActionAvailability {
++                        action: AccountSlotAction::RetryLogin,
++                        allowed: false,
++                        deny_reason: Some("account_slot_login_not_available".to_string()),
++                    },
++                    AccountSlotActionAvailability {
++                        action: AccountSlotAction::SwitchTo,
++                        allowed: false,
++                        deny_reason: Some("thread_account_switch_not_available".to_string()),
++                    },
++                ],
++                updated_at: 0,
++            }],
++            next_cursor: None,
++            registry_revision: 1,
++            multi_account: AccountSlotCapability {
++                available: true,
++                deny_reason: None,
++            },
++        }
++    );
++    assert!(!manifest_path.exists());
++    Ok(())
++}
++
++#[tokio::test]
++async fn api_key_login_creates_ready_private_slot_and_sanitized_event() -> Result<()> {
++    let codex_home = TempDir::new()?;
++    std::fs::write(
++        codex_home.path().join("config.toml"),
++        r#"
++model = "mock-model"
++approval_policy = "never"
++sandbox_mode = "danger-full-access"
++cli_auth_credentials_store = "file"
++
++[features]
++shell_snapshot = false
++"#,
++    )?;
++    let mut app_server = TestAppServer::builder()
++        .with_codex_home(codex_home.path())
++        .without_auto_env()
++        .with_env_overrides(&[
++            ("CODEX_API_KEY", None),
++            ("CODEX_ACCESS_TOKEN", None),
++            ("OPENAI_API_KEY", None),
++        ])
++        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
++        .await?;
++
++    let request_id = app_server
++        .send_raw_request(
++            "accountSlot/login/start",
++            Some(serde_json::to_value(AccountSlotLoginStartParams::ApiKey {
++                slot_id: None,
++                api_key: "test-slot-secret".to_string(),
++            })?),
++        )
++        .await?;
++    let response: AccountSlotLoginStartResponse =
++        timeout(DEFAULT_TIMEOUT, app_server.read_response(request_id)).await??;
++    let changed: AccountSlotChangedNotification = timeout(
++        DEFAULT_TIMEOUT,
++        app_server.read_notification("accountSlot/changed"),
++    )
++    .await??;
++    let accepted: SessionRuntimeOperationUpdatedNotification = timeout(
++        DEFAULT_TIMEOUT,
++        app_server.read_notification("sessionRuntime/operation/updated"),
++    )
++    .await??;
++    let ready: SessionRuntimeOperationUpdatedNotification = timeout(
++        DEFAULT_TIMEOUT,
++        app_server.read_notification("sessionRuntime/operation/updated"),
++    )
++    .await??;
++
++    assert_eq!(response.slot.status, AccountSlotStatus::Ready);
++    assert_eq!(
++        response.slot.auth_mode,
++        Some(codex_app_server_protocol::AuthMode::ApiKey)
++    );
++    assert_eq!(response.challenge, None);
++    assert_eq!(changed.slot, response.slot);
++    assert_eq!(
++        accepted.operation.status,
++        SessionRuntimeOperationStatus::Accepted
++    );
++    assert_eq!(ready.operation, response.operation);
++    assert_ne!(response.slot.account_slot_id, "default");
++    let response_json = serde_json::to_string(&response)?;
++    let changed_json = serde_json::to_string(&changed)?;
++    assert!(!response_json.contains("test-slot-secret"));
++    assert!(!changed_json.contains("test-slot-secret"));
++    assert!(!response_json.contains(codex_home.path().to_string_lossy().as_ref()));
++    assert!(!changed_json.contains(codex_home.path().to_string_lossy().as_ref()));
++    assert!(codex_home.path().join("account-slots.toml").is_file());
++    Ok(())
++}
+diff --git a/codex-rs/app-server/tests/suite/mod.rs b/codex-rs/app-server/tests/suite/mod.rs
+index 09c4049..66b97a9 100644
+--- a/codex-rs/app-server/tests/suite/mod.rs
++++ b/codex-rs/app-server/tests/suite/mod.rs
+@@ -1,3 +1,4 @@
++mod account_slot;
+ mod auth;
+ mod conversation_summary;
+ mod fuzzy_file_search;
+diff --git a/codex-rs/login/src/lib.rs b/codex-rs/login/src/lib.rs
+index f20d24e..c088086 100644
+--- a/codex-rs/login/src/lib.rs
++++ b/codex-rs/login/src/lib.rs
+@@ -22,6 +22,7 @@ pub use server::LoginServer;
+ pub use server::ServerOptions;
+ pub use server::ShutdownHandle;
+ pub use server::run_login_server;
++pub use server::run_login_server_fail_if_busy;
+ pub use success_page::CODEX_OPEN_APP_URL;
+ pub use success_page::LoginSuccessPage;
+ pub use success_page::LoginSuccessPageBrand;
+diff --git a/codex-rs/login/src/server.rs b/codex-rs/login/src/server.rs
+index dbfddc3..439657d 100644
+--- a/codex-rs/login/src/server.rs
++++ b/codex-rs/login/src/server.rs
+@@ -158,10 +158,33 @@ impl ShutdownHandle {
+ 
+ /// Starts a local callback server and returns the browser auth URL.
+ pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
++    run_login_server_with_bind_mode(opts, LoginServerBindMode::CancelExisting)
++}
++
++/// Starts a local callback server without sending `/cancel` to an existing
++/// listener. App-server uses this when multiple independently owned login
++/// operations share the fixed callback ports.
++pub fn run_login_server_fail_if_busy(opts: ServerOptions) -> io::Result<LoginServer> {
++    run_login_server_with_bind_mode(opts, LoginServerBindMode::FailIfBusy)
++}
++
++#[derive(Clone, Copy)]
++enum LoginServerBindMode {
++    CancelExisting,
++    FailIfBusy,
++}
++
++fn run_login_server_with_bind_mode(
++    opts: ServerOptions,
++    bind_mode: LoginServerBindMode,
++) -> io::Result<LoginServer> {
+     let pkce = generate_pkce();
+     let state = opts.force_state.clone().unwrap_or_else(generate_state);
+ 
+-    let server = bind_server(opts.port)?;
++    let server = match bind_mode {
++        LoginServerBindMode::CancelExisting => bind_server(opts.port)?,
++        LoginServerBindMode::FailIfBusy => bind_server_fail_if_busy(opts.port)?,
++    };
+     let actual_port = match server.server_addr().to_ip() {
+         Some(addr) => addr.port(),
+         None => {
+@@ -305,6 +328,28 @@ pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
+     })
+ }
+ 
++fn bind_server_fail_if_busy(port: u16) -> io::Result<Server> {
++    match Server::http(format!("127.0.0.1:{port}")) {
++        Ok(server) => Ok(server),
++        Err(err) if port == DEFAULT_PORT && is_addr_in_use(err.as_ref()) => {
++            Server::http(format!("127.0.0.1:{FALLBACK_PORT}")).map_err(tiny_http_error_to_io)
++        }
++        Err(err) => Err(tiny_http_error_to_io(err)),
++    }
++}
++
++fn tiny_http_error_to_io(err: Box<dyn std::error::Error + Send + Sync>) -> io::Error {
++    match err.downcast::<io::Error>() {
++        Ok(err) => *err,
++        Err(err) => io::Error::other(err),
++    }
++}
++
++fn is_addr_in_use(err: &(dyn std::error::Error + Send + Sync + 'static)) -> bool {
++    err.downcast_ref::<io::Error>()
++        .is_some_and(|err| err.kind() == io::ErrorKind::AddrInUse)
++}
++
+ /// Internal callback handling outcome.
+ enum HandledRequest {
+     Response(Response<Cursor<Vec<u8>>>),
+@@ -649,10 +694,7 @@ fn bind_server(port: u16) -> io::Result<Server> {
+             Ok(server) => return Ok(server),
+             Err(err) => {
+                 attempts += 1;
+-                let is_addr_in_use = err
+-                    .downcast_ref::<io::Error>()
+-                    .map(|io_err| io_err.kind() == io::ErrorKind::AddrInUse)
+-                    .unwrap_or(false);
++                let is_addr_in_use = is_addr_in_use(err.as_ref());
+ 
+                 // If the address is in use, there may be another instance of the login server
+                 // running. Attempt to cancel it and retry before falling back.
+@@ -1171,9 +1213,12 @@ pub(crate) async fn obtain_api_key(
+ }
+ #[cfg(test)]
+ mod tests {
++    use std::io;
++
+     use pretty_assertions::assert_eq;
+ 
+     use super::TokenEndpointErrorDetail;
++    use super::bind_server_fail_if_busy;
+     use super::html_escape;
+     use super::is_missing_codex_entitlement_error;
+     use super::parse_token_endpoint_error;
+@@ -1182,6 +1227,23 @@ mod tests {
+     use super::render_login_error_page;
+     use super::sanitize_url_for_logging;
+ 
++    #[test]
++    fn fail_if_busy_bind_does_not_cancel_existing_listener() {
++        let first = bind_server_fail_if_busy(/*port*/ 0).expect("bind first listener");
++        let port = first.server_addr().to_ip().expect("TCP listener").port();
++
++        let error = match bind_server_fail_if_busy(port) {
++            Ok(_) => panic!("busy port must fail"),
++            Err(error) => error,
++        };
++
++        assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
++        assert_eq!(
++            first.server_addr().to_ip().expect("first listener").port(),
++            port
++        );
++    }
++
+     #[test]
+     fn parse_token_endpoint_error_prefers_error_description() {
+         let detail = parse_token_endpoint_error(
+-- 
+2.50.1 (Apple Git-155)
+

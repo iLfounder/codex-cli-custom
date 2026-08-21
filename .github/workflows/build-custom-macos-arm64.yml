@@ -1,0 +1,101 @@
+name: Build custom Codex for macOS arm64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-custom-macos-arm64-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: rust-v0.148.0 / macOS arm64
+    runs-on: macos-15
+    timeout-minutes: 330
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"
+      CARGO_PROFILE_RELEASE_INCREMENTAL: "false"
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
+      CARGO_TERM_COLOR: always
+      SOURCE_COMMIT: 3ba0f711642a888aec92a611a3f3b2211157ff89
+      PATCH_TREE: fe1cec7cc8a29dedd89896c4459474fb5cf2d54e
+
+    steps:
+      - name: Check out patch repository
+        uses: actions/checkout@v6
+
+      - name: Cache Cargo downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-rust-v0.148.0-${{ hashFiles('custom-patches/rust-v0.148.0/**') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-rust-v0.148.0-
+
+      - name: Fetch the exact upstream source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init upstream-codex
+          git -C upstream-codex remote add origin https://github.com/openai/codex.git
+          git -C upstream-codex fetch --depth=1 origin "$SOURCE_COMMIT"
+          git -C upstream-codex checkout --detach FETCH_HEAD
+          test "$(git -C upstream-codex rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test -z "$(git -C upstream-codex status --porcelain)"
+
+      - name: Apply the numbered patch series
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C upstream-codex config user.name github-actions
+          git -C upstream-codex config user.email github-actions@users.noreply.github.com
+          ./custom-patches/apply-series.sh upstream-codex
+          test "$(git -C upstream-codex rev-parse HEAD^{tree})" = "$PATCH_TREE"
+
+      - name: Build Codex and app-server
+        working-directory: upstream-codex/codex-rs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release -p codex-cli --bin codex
+          cargo build --locked --release -p codex-app-server --bin codex-app-server
+
+      - name: Package binaries and provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "$CARGO_TARGET_DIR/release/codex" dist/codex
+          cp "$CARGO_TARGET_DIR/release/codex-app-server" dist/codex-app-server
+          strip -x dist/codex dist/codex-app-server
+          chmod 0755 dist/codex dist/codex-app-server
+          shasum -a 256 dist/codex dist/codex-app-server > dist/SHA256SUMS
+          {
+            printf 'upstream_commit=%s\n' "$SOURCE_COMMIT"
+            printf 'patched_tree=%s\n' "$PATCH_TREE"
+            printf 'runner_arch=%s\n' "$(uname -m)"
+            rustc --version
+            cargo --version
+            sw_vers
+          } > dist/BUILD-METADATA.txt
+          COPYFILE_DISABLE=1 tar -C dist -czf codex-custom-rust-v0.148.0-macos-arm64.tar.gz .
+          shasum -a 256 codex-custom-rust-v0.148.0-macos-arm64.tar.gz \
+            > codex-custom-rust-v0.148.0-macos-arm64.tar.gz.sha256
+          file dist/codex dist/codex-app-server
+
+      - name: Upload macOS arm64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-custom-rust-v0.148.0-macos-arm64
+          path: |
+            codex-custom-rust-v0.148.0-macos-arm64.tar.gz
+            codex-custom-rust-v0.148.0-macos-arm64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
