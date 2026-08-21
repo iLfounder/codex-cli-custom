@@ -1,7 +1,7 @@
 schema_version = 1
 applies_to = "rust-v0.149.0"
 base_commit = "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0"
-final_tree = "9f3fe8a00dbbcab59a69d0719b9def1930ef0bff"
+final_tree = "e5915796b021e81b88bd40406b62fa6c3bf89e76"
 
 [[patches]]
 number = "P001"
@@ -46,14 +46,14 @@ sha256 = "c243b259e64f4cf31e08489727d17cd714be00b03c3b4395af8153eb144befab"
 [[patches]]
 number = "P009"
 file = "0009-P009-switch-thread-execution-accounts.patch"
-sha256 = "b79e1bdbbbb4f2512098a01194bf38f4bf0414501ae856afe6230a8177220583"
+sha256 = "94adac2d02403f4dd36af89a2bf82c4b777ea6660a43eaf5bcf06b1ecd203c66"
 
 [[patches]]
 number = "P010"
 file = "0010-P010-add-TUI-session-and-account-controls.patch"
-sha256 = "420c011cd6b9deea829ce7de7f1c9cbe6a0c8207232b3c3cc25652053dadfff1"
+sha256 = "b6fc61add107d4469cbaf2b8ae8785f4789623e119cf2ea7babd76368cbbfcd0"
 
 [[patches]]
 number = "P011"
 file = "0011-P011-installable-plugin-commands-and-presentation.patch"
-sha256 = "096bdad3efea6458015898e666e3ceb34daac812b408a183c2f305557298c717"
+sha256 = "451e15606404e396ad2768c1ffcd95babd627434a629066aa14eba761b3cbc67"

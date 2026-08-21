@@ -28,7 +28,7 @@ Stock Codex는 인증과 runtime 소유권의 많은 부분을 process 단위로
 | 영역 | 현재 상태 |
 |---|---|
 | P001–P011 구현과 focused check | 완료 |
-| 순서형 0.149 patch export와 clean-apply 검증 | 완료; 11개 patch가 tree `9f3fe8a00dbbcab59a69d0719b9def1930ef0bff`를 재현함 |
+| 순서형 0.149 patch export와 clean-apply 검증 | 완료; 11개 patch가 tree `e5915796b021e81b88bd40406b62fa6c3bf89e76`를 재현함 |
 | macOS arm64 release build와 artifact | final review 수정 후 rebuild 대기; [run 32485937374](https://github.com/iLfounder/codex-cli-custom/actions/runs/32485937374)는 교체된 review 전 tree의 증거임 |
 | 최종 독립 review | Pending |
 | 0.149 publication | Pending |
@@ -128,7 +128,7 @@ git checkout 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
 /path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD"
 ```
 
-Applier는 dirty 또는 잘못된 base worktree를 거절하고, 각 patch digest를 검증하며, P001–P011을 순서대로 적용한 뒤 final tree `9f3fe8a00dbbcab59a69d0719b9def1930ef0bff`를 요구한다.
+Applier는 dirty 또는 잘못된 base worktree를 거절하고, 각 patch digest를 검증하며, P001–P011을 순서대로 적용한 뒤 final tree `e5915796b021e81b88bd40406b62fa6c3bf89e76`를 요구한다.
 
 이 분리가 유지보수 방식이다. upstream이 갱신되면 각 P번호를 자기 기능 경계 안에서 inspect·adapt·verify할 수 있다.
 

@@ -1,4 +1,4 @@
-From 8ecf82a1abf82647e9070a5f8a0870ba46eba01e Mon Sep 17 00:00:00 2001
+From 9074eee6f3da52964795371f5c9726c3d7e9df37 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 19:45:26 +0900
 Subject: [PATCH] feat(custom): add release-aware TUI controls for 0.149

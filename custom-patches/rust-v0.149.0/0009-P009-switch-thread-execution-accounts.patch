@@ -1,4 +1,4 @@
-From f21a56a53555cd03256a67336ab9f5e5e5803da7 Mon Sep 17 00:00:00 2001
+From c4565aaf4dab07d88e6a463b4deed9e5ca590b9d Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 19:13:43 +0900
 Subject: [PATCH] feat(custom): switch thread accounts without restart for
@@ -6,7 +6,7 @@ Subject: [PATCH] feat(custom): switch thread accounts without restart for
 
 ---
  codex-rs/app-server/src/account_registry.rs   | 182 ++++---
- .../src/account_registry/live_registration.rs |  32 +-
+ .../src/account_registry/live_registration.rs |  34 +-
  .../app-server/src/account_registry_tests.rs  |  42 ++
  codex-rs/app-server/src/message_processor.rs  |   9 +-
  .../app-server/src/session_runtime/mod.rs     |   2 +
@@ -66,7 +66,7 @@ Subject: [PATCH] feat(custom): switch thread accounts without restart for
  codex-rs/network-proxy/src/proxy.rs           |   6 +-
  .../network-proxy/src/remote_config_tests.rs  |  24 +-
  codex-rs/network-proxy/src/runtime.rs         |  21 +-
- 61 files changed, 2154 insertions(+), 400 deletions(-)
+ 61 files changed, 2155 insertions(+), 401 deletions(-)
  create mode 100644 codex-rs/app-server/src/session_runtime/switch_account.rs
  create mode 100644 codex-rs/app-server/tests/suite/v2/thread_account_switch.rs
  create mode 100644 codex-rs/ext/extension-api/src/contributors/execution_account.rs
@@ -283,7 +283,7 @@ index 43f1a06c2..94df2ca4f 100644
      }
  }
 diff --git a/codex-rs/app-server/src/account_registry/live_registration.rs b/codex-rs/app-server/src/account_registry/live_registration.rs
-index 07e7308bf..4d6c64c9d 100644
+index 07e7308bf..763bfbef1 100644
 --- a/codex-rs/app-server/src/account_registry/live_registration.rs
 +++ b/codex-rs/app-server/src/account_registry/live_registration.rs
 @@ -84,6 +84,10 @@ impl AccountRegistry {
@@ -318,7 +318,8 @@ index 07e7308bf..4d6c64c9d 100644
 +        for (_binding_transition, slot_id, (status, error_code)) in &changed {
              if let Some(slot) = next_slots
                  .iter_mut()
-                 .find(|slot| slot.manifest.account_slot_id == slot_id)
+-                .find(|slot| slot.manifest.account_slot_id == slot_id)
++                .find(|slot| slot.manifest.account_slot_id == *slot_id)
                  && slot.active_logout_operation_id.is_none()
              {
 -                slot.manifest.status = status;
