@@ -22,6 +22,7 @@ use codex_rollout::state_db::StateDbHandle;
 use codex_utils_path_uri::LegacyAppPathString;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::Weak;
@@ -109,7 +110,29 @@ pub(crate) struct ThreadState {
     watch_registration: WatchRegistration,
 }
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ThreadSubscriptionSnapshot {
+    pub(crate) subscriber_count: u32,
+    pub(crate) client_incarnations: Vec<String>,
+    pub(crate) active_turn_id: Option<String>,
+    pub(crate) settings: Option<ThreadSettings>,
+    pub(crate) unload_at: Option<i64>,
+}
+
+pub(crate) enum PendingUnloadSubscription<T> {
+    PendingUnload,
+    ConnectionClosed,
+    Subscribed(T),
+}
+
 impl ThreadState {
+    fn runtime_snapshot(&self) -> (Option<String>, Option<ThreadSettings>) {
+        (
+            self.active_turn_snapshot().map(|turn| turn.id),
+            self.last_thread_settings.clone(),
+        )
+    }
+
     pub(crate) fn listener_matches(&self, conversation: &Arc<CodexThread>) -> bool {
         self.listener_thread
             .as_ref()
@@ -261,6 +284,22 @@ mod tests {
         assert_eq!(results, vec![true, false, true, false]);
     }
 
+    #[tokio::test]
+    async fn unload_target_updates_and_clears_in_runtime_snapshot() {
+        let manager = ThreadStateManager::new();
+        let thread_id = ThreadId::default();
+        manager.thread_state(thread_id).await;
+
+        manager.set_unload_at(thread_id, Some(123)).await;
+        assert_eq!(
+            manager.runtime_snapshot(thread_id).await.unload_at,
+            Some(123)
+        );
+
+        manager.set_unload_at(thread_id, None).await;
+        assert_eq!(manager.runtime_snapshot(thread_id).await.unload_at, None);
+    }
+
     fn thread_settings(model: &str) -> ThreadSettings {
         ThreadSettings {
             cwd: AbsolutePathBuf::from_absolute_path("/tmp").expect("absolute path"),
@@ -293,6 +332,7 @@ struct ThreadEntry {
     state: Arc<Mutex<ThreadState>>,
     connection_ids: HashSet<ConnectionId>,
     has_connections_watcher: watch::Sender<bool>,
+    unload_at: Option<i64>,
 }
 
 impl Default for ThreadEntry {
@@ -301,6 +341,7 @@ impl Default for ThreadEntry {
             state: Arc::new(Mutex::new(ThreadState::default())),
             connection_ids: HashSet::new(),
             has_connections_watcher: watch::channel(false).0,
+            unload_at: None,
         }
     }
 }
@@ -317,9 +358,15 @@ impl ThreadEntry {
 
 #[derive(Default)]
 struct ThreadStateManagerInner {
-    live_connections: HashMap<ConnectionId, ConnectionCapabilities>,
+    live_connections: HashMap<ConnectionId, LiveConnection>,
     threads: HashMap<ThreadId, ThreadEntry>,
     thread_ids_by_connection: HashMap<ConnectionId, HashSet<ThreadId>>,
+}
+
+#[derive(Clone, Copy)]
+struct LiveConnection {
+    capabilities: ConnectionCapabilities,
+    incarnation: uuid::Uuid,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -334,6 +381,7 @@ pub(crate) struct ThreadStateManager {
     // enqueue work on the active per-thread listener.
     listener_commands:
         Arc<StdMutex<HashMap<ThreadId, mpsc::UnboundedSender<ThreadListenerCommand>>>>,
+    runtime_engine: Arc<StdMutex<Option<Weak<crate::session_runtime::SessionRuntimeEngine>>>>,
 }
 
 impl ThreadStateManager {
@@ -341,16 +389,49 @@ impl ThreadStateManager {
         Self::default()
     }
 
+    pub(crate) fn attach_runtime_engine(
+        &self,
+        runtime_engine: &Arc<crate::session_runtime::SessionRuntimeEngine>,
+    ) {
+        *self
+            .runtime_engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(Arc::downgrade(runtime_engine));
+    }
+
+    fn runtime_engine(&self) -> Option<Arc<crate::session_runtime::SessionRuntimeEngine>> {
+        self.runtime_engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(Weak::upgrade)
+    }
+
+    pub(crate) async fn publish_runtime(&self, thread_id: ThreadId) {
+        if let Some(runtime_engine) = self.runtime_engine() {
+            runtime_engine.publish_thread(thread_id).await;
+        }
+    }
+
+    pub(crate) fn mark_runtime_dirty(&self) {
+        if let Some(runtime_engine) = self.runtime_engine() {
+            runtime_engine.mark_dirty();
+        }
+    }
+
     pub(crate) async fn connection_initialized(
         &self,
         connection_id: ConnectionId,
         capabilities: ConnectionCapabilities,
     ) {
-        self.state
-            .lock()
-            .await
-            .live_connections
-            .insert(connection_id, capabilities);
+        self.state.lock().await.live_connections.insert(
+            connection_id,
+            LiveConnection {
+                capabilities,
+                incarnation: uuid::Uuid::new_v4(),
+            },
+        );
     }
 
     pub(crate) async fn first_attestation_capable_connection_for_thread(
@@ -367,6 +448,7 @@ impl ThreadStateManager {
                 state
                     .live_connections
                     .get(connection_id)?
+                    .capabilities
                     .request_attestation
                     .then_some(*connection_id)
             })
@@ -397,6 +479,59 @@ impl ThreadStateManager {
             .get(&thread_id)
             .map(|thread_entry| thread_entry.connection_ids.iter().copied().collect())
             .unwrap_or_default()
+    }
+
+    pub(crate) async fn runtime_snapshot(&self, thread_id: ThreadId) -> ThreadSubscriptionSnapshot {
+        let (state_handle, subscriber_count, client_incarnations, unload_at) = {
+            let state = self.state.lock().await;
+            let Some(entry) = state.threads.get(&thread_id) else {
+                return ThreadSubscriptionSnapshot::default();
+            };
+            let mut client_incarnations = entry
+                .connection_ids
+                .iter()
+                .filter_map(|connection_id| {
+                    state
+                        .live_connections
+                        .get(connection_id)
+                        .map(|connection| connection.incarnation.to_string())
+                })
+                .collect::<Vec<_>>();
+            client_incarnations.sort();
+            (
+                entry.state.clone(),
+                u32::try_from(entry.connection_ids.len()).unwrap_or(u32::MAX),
+                client_incarnations,
+                entry.unload_at,
+            )
+        };
+        let (active_turn_id, settings) = state_handle.lock().await.runtime_snapshot();
+        ThreadSubscriptionSnapshot {
+            subscriber_count,
+            client_incarnations,
+            active_turn_id,
+            settings,
+            unload_at,
+        }
+    }
+
+    pub(crate) async fn set_unload_at(&self, thread_id: ThreadId, unload_at: Option<i64>) {
+        self.mark_runtime_dirty();
+        let changed = {
+            let mut state = self.state.lock().await;
+            let Some(entry) = state.threads.get_mut(&thread_id) else {
+                return;
+            };
+            if entry.unload_at == unload_at {
+                false
+            } else {
+                entry.unload_at = unload_at;
+                true
+            }
+        };
+        if changed {
+            self.publish_runtime(thread_id).await;
+        }
     }
 
     pub(crate) async fn thread_state(&self, thread_id: ThreadId) -> Arc<Mutex<ThreadState>> {
@@ -434,6 +569,7 @@ impl ThreadStateManager {
     }
 
     pub(crate) async fn remove_thread_state(&self, thread_id: ThreadId) {
+        self.mark_runtime_dirty();
         let thread_state = {
             let mut state = self.state.lock().await;
             let thread_state = state
@@ -459,6 +595,7 @@ impl ThreadStateManager {
             );
             thread_state.clear_listener();
         }
+        self.publish_runtime(thread_id).await;
     }
 
     pub(crate) async fn clear_all_listeners(&self) {
@@ -473,15 +610,18 @@ impl ThreadStateManager {
 
         for (thread_id, thread_state) in thread_states {
             self.unregister_listener_command_tx(thread_id);
-            let mut thread_state = thread_state.lock().await;
-            tracing::debug!(
-                thread_id = %thread_id,
-                listener_generation = thread_state.listener_generation,
-                had_listener = thread_state.cancel_tx.is_some(),
-                had_active_turn = thread_state.active_turn_snapshot().is_some(),
-                "clearing thread listener during app-server shutdown"
-            );
-            thread_state.clear_listener();
+            {
+                let mut thread_state = thread_state.lock().await;
+                tracing::debug!(
+                    thread_id = %thread_id,
+                    listener_generation = thread_state.listener_generation,
+                    had_listener = thread_state.cancel_tx.is_some(),
+                    had_active_turn = thread_state.active_turn_snapshot().is_some(),
+                    "clearing thread listener during app-server shutdown"
+                );
+                thread_state.clear_listener();
+            }
+            self.set_unload_at(thread_id, None).await;
         }
     }
 
@@ -490,6 +630,7 @@ impl ThreadStateManager {
         thread_id: ThreadId,
         connection_id: ConnectionId,
     ) -> bool {
+        self.mark_runtime_dirty();
         {
             let mut state = self.state.lock().await;
             if !state.threads.contains_key(&thread_id) {
@@ -516,6 +657,7 @@ impl ThreadStateManager {
             }
         };
 
+        self.publish_runtime(thread_id).await;
         true
     }
 
@@ -529,12 +671,50 @@ impl ThreadStateManager {
             .is_some_and(|thread_entry| !thread_entry.connection_ids.is_empty())
     }
 
+    #[cfg(test)]
     pub(crate) async fn try_ensure_connection_subscribed(
         &self,
         thread_id: ThreadId,
         connection_id: ConnectionId,
         experimental_raw_events: bool,
     ) -> Option<Arc<Mutex<ThreadState>>> {
+        let thread_state = self
+            .try_ensure_connection_subscribed_without_runtime_publish(
+                thread_id,
+                connection_id,
+                experimental_raw_events,
+            )
+            .await?;
+        self.publish_runtime(thread_id).await;
+        Some(thread_state)
+    }
+
+    pub(crate) async fn try_ensure_connection_subscribed_unless_pending_unload(
+        &self,
+        pending_thread_unloads: &Mutex<HashSet<ThreadId>>,
+        thread_id: ThreadId,
+        connection_id: ConnectionId,
+        experimental_raw_events: bool,
+    ) -> PendingUnloadSubscription<Arc<Mutex<ThreadState>>> {
+        self.subscribe_unless_pending_unload(
+            pending_thread_unloads,
+            thread_id,
+            self.try_ensure_connection_subscribed_without_runtime_publish(
+                thread_id,
+                connection_id,
+                experimental_raw_events,
+            ),
+        )
+        .await
+    }
+
+    async fn try_ensure_connection_subscribed_without_runtime_publish(
+        &self,
+        thread_id: ThreadId,
+        connection_id: ConnectionId,
+        experimental_raw_events: bool,
+    ) -> Option<Arc<Mutex<ThreadState>>> {
+        self.mark_runtime_dirty();
         let thread_state = {
             let mut state = self.state.lock().await;
             if !state.live_connections.contains_key(&connection_id) {
@@ -559,14 +739,44 @@ impl ThreadStateManager {
         Some(thread_state)
     }
 
+    #[cfg(test)]
     pub(crate) async fn try_add_connection_to_thread(
         &self,
         thread_id: ThreadId,
         connection_id: ConnectionId,
     ) -> bool {
+        let subscribed = self
+            .try_add_connection_to_thread_without_runtime_publish(thread_id, connection_id)
+            .await;
+        if subscribed.is_some() {
+            self.publish_runtime(thread_id).await;
+        }
+        subscribed.is_some()
+    }
+
+    pub(crate) async fn try_add_connection_to_thread_unless_pending_unload(
+        &self,
+        pending_thread_unloads: &Mutex<HashSet<ThreadId>>,
+        thread_id: ThreadId,
+        connection_id: ConnectionId,
+    ) -> PendingUnloadSubscription<()> {
+        self.subscribe_unless_pending_unload(
+            pending_thread_unloads,
+            thread_id,
+            self.try_add_connection_to_thread_without_runtime_publish(thread_id, connection_id),
+        )
+        .await
+    }
+
+    async fn try_add_connection_to_thread_without_runtime_publish(
+        &self,
+        thread_id: ThreadId,
+        connection_id: ConnectionId,
+    ) -> Option<()> {
+        self.mark_runtime_dirty();
         let mut state = self.state.lock().await;
         if !state.live_connections.contains_key(&connection_id) {
-            return false;
+            return None;
         }
         state
             .thread_ids_by_connection
@@ -576,11 +786,36 @@ impl ThreadStateManager {
         let thread_entry = state.threads.entry(thread_id).or_default();
         thread_entry.connection_ids.insert(connection_id);
         thread_entry.update_has_connections();
-        true
+        Some(())
+    }
+
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "the pending-unload fence must cover the subscriber-state mutation"
+    )]
+    async fn subscribe_unless_pending_unload<T>(
+        &self,
+        pending_thread_unloads: &Mutex<HashSet<ThreadId>>,
+        thread_id: ThreadId,
+        subscription: impl Future<Output = Option<T>>,
+    ) -> PendingUnloadSubscription<T> {
+        let subscribed = {
+            let pending_thread_unloads = pending_thread_unloads.lock().await;
+            if pending_thread_unloads.contains(&thread_id) {
+                return PendingUnloadSubscription::PendingUnload;
+            }
+            let Some(subscribed) = subscription.await else {
+                return PendingUnloadSubscription::ConnectionClosed;
+            };
+            subscribed
+        };
+        self.publish_runtime(thread_id).await;
+        PendingUnloadSubscription::Subscribed(subscribed)
     }
 
     pub(crate) async fn remove_connection(&self, connection_id: ConnectionId) -> Vec<ThreadId> {
-        {
+        self.mark_runtime_dirty();
+        let (empty_thread_ids, affected_thread_ids) = {
             let mut state = self.state.lock().await;
             state.live_connections.remove(&connection_id);
             let thread_ids = state
@@ -593,16 +828,22 @@ impl ThreadStateManager {
                     thread_entry.update_has_connections();
                 }
             }
-            thread_ids
-                .into_iter()
+            let empty_thread_ids = thread_ids
+                .iter()
+                .copied()
                 .filter(|thread_id| {
                     state
                         .threads
                         .get(thread_id)
                         .is_some_and(|thread_entry| thread_entry.connection_ids.is_empty())
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (empty_thread_ids, thread_ids)
+        };
+        for thread_id in affected_thread_ids {
+            self.publish_runtime(thread_id).await;
         }
+        empty_thread_ids
     }
 
     pub(crate) async fn subscribe_to_has_connections(

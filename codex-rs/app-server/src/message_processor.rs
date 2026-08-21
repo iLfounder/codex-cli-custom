@@ -160,6 +160,7 @@ pub(crate) struct MessageProcessor {
     turn_processor: TurnRequestProcessor,
     windows_sandbox_processor: WindowsSandboxRequestProcessor,
     request_serialization_queues: RequestSerializationQueues,
+    session_runtime: Arc<crate::session_runtime::SessionRuntimeEngine>,
 }
 
 #[derive(Debug)]
@@ -385,6 +386,17 @@ impl MessageProcessor {
         let pending_thread_unloads = Arc::new(Mutex::new(HashSet::new()));
         let thread_watch_manager =
             crate::thread_status::ThreadWatchManager::new_with_outgoing(outgoing.clone());
+        let session_runtime = Arc::new(crate::session_runtime::SessionRuntimeEngine::new(
+            Arc::clone(&thread_store),
+            Arc::clone(&thread_manager),
+            thread_state_manager.clone(),
+            thread_watch_manager.clone(),
+            Arc::clone(&pending_thread_unloads),
+            Arc::clone(&account_registry),
+            outgoing.clone(),
+        ));
+        thread_state_manager.attach_runtime_engine(&session_runtime);
+        thread_watch_manager.attach_runtime_engine(&session_runtime);
         let thread_list_state_permit = Arc::new(Semaphore::new(/*permits*/ 1));
         let app_list_shutdown_token = CancellationToken::new();
         let request_serialization_queues = RequestSerializationQueues::default();
@@ -404,7 +416,7 @@ impl MessageProcessor {
             );
         let account_processor = AccountRequestProcessor::new(
             auth_manager.clone(),
-            account_registry,
+            Arc::clone(&account_registry),
             Arc::clone(&thread_manager),
             outgoing.clone(),
             Arc::clone(&config),
@@ -589,6 +601,7 @@ impl MessageProcessor {
             turn_processor,
             windows_sandbox_processor,
             request_serialization_queues,
+            session_runtime,
         }
     }
 
@@ -967,9 +980,11 @@ impl MessageProcessor {
                 panic!("Initialize should be handled before initialized request dispatch");
             }
             ClientRequest::ServerDiagnostics { .. } => Ok(Some(read_server_diagnostics().into())),
-            ClientRequest::SessionRuntimeList { .. } => Err(method_not_found(
-                "sessionRuntime/list is not implemented yet",
-            )),
+            ClientRequest::SessionRuntimeList { params, .. } => self
+                .session_runtime
+                .list(params)
+                .await
+                .map(|response| Some(response.into())),
             ClientRequest::AccountSlotList { params, .. } => self
                 .account_processor
                 .list_account_slots(params)

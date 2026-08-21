@@ -89,6 +89,13 @@ pub struct RolloutRecorder {
     pub(crate) rollout_path: PathBuf,
 }
 
+/// Exact durable end position for a paginated rollout after a writer barrier.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RolloutProgress {
+    pub end_ordinal_exclusive: u64,
+    pub end_byte_offset: u64,
+}
+
 #[derive(Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum RolloutRecorderParams {
@@ -130,8 +137,11 @@ enum RolloutCmd {
     Flush {
         ack: oneshot::Sender<std::io::Result<()>>,
     },
+    Progress {
+        ack: oneshot::Sender<std::io::Result<Option<RolloutProgress>>>,
+    },
     Shutdown {
-        ack: oneshot::Sender<std::io::Result<()>>,
+        ack: oneshot::Sender<std::io::Result<Option<RolloutProgress>>>,
     },
 }
 
@@ -1006,6 +1016,27 @@ impl RolloutRecorder {
         })?
     }
 
+    /// Return the exact durable end position for a materialized paginated rollout.
+    ///
+    /// Legacy rollouts have no ordinal authority and deferred files have no durable
+    /// byte position, so both return `None`.
+    pub async fn progress(&self) -> std::io::Result<Option<RolloutProgress>> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(RolloutCmd::Progress { ack: tx })
+            .await
+            .map_err(|e| {
+                self.writer_task.terminal_failure().unwrap_or_else(|| {
+                    IoError::other(format!("failed to queue rollout progress read: {e}"))
+                })
+            })?;
+        rx.await.map_err(|e| {
+            self.writer_task.terminal_failure().unwrap_or_else(|| {
+                IoError::other(format!("failed waiting for rollout progress read: {e}"))
+            })
+        })?
+    }
+
     pub async fn load_rollout_items(
         path: &Path,
     ) -> std::io::Result<(Vec<RolloutItem>, Option<ThreadId>, usize)> {
@@ -1092,13 +1123,18 @@ impl RolloutRecorder {
     ///
     /// If draining fails, the writer stays alive so callers can continue retrying flush/shutdown.
     pub async fn shutdown(&self) -> std::io::Result<()> {
+        self.shutdown_with_progress().await.map(drop)
+    }
+
+    /// Drain the writer and return its exact final paginated position.
+    pub async fn shutdown_with_progress(&self) -> std::io::Result<Option<RolloutProgress>> {
         let (tx_done, rx_done) = oneshot::channel();
         match self.tx.send(RolloutCmd::Shutdown { ack: tx_done }).await {
             Ok(_) => rx_done.await.map_err(|e| {
                 self.writer_task.terminal_failure().unwrap_or_else(|| {
                     IoError::other(format!("failed waiting for rollout shutdown: {e}"))
                 })
-            })??,
+            })?,
             Err(e) => {
                 if let Some(err) = self.writer_task.terminal_failure() {
                     warn!(
@@ -1107,12 +1143,11 @@ impl RolloutRecorder {
                     return Err(err);
                 }
                 warn!("failed to send rollout shutdown command: {e}");
-                return Err(IoError::other(format!(
+                Err(IoError::other(format!(
                     "failed to send rollout shutdown command: {e}"
-                )));
+                )))
             }
-        };
-        Ok(())
+        }
     }
 }
 
@@ -1699,6 +1734,22 @@ impl RolloutWriterState {
         self.write_pending_with_recovery("shutdown").await
     }
 
+    async fn progress(&mut self) -> std::io::Result<Option<RolloutProgress>> {
+        if self.is_deferred() {
+            return Ok(None);
+        }
+        let Some(end_ordinal_exclusive) = self.ordinal_state.current()? else {
+            return Ok(None);
+        };
+        let Some(writer) = self.writer.as_mut() else {
+            return Ok(None);
+        };
+        Ok(Some(RolloutProgress {
+            end_ordinal_exclusive,
+            end_byte_offset: writer.file.metadata().await?.len(),
+        }))
+    }
+
     async fn write_pending_with_recovery(&mut self, operation: &str) -> std::io::Result<()> {
         match self.write_pending_once().await {
             Ok(()) => {
@@ -1834,11 +1885,19 @@ async fn rollout_writer(
             RolloutCmd::Flush { ack } => {
                 let _ = ack.send(state.flush().await);
             }
+            RolloutCmd::Progress { ack } => {
+                let _ = ack.send(state.progress().await);
+            }
             RolloutCmd::Shutdown { ack } => match state.shutdown().await {
-                Ok(()) => {
-                    let _ = ack.send(Ok(()));
-                    break;
-                }
+                Ok(()) => match state.progress().await {
+                    Ok(progress) => {
+                        let _ = ack.send(Ok(progress));
+                        break;
+                    }
+                    Err(err) => {
+                        let _ = ack.send(Err(err));
+                    }
+                },
                 Err(err) => {
                     let _ = ack.send(Err(err));
                 }

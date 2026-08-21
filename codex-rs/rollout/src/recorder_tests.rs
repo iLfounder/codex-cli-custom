@@ -712,6 +712,42 @@ async fn recorder_materializes_on_flush_with_pending_items() -> std::io::Result<
 }
 
 #[tokio::test]
+async fn paginated_progress_matches_flush_barrier_and_resume_position() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let config = test_config(home.path());
+    let recorder = RolloutRecorder::new(
+        &config,
+        RolloutRecorderParams::new(
+            ThreadId::new(),
+            /*forked_from_id*/ None,
+            /*parent_thread_id*/ None,
+            SessionSource::Exec,
+            /*thread_source*/ None,
+            "test_originator".to_string(),
+            BaseInstructions::default(),
+            Vec::new(),
+        )
+        .with_history_mode(ThreadHistoryMode::Paginated),
+    )
+    .await?;
+    recorder
+        .record_canonical_items(&[agent_message_item("durable progress")])
+        .await?;
+    recorder.flush().await?;
+    let rollout_path = recorder.rollout_path().to_path_buf();
+    let progress = recorder.progress().await?.expect("paginated progress");
+
+    assert_eq!(progress.end_ordinal_exclusive, 2);
+    assert_eq!(progress.end_byte_offset, fs::metadata(&rollout_path)?.len());
+    assert_eq!(recorder.shutdown_with_progress().await?, Some(progress));
+
+    let resumed =
+        RolloutRecorder::new(&config, RolloutRecorderParams::resume(rollout_path)).await?;
+    assert_eq!(resumed.progress().await?, Some(progress));
+    resumed.shutdown().await
+}
+
+#[tokio::test]
 async fn referenced_paginated_rollout_starts_at_history_cutoff_and_resumes() -> std::io::Result<()>
 {
     let home = TempDir::new().expect("temp dir");

@@ -52,6 +52,7 @@ use crate::TurnPage;
 use crate::UpdateProjectParams;
 use crate::UpdateThreadMetadataParams;
 use crate::UpdatedProject;
+use crate::WriterControlCapability;
 
 /// Future returned by [`ThreadStore`] operations.
 pub type ThreadStoreFuture<'a, T> = Pin<Box<dyn Future<Output = ThreadStoreResult<T>> + Send + 'a>>;
@@ -65,6 +66,67 @@ pub enum PersistContext {
     TurnStart,
 }
 
+/// Storage-neutral writer ownership exposed to runtime observers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeWriterOwnership {
+    None,
+    OwnedHere,
+    OwnedElsewhere,
+    Unavailable,
+}
+
+/// Storage-neutral durable position that never exposes a backing path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimePersistencePosition {
+    pub ordinal: u64,
+    pub offset: u64,
+}
+
+/// Health of one runtime persistence stage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimePersistenceHealth {
+    Unknown,
+    Healthy,
+    Degraded,
+    Failed,
+}
+
+/// Sanitized store state used by app-server runtime snapshots.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ThreadStoreRuntimeSnapshot {
+    pub writer_ownership: RuntimeWriterOwnership,
+    pub writer_store_id: Option<String>,
+    pub writer_generation: Option<u64>,
+    pub writer_deny_reason: Option<String>,
+    pub jsonl: Option<RuntimePersistencePosition>,
+    pub sqlite: Option<RuntimePersistencePosition>,
+    pub lag: Option<u64>,
+    pub flush_health: RuntimePersistenceHealth,
+    pub materialize_health: RuntimePersistenceHealth,
+    pub flushed_at: Option<i64>,
+    pub materialized_at: Option<i64>,
+    pub persistence_deny_reason: Option<String>,
+}
+
+impl ThreadStoreRuntimeSnapshot {
+    pub fn unavailable(reason: impl Into<String>) -> Self {
+        Self {
+            writer_ownership: RuntimeWriterOwnership::Unavailable,
+            writer_store_id: None,
+            writer_generation: None,
+            writer_deny_reason: Some(reason.into()),
+            jsonl: None,
+            sqlite: None,
+            lag: None,
+            flush_health: RuntimePersistenceHealth::Unknown,
+            materialize_health: RuntimePersistenceHealth::Unknown,
+            flushed_at: None,
+            materialized_at: None,
+            persistence_deny_reason: None,
+        }
+    }
+}
+
 /// Storage-neutral thread persistence boundary.
 pub trait ThreadStore: Any + Send + Sync {
     /// Return this store as [`Any`] for implementation-owned escape hatches.
@@ -76,6 +138,25 @@ pub trait ThreadStore: Any + Send + Sync {
     /// already paginated should override this instead of relying on core to infer storage behavior.
     fn default_history_mode(&self) -> ThreadHistoryMode {
         ThreadHistoryMode::Legacy
+    }
+
+    /// Reports whether this process has persistent writer fencing for strict control operations.
+    fn writer_control_capability(&self) -> WriterControlCapability {
+        WriterControlCapability::Disabled {
+            reason: "persistent writer control requires the state database".to_string(),
+        }
+    }
+
+    /// Read sanitized writer and persistence state without scanning backing files.
+    fn runtime_snapshot(
+        &self,
+        _thread_id: ThreadId,
+    ) -> ThreadStoreFuture<'_, ThreadStoreRuntimeSnapshot> {
+        Box::pin(async {
+            Ok(ThreadStoreRuntimeSnapshot::unavailable(
+                "thread store runtime state is unavailable",
+            ))
+        })
     }
 
     fn execution_account_binding(

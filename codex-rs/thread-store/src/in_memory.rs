@@ -33,6 +33,8 @@ use crate::PersistContext;
 use crate::ReadThreadByRolloutPathParams;
 use crate::ReadThreadParams;
 use crate::ResumeThreadParams;
+use crate::RuntimePersistenceHealth;
+use crate::RuntimeWriterOwnership;
 use crate::StoredModelContext;
 use crate::StoredThread;
 use crate::StoredThreadHistory;
@@ -44,6 +46,7 @@ use crate::ThreadStore;
 use crate::ThreadStoreError;
 use crate::ThreadStoreFuture;
 use crate::ThreadStoreResult;
+use crate::ThreadStoreRuntimeSnapshot;
 use crate::UpdateThreadMetadataParams;
 use crate::error::reject_paginated_history_mode;
 
@@ -916,6 +919,45 @@ impl InMemoryThreadStore {
 impl ThreadStore for InMemoryThreadStore {
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn runtime_snapshot(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreFuture<'_, ThreadStoreRuntimeSnapshot> {
+        Box::pin(async move {
+            let state = self.state.lock().await;
+            let persisted = state.histories.contains_key(&thread_id);
+            Ok(ThreadStoreRuntimeSnapshot {
+                writer_ownership: if state.created_threads.contains_key(&thread_id) {
+                    RuntimeWriterOwnership::OwnedHere
+                } else {
+                    RuntimeWriterOwnership::None
+                },
+                writer_store_id: None,
+                writer_generation: None,
+                writer_deny_reason: Some(
+                    "persistent writer control requires the state database".to_string(),
+                ),
+                jsonl: None,
+                sqlite: None,
+                lag: None,
+                flush_health: if persisted {
+                    RuntimePersistenceHealth::Healthy
+                } else {
+                    RuntimePersistenceHealth::Unknown
+                },
+                materialize_health: if persisted {
+                    RuntimePersistenceHealth::Healthy
+                } else {
+                    RuntimePersistenceHealth::Unknown
+                },
+                flushed_at: None,
+                materialized_at: None,
+                persistence_deny_reason: persisted
+                    .then(|| "in-memory store has no durable position authority".to_string()),
+            })
+        })
     }
 
     fn execution_account_binding(

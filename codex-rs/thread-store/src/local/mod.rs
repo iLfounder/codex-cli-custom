@@ -28,6 +28,9 @@ mod writer_lock;
 #[path = "pending_thread_metadata_tests.rs"]
 mod pending_thread_metadata_tests;
 #[cfg(test)]
+#[path = "runtime_snapshot_tests.rs"]
+mod runtime_snapshot_tests;
+#[cfg(test)]
 mod test_support;
 
 use codex_protocol::ThreadId;
@@ -76,6 +79,9 @@ use crate::ReadThreadParams;
 use crate::RenameThreadSectionParams;
 use crate::ResumeThreadParams;
 use crate::RevertThreadParams;
+use crate::RuntimePersistenceHealth;
+use crate::RuntimePersistencePosition;
+use crate::RuntimeWriterOwnership;
 use crate::SearchThreadOccurrencesParams;
 use crate::SearchThreadsParams;
 use crate::StoredModelContext;
@@ -93,6 +99,7 @@ use crate::ThreadStore;
 use crate::ThreadStoreError;
 use crate::ThreadStoreFuture;
 use crate::ThreadStoreResult;
+use crate::ThreadStoreRuntimeSnapshot;
 use crate::TurnPage;
 use crate::UpdateProjectParams;
 use crate::UpdateThreadMetadataParams;
@@ -112,6 +119,14 @@ pub use writer_lock::WriterControlCapability;
 
 const WRITER_CONTROL_UNAVAILABLE_REASON: &str =
     "persistent writer control requires the state database";
+const COLD_JSONL_POSITION_UNAVAILABLE_REASON: &str =
+    "cold JSONL position is unavailable without a live recorder";
+const LEGACY_POSITION_UNAVAILABLE_REASON: &str =
+    "legacy history has no paginated persistence position";
+const STATE_DB_POSITION_UNAVAILABLE_REASON: &str =
+    "SQLite projection position requires the state database";
+const SQLITE_PROJECTION_UNAVAILABLE_REASON: &str =
+    "paginated SQLite projection position is unavailable";
 
 /// Local filesystem/SQLite-backed implementation of [`ThreadStore`].
 ///
@@ -465,6 +480,113 @@ impl LocalThreadStore {
 impl ThreadStore for LocalThreadStore {
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn writer_control_capability(&self) -> WriterControlCapability {
+        match self.state_db.as_ref() {
+            Some(state_db) => WriterControlCapability::Enabled {
+                store_id: state_db.writer_store_id().to_string(),
+            },
+            None => WriterControlCapability::Disabled {
+                reason: WRITER_CONTROL_UNAVAILABLE_REASON.to_string(),
+            },
+        }
+    }
+
+    fn runtime_snapshot(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreFuture<'_, ThreadStoreRuntimeSnapshot> {
+        Box::pin(async move {
+            let authority = self.probe_writer_authority(thread_id).await?;
+            let live = {
+                let recorders = self.live_recorders.lock().await;
+                recorders
+                    .get(&thread_id)
+                    .map(|entry| (entry.recorder.clone(), entry.history_mode))
+            };
+            let (jsonl, live_history_mode) =
+                match live {
+                    Some((recorder, history_mode)) => {
+                        let progress = recorder.progress().await.map_err(|err| {
+                            ThreadStoreError::Internal {
+                                message: format!(
+                                    "failed to read live rollout progress for {thread_id}: {err}"
+                                ),
+                            }
+                        })?;
+                        (
+                            progress.map(|progress| RuntimePersistencePosition {
+                                ordinal: progress.end_ordinal_exclusive,
+                                offset: progress.end_byte_offset,
+                            }),
+                            Some(history_mode),
+                        )
+                    }
+                    None => (None, None),
+                };
+            let projection = thread_history::projection_state(self, thread_id).await?;
+            let sqlite = projection.as_ref().map(|state| RuntimePersistencePosition {
+                ordinal: state.next_ordinal,
+                offset: state.next_byte_offset,
+            });
+            let history_mode = if live_history_mode.is_some() {
+                live_history_mode
+            } else if let Some(state_db) = self.state_db.as_ref() {
+                state_db
+                    .get_thread(thread_id)
+                    .await
+                    .map_err(|err| ThreadStoreError::Internal {
+                        message: format!("failed to read history mode for {thread_id}: {err}"),
+                    })?
+                    .map(|thread| thread.history_mode)
+            } else {
+                None
+            };
+            let persistence_deny_reason = if self.state_db.is_none() {
+                Some(STATE_DB_POSITION_UNAVAILABLE_REASON.to_string())
+            } else if jsonl.is_none() && matches!(history_mode, Some(ThreadHistoryMode::Legacy)) {
+                Some(LEGACY_POSITION_UNAVAILABLE_REASON.to_string())
+            } else if jsonl.is_none() && sqlite.is_some() {
+                Some(COLD_JSONL_POSITION_UNAVAILABLE_REASON.to_string())
+            } else if jsonl.is_none() || sqlite.is_none() {
+                Some(SQLITE_PROJECTION_UNAVAILABLE_REASON.to_string())
+            } else {
+                None
+            };
+            let (writer_store_id, writer_deny_reason) = match authority.control {
+                WriterControlCapability::Enabled { store_id } => (Some(store_id), None),
+                WriterControlCapability::Disabled { reason } => (None, Some(reason)),
+            };
+            Ok(ThreadStoreRuntimeSnapshot {
+                writer_ownership: match authority.ownership {
+                    ThreadWriterOwnership::None => RuntimeWriterOwnership::None,
+                    ThreadWriterOwnership::OwnedHere => RuntimeWriterOwnership::OwnedHere,
+                    ThreadWriterOwnership::OwnedElsewhere => RuntimeWriterOwnership::OwnedElsewhere,
+                },
+                writer_store_id,
+                writer_generation: authority.generation,
+                writer_deny_reason,
+                jsonl,
+                sqlite,
+                lag: jsonl
+                    .zip(sqlite)
+                    .map(|(jsonl, sqlite)| jsonl.ordinal.saturating_sub(sqlite.ordinal)),
+                flush_health: if jsonl.is_some() {
+                    RuntimePersistenceHealth::Healthy
+                } else {
+                    RuntimePersistenceHealth::Unknown
+                },
+                materialize_health: if sqlite.is_some() {
+                    RuntimePersistenceHealth::Healthy
+                } else {
+                    RuntimePersistenceHealth::Unknown
+                },
+                flushed_at: None,
+                materialized_at: None,
+                persistence_deny_reason,
+            })
+        })
     }
 
     fn execution_account_binding(
