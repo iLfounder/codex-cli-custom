@@ -211,6 +211,30 @@ pub enum RefreshTokenError {
 #[error(transparent)]
 pub struct AuthManagerInitializationError(AuthManagerInitializationErrorSource);
 
+/// Secret-free classification of the credential source currently selected by an auth manager.
+///
+/// Callers use this to decide whether multiple independently managed credential homes can coexist
+/// in one process. The classification never contains credential values or storage paths.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthSourceKind {
+    ManagedStore,
+    CodexApiKeyEnvironment,
+    CodexAccessTokenEnvironment,
+    WorkloadIdentity,
+    External,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuthLoadPolicy {
+    ProcessSources,
+    ManagedStoreOnly,
+}
+
+struct LoadedAuth {
+    auth: Option<CodexAuth>,
+    source_kind: AuthSourceKind,
+}
+
 #[derive(Debug, Error)]
 enum AuthManagerInitializationErrorSource {
     #[error(transparent)]
@@ -1162,13 +1186,24 @@ impl AuthConfig {
         &self,
         enable_codex_api_key_env: bool,
     ) -> std::io::Result<Option<CodexAuth>> {
+        self.load_auth_with_policy(enable_codex_api_key_env, AuthLoadPolicy::ProcessSources)
+            .await
+            .map(|loaded| loaded.auth)
+    }
+
+    async fn load_auth_with_policy(
+        &self,
+        enable_codex_api_key_env: bool,
+        load_policy: AuthLoadPolicy,
+    ) -> std::io::Result<LoadedAuth> {
         let allowed_login_methods = self.allowed_login_methods();
         let workspaces = self.effective_chatgpt_workspaces();
         let agent_identity_authapi_base_url =
             agent_identity_authapi_base_url(self.chatgpt_base_url.as_deref()).ok();
-        let auth = load_auth(
+        let loaded = load_auth_with_policy(
             &self.codex_home,
             enable_codex_api_key_env,
+            load_policy,
             self.auth_credentials_store_mode,
             Some(&allowed_login_methods),
             workspaces.as_deref(),
@@ -1178,7 +1213,10 @@ impl AuthConfig {
             &self.auth_route_config,
         )
         .await?;
-        Ok(auth.filter(|auth| self.allows_auth(auth)))
+        Ok(LoadedAuth {
+            auth: loaded.auth.filter(|auth| self.allows_auth(auth)),
+            source_kind: loaded.source_kind,
+        })
     }
 
     fn allowed_login_methods(&self) -> Vec<ForcedLoginMethod> {
@@ -1423,12 +1461,45 @@ async fn load_auth(
     agent_identity_authapi_base_url: Option<&str>,
     auth_route_config: &AuthRouteConfig,
 ) -> std::io::Result<Option<CodexAuth>> {
+    load_auth_with_policy(
+        codex_home,
+        enable_codex_api_key_env,
+        AuthLoadPolicy::ProcessSources,
+        auth_credentials_store_mode,
+        allowed_login_methods,
+        forced_chatgpt_workspace_id,
+        chatgpt_base_url,
+        keyring_backend_kind,
+        agent_identity_authapi_base_url,
+        auth_route_config,
+    )
+    .await
+    .map(|loaded| loaded.auth)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn load_auth_with_policy(
+    codex_home: &Path,
+    enable_codex_api_key_env: bool,
+    load_policy: AuthLoadPolicy,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    allowed_login_methods: Option<&[ForcedLoginMethod]>,
+    forced_chatgpt_workspace_id: Option<&[String]>,
+    chatgpt_base_url: Option<&str>,
+    keyring_backend_kind: AuthKeyringBackendKind,
+    agent_identity_authapi_base_url: Option<&str>,
+    auth_route_config: &AuthRouteConfig,
+) -> std::io::Result<LoadedAuth> {
     // API key via env var takes precedence over any other auth method.
-    if enable_codex_api_key_env
+    if load_policy == AuthLoadPolicy::ProcessSources
+        && enable_codex_api_key_env
         && auth_mode_is_allowed(allowed_login_methods, AuthMode::ApiKey)
         && let Some(api_key) = read_codex_api_key_from_env()
     {
-        return Ok(Some(CodexAuth::from_api_key(api_key.as_str())));
+        return Ok(LoadedAuth {
+            auth: Some(CodexAuth::from_api_key(api_key.as_str())),
+            source_kind: AuthSourceKind::CodexApiKeyEnvironment,
+        });
     }
 
     // External ChatGPT auth tokens live in the in-memory (ephemeral) store. Always check this
@@ -1457,36 +1528,48 @@ async fn load_auth(
         if let CodexAuth::PersonalAccessToken(auth) = &auth {
             ensure_auth_workspace_allowed(forced_chatgpt_workspace_id, auth.account_id())?;
         }
-        return Ok(Some(auth));
+        return Ok(LoadedAuth {
+            auth: Some(auth),
+            source_kind: AuthSourceKind::ManagedStore,
+        });
     }
 
-    if auth_mode_is_allowed(allowed_login_methods, AuthMode::AgentIdentity)
+    if load_policy == AuthLoadPolicy::ProcessSources
+        && auth_mode_is_allowed(allowed_login_methods, AuthMode::AgentIdentity)
         && let Some(access_token) = read_codex_access_token_from_env()
     {
-        return match classify_codex_access_token(&access_token) {
+        let auth = match classify_codex_access_token(&access_token) {
             CodexAccessToken::PersonalAccessToken(access_token) => {
                 let auth = PersonalAccessTokenAuth::load(access_token, auth_route_config).await?;
                 ensure_auth_workspace_allowed(forced_chatgpt_workspace_id, auth.account_id())?;
-                Ok(Some(CodexAuth::PersonalAccessToken(auth)))
+                Ok(CodexAuth::PersonalAccessToken(auth))
             }
             CodexAccessToken::AgentIdentityJwt(jwt) => {
-                let record = AgentIdentityAuthRecord::from_agent_identity_jwt(jwt)?;
-                ensure_auth_workspace_allowed(forced_chatgpt_workspace_id, &record.account_id)?;
-                CodexAuth::from_agent_identity_jwt_with_authapi_base_url(
-                    jwt,
-                    chatgpt_base_url,
-                    require_agent_identity_authapi_base_url(agent_identity_authapi_base_url)?,
-                    auth_route_config,
-                )
+                {
+                    let record = AgentIdentityAuthRecord::from_agent_identity_jwt(jwt)?;
+                    ensure_auth_workspace_allowed(forced_chatgpt_workspace_id, &record.account_id)?;
+                    CodexAuth::from_agent_identity_jwt_with_authapi_base_url(
+                        jwt,
+                        chatgpt_base_url,
+                        require_agent_identity_authapi_base_url(agent_identity_authapi_base_url)?,
+                        auth_route_config,
+                    )
+                }
+                .await
             }
-            .await
-            .map(Some),
-        };
+        }?;
+        return Ok(LoadedAuth {
+            auth: Some(auth),
+            source_kind: AuthSourceKind::CodexAccessTokenEnvironment,
+        });
     }
 
     // If the caller explicitly requested ephemeral auth, there is no persisted fallback.
     if auth_credentials_store_mode == AuthCredentialsStoreMode::Ephemeral {
-        return Ok(None);
+        return Ok(LoadedAuth {
+            auth: None,
+            source_kind: AuthSourceKind::ManagedStore,
+        });
     }
 
     // Fall back to the configured persistent store (file/keyring/auto) for managed auth.
@@ -1497,10 +1580,18 @@ async fn load_auth(
     );
     let auth_dot_json = match storage.load()? {
         Some(auth) => auth,
-        None => return Ok(None),
+        None => {
+            return Ok(LoadedAuth {
+                auth: None,
+                source_kind: AuthSourceKind::ManagedStore,
+            });
+        }
     };
     if !auth_mode_is_allowed(allowed_login_methods, auth_dot_json.resolved_mode()) {
-        return Ok(None);
+        return Ok(LoadedAuth {
+            auth: None,
+            source_kind: AuthSourceKind::ManagedStore,
+        });
     }
     if let Some(agent_identity) = auth_dot_json.agent_identity.as_ref() {
         ensure_agent_identity_workspace_allowed(forced_chatgpt_workspace_id, agent_identity)?;
@@ -1519,7 +1610,10 @@ async fn load_auth(
     if let CodexAuth::PersonalAccessToken(auth) = &auth {
         ensure_auth_workspace_allowed(forced_chatgpt_workspace_id, auth.account_id())?;
     }
-    Ok(Some(auth))
+    Ok(LoadedAuth {
+        auth: Some(auth),
+        source_kind: AuthSourceKind::ManagedStore,
+    })
 }
 
 // Persist refreshed tokens into auth storage and update last_refresh.
@@ -1752,6 +1846,7 @@ impl AuthDotJson {
 #[derive(Clone)]
 struct CachedAuth {
     auth: Option<CodexAuth>,
+    source_kind: AuthSourceKind,
     /// Permanent refresh failure cached for the current auth snapshot so
     /// later refresh attempts for the same credentials fail fast without network.
     permanent_refresh_failure: Option<AuthScopedRefreshFailure>,
@@ -1770,6 +1865,7 @@ impl Debug for CachedAuth {
                 "auth_mode",
                 &self.auth.as_ref().map(CodexAuth::api_auth_mode),
             )
+            .field("source_kind", &self.source_kind)
             .field(
                 "permanent_refresh_failure",
                 &self
@@ -2001,6 +2097,7 @@ pub struct AuthManager {
     inner: RwLock<CachedAuth>,
     auth_change_tx: watch::Sender<u64>,
     enable_codex_api_key_env: bool,
+    auth_load_policy: AuthLoadPolicy,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     keyring_backend_kind: AuthKeyringBackendKind,
     forced_login_method: Option<ForcedLoginMethod>,
@@ -2106,16 +2203,24 @@ impl AuthManager {
                 auth_route_config,
             },
             enable_codex_api_key_env,
+            AuthLoadPolicy::ProcessSources,
         )
         .await
     }
 
-    async fn new_from_auth_config(auth_config: AuthConfig, enable_codex_api_key_env: bool) -> Self {
-        let managed_auth = auth_config
-            .load_auth(enable_codex_api_key_env)
+    async fn new_from_auth_config(
+        auth_config: AuthConfig,
+        enable_codex_api_key_env: bool,
+        auth_load_policy: AuthLoadPolicy,
+    ) -> Self {
+        let loaded_auth = auth_config
+            .load_auth_with_policy(enable_codex_api_key_env, auth_load_policy)
             .await
             .ok()
-            .flatten();
+            .unwrap_or(LoadedAuth {
+                auth: None,
+                source_kind: AuthSourceKind::ManagedStore,
+            });
         let AuthConfig {
             codex_home,
             auth_credentials_store_mode,
@@ -2132,11 +2237,13 @@ impl AuthManager {
         Self {
             codex_home,
             inner: RwLock::new(CachedAuth {
-                auth: managed_auth,
+                auth: loaded_auth.auth,
+                source_kind: loaded_auth.source_kind,
                 permanent_refresh_failure: None,
             }),
             auth_change_tx,
             enable_codex_api_key_env,
+            auth_load_policy,
             auth_credentials_store_mode,
             keyring_backend_kind,
             forced_login_method,
@@ -2162,6 +2269,7 @@ impl AuthManager {
     pub(crate) fn from_optional_auth_for_testing(auth: Option<CodexAuth>) -> Arc<Self> {
         let cached = CachedAuth {
             auth,
+            source_kind: AuthSourceKind::ManagedStore,
             permanent_refresh_failure: None,
         };
         let (auth_change_tx, _auth_change_rx) = watch::channel(0);
@@ -2171,6 +2279,7 @@ impl AuthManager {
             inner: RwLock::new(cached),
             auth_change_tx,
             enable_codex_api_key_env: false,
+            auth_load_policy: AuthLoadPolicy::ManagedStoreOnly,
             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
             keyring_backend_kind: AuthKeyringBackendKind::default(),
             forced_login_method: None,
@@ -2191,6 +2300,7 @@ impl AuthManager {
     pub fn from_auth_for_testing_with_home(auth: CodexAuth, codex_home: PathBuf) -> Arc<Self> {
         let cached = CachedAuth {
             auth: Some(auth),
+            source_kind: AuthSourceKind::ManagedStore,
             permanent_refresh_failure: None,
         };
         let (auth_change_tx, _auth_change_rx) = watch::channel(0);
@@ -2199,6 +2309,7 @@ impl AuthManager {
             inner: RwLock::new(cached),
             auth_change_tx,
             enable_codex_api_key_env: false,
+            auth_load_policy: AuthLoadPolicy::ManagedStoreOnly,
             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
             keyring_backend_kind: AuthKeyringBackendKind::default(),
             forced_login_method: None,
@@ -2223,6 +2334,7 @@ impl AuthManager {
     ) -> Arc<Self> {
         let cached = CachedAuth {
             auth: Some(auth),
+            source_kind: AuthSourceKind::ManagedStore,
             permanent_refresh_failure: None,
         };
         let (auth_change_tx, _auth_change_rx) = watch::channel(0);
@@ -2231,6 +2343,7 @@ impl AuthManager {
             inner: RwLock::new(cached),
             auth_change_tx,
             enable_codex_api_key_env: false,
+            auth_load_policy: AuthLoadPolicy::ManagedStoreOnly,
             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
             keyring_backend_kind: AuthKeyringBackendKind::default(),
             forced_login_method: None,
@@ -2257,10 +2370,12 @@ impl AuthManager {
             codex_home: PathBuf::from("non-existent"),
             inner: RwLock::new(CachedAuth {
                 auth: None,
+                source_kind: AuthSourceKind::External,
                 permanent_refresh_failure: None,
             }),
             auth_change_tx,
             enable_codex_api_key_env: false,
+            auth_load_policy: AuthLoadPolicy::ManagedStoreOnly,
             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
             keyring_backend_kind: AuthKeyringBackendKind::default(),
             forced_login_method: None,
@@ -2390,8 +2505,8 @@ impl AuthManager {
     /// Reloads auth from the active source. Returns whether the auth value changed.
     pub async fn reload(&self) -> bool {
         tracing::info!("Reloading auth");
-        let new_auth = self.load_auth().await;
-        self.set_cached_auth(new_auth)
+        let loaded = self.load_auth().await;
+        self.set_loaded_auth(loaded)
     }
 
     async fn reload_if_account_id_matches(
@@ -2406,8 +2521,8 @@ impl AuthManager {
             }
         };
 
-        let new_auth = self.load_auth().await;
-        let new_account_id = new_auth.as_ref().and_then(CodexAuth::get_account_id);
+        let loaded = self.load_auth().await;
+        let new_account_id = loaded.auth.as_ref().and_then(CodexAuth::get_account_id);
 
         if new_account_id.as_deref() != Some(expected_account_id) {
             let found_account_id = new_account_id.as_deref().unwrap_or("unknown");
@@ -2420,8 +2535,8 @@ impl AuthManager {
         tracing::info!("Reloading auth for account {expected_account_id}");
         let cached_before_reload = self.auth_cached();
         let auth_changed =
-            !Self::auths_equal_for_refresh(cached_before_reload.as_ref(), new_auth.as_ref());
-        self.set_cached_auth(new_auth);
+            !Self::auths_equal_for_refresh(cached_before_reload.as_ref(), loaded.auth.as_ref());
+        self.set_loaded_auth(loaded);
         if auth_changed {
             ReloadOutcome::ReloadedChanged
         } else {
@@ -2482,16 +2597,19 @@ impl AuthManager {
         }
     }
 
-    async fn load_auth(&self) -> Option<CodexAuth> {
+    async fn load_auth(&self) -> LoadedAuth {
         if let Some(external_auth) = self.external_auth_provider() {
             let cached_auth = self.auth_cached();
             if cached_auth
                 .as_ref()
                 .is_some_and(|auth| self.refresh_failure_for_auth(auth).is_some())
             {
-                return cached_auth;
+                return LoadedAuth {
+                    auth: cached_auth,
+                    source_kind: AuthSourceKind::External,
+                };
             }
-            return match self.resolve_external_auth(external_auth.as_ref()).await {
+            let auth = match self.resolve_external_auth(external_auth.as_ref()).await {
                 Ok(auth) => Some(auth),
                 Err(err) => {
                     tracing::error!("Failed to resolve external auth: {err}");
@@ -2506,13 +2624,18 @@ impl AuthManager {
                     }
                 }
             };
+            return LoadedAuth {
+                auth,
+                source_kind: AuthSourceKind::External,
+            };
         }
 
         let allowed_login_methods = self.allowed_login_methods();
         let effective_chatgpt_workspaces = self.effective_chatgpt_workspaces();
-        load_auth(
+        load_auth_with_policy(
             &self.codex_home,
             self.enable_codex_api_key_env,
+            self.auth_load_policy,
             self.auth_credentials_store_mode,
             Some(&allowed_login_methods),
             effective_chatgpt_workspaces.as_deref(),
@@ -2522,19 +2645,36 @@ impl AuthManager {
             &self.auth_route_config,
         )
         .await
-        .ok()
-        .flatten()
-        .filter(|auth| {
-            validate_auth_restrictions(
-                Some(&allowed_login_methods),
-                effective_chatgpt_workspaces.as_deref(),
-                auth,
-            )
-            .is_ok()
+        .map(|mut loaded| {
+            loaded.auth = loaded.auth.filter(|auth| {
+                validate_auth_restrictions(
+                    Some(&allowed_login_methods),
+                    effective_chatgpt_workspaces.as_deref(),
+                    auth,
+                )
+                .is_ok()
+            });
+            loaded
+        })
+        .unwrap_or(LoadedAuth {
+            auth: None,
+            source_kind: AuthSourceKind::ManagedStore,
         })
     }
 
+    fn set_loaded_auth(&self, loaded: LoadedAuth) -> bool {
+        self.set_cached_auth_with_source(loaded.auth, Some(loaded.source_kind))
+    }
+
     fn set_cached_auth(&self, new_auth: Option<CodexAuth>) -> bool {
+        self.set_cached_auth_with_source(new_auth, /*source_kind*/ None)
+    }
+
+    fn set_cached_auth_with_source(
+        &self,
+        new_auth: Option<CodexAuth>,
+        source_kind: Option<AuthSourceKind>,
+    ) -> bool {
         if let Ok(mut guard) = self.inner.write() {
             let previous = guard.auth.as_ref();
             let changed = !AuthManager::auths_equal(previous, new_auth.as_ref());
@@ -2545,6 +2685,9 @@ impl AuthManager {
             }
             tracing::info!("Reloaded auth, changed: {changed}");
             guard.auth = new_auth;
+            if let Some(source_kind) = source_kind {
+                guard.source_kind = source_kind;
+            }
             if auth_changed_for_refresh {
                 self.auth_change_tx.send_modify(|revision| *revision += 1);
             }
@@ -2646,6 +2789,20 @@ impl AuthManager {
         self.enable_codex_api_key_env
     }
 
+    /// Returns the active credential source without exposing credential material.
+    pub fn auth_source_kind(&self) -> AuthSourceKind {
+        if self.workload_identity_selected {
+            return AuthSourceKind::WorkloadIdentity;
+        }
+        if self.has_external_auth() {
+            return AuthSourceKind::External;
+        }
+        self.inner
+            .read()
+            .map(|cached| cached.source_kind)
+            .unwrap_or(AuthSourceKind::External)
+    }
+
     /// Convenience constructor returning an `Arc` wrapper.
     pub async fn shared(
         codex_home: PathBuf,
@@ -2684,7 +2841,12 @@ impl AuthManager {
         enable_codex_api_key_env: bool,
     ) -> Result<Arc<Self>, AuthManagerInitializationError> {
         let external_auth = WorkloadIdentityExternalAuth::from_process_config(&auth_config)?;
-        let mut manager = Self::new_from_auth_config(auth_config, enable_codex_api_key_env).await;
+        let mut manager = Self::new_from_auth_config(
+            auth_config,
+            enable_codex_api_key_env,
+            AuthLoadPolicy::ProcessSources,
+        )
+        .await;
         manager.workload_identity_selected = external_auth.is_some();
         let manager = Arc::new(manager);
         if let Some(external_auth) = external_auth {
@@ -2693,6 +2855,22 @@ impl AuthManager {
                 .await?;
         }
         Ok(manager)
+    }
+
+    /// Builds a shared manager that only reads the credential stores owned by `auth_config`.
+    ///
+    /// This constructor deliberately ignores process credential environment variables and does
+    /// not install process-wide workload identity or another external auth provider. It is the
+    /// constructor for non-default account slots with their own private credential home.
+    pub async fn shared_from_managed_auth_config(auth_config: AuthConfig) -> Arc<Self> {
+        Arc::new(
+            Self::new_from_auth_config(
+                auth_config,
+                /*enable_codex_api_key_env*/ false,
+                AuthLoadPolicy::ManagedStoreOnly,
+            )
+            .await,
+        )
     }
 
     pub fn unauthorized_recovery(self: &Arc<Self>) -> UnauthorizedRecovery {

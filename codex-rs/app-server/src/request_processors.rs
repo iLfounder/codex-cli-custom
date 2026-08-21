@@ -21,6 +21,8 @@ use codex_analytics::InputError;
 use codex_analytics::TurnSteerRequestError;
 use codex_app_server_protocol::Account;
 use codex_app_server_protocol::AccountLoginCompletedNotification;
+use codex_app_server_protocol::AccountSlotListParams;
+use codex_app_server_protocol::AccountSlotListResponse;
 use codex_app_server_protocol::AccountTokenUsageDailyBucket;
 use codex_app_server_protocol::AccountTokenUsageSummary;
 use codex_app_server_protocol::AccountUpdatedNotification;

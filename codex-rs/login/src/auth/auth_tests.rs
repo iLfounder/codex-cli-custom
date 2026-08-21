@@ -33,6 +33,84 @@ const WORKSPACE_ID_ALLOWED: &str = "123e4567-e89b-42d3-a456-426614174000";
 const WORKSPACE_ID_SECOND_ALLOWED: &str = "123e4567-e89b-42d3-a456-426614174001";
 const WORKSPACE_ID_DISALLOWED: &str = "123e4567-e89b-42d3-a456-426614174002";
 
+#[tokio::test]
+#[serial(codex_auth_env)]
+async fn managed_auth_config_loads_only_its_private_store() {
+    let auth_home = tempdir().expect("temp auth home");
+    let access_token_guard = EnvVarGuard::set(CODEX_ACCESS_TOKEN_ENV_VAR, "invalid-slot-token");
+    login_with_api_key(
+        auth_home.path(),
+        "slot-key",
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )
+    .expect("write slot auth");
+
+    let manager = AuthManager::shared_from_managed_auth_config(AuthConfig {
+        codex_home: auth_home.path().to_path_buf(),
+        auth_credentials_store_mode: AuthCredentialsStoreMode::File,
+        keyring_backend_kind: AuthKeyringBackendKind::default(),
+        forced_login_method: None,
+        chatgpt_base_url: None,
+        forced_chatgpt_workspace_id: None,
+        managed_auth_policy: ManagedAuthPolicy::default(),
+        auth_route_config: crate::test_support::transport_default_auth_route_config(),
+    })
+    .await;
+
+    assert_eq!(manager.auth_mode(), Some(AuthMode::ApiKey));
+    assert_eq!(manager.auth_source_kind(), AuthSourceKind::ManagedStore);
+    assert!(!manager.codex_api_key_env_enabled());
+    assert!(!manager.has_external_auth());
+    drop(access_token_guard);
+    let _late_access_token =
+        EnvVarGuard::set(CODEX_ACCESS_TOKEN_ENV_VAR, "invalid-late-slot-token");
+    assert_eq!(manager.auth_source_kind(), AuthSourceKind::ManagedStore);
+
+    assert!(!manager.reload().await);
+    assert_eq!(manager.auth_mode(), Some(AuthMode::ApiKey));
+    assert_eq!(manager.auth_source_kind(), AuthSourceKind::ManagedStore);
+}
+
+#[tokio::test]
+#[serial(codex_auth_env)]
+async fn explicit_reload_updates_the_cached_auth_source() {
+    let auth_home = tempdir().expect("temp auth home");
+    let _clean_api_key = EnvVarGuard::remove(CODEX_API_KEY_ENV_VAR);
+    login_with_api_key(
+        auth_home.path(),
+        "managed-key",
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )
+    .expect("write managed auth");
+    let process_api_key = EnvVarGuard::set(CODEX_API_KEY_ENV_VAR, "process-key");
+    let manager = AuthManager::new(
+        auth_home.path().to_path_buf(),
+        /*enable_codex_api_key_env*/ true,
+        AuthCredentialsStoreMode::File,
+        /*forced_chatgpt_workspace_id*/ None,
+        /*chatgpt_base_url*/ None,
+        AuthKeyringBackendKind::default(),
+        crate::test_support::transport_default_auth_route_config(),
+    )
+    .await;
+    let access_token = EnvVarGuard::set(CODEX_ACCESS_TOKEN_ENV_VAR, "invalid-late-token");
+    assert_eq!(
+        manager.auth_source_kind(),
+        AuthSourceKind::CodexApiKeyEnvironment
+    );
+    drop(access_token);
+    assert_eq!(
+        manager.auth_source_kind(),
+        AuthSourceKind::CodexApiKeyEnvironment
+    );
+
+    drop(process_api_key);
+    manager.reload().await;
+    assert_eq!(manager.auth_source_kind(), AuthSourceKind::ManagedStore);
+}
+
 #[test]
 fn header_auth_exposes_a_valid_chatgpt_account_id() {
     for (account_id_header, expected_account_id) in [
@@ -1317,6 +1395,21 @@ impl ExternalAuth for StaticExternalAuth {
     fn refresh(&self, _context: ExternalAuthRefreshContext) -> ExternalAuthFuture<'_, CodexAuth> {
         Box::pin(async { Ok(self.0.clone()) })
     }
+}
+
+#[tokio::test]
+async fn reload_resolves_and_preserves_installed_external_auth() {
+    let manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("seed"));
+    let external = CodexAuth::from_api_key("external-token");
+    manager
+        .set_external_auth(Arc::new(StaticExternalAuth(external.clone())))
+        .await
+        .expect("external auth should install");
+
+    manager.reload().await;
+
+    assert_eq!(manager.auth_cached(), Some(external));
+    assert_eq!(manager.auth_source_kind(), AuthSourceKind::External);
 }
 
 struct RefreshingExternalAuth {

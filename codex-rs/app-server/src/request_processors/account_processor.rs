@@ -1,6 +1,7 @@
 use super::bedrock_auth::clear_user_model_provider_if_bedrock;
 use super::bedrock_auth::set_user_model_provider_to_bedrock;
 use super::*;
+use crate::account_registry::AccountRegistry;
 use crate::auth_mode::auth_mode_to_api;
 use crate::external_auth::ExternalAuthBridge;
 use chrono::DateTime;
@@ -72,6 +73,7 @@ impl Drop for ActiveLogin {
 #[derive(Clone)]
 pub(crate) struct AccountRequestProcessor {
     auth_manager: Arc<AuthManager>,
+    account_registry: Arc<AccountRegistry>,
     thread_manager: Arc<ThreadManager>,
     outgoing: Arc<OutgoingMessageSender>,
     config: Arc<Config>,
@@ -82,6 +84,7 @@ pub(crate) struct AccountRequestProcessor {
 impl AccountRequestProcessor {
     pub(crate) fn new(
         auth_manager: Arc<AuthManager>,
+        account_registry: Arc<AccountRegistry>,
         thread_manager: Arc<ThreadManager>,
         outgoing: Arc<OutgoingMessageSender>,
         config: Arc<Config>,
@@ -89,12 +92,20 @@ impl AccountRequestProcessor {
     ) -> Self {
         Self {
             auth_manager,
+            account_registry,
             thread_manager,
             outgoing,
             config,
             config_manager,
             active_login: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub(crate) async fn list_account_slots(
+        &self,
+        params: AccountSlotListParams,
+    ) -> Result<AccountSlotListResponse, JSONRPCErrorError> {
+        self.account_registry.list(params).await
     }
 
     pub(crate) async fn login_account(

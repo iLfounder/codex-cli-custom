@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 
+use crate::account_registry::AccountRegistry;
 use crate::attestation::app_server_attestation_provider;
 use crate::config_manager::ConfigManager;
 use crate::connection_rpc_gate::ConnectionRpcGate;
@@ -305,6 +306,13 @@ impl MessageProcessor {
         let goal_service = Arc::new(GoalService::new());
         let extension_event_sink =
             app_server_extension_event_sink(outgoing.clone(), thread_state_manager.clone());
+        let default_models_manager =
+            codex_core::build_models_manager(config.as_ref(), auth_manager.clone());
+        let account_registry = Arc::new(AccountRegistry::new(
+            Arc::clone(&config),
+            Arc::clone(&auth_manager),
+            Arc::clone(&default_models_manager),
+        ));
         let mut queue_service = None;
         let thread_manager = Arc::new_cyclic(|thread_manager| {
             queue_service = queue_store.map(|queue| {
@@ -317,7 +325,7 @@ impl MessageProcessor {
             let manager = ThreadManager::new(
                 config.as_ref(),
                 auth_manager.clone(),
-                codex_core::build_models_manager(config.as_ref(), auth_manager.clone()),
+                default_models_manager,
                 codex_core::CodexAppsToolsCache::default(),
                 session_source,
                 environment_manager,
@@ -394,6 +402,7 @@ impl MessageProcessor {
             );
         let account_processor = AccountRequestProcessor::new(
             auth_manager.clone(),
+            account_registry,
             Arc::clone(&thread_manager),
             outgoing.clone(),
             Arc::clone(&config),
@@ -959,9 +968,11 @@ impl MessageProcessor {
             ClientRequest::SessionRuntimeList { .. } => Err(method_not_found(
                 "sessionRuntime/list is not implemented yet",
             )),
-            ClientRequest::AccountSlotList { .. } => {
-                Err(method_not_found("accountSlot/list is not implemented yet"))
-            }
+            ClientRequest::AccountSlotList { params, .. } => self
+                .account_processor
+                .list_account_slots(params)
+                .await
+                .map(|response| Some(response.into())),
             ClientRequest::AccountSlotLoginStart { .. } => Err(method_not_found(
                 "accountSlot/login/start is not implemented yet",
             )),

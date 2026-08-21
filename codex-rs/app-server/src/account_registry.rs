@@ -1,0 +1,570 @@
+use std::collections::HashSet;
+use std::io;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::RwLock;
+
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use codex_app_server_protocol::AccountSlotActionAvailability;
+use codex_app_server_protocol::AccountSlotCapability;
+use codex_app_server_protocol::AccountSlotListParams;
+use codex_app_server_protocol::AccountSlotListResponse;
+use codex_app_server_protocol::AccountSlotSnapshot;
+use codex_app_server_protocol::AccountSlotStatus;
+use codex_app_server_protocol::JSONRPCErrorError;
+use codex_core::config::Config;
+use codex_core::path_utils::write_atomically;
+use codex_login::AuthConfig;
+use codex_login::AuthManager;
+use codex_login::AuthSourceKind;
+use codex_model_provider::create_model_provider;
+use codex_models_manager::manager::SharedModelsManager;
+use serde::Deserialize;
+use serde::Serialize;
+use tokio::sync::OnceCell;
+use uuid::Uuid;
+
+use crate::auth_mode::auth_mode_to_api;
+use crate::error_code::internal_error;
+use crate::error_code::invalid_params;
+
+const MANIFEST_FILE: &str = "account-slots.toml";
+const PRIVATE_HOMES_DIR: &str = "accounts";
+const MANIFEST_SCHEMA_VERSION: u32 = 1;
+const DEFAULT_SLOT_ID: &str = "default";
+const DEFAULT_LIST_LIMIT: usize = 50;
+const MAX_LIST_LIMIT: usize = 100;
+const MAX_MANIFEST_SLOTS: usize = 1_000;
+
+const DENY_MANIFEST_INVALID: &str = "account_slot_manifest_invalid";
+const DENY_HOST_ACCESS_TOKEN: &str = "host_owned_codex_access_token";
+const DENY_HOST_EXTERNAL_AUTH: &str = "host_owned_external_auth";
+const DENY_HOST_PROVIDER_AUTH: &str = "host_owned_provider_auth";
+const DENY_HOST_WORKLOAD_IDENTITY: &str = "host_owned_workload_identity";
+const DENY_LOGIN_NOT_AVAILABLE: &str = "account_slot_login_not_available";
+const DENY_SWITCH_NOT_AVAILABLE: &str = "thread_account_switch_not_available";
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AccountSlotsManifest {
+    schema_version: u32,
+    revision: u64,
+    slots: Vec<AccountSlotManifest>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AccountSlotManifest {
+    account_slot_id: String,
+    label: String,
+    auth_home: PathBuf,
+    is_default: bool,
+    status: ManifestSlotStatus,
+    attempt_generation: u64,
+    updated_at: i64,
+    error_code: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum ManifestSlotStatus {
+    LoginRequired,
+    Ready,
+    Failed,
+}
+
+impl From<ManifestSlotStatus> for AccountSlotStatus {
+    fn from(status: ManifestSlotStatus) -> Self {
+        match status {
+            ManifestSlotStatus::LoginRequired => Self::LoginRequired,
+            ManifestSlotStatus::Ready => Self::Ready,
+            ManifestSlotStatus::Failed => Self::Failed,
+        }
+    }
+}
+
+impl AccountSlotsManifest {
+    fn load(path: &Path, process_home: &Path) -> io::Result<Option<Self>> {
+        let contents = match std::fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let manifest: Self = toml::from_str(&contents)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid manifest"))?;
+        manifest.validate(process_home)?;
+        Ok(Some(manifest))
+    }
+
+    fn persist(&self, path: &Path) -> io::Result<()> {
+        let contents = toml::to_string(self)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid manifest"))?;
+        write_atomically(path, &contents)
+    }
+
+    fn validate(&self, process_home: &Path) -> io::Result<()> {
+        if self.schema_version != MANIFEST_SCHEMA_VERSION
+            || self.revision == 0
+            || self.slots.is_empty()
+            || self.slots.len() > MAX_MANIFEST_SLOTS
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid manifest metadata",
+            ));
+        }
+
+        let private_homes_root = process_home.join(PRIVATE_HOMES_DIR);
+        let mut slot_ids = HashSet::with_capacity(self.slots.len());
+        let mut default_count = 0;
+        for slot in &self.slots {
+            if slot.label.trim().is_empty()
+                || slot.label.len() > 128
+                || !slot.auth_home.is_absolute()
+                || !slot_ids.insert(slot.account_slot_id.as_str())
+                || slot
+                    .error_code
+                    .as_ref()
+                    .is_some_and(|code| !valid_manifest_token(code))
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid account slot",
+                ));
+            }
+            if slot.is_default {
+                default_count += 1;
+                if slot.account_slot_id != DEFAULT_SLOT_ID || slot.auth_home != process_home {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid default account home",
+                    ));
+                }
+            } else {
+                if !valid_account_slot_id(&slot.account_slot_id) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid account slot id",
+                    ));
+                }
+                validate_private_auth_home(
+                    process_home,
+                    &private_homes_root,
+                    &slot.account_slot_id,
+                    &slot.auth_home,
+                )?;
+            }
+        }
+        if default_count != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "manifest must contain one default slot",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn valid_account_slot_id(value: &str) -> bool {
+    Uuid::parse_str(value).is_ok_and(|uuid| uuid.simple().to_string() == value)
+}
+
+fn validate_private_auth_home(
+    process_home: &Path,
+    private_homes_root: &Path,
+    account_slot_id: &str,
+    auth_home: &Path,
+) -> io::Result<()> {
+    if auth_home != private_homes_root.join(account_slot_id) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid private account home",
+        ));
+    }
+
+    reject_symlink(private_homes_root)?;
+    reject_symlink(auth_home)?;
+
+    let canonical_private_root = match private_homes_root.canonicalize() {
+        Ok(path) => path,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let canonical_process_home = process_home.canonicalize()?;
+    if canonical_private_root.parent() != Some(canonical_process_home.as_path()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "private account root escapes process home",
+        ));
+    }
+
+    let canonical_auth_home = match auth_home.canonicalize() {
+        Ok(path) => path,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if canonical_auth_home.parent() != Some(canonical_private_root.as_path())
+        || canonical_auth_home.file_name() != Some(std::ffi::OsStr::new(account_slot_id))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "private account home escapes private root",
+        ));
+    }
+    Ok(())
+}
+
+fn reject_symlink(path: &Path) -> io::Result<()> {
+    match path.symlink_metadata() {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "private account path must not be a symlink",
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn valid_manifest_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+}
+
+#[derive(Clone)]
+struct AccountSlotRecord {
+    manifest: AccountSlotManifest,
+    runtime: Arc<OnceCell<Arc<AccountRuntimeBundle>>>,
+}
+
+pub(crate) struct AccountRuntimeBundle {
+    pub(crate) auth_manager: Arc<AuthManager>,
+    pub(crate) models_manager: SharedModelsManager,
+}
+
+struct AccountRegistryState {
+    revision: u64,
+    slots: Vec<AccountSlotRecord>,
+    manifest_error: Option<&'static str>,
+}
+
+pub(crate) struct AccountRegistry {
+    config: Arc<Config>,
+    auth_config_template: AuthConfig,
+    state: RwLock<AccountRegistryState>,
+}
+
+impl AccountRegistry {
+    pub(crate) fn new(
+        config: Arc<Config>,
+        default_auth_manager: Arc<AuthManager>,
+        default_models_manager: SharedModelsManager,
+    ) -> Self {
+        let manifest_path = config.codex_home.join(MANIFEST_FILE);
+        let (manifest, manifest_error) =
+            match AccountSlotsManifest::load(&manifest_path, &config.codex_home) {
+                Ok(Some(manifest)) => (manifest, None),
+                Ok(None) => (virtual_default_manifest(&config.codex_home), None),
+                Err(_) => (
+                    virtual_default_manifest(&config.codex_home),
+                    Some(DENY_MANIFEST_INVALID),
+                ),
+            };
+        let default_runtime = Arc::new(AccountRuntimeBundle {
+            auth_manager: default_auth_manager,
+            models_manager: default_models_manager,
+        });
+        let mut slots = manifest
+            .slots
+            .into_iter()
+            .map(|manifest| {
+                let runtime = Arc::new(OnceCell::new());
+                if manifest.is_default {
+                    let _ = runtime.set(Arc::clone(&default_runtime));
+                }
+                AccountSlotRecord { manifest, runtime }
+            })
+            .collect::<Vec<_>>();
+        slots.sort_by(|left, right| {
+            left.manifest
+                .account_slot_id
+                .cmp(&right.manifest.account_slot_id)
+        });
+
+        Self {
+            auth_config_template: config.auth_config(),
+            config,
+            state: RwLock::new(AccountRegistryState {
+                revision: manifest.revision,
+                slots,
+                manifest_error,
+            }),
+        }
+    }
+
+    pub(crate) async fn list(
+        &self,
+        params: AccountSlotListParams,
+    ) -> Result<AccountSlotListResponse, JSONRPCErrorError> {
+        let (revision, slots, manifest_error) = {
+            let state = self
+                .state
+                .read()
+                .map_err(|_| internal_error("account slot registry is unavailable"))?;
+            (state.revision, state.slots.clone(), state.manifest_error)
+        };
+        let capability = self.capability(manifest_error);
+        let limit = match params.limit.map(|limit| limit as usize) {
+            Some(0) => return Err(invalid_params("accountSlot/list limit must be positive")),
+            Some(limit) => limit.min(MAX_LIST_LIMIT),
+            None => DEFAULT_LIST_LIMIT,
+        };
+        let start = cursor_start(params.cursor.as_deref(), revision, &slots)?;
+        let end = start.saturating_add(limit).min(slots.len());
+        let mut data = Vec::with_capacity(end.saturating_sub(start));
+        for slot in &slots[start..end] {
+            data.push(self.snapshot(slot, revision, &capability).await);
+        }
+        let next_cursor = if end < slots.len() {
+            Some(
+                encode_cursor(AccountSlotCursor {
+                    revision,
+                    after_slot_id: slots[end - 1].manifest.account_slot_id.clone(),
+                })
+                .map_err(|_| internal_error("account slot cursor could not be serialized"))?,
+            )
+        } else {
+            None
+        };
+
+        Ok(AccountSlotListResponse {
+            data,
+            next_cursor,
+            registry_revision: revision,
+            multi_account: capability,
+        })
+    }
+
+    pub(crate) async fn runtime_capability(
+        &self,
+    ) -> Result<AccountSlotCapability, JSONRPCErrorError> {
+        let manifest_error = self
+            .state
+            .read()
+            .map_err(|_| internal_error("account slot registry is unavailable"))?
+            .manifest_error;
+        Ok(self.capability(manifest_error))
+    }
+
+    pub(crate) async fn slot_snapshot(
+        &self,
+        account_slot_id: &str,
+    ) -> Result<AccountSlotSnapshot, JSONRPCErrorError> {
+        let (slot, revision, manifest_error) = {
+            let state = self
+                .state
+                .read()
+                .map_err(|_| internal_error("account slot registry is unavailable"))?;
+            let slot = state
+                .slots
+                .iter()
+                .find(|slot| slot.manifest.account_slot_id == account_slot_id)
+                .cloned()
+                .ok_or_else(|| invalid_params("account slot is unavailable"))?;
+            (slot, state.revision, state.manifest_error)
+        };
+        let capability = self.capability(manifest_error);
+        Ok(self.snapshot(&slot, revision, &capability).await)
+    }
+
+    async fn snapshot(
+        &self,
+        slot: &AccountSlotRecord,
+        revision: u64,
+        capability: &AccountSlotCapability,
+    ) -> AccountSlotSnapshot {
+        let runtime = if capability.available || slot.manifest.is_default {
+            Some(self.runtime(slot).await)
+        } else {
+            None
+        };
+        let auth_mode = runtime
+            .as_ref()
+            .and_then(|runtime| runtime.auth_manager.auth_mode())
+            .map(auth_mode_to_api);
+        let status = match (slot.manifest.is_default, auth_mode) {
+            (true, Some(_)) => AccountSlotStatus::Ready,
+            _ => slot.manifest.status.into(),
+        };
+        let error_code = (status == AccountSlotStatus::Failed)
+            .then(|| slot.manifest.error_code.clone())
+            .flatten();
+
+        AccountSlotSnapshot {
+            account_slot_id: slot.manifest.account_slot_id.clone(),
+            label: slot.manifest.label.clone(),
+            is_default: slot.manifest.is_default,
+            status,
+            auth_mode,
+            attempt_generation: slot.manifest.attempt_generation,
+            registry_revision: revision,
+            active_login_operation_id: None,
+            error_code,
+            actions: Vec::<AccountSlotActionAvailability>::new(),
+            updated_at: slot.manifest.updated_at,
+        }
+    }
+
+    async fn runtime(&self, slot: &AccountSlotRecord) -> Arc<AccountRuntimeBundle> {
+        slot.runtime
+            .get_or_init(|| async {
+                let mut auth_config = self.auth_config_template.clone();
+                auth_config.codex_home = slot.manifest.auth_home.clone();
+                let auth_manager = AuthManager::shared_from_managed_auth_config(auth_config).await;
+                let provider = create_model_provider(
+                    self.config.model_provider.clone(),
+                    Some(Arc::clone(&auth_manager)),
+                );
+                let models_manager = provider.models_manager(
+                    slot.manifest.auth_home.clone(),
+                    self.config.model_catalog.clone(),
+                );
+                Arc::new(AccountRuntimeBundle {
+                    auth_manager,
+                    models_manager,
+                })
+            })
+            .await
+            .clone()
+    }
+
+    fn capability(&self, manifest_error: Option<&'static str>) -> AccountSlotCapability {
+        let deny_reason = match self.default_auth_source() {
+            AuthSourceKind::CodexAccessTokenEnvironment => Some(DENY_HOST_ACCESS_TOKEN),
+            AuthSourceKind::WorkloadIdentity => Some(DENY_HOST_WORKLOAD_IDENTITY),
+            AuthSourceKind::External => Some(DENY_HOST_EXTERNAL_AUTH),
+            AuthSourceKind::ManagedStore | AuthSourceKind::CodexApiKeyEnvironment => manifest_error,
+        }
+        .or_else(|| {
+            self.provider_has_host_owned_auth()
+                .then_some(DENY_HOST_PROVIDER_AUTH)
+        });
+        AccountSlotCapability {
+            available: deny_reason.is_none(),
+            deny_reason: deny_reason.map(str::to_string),
+        }
+    }
+
+    fn default_auth_source(&self) -> AuthSourceKind {
+        self.state
+            .read()
+            .ok()
+            .and_then(|state| {
+                state
+                    .slots
+                    .iter()
+                    .find(|slot| slot.manifest.is_default)
+                    .cloned()
+            })
+            .and_then(|slot| slot.runtime.get().cloned())
+            .map(|runtime| runtime.auth_manager.auth_source_kind())
+            .unwrap_or(AuthSourceKind::External)
+    }
+
+    fn provider_has_host_owned_auth(&self) -> bool {
+        let provider = &self.config.model_provider;
+        provider.auth.is_some()
+            || provider.aws.is_some()
+            || provider.experimental_bearer_token.is_some()
+            || provider
+                .env_key
+                .as_ref()
+                .is_some_and(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
+            || provider.env_http_headers.as_ref().is_some_and(|headers| {
+                headers
+                    .values()
+                    .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
+            })
+    }
+}
+
+fn virtual_default_manifest(process_home: &Path) -> AccountSlotsManifest {
+    AccountSlotsManifest {
+        schema_version: MANIFEST_SCHEMA_VERSION,
+        revision: 1,
+        slots: vec![AccountSlotManifest {
+            account_slot_id: DEFAULT_SLOT_ID.to_string(),
+            label: "Default account".to_string(),
+            auth_home: process_home.to_path_buf(),
+            is_default: true,
+            status: ManifestSlotStatus::LoginRequired,
+            attempt_generation: 0,
+            updated_at: 0,
+            error_code: None,
+        }],
+    }
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountSlotCursor {
+    revision: u64,
+    after_slot_id: String,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum CursorError {
+    Invalid,
+    Stale,
+}
+
+fn encode_cursor(cursor: AccountSlotCursor) -> Result<String, serde_json::Error> {
+    serde_json::to_vec(&cursor).map(|json| URL_SAFE_NO_PAD.encode(json))
+}
+
+fn decode_cursor(cursor: &str, revision: u64) -> Result<AccountSlotCursor, CursorError> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(cursor)
+        .map_err(|_| CursorError::Invalid)?;
+    let cursor: AccountSlotCursor =
+        serde_json::from_slice(&bytes).map_err(|_| CursorError::Invalid)?;
+    if cursor.revision != revision {
+        return Err(CursorError::Stale);
+    }
+    Ok(cursor)
+}
+
+fn cursor_start(
+    cursor: Option<&str>,
+    revision: u64,
+    slots: &[AccountSlotRecord],
+) -> Result<usize, JSONRPCErrorError> {
+    let Some(cursor) = cursor else {
+        return Ok(0);
+    };
+    let cursor = match decode_cursor(cursor, revision) {
+        Ok(cursor) => cursor,
+        Err(CursorError::Invalid) => {
+            return Err(invalid_params("accountSlot/list cursor is invalid"));
+        }
+        Err(CursorError::Stale) => {
+            return Err(invalid_params(
+                "accountSlot/list cursor is stale; restart pagination",
+            ));
+        }
+    };
+    slots
+        .iter()
+        .position(|slot| slot.manifest.account_slot_id == cursor.after_slot_id)
+        .map(|index| index + 1)
+        .ok_or_else(|| invalid_params("accountSlot/list cursor is invalid"))
+}
+
+#[cfg(test)]
+#[path = "account_registry_tests.rs"]
+mod tests;
