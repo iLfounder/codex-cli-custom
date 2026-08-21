@@ -233,6 +233,7 @@ impl SessionRuntimeEngine {
         let writer = writer_snapshot(&store_runtime);
         let account =
             account_snapshot(current_binding, active_binding, account_capability.as_ref());
+        let actions = action_snapshot(&lifecycle, &writer);
         SessionRuntimeSnapshot {
             thread_id: thread_id.to_string(),
             state_revision: 0,
@@ -241,7 +242,7 @@ impl SessionRuntimeEngine {
             writer,
             persistence: persistence_snapshot(&store_runtime),
             account,
-            actions: unavailable_actions(),
+            actions,
         }
     }
 
@@ -398,7 +399,7 @@ fn subagent_status(status: AgentStatus) -> ThreadStatus {
     }
 }
 
-fn writer_snapshot(
+pub(super) fn writer_snapshot(
     runtime: &codex_thread_store::ThreadStoreRuntimeSnapshot,
 ) -> SessionRuntimeWriter {
     SessionRuntimeWriter {
@@ -414,7 +415,7 @@ fn writer_snapshot(
     }
 }
 
-fn persistence_snapshot(
+pub(super) fn persistence_snapshot(
     runtime: &codex_thread_store::ThreadStoreRuntimeSnapshot,
 ) -> SessionRuntimePersistence {
     SessionRuntimePersistence {
@@ -482,18 +483,36 @@ fn account_ref(binding: ExecutionAccountBinding) -> SessionRuntimeAccountRef {
     }
 }
 
-fn unavailable_actions() -> Vec<SessionRuntimeActionAvailability> {
-    [
-        SessionRuntimeAction::Relinquish,
-        SessionRuntimeAction::SwitchAccount,
+pub(super) fn action_snapshot(
+    lifecycle: &SessionRuntimeLifecycle,
+    writer: &SessionRuntimeWriter,
+) -> Vec<SessionRuntimeActionAvailability> {
+    let relinquish_denial = if lifecycle.state != SessionRuntimeLifecycleState::Idle
+        || lifecycle.active_turn_id.is_some()
+        || !lifecycle.waiting_on.is_empty()
+    {
+        Some("thread_not_idle")
+    } else if lifecycle.subscriber_count > 1 {
+        Some("other_subscribers_present")
+    } else if writer.state != SessionRuntimeWriterState::OwnedHere {
+        Some("writer_not_owned")
+    } else if writer.store_id.is_none() || writer.writer_generation.is_none() {
+        Some("writer_control_unavailable")
+    } else {
+        None
+    };
+    vec![
+        SessionRuntimeActionAvailability {
+            action: SessionRuntimeAction::Relinquish,
+            allowed: relinquish_denial.is_none(),
+            deny_reason: relinquish_denial.map(str::to_string),
+        },
+        SessionRuntimeActionAvailability {
+            action: SessionRuntimeAction::SwitchAccount,
+            allowed: false,
+            deny_reason: Some(CONTROL_NOT_IMPLEMENTED.to_string()),
+        },
     ]
-    .into_iter()
-    .map(|action| SessionRuntimeActionAvailability {
-        action,
-        allowed: false,
-        deny_reason: Some(CONTROL_NOT_IMPLEMENTED.to_string()),
-    })
-    .collect()
 }
 
 fn sanitize_git_origin(origin: String) -> Option<String> {

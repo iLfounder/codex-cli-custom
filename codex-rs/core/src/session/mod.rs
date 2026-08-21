@@ -896,6 +896,26 @@ impl SessionIo {
         Ok(())
     }
 
+    /// Strictly release the exact writer generation and wait for runtime termination.
+    pub(crate) async fn relinquish_and_wait(
+        &self,
+        expected_writer_generation: u64,
+    ) -> Result<(), String> {
+        let session_loop_termination = self.session_loop_termination.clone();
+        let (reply, result) = oneshot::channel();
+        self.submit(Op::Relinquish {
+            expected_writer_generation,
+            reply,
+        })
+        .await
+        .map_err(|_| "thread runtime is unavailable".to_string())?;
+        result
+            .await
+            .map_err(|_| "thread runtime ended before writer release completed".to_string())??;
+        session_loop_termination.await;
+        Ok(())
+    }
+
     pub(crate) async fn next_event(&self) -> CodexResult<Event> {
         let event = self
             .rx_event

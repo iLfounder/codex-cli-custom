@@ -686,6 +686,12 @@ pub enum Op {
     /// Request to shut down codex instance.
     Shutdown,
 
+    /// Strictly durabilize and release this exact writer generation.
+    Relinquish {
+        expected_writer_generation: u64,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+
     /// Execute a user-initiated one-off shell command (triggered by "!cmd").
     ///
     /// The command string is executed using the user's default shell and may
@@ -890,6 +896,7 @@ impl Op {
             Self::Review { .. } => "review",
             Self::ApproveGuardianDeniedAction { .. } => "approve_guardian_denied_action",
             Self::Shutdown => "shutdown",
+            Self::Relinquish { .. } => "relinquish",
             Self::RunUserShellCommand { .. } => "run_user_shell_command",
         }
     }

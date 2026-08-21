@@ -730,6 +730,38 @@ impl ThreadStore for LocalThreadStore {
         Box::pin(async move { live_writer::shutdown_thread(self, thread_id).await })
     }
 
+    fn relinquish_thread(
+        &self,
+        thread_id: ThreadId,
+        expected_writer_generation: u64,
+    ) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move {
+            live_writer::relinquish_thread(self, thread_id, expected_writer_generation).await
+        })
+    }
+
+    fn validate_writer_generation(
+        &self,
+        thread_id: ThreadId,
+        expected_writer_generation: u64,
+    ) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move {
+            let _live_writer_guard = self.live_writer_locks.lock(thread_id).await;
+            let live_recorders = self.live_recorders.lock().await;
+            let entry = live_recorders
+                .get(&thread_id)
+                .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
+            if entry.writer_lock.generation() != Some(expected_writer_generation) {
+                return Err(ThreadStoreError::Conflict {
+                    message: format!(
+                        "thread {thread_id} writer generation does not match expected generation {expected_writer_generation}"
+                    ),
+                });
+            }
+            Ok(())
+        })
+    }
+
     fn discard_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move { live_writer::discard_thread(self, thread_id).await })
     }
@@ -922,6 +954,9 @@ impl ThreadStore for LocalThreadStore {
 
 #[cfg(test)]
 mod tests {
+    #[path = "relinquish_tests.rs"]
+    mod relinquish_tests;
+
     use std::sync::Arc;
 
     use codex_protocol::ThreadId;

@@ -1070,6 +1070,26 @@ impl ThreadStore for InMemoryThreadStore {
         })
     }
 
+    fn relinquish_thread(
+        &self,
+        _thread_id: ThreadId,
+        _expected_writer_generation: u64,
+    ) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move {
+            let mut state = self.state.lock().await;
+            state.calls.shutdown_thread += 1;
+            Ok(())
+        })
+    }
+
+    fn validate_writer_generation(
+        &self,
+        _thread_id: ThreadId,
+        _expected_writer_generation: u64,
+    ) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
     fn discard_thread(&self, _thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move {
             self.state.lock().await.calls.discard_thread += 1;

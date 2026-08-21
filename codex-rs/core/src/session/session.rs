@@ -30,6 +30,8 @@ use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::security_risk::SecurityRiskScore;
 use codex_skills::SkillError;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use tokio::sync::Semaphore;
 
 /// Context for an initialized model agent
@@ -60,6 +62,8 @@ pub(crate) struct Session {
     pub(super) mcp_prewarm_task: std::sync::Mutex<Option<JoinHandle<()>>>,
     pub(crate) conversation: Arc<RealtimeConversationManager>,
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
+    pub(crate) execution_runtime_transition_lock: Mutex<()>,
+    pub(crate) execution_control_closing: AtomicBool,
     pub(crate) async_hook_results: async_channel::Receiver<HookCompletedEvent>,
     pub(crate) input_queue: InputQueue,
     pub(crate) guardian_review_session: GuardianReviewSessionManager,
@@ -644,6 +648,33 @@ impl Session {
         &self,
     ) -> Arc<crate::execution_account::ExecutionAccountContext> {
         Arc::clone(&self.execution_account)
+    }
+
+    /// Close the idle input boundary immediately before a writer-control commit.
+    ///
+    /// Callers must hold `execution_runtime_transition_lock`. Every admission path uses the same
+    /// lock, while the closing flag keeps a successfully relinquished runtime terminal.
+    pub(crate) async fn begin_execution_control_transition(&self) -> Result<(), ()> {
+        if self.execution_control_is_closing()
+            || self.active_turn.lock().await.is_some()
+            || self.input_queue.has_pending_mailbox_items().await
+            || *self.services.elicitations.subscribe().borrow()
+            || self.conversation.running_state().await.is_some()
+        {
+            return Err(());
+        }
+        self.execution_control_closing
+            .store(true, Ordering::Release);
+        Ok(())
+    }
+
+    pub(crate) fn end_execution_control_transition(&self) {
+        self.execution_control_closing
+            .store(false, Ordering::Release);
+    }
+
+    pub(crate) fn execution_control_is_closing(&self) -> bool {
+        self.execution_control_closing.load(Ordering::Acquire)
     }
 
     #[instrument(name = "session_init", level = "info", skip_all)]
@@ -1453,6 +1484,8 @@ impl Session {
                 mcp_prewarm_task: std::sync::Mutex::new(None),
                 conversation: Arc::new(RealtimeConversationManager::new()),
                 active_turn: Mutex::new(None),
+                execution_runtime_transition_lock: Mutex::new(()),
+                execution_control_closing: AtomicBool::new(false),
                 async_hook_results,
                 input_queue: InputQueue::new(),
                 guardian_review_session: GuardianReviewSessionManager::default(),

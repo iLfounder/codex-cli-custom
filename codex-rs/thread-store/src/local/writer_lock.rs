@@ -31,7 +31,7 @@ pub(super) struct WriterLockGuard {
     thread_id: ThreadId,
     path: PathBuf,
     file: Option<File>,
-    _generation: Option<WriterGeneration>,
+    generation: Option<WriterGeneration>,
 }
 
 /// Filesystem ownership observed for one exact thread UUID.
@@ -115,7 +115,7 @@ impl WriterLockCoordinator {
             thread_id,
             path,
             file: Some(file),
-            _generation: None,
+            generation: None,
         })
     }
 
@@ -239,8 +239,14 @@ impl WriterLockCoordinator {
 
 impl WriterLockGuard {
     pub(super) fn with_generation(mut self, generation: WriterGeneration) -> Self {
-        self._generation = Some(generation);
+        self.generation = Some(generation);
         self
+    }
+
+    pub(super) fn generation(&self) -> Option<u64> {
+        self.generation
+            .as_ref()
+            .map(|generation| generation.generation)
     }
 }
 

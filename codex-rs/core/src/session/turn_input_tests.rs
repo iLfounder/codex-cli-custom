@@ -64,6 +64,72 @@ fn user_message(text: &str) -> ResponseItem {
     }
 }
 
+#[tokio::test]
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "the test proves turn admission waits on the transition fence"
+)]
+async fn turn_and_mailbox_admission_wait_for_execution_control_transition() {
+    let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
+    let transition = session.execution_runtime_transition_lock.lock().await;
+    let session_for_submission = Arc::clone(&session);
+    let mut submission = tokio::spawn(async move {
+        handle(
+            &session_for_submission,
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "queued while closing".to_string(),
+                text_elements: Vec::new(),
+            }]),
+            TurnInputMode::Steer {
+                expected_turn_id: "missing-turn".to_string(),
+            },
+            "serialized-submission".to_string(),
+        )
+        .await
+    });
+    let session_for_delivery = Arc::clone(&session);
+    let mut delivery = tokio::spawn(async move {
+        crate::session::handlers::inter_agent_communication(
+            &session_for_delivery,
+            "mailbox-submission".to_string(),
+            InterAgentCommunication::new(
+                AgentPath::root(),
+                AgentPath::root(),
+                Vec::new(),
+                "queued while closing".to_string(),
+                /*trigger_turn*/ false,
+            ),
+            /*parent_turn_id*/ None,
+            /*root_turn_id*/ None,
+        )
+        .await;
+    });
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), &mut submission)
+            .await
+            .is_err()
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), &mut delivery)
+            .await
+            .is_err()
+    );
+    assert!(!session.input_queue.has_pending_mailbox_items().await);
+    drop(transition);
+    assert_eq!(
+        submission
+            .await
+            .expect("submission task")
+            .expect("submission"),
+        TurnInputSubmission::NotSubmitted {
+            reason: NotSubmittedReason::NoActiveTurn,
+        }
+    );
+    delivery.await.expect("mailbox delivery");
+    assert!(session.input_queue.has_pending_mailbox_items().await);
+}
+
 async fn submit_start_only(
     session: &Arc<Session>,
     input: SubmittedTurnInput,

@@ -1082,11 +1082,21 @@ async fn stop_conversation_state(
     }
 }
 
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "realtime startup and execution control share one transition fence"
+)]
 pub(crate) async fn handle_start(
     sess: &Arc<Session>,
     sub_id: String,
     params: ConversationStartParams,
 ) -> CodexResult<()> {
+    let _transition = sess.execution_runtime_transition_lock.lock().await;
+    if sess.execution_control_is_closing() {
+        return Err(CodexErr::InvalidRequest(
+            "thread runtime is closing".to_string(),
+        ));
+    }
     let prepared_start = match prepare_realtime_start(sess, params).await {
         Ok(prepared_start) => prepared_start,
         Err(err) => {

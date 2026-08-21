@@ -393,6 +393,7 @@ impl MessageProcessor {
         );
 
         let pending_thread_unloads = Arc::new(Mutex::new(HashSet::new()));
+        let thread_list_state_permit = Arc::new(Semaphore::new(/*permits*/ 1));
         let thread_watch_manager =
             crate::thread_status::ThreadWatchManager::new_with_outgoing(outgoing.clone());
         let session_runtime = Arc::new(crate::session_runtime::SessionRuntimeEngine::new(
@@ -401,12 +402,12 @@ impl MessageProcessor {
             thread_state_manager.clone(),
             thread_watch_manager.clone(),
             Arc::clone(&pending_thread_unloads),
+            Arc::clone(&thread_list_state_permit),
             Arc::clone(&account_registry),
             outgoing.clone(),
         ));
         thread_state_manager.attach_runtime_engine(&session_runtime);
         thread_watch_manager.attach_runtime_engine(&session_runtime);
-        let thread_list_state_permit = Arc::new(Semaphore::new(/*permits*/ 1));
         let app_list_shutdown_token = CancellationToken::new();
         let request_serialization_queues = RequestSerializationQueues::default();
         let config_processor = ConfigRequestProcessor::new(
@@ -1022,9 +1023,11 @@ impl MessageProcessor {
             ClientRequest::ThreadAccountSwitch { .. } => Err(method_not_found(
                 "thread/account/switch is not implemented yet",
             )),
-            ClientRequest::ThreadRelinquish { .. } => {
-                Err(method_not_found("thread/relinquish is not implemented yet"))
-            }
+            ClientRequest::ThreadRelinquish { params, .. } => self
+                .session_runtime
+                .relinquish(connection_id, params)
+                .await
+                .map(|response| Some(response.into())),
             ClientRequest::ConfigRead { params, .. } => self
                 .config_processor
                 .read(params)

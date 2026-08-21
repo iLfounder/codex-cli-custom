@@ -191,6 +191,13 @@ impl CodexThread {
         self.io.submit(op).await
     }
 
+    /// Strictly release the exact persistent writer generation and wait for termination.
+    pub async fn relinquish_and_wait(&self, expected_writer_generation: u64) -> Result<(), String> {
+        self.io
+            .relinquish_and_wait(expected_writer_generation)
+            .await
+    }
+
     /// Returns the session telemetry handle for thread-scoped production instrumentation.
     pub fn session_telemetry(&self) -> SessionTelemetry {
         self.session.services.session_telemetry.clone()
@@ -777,7 +784,17 @@ impl CodexThread {
         self.session.enabled(feature)
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "out-of-band input ownership and execution control share one transition fence"
+    )]
     pub async fn increment_out_of_band_elicitation_count(&self) -> CodexResult<i64> {
+        let _transition = self.session.execution_runtime_transition_lock.lock().await;
+        if self.session.execution_control_is_closing() {
+            return Err(CodexErr::InvalidRequest(
+                "thread runtime is closing".to_string(),
+            ));
+        }
         let mut elicitations = self.out_of_band_elicitations.lock().await;
         let incremented = elicitations.count.checked_add(1).ok_or_else(|| {
             CodexErr::Fatal("out-of-band elicitation count overflowed".to_string())
@@ -789,7 +806,12 @@ impl CodexThread {
         Ok(incremented)
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "out-of-band cleanup and execution control share one transition fence"
+    )]
     pub async fn decrement_out_of_band_elicitation_count(&self) -> CodexResult<i64> {
+        let _transition = self.session.execution_runtime_transition_lock.lock().await;
         let mut elicitations = self.out_of_band_elicitations.lock().await;
         if elicitations.count == 0 {
             return Err(CodexErr::InvalidRequest(

@@ -138,12 +138,22 @@ impl PreparedTurnInputSettings {
     }
 }
 
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "turn admission and execution control share one transition fence"
+)]
 pub(super) async fn handle(
     session: &Arc<Session>,
     request: TurnInputRequest,
     mode: TurnInputMode,
     submission_id: String,
 ) -> CodexResult<TurnInputSubmission> {
+    let _transition = session.execution_runtime_transition_lock.lock().await;
+    if session.execution_control_is_closing() {
+        return Err(CodexErr::InvalidRequest(
+            "thread runtime is closing".to_string(),
+        ));
+    }
     match mode {
         TurnInputMode::StartOrSteer => start_or_steer(session, request, submission_id).await,
         TurnInputMode::StartIfIdle => {
@@ -155,11 +165,21 @@ pub(super) async fn handle(
     }
 }
 
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "turn recovery admission and execution control share one transition fence"
+)]
 pub(super) async fn handle_recovery(
     session: &Arc<Session>,
     thread_settings: ThreadSettingsOverrides,
     submission_id: String,
 ) -> CodexResult<TurnInputSubmission> {
+    let _transition = session.execution_runtime_transition_lock.lock().await;
+    if session.execution_control_is_closing() {
+        return Err(CodexErr::InvalidRequest(
+            "thread runtime is closing".to_string(),
+        ));
+    }
     let request = TurnInputRequest::user_input(Vec::new()).with_thread_settings(thread_settings);
     start_if_idle(session, request, submission_id, /*is_recovery*/ true).await
 }

@@ -79,6 +79,10 @@ pub async fn realtime_conversation_list_voices(sess: &Session, sub_id: String) {
 
 /// Queues an inter-agent message, then lets the shared pending-work scheduler
 /// decide whether an idle session should start a regular turn.
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "mailbox admission and execution control share one transition fence"
+)]
 pub async fn inter_agent_communication(
     sess: &Arc<Session>,
     sub_id: String,
@@ -86,6 +90,10 @@ pub async fn inter_agent_communication(
     parent_turn_id: Option<String>,
     root_turn_id: Option<String>,
 ) {
+    let transition = sess.execution_runtime_transition_lock.lock().await;
+    if sess.execution_control_is_closing() {
+        return;
+    }
     let trigger_turn = communication.trigger_turn;
     sess.input_queue
         .enqueue_mailbox_communication(
@@ -95,13 +103,22 @@ pub async fn inter_agent_communication(
         )
         .await;
     crate::agent_communication::emit_agent_communication_receive(&sub_id);
+    drop(transition);
     if trigger_turn || sess.has_outstanding_durable_sleep() {
         sess.maybe_start_turn_for_pending_work_with_sub_id(sub_id)
             .await;
     }
 }
 
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "idle shell admission and execution control share one transition fence"
+)]
 pub async fn run_user_shell_command(sess: &Arc<Session>, sub_id: String, command: String) {
+    let _transition = sess.execution_runtime_transition_lock.lock().await;
+    if sess.execution_control_is_closing() {
+        return;
+    }
     if let Some((turn_context, cancellation_token)) =
         sess.active_turn_context_and_cancellation_token().await
     {
@@ -241,7 +258,15 @@ pub async fn reload_user_config(sess: &Arc<Session>) {
     sess.reload_user_config_layer().await;
 }
 
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "compact admission and execution control share one transition fence"
+)]
 pub async fn compact(sess: &Arc<Session>, sub_id: String) {
+    let _transition = sess.execution_runtime_transition_lock.lock().await;
+    if sess.execution_control_is_closing() {
+        return;
+    }
     let turn_context = sess.new_default_turn_with_sub_id(sub_id).await;
 
     sess.spawn_task(Arc::clone(&turn_context), Vec::new(), CompactTask)
@@ -478,12 +503,57 @@ pub async fn shutdown(sess: &Arc<Session>, sub_id: String) -> bool {
     true
 }
 
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "strict writer release owns the execution transition through its commit"
+)]
+pub async fn relinquish(
+    sess: &Arc<Session>,
+    expected_writer_generation: u64,
+    reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+) -> bool {
+    let transition = sess.execution_runtime_transition_lock.lock().await;
+    if sess.begin_execution_control_transition().await.is_err() {
+        let _ = reply.send(Err("thread is not idle".to_string()));
+        return false;
+    }
+    let result = match sess.live_thread() {
+        Some(live_thread) => live_thread
+            .relinquish(expected_writer_generation)
+            .await
+            .map_err(|err| err.to_string()),
+        None => Err("thread persistence is unavailable".to_string()),
+    };
+    if let Err(err) = result {
+        sess.end_execution_control_transition();
+        let _ = reply.send(Err(err));
+        return false;
+    }
+    drop(transition);
+
+    shutdown_session_runtime(sess).await;
+    emit_thread_stop_lifecycle(sess.as_ref()).await;
+    sess.services
+        .rollout_thread_trace
+        .record_ended(codex_rollout_trace::RolloutStatus::Completed);
+    let _ = reply.send(Ok(()));
+    true
+}
+
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "review admission and execution control share one transition fence"
+)]
 pub async fn review(
     sess: &Arc<Session>,
     config: &Arc<Config>,
     sub_id: String,
     review_request: ReviewRequest,
 ) {
+    let _transition = sess.execution_runtime_transition_lock.lock().await;
+    if sess.execution_control_is_closing() {
+        return;
+    }
     let turn_context = sess.new_default_turn_with_sub_id(sub_id.clone()).await;
     sess.maybe_emit_model_warnings_for_turn(turn_context.as_ref())
         .await;
@@ -660,6 +730,10 @@ pub(super) async fn submission_loop(
                     false
                 }
                 Op::Shutdown => shutdown(&sess, sub.id.clone()).await,
+                Op::Relinquish {
+                    expected_writer_generation,
+                    reply,
+                } => relinquish(&sess, expected_writer_generation, reply).await,
                 Op::Review { review_request } => {
                     review(&sess, &config, sub.id.clone(), review_request).await;
                     false

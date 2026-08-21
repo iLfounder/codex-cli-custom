@@ -460,10 +460,18 @@ impl Session {
     ///
     /// The turn is created only when the session is idle and mailbox mail either requests a turn
     /// or can wake an outstanding durable sleep.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "automatic turn admission and execution control share one transition fence"
+    )]
     pub(crate) async fn maybe_start_turn_for_pending_work_with_sub_id(
         self: &Arc<Self>,
         sub_id: String,
     ) {
+        let _transition = self.execution_runtime_transition_lock.lock().await;
+        if self.execution_control_is_closing() {
+            return;
+        }
         if !self.input_queue.has_pending_mailbox_items().await
             || (!self.input_queue.has_trigger_turn_mailbox_items().await
                 && !self.has_outstanding_durable_sleep())
