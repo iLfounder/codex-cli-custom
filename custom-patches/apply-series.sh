@@ -2,7 +2,8 @@
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-series_dir="$script_dir/rust-v0.148.0"
+series_name=${2:-rust-v0.149.0}
+series_dir="$script_dir/$series_name"
 manifest="$series_dir/series.toml"
 target_repo=${1:-.}
 
@@ -13,6 +14,8 @@ die() {
 
 git -C "$target_repo" rev-parse --git-dir >/dev/null 2>&1 \
     || die "target is not a Git repository: $target_repo"
+
+test -f "$manifest" || die "unknown or incomplete patch series: $series_name"
 
 test -z "$(git -C "$target_repo" status --porcelain)" \
     || die "target worktree must be clean"

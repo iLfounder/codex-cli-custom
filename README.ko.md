@@ -4,98 +4,147 @@
 
 # Codex CLI Custom
 
-## 이 패치 시리즈를 만든 이유
+## 이 fork를 만든 이유
 
-하나의 장기 실행 app-server와 TUI에서 여러 계정을 운용하면 process 단위 identity만으로는 세션의 실행 계정과 writer 소유권을 안전하게 구분할 수 없다. 각 세션에는 명시적인 실행 계정과 영속적인 writer 소유권이 필요하고, 다른 process가 이어받을 때도 추측이 아니라 검증된 handoff가 필요하다. 외부 orchestrator 역시 파일, process 생명주기, timing을 추정하는 대신 세션의 정확한 상태와 허용된 control을 읽을 수 있어야 한다.
+Stock Codex는 인증과 runtime 소유권의 많은 부분을 process 단위로 다룬다. 하나의 장기 실행 app-server와 TUI가 여러 계정을 처리하고, 각 thread를 올바른 계정에 결속하며, 명시적으로 닫힌 thread를 다른 process가 history 손상 없이 이어받아야 할 때는 이 경계만으로 부족하다.
 
-이 순서형 patch series는 그 경계를 명시한다. 한 app-server/TUI 안에서 여러 account slot을 운용하고, 서로 다른 workflow 역할을 맡는 session이 올바른 account context를 유지하도록 session·turn별 auth를 격리하며, 관측 가능한 session state와 보호된 control operation을 제공하고, 활성화된 skill을 slash command로 노출한다.
+이 fork는 암묵적인 경계를 명시적인 contract로 바꾼다.
 
-이 저장소는 upstream 전체를 복제하지 않는다. [`openai/codex`](https://github.com/openai/codex)의 정확한 commit을 받은 뒤 검증된 P001–P011 series를 순서대로 적용한다.
+- 하나의 app-server 안에서 격리된 여러 account slot을 운용한다.
+- 각 turn은 불변의 execution account를 사용하고, account 전환은 보호된 next-turn 동작으로 수행한다.
+- single-writer authority와 strict handoff를 영속적으로 관리한다.
+- 외부 consumer가 사용할 수 있도록 sanitize된 session identity, lifecycle, persistence, allowed-control state를 제공한다.
+- account별 앱을 빠져나와 다른 앱에 붙지 않고도 TUI에서 account와 session을 제어한다.
+- 설치 가능한 structured plugin command와 bounded UI-only presentation component를 제공한다.
 
-> **Experimental:** 공식 OpenAI 배포물이 아니며, 현재 series는 `rust-v0.148.0`에만 적용된다.
+목표는 workflow나 relay system을 대체하는 것이 아니다. PID, socket, title, cwd, timeout을 추측하지 않고도 외부 system이 app-server의 정본 상태와 안전한 control을 소비하게 하는 것이다.
 
-## 기준과 재현성
+> **Experimental:** 공식 OpenAI 배포물이 아니다.
 
-- upstream tag: `rust-v0.148.0`
-- upstream commit: `3ba0f711642a888aec92a611a3f3b2211157ff89`
-- 전체 patch 적용 후 tree: `fe1cec7cc8a29dedd89896c4459474fb5cf2d54e`
-- manifest: [`custom-patches/rust-v0.148.0/series.toml`](custom-patches/rust-v0.148.0/series.toml)
-- 적용기: [`custom-patches/apply-series.sh`](custom-patches/apply-series.sh)
+## 0.149 공개 준비 상태
 
-적용기는 clean worktree와 정확한 upstream commit을 요구하고, 각 patch의 SHA-256과 최종 Git tree를 검증한다. P번호는 순서가 고정된 의존 chain이므로 일부를 건너뛰거나 순서를 바꾸는 선택지가 아니다.
+대상 upstream은 [`rust-v0.149.0`](https://github.com/openai/codex/releases/tag/rust-v0.149.0), commit `758ef40f50c1a458425c7cfbf1eb12cbc07af0b0`이다.
 
-## Patch series
+| 영역 | 현재 상태 |
+|---|---|
+| P001–P011 구현과 focused check | 완료 |
+| 순서형 0.149 patch export와 clean-apply 검증 | 완료; 11개 patch가 tree `85d7f4039b29096250faa772e67f240d9f7a4a90`를 재현함 |
+| macOS arm64 release build와 artifact | Pending |
+| 최종 독립 review | Pending |
+| 0.149 publication | Pending |
+
+현재 candidate는 [`custom-patches/rust-v0.149.0`](custom-patches/rust-v0.149.0/)이다. [`custom-patches/rust-v0.148.0`](custom-patches/rust-v0.148.0/)은 이전 release series로만 보존한다.
+
+## P001–P011의 의도된 경계
+
+각 번호는 독립적으로 검토 가능한 기능 patch다. 뒤 patch가 앞 contract를 소비하므로 적용 순서는 고정된다. 번호 분리는 향후 upstream update를 하나의 큰 fork merge가 아니라 기능별 port로 제한하는 유지보수 전략이기도 하다.
 
 ### P001 — Shared writer authority
 
-**취지:** 서로 다른 account home이 같은 session store를 사용해도 소유권을 모호하지 않게 만든다. 영속적인 store ID와 writer generation을 SQLite에 보관하고, thread writer의 현재 소유 상태를 mutation 없이 조회한다.
+**이유:** 서로 다른 account home이 하나의 session과 SQLite store를 공유하면 account-local lock file만으로 중복 writer를 막을 수 없다.
+
+**경계:** shared SQLite root에 영속적인 `storeId`와 단조 증가하는 `writerGeneration` authority를 두고 advisory process lock을 유지하며, stale owner는 mutation 전에 거절한다. writer 자동 강탈은 하지 않는다.
 
 ### P002 — Session runtime protocol
 
-**취지:** runtime 동작을 구현하기 전에 client가 의존할 안정적인 contract를 먼저 고정한다. app-server v2에 runtime snapshot·operation, strict relinquish, execution-account switch, account slot 조회·login을 위한 DTO, method, notification을 추가한다.
+**이유:** TUI, relay adapter, 외부 orchestrator가 control 구현보다 먼저 의존할 안정적인 app-server v2 contract가 필요하다.
+
+**경계:** bounded `sessionRuntime`, account-slot, login, relinquish, switch DTO·method·notification·pagination과 compile-safe stub을 정의한다. 실제 control 동작은 구현하지 않는다.
 
 ### P003 — Multi-account registry
 
-**취지:** 하나의 app-server 안에서 여러 account를 identity 혼합 없이 사용할 수 있게 한다. 기본 account는 호환성을 위한 virtual slot으로 유지하고, 추가 slot은 private home, managed credential loading, revision-bound pagination과 process 전역 identity 충돌에 대한 fail-closed 검사를 사용한다.
+**이유:** 하나의 server가 credential path를 노출하거나 process-default identity로 조용히 fallback하지 않고 여러 account를 보유해야 한다.
+
+**경계:** host-managed account-slot manifest, slot별 private auth home과 model cache, 호환 default slot, revision-bound listing을 제공한다. 지원하지 않는 process-global external/workload identity에서는 fail closed 한다.
 
 ### P004 — Durable execution binding and history
 
-**취지:** thread가 이전 작업을 소유했던 동일한 execution account로 다시 시작되도록 한다. thread-account binding을 영속화하고 generation CAS로 갱신하며, resume·fork·child·review session이 binding을 상속하고 각 turn은 불변의 binding provenance를 기록한다.
+**이유:** resume·fork·child·review thread는 작업을 소유한 account로 계속 실행돼야 한다.
 
-### P005 — Propagate execution account to auth consumers
+**경계:** thread-slot binding을 generation CAS와 함께 영속화하고 thread 생성 경로에 상속하며, 각 turn에 불변 provenance를 기록한다. slot ID만으로 credential identity가 최신이라고 판단하지 않는다.
 
-**취지:** credential과 account-scoped state가 session 경계를 넘어 섞이지 않게 한다. model, connector, app, plugin, MCP, extension, memory, review 경로는 thread 또는 turn에 capture된 account context와 account별 service·cache를 사용한다.
+### P005 — 모든 consumer에 account 전파
 
-### P006 — Publish session runtime state
+**이유:** model client만 바꿔도 connector, app, plugin, MCP, telemetry, memory, review, cost polling이 default 또는 stale credential을 사용하면 격리가 깨진다.
 
-**취지:** 외부 controller가 추측 없이 session을 관측하고 제어하게 한다. sanitized `sessionRuntime` snapshot은 lifecycle·waiting state, subscriber, writer authority, persistence health·position, account binding, 현재 허용된 action을 revisioned snapshot과 sequenced notification으로 제공한다.
+**경계:** turn마다 하나의 account runtime을 capture하고 account별 service·cache를 포함한 모든 credential-sensitive consumer에 전파한다. mid-turn credential mixing은 허용하지 않는다.
 
-### P007 — Live account registration
+### P006 — 외부에 보이는 session runtime
 
-**취지:** app-server를 재시작하지 않고 account slot을 추가하거나 재인증하게 한다. API key, browser, device-code, external-refresh login을 slot-scoped operation으로 실행하고, connection·generation 검사로 browser ownership과 늦게 도착한 응답을 보호한다.
+**이유:** 외부 관리자는 session이 무엇을 하고 있고 다음에 어떤 동작이 안전한지 추측 없이 알아야 한다.
 
-### P008 — Strict thread writer relinquish
+**경계:** stable identity, lifecycle·waiting state, subscriber, writer authority, persistence health·position, account binding, 현재 허용된 action을 sanitize된 revisioned snapshot과 sequenced notification으로 제공한다. operation replay는 bounded하며 credential path나 secret을 노출하지 않는다.
 
-**취지:** 다른 owner가 이어받아도 안전할 만큼 state가 영속화된 뒤에만 session을 release한다. 새 turn과 control transition을 직렬화하고 flush, materialization, sync, recorder shutdown이 모두 성공해야 writer guard를 해제하며, 실패 시 소유권을 보존하고 stable cause를 발행한다.
+### P007 — 무중단 account 등록
 
-### P009 — Hot execution-account switch
+**이유:** account 추가와 재인증 때문에 app-server를 재시작하거나 모든 TUI를 끊어서는 안 된다.
 
-**취지:** app-server나 TUI 연결을 끊지 않고 idle thread의 account를 전환한다. target runtime을 먼저 준비한 뒤 durable binding CAS로 in-memory pointer를 갱신하며, 진행 중인 turn은 capture된 account를 유지하고 다음 turn부터 새 account를 사용한다.
+**경계:** slot-scoped API-key, browser, device-code, external-refresh login operation과 secondary-slot logout을 제공한다. exact connection ownership과 generation CAS로 이미 교체된 늦은 OAuth·same-slot completion을 거절한다.
 
-### P010 — TUI session and account controls
+### P008 — Strict writer relinquish
 
-**취지:** multi-account session control을 terminal에서 직접 사용할 수 있게 한다. TUI에 account picker, `/account`, slot-scoped `/logout`, strict shutdown/release를 연결하고, timeout을 성공으로 간주하지 않고 writer release와 terminal `ThreadClosed`를 모두 기다린다.
+**이유:** TUI가 닫혔다는 사실만으로 writer가 flush·materialize를 끝내고 다른 account/process에 thread를 반환했다고 볼 수 없다.
 
-### P011 — Enabled skills as slash commands
+**경계:** 새 작업과 close transition을 직렬화하고 flush, materialization, path sync, recorder shutdown, exact-generation release가 모두 성공해야 반환한다. 실패하면 기존 owner를 유지하며, admission을 다시 열기 전에 terminal `NotLoaded`, `Released`, matching `ThreadClosed`를 발행한다.
 
-**취지:** 현재 thread·account·working directory에서 활성화된 skill을 바로 찾고 실행하게 한다. skill은 `/name` 또는 `/namespace:name`으로 나타나며 builtin·service tier·중복 이름 충돌을 결정론적으로 처리하고, account나 directory 변경 후 도착한 오래된 목록은 generation fence로 버린다.
+### P009 — 무중단 execution-account 전환
 
-## 로컬 적용
+**이유:** attach된 idle thread가 TUI를 떠나거나 account별 app-server에 다시 연결하지 않고 owner account를 바꿀 수 있어야 한다.
 
-적용기는 `git am`을 사용하므로 target repository에 Git commit identity가 미리 설정되어 있어야 한다.
+**경계:** complete target runtime을 먼저 준비한 뒤 durable binding CAS와 실패하지 않는 pointer publish를 수행한다. 진행 중인 turn은 capture한 account를 유지하고 다음 turn부터 target을 사용한다. same-slot 재인증을 포함해 MCP, plugin, realtime, telemetry/network provenance, Guardian sampler, Goal runtime 등 장기 account-bound consumer를 rebuild 또는 refresh한다.
 
-```bash
-git init upstream-codex
-git -C upstream-codex remote add origin https://github.com/openai/codex.git
-git -C upstream-codex fetch --depth=1 origin 3ba0f711642a888aec92a611a3f3b2211157ff89
-git -C upstream-codex checkout --detach FETCH_HEAD
-./custom-patches/apply-series.sh upstream-codex
+**상태:** P009에서 구현 완료.
+
+### P010 — TUI account, exit, clear, new-thread control
+
+**이유:** timeout이나 disconnect를 성공으로 오인하지 않으면서 terminal에서 직접 safety contract를 사용할 수 있어야 한다.
+
+**경계:** account picker와 account/logout control을 추가하고, explicit exit는 strict terminal release를 기다린다. typed `threadClear`/`threadNew` agent control을 신규 thread와 legacy-resumed thread 모두에 제공한다. clear/new는 먼저 응답하고 exact successful completion event 뒤에만 UI를 전환한다.
+
+**상태:** P010에서 구현 완료.
+
+### P011 — 설치 가능한 structured plugin command와 ephemeral presentation
+
+**이유:** skill을 text slash command로 노출하는 것만으로는 충분한 component model이 아니다. Plugin은 model transcript에 control data를 넣지 않으면서 typed action과 relay-friendly UI element를 제공해야 한다.
+
+**경계:** legacy plugin command path를 보존하면서 normalized contribution overlay를 추가한다. Command의 canonical 이름은 `/namespace:name`이며 `/name`은 유일할 때만 허용한다. Target은 bounded prompt, exact MCP tool, goal get/set/clear 같은 allowlisted Rust app-server action, 또는 fixed argv·no shell·기존 approval/sandbox를 사용하는 packaged executable로 제한한다.
+
+Plugin은 exact thread의 현재 subscriber와 TUI에 bounded card, notice, progress item을 append할 수 있다. 이 item은 ephemeral이며 rollout history, model context, durable conversation history에 들어가지 않는다. `llc-relay`가 routing과 message-job authority로 계속 남는다.
+
+**상태:** P011에서 구현 완료.
+
+## Runtime과 Relay의 경계
+
+Custom app-server는 account execution, thread writer ownership, persistence state, safe control admission의 authority다. 외부 system은 이 값을 소비하고 session을 workflow role과 연결할 수 있지만, 이 fork가 relay job을 workflow state나 responsibility assignment와 동일한 entity로 만들지는 않는다.
+
+`llc-relay`는 Codex와 Claude session 사이의 message transport를 계속 담당한다. Plugin card/notice/progress는 현재 subscriber를 위한 typed presentation surface일 뿐, transport·acknowledgement ledger·Agent 작업 완료 증명이 아니다.
+
+## Packaging과 update
+
+0.149 candidate는 digest manifest와 clean-tree applier를 포함한 열한 개의 ordered exact-base patch다. 정확한 upstream commit에만 적용한다.
+
+```sh
+git checkout 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
+/path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD"
 ```
 
-## 빌드와 artifact
+Applier는 dirty 또는 잘못된 base worktree를 거절하고, 각 patch digest를 검증하며, P001–P011을 순서대로 적용한 뒤 final tree `85d7f4039b29096250faa772e67f240d9f7a4a90`를 요구한다.
 
-GitHub Actions의 [`Build custom Codex for macOS arm64`](.github/workflows/build-custom-macos-arm64.yml) workflow는 수동 실행만 허용한다. 표준 `macos-15` runner에서 series를 다시 적용하고 다음 release binary를 빌드한다.
+이 분리가 유지보수 방식이다. upstream이 갱신되면 각 P번호를 자기 기능 경계 안에서 inspect·adapt·verify할 수 있다.
 
-- `codex`
-- `codex-app-server`
+## Build, review, publication
 
-14일간 보관되는 artifact에는 strip된 두 binary, SHA-256 목록, upstream commit·patched tree·runner·Rust compiler·Cargo·macOS version을 기록한 build metadata가 포함된다. 로컬에서는 series 적용 후 다음처럼 빌드할 수 있다.
+0.149를 공개 완료라고 부르기 전에 다음 작업이 남아 있다.
 
-```bash
-cd upstream-codex/codex-rs
-cargo build --release -p codex-cli --bin codex
-cargo build --release -p codex-app-server --bin codex-app-server
-```
+1. macOS arm64용 `codex`, `codex-app-server` build
+2. 동일한 최종 candidate에 대한 fresh-context 독립 review 2회
+3. manifest, patch, 문서, build artifact 동시 공개
+
+남은 행을 갱신하기 전에는 release build, 최종 review, artifact, publication 완료를 주장하지 않는다.
+
+## 과거 작업 참고자료
+
+초기 개인 조사와 build note는 비정본 배경자료로 [`docs/handoff.md`](docs/handoff.md)와 [`docs/codex-rs-build-guide.md`](docs/codex-rs-build-guide.md)에 보존한다. 현재 0.149 설계보다 오래된 자료이며 public runtime contract가 아니다.
 
 ## License
 

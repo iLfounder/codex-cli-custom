@@ -1,0 +1,3024 @@
+From 1fd207b11588056234a007c6b27bb8ca56c25fe6 Mon Sep 17 00:00:00 2001
+From: patch-verifier <patch-verifier@localhost>
+Date: Fri, 21 Aug 2026 16:46:40 +0900
+Subject: [PATCH 06/11] feat(custom): publish session runtime state for 0.149
+
+---
+ codex-rs/app-server/src/lib.rs                |   1 +
+ codex-rs/app-server/src/message_processor.rs  |  23 +-
+ .../request_processors/thread_lifecycle.rs    | 159 ++++--
+ .../thread_lifecycle_tests.rs                 |  19 +
+ .../app-server/src/session_runtime/mod.rs     | 254 +++++++++
+ .../src/session_runtime/operations.rs         | 212 ++++++++
+ .../src/session_runtime/pagination.rs         | 147 +++++
+ .../src/session_runtime/snapshot.rs           | 509 ++++++++++++++++++
+ .../app-server/src/session_runtime/tests.rs   | 190 +++++++
+ codex-rs/app-server/src/thread_state.rs       | 283 +++++++++-
+ codex-rs/app-server/src/thread_status.rs      |  36 ++
+ codex-rs/rollout/src/lib.rs                   |   1 +
+ codex-rs/rollout/src/recorder.rs              |  79 ++-
+ codex-rs/rollout/src/recorder_tests.rs        |  36 ++
+ codex-rs/thread-store/src/in_memory.rs        |  42 ++
+ codex-rs/thread-store/src/lib.rs              |   4 +
+ codex-rs/thread-store/src/local/mod.rs        | 122 +++++
+ .../src/local/runtime_snapshot_tests.rs       | 107 ++++
+ codex-rs/thread-store/src/store.rs            |  81 +++
+ 19 files changed, 2226 insertions(+), 79 deletions(-)
+ create mode 100644 codex-rs/app-server/src/request_processors/thread_lifecycle_tests.rs
+ create mode 100644 codex-rs/app-server/src/session_runtime/mod.rs
+ create mode 100644 codex-rs/app-server/src/session_runtime/operations.rs
+ create mode 100644 codex-rs/app-server/src/session_runtime/pagination.rs
+ create mode 100644 codex-rs/app-server/src/session_runtime/snapshot.rs
+ create mode 100644 codex-rs/app-server/src/session_runtime/tests.rs
+ create mode 100644 codex-rs/thread-store/src/local/runtime_snapshot_tests.rs
+
+diff --git a/codex-rs/app-server/src/lib.rs b/codex-rs/app-server/src/lib.rs
+index 0c67d18e0e920b7c275ab07acce9582768aaf87f..77b0bea6593488545729b30b5d9eea9156ebf579 100644
+--- a/codex-rs/app-server/src/lib.rs
++++ b/codex-rs/app-server/src/lib.rs
+@@ -117,6 +117,7 @@ mod outgoing_message;
+ mod request_processors;
+ mod request_serialization;
+ mod server_request_error;
++mod session_runtime;
+ mod skills_watcher;
+ mod thread_state;
+ mod thread_status;
+diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
+index e49547d5d2e9eb56ca36faad363e79df6ce8d34d..f5101a991134023aaac5a7ed4ef080360972e61b 100644
+--- a/codex-rs/app-server/src/message_processor.rs
++++ b/codex-rs/app-server/src/message_processor.rs
+@@ -160,6 +160,7 @@ pub(crate) struct MessageProcessor {
+     turn_processor: TurnRequestProcessor,
+     windows_sandbox_processor: WindowsSandboxRequestProcessor,
+     request_serialization_queues: RequestSerializationQueues,
++    session_runtime: Arc<crate::session_runtime::SessionRuntimeEngine>,
+ }
+ 
+ #[derive(Debug)]
+@@ -385,6 +386,17 @@ impl MessageProcessor {
+         let pending_thread_unloads = Arc::new(Mutex::new(HashSet::new()));
+         let thread_watch_manager =
+             crate::thread_status::ThreadWatchManager::new_with_outgoing(outgoing.clone());
++        let session_runtime = Arc::new(crate::session_runtime::SessionRuntimeEngine::new(
++            Arc::clone(&thread_store),
++            Arc::clone(&thread_manager),
++            thread_state_manager.clone(),
++            thread_watch_manager.clone(),
++            Arc::clone(&pending_thread_unloads),
++            Arc::clone(&account_registry),
++            outgoing.clone(),
++        ));
++        thread_state_manager.attach_runtime_engine(&session_runtime);
++        thread_watch_manager.attach_runtime_engine(&session_runtime);
+         let thread_list_state_permit = Arc::new(Semaphore::new(/*permits*/ 1));
+         let app_list_shutdown_token = CancellationToken::new();
+         let request_serialization_queues = RequestSerializationQueues::default();
+@@ -404,7 +416,7 @@ impl MessageProcessor {
+             );
+         let account_processor = AccountRequestProcessor::new(
+             auth_manager.clone(),
+-            account_registry,
++            Arc::clone(&account_registry),
+             Arc::clone(&thread_manager),
+             outgoing.clone(),
+             Arc::clone(&config),
+@@ -589,6 +601,7 @@ impl MessageProcessor {
+             turn_processor,
+             windows_sandbox_processor,
+             request_serialization_queues,
++            session_runtime,
+         }
+     }
+ 
+@@ -967,9 +980,11 @@ impl MessageProcessor {
+                 panic!("Initialize should be handled before initialized request dispatch");
+             }
+             ClientRequest::ServerDiagnostics { .. } => Ok(Some(read_server_diagnostics().into())),
+-            ClientRequest::SessionRuntimeList { .. } => Err(method_not_found(
+-                "sessionRuntime/list is not implemented yet",
+-            )),
++            ClientRequest::SessionRuntimeList { params, .. } => self
++                .session_runtime
++                .list(params)
++                .await
++                .map(|response| Some(response.into())),
+             ClientRequest::AccountSlotList { params, .. } => self
+                 .account_processor
+                 .list_account_slots(params)
+diff --git a/codex-rs/app-server/src/request_processors/thread_lifecycle.rs b/codex-rs/app-server/src/request_processors/thread_lifecycle.rs
+index 86fedbe945166f7fffeda8309734f15a09228ebc..c892f6c39c67a29db6aacb989d8dd4084ac829e2 100644
+--- a/codex-rs/app-server/src/request_processors/thread_lifecycle.rs
++++ b/codex-rs/app-server/src/request_processors/thread_lifecycle.rs
+@@ -1,5 +1,6 @@
+ use super::*;
+ use crate::extensions::send_thread_warning;
++use crate::thread_state::PendingUnloadSubscription;
+ use codex_app_server_protocol::ThreadQueueChangedNotification;
+ use codex_extension_api::ThreadIdleCause;
+ use codex_protocol::config_types::MultiAgentMode;
+@@ -21,6 +22,8 @@ pub(super) struct ListenerTaskContext {
+ }
+ 
+ struct UnloadingState {
++    thread_id: ThreadId,
++    thread_state_manager: ThreadStateManager,
+     delay: Duration,
+     has_subscribers_rx: watch::Receiver<bool>,
+     has_subscribers: (bool, Instant),
+@@ -48,6 +51,8 @@ impl UnloadingState {
+             Instant::now(),
+         );
+         Some(Self {
++            thread_id,
++            thread_state_manager: listener_task_context.thread_state_manager.clone(),
+             delay,
+             has_subscribers_rx,
+             has_subscribers,
+@@ -65,7 +70,8 @@ impl UnloadingState {
+         }
+     }
+ 
+-    fn sync_receiver_values(&mut self) {
++    fn sync_receiver_values(&mut self) -> bool {
++        let previous_target = self.unloading_target();
+         let has_subscribers = *self.has_subscribers_rx.borrow();
+         if self.has_subscribers.0 != has_subscribers {
+             self.has_subscribers = (has_subscribers, Instant::now());
+@@ -75,23 +81,45 @@ impl UnloadingState {
+         if self.is_active.0 != is_active {
+             self.is_active = (is_active, Instant::now());
+         }
++        previous_target != self.unloading_target()
++    }
++
++    async fn should_unload_now(&mut self) -> bool {
++        if self.sync_receiver_values() {
++            self.publish_unloading_target().await;
++        }
++        self.unloading_due_now()
+     }
+ 
+-    fn should_unload_now(&mut self) -> bool {
+-        self.sync_receiver_values();
++    fn unloading_due_now(&self) -> bool {
+         self.unloading_target()
+             .is_some_and(|target| target <= Instant::now())
+     }
+ 
+-    fn note_thread_activity_observed(&mut self) {
++    async fn note_thread_activity_observed(&mut self) {
++        let previous_target = self.unloading_target();
+         if !self.is_active.0 {
+             self.is_active = (false, Instant::now());
+         }
++        if previous_target != self.unloading_target() {
++            self.publish_unloading_target().await;
++        }
++    }
++
++    async fn publish_unloading_target(&self) {
++        self.thread_state_manager
++            .set_unload_at(
++                self.thread_id,
++                self.unloading_target().map(unloading_target_unix),
++            )
++            .await;
+     }
+ 
+     async fn wait_for_unloading_trigger(&mut self) -> bool {
+         loop {
+-            self.sync_receiver_values();
++            if self.sync_receiver_values() {
++                self.publish_unloading_target().await;
++            }
+             let unloading_target = self.unloading_target();
+             if let Some(target) = unloading_target
+                 && target <= Instant::now()
+@@ -111,19 +139,32 @@ impl UnloadingState {
+                     if changed.is_err() {
+                         return false;
+                     }
+-                    self.sync_receiver_values();
++                    if self.sync_receiver_values() {
++                        self.publish_unloading_target().await;
++                    }
+                 },
+                 changed = self.thread_status_rx.changed() => {
+                     if changed.is_err() {
+                         return false;
+                     }
+-                    self.sync_receiver_values();
++                    if self.sync_receiver_values() {
++                        self.publish_unloading_target().await;
++                    }
+                 },
+             }
+         }
+     }
+ }
+ 
++fn unloading_target_unix(target: Instant) -> i64 {
++    let remaining = target.saturating_duration_since(Instant::now());
++    let target_since_epoch = std::time::SystemTime::now()
++        .duration_since(std::time::UNIX_EPOCH)
++        .unwrap_or_default()
++        .saturating_add(remaining);
++    i64::try_from(target_since_epoch.as_secs()).unwrap_or(i64::MAX)
++}
++
+ pub(super) enum ThreadShutdownResult {
+     Complete,
+     SubmitFailed,
+@@ -135,10 +176,6 @@ pub(super) enum EnsureConversationListenerResult {
+     ConnectionClosed,
+ }
+ 
+-#[expect(
+-    clippy::await_holding_invalid_type,
+-    reason = "listener subscription must be serialized against pending unloads"
+-)]
+ pub(super) async fn ensure_conversation_listener(
+     listener_task_context: ListenerTaskContext,
+     conversation_id: ThreadId,
+@@ -157,21 +194,25 @@ pub(super) async fn ensure_conversation_listener(
+             )));
+         }
+     };
+-    let thread_state = {
+-        let pending_thread_unloads = listener_task_context.pending_thread_unloads.lock().await;
+-        if pending_thread_unloads.contains(&conversation_id) {
++    let thread_state = match listener_task_context
++        .thread_state_manager
++        .try_ensure_connection_subscribed_unless_pending_unload(
++            listener_task_context.pending_thread_unloads.as_ref(),
++            conversation_id,
++            connection_id,
++            raw_events_enabled,
++        )
++        .await
++    {
++        PendingUnloadSubscription::PendingUnload => {
+             return Err(invalid_request(format!(
+                 "thread {conversation_id} is closing; retry after the thread is closed"
+             )));
+         }
+-        let Some(thread_state) = listener_task_context
+-            .thread_state_manager
+-            .try_ensure_connection_subscribed(conversation_id, connection_id, raw_events_enabled)
+-            .await
+-        else {
++        PendingUnloadSubscription::ConnectionClosed => {
+             return Ok(EnsureConversationListenerResult::ConnectionClosed);
+-        };
+-        thread_state
++        }
++        PendingUnloadSubscription::Subscribed(thread_state) => thread_state,
+     };
+     if let Err(error) = ensure_listener_task_running(
+         listener_task_context.clone(),
+@@ -271,6 +312,7 @@ pub(super) async fn ensure_listener_task_running(
+             .register_listener_command_tx(conversation_id, listener_command_tx);
+         (listener_command_rx, listener_generation)
+     };
++    unloading_state.publish_unloading_target().await;
+     let ListenerTaskContext {
+         outgoing,
+         thread_manager,
+@@ -363,6 +405,7 @@ pub(super) async fn ensure_listener_task_running(
+                         fallback_model_provider.clone(),
+                     )
+                     .await;
++                    thread_state_manager.publish_runtime(conversation_id).await;
+                     if matches!(event.msg, EventMsg::ShutdownComplete)
+                         && let Some(completion_tx) = thread_state
+                             .lock()
+@@ -376,23 +419,34 @@ pub(super) async fn ensure_listener_task_running(
+                     if !unloading_watchers_open {
+                         break;
+                     }
+-                    if !unloading_state.should_unload_now() {
++                    if !unloading_state.should_unload_now().await {
+                         continue;
+                     }
+                     if matches!(conversation.agent_status().await, AgentStatus::Running) {
+-                        unloading_state.note_thread_activity_observed();
++                        unloading_state.note_thread_activity_observed().await;
+                         continue;
+                     }
+-                    {
++                    thread_state_manager.mark_runtime_dirty();
++                    let (start_unload, target_changed) = {
+                         let mut pending_thread_unloads = pending_thread_unloads.lock().await;
+                         if pending_thread_unloads.contains(&conversation_id) {
+-                            continue;
++                            (false, false)
++                        } else {
++                            let target_changed = unloading_state.sync_receiver_values();
++                            let start_unload = unloading_state.unloading_due_now();
++                            if start_unload {
++                                pending_thread_unloads.insert(conversation_id);
++                            }
++                            (start_unload, target_changed)
+                         }
+-                        if !unloading_state.should_unload_now() {
+-                            continue;
+-                        }
+-                        pending_thread_unloads.insert(conversation_id);
++                    };
++                    if target_changed {
++                        unloading_state.publish_unloading_target().await;
+                     }
++                    if !start_unload {
++                        continue;
++                    }
++                    thread_state_manager.set_unload_at(conversation_id, None).await;
+                     unload_thread_without_subscribers(
+                         thread_manager.clone(),
+                         outgoing_for_task.clone(),
+@@ -408,15 +462,29 @@ pub(super) async fn ensure_listener_task_running(
+             }
+         }
+ 
+-        let mut thread_state = thread_state.lock().await;
+-        if thread_state.listener_generation == listener_generation {
+-            thread_state_manager.unregister_listener_command_tx(conversation_id);
+-            thread_state.clear_listener();
++        let listener_cleared = {
++            let mut thread_state = thread_state.lock().await;
++            if thread_state.listener_generation == listener_generation {
++                thread_state_manager.unregister_listener_command_tx(conversation_id);
++                thread_state.clear_listener();
++                true
++            } else {
++                false
++            }
++        };
++        if listener_cleared {
++            thread_state_manager
++                .set_unload_at(conversation_id, None)
++                .await;
+         }
+     });
+     Ok(())
+ }
+ 
++#[cfg(test)]
++#[path = "thread_lifecycle_tests.rs"]
++mod tests;
++
+ pub(super) async fn wait_for_thread_shutdown(thread: &Arc<CodexThread>) -> ThreadShutdownResult {
+     match tokio::time::timeout(Duration::from_secs(10), thread.shutdown_and_wait()).await {
+         Ok(Ok(())) => ThreadShutdownResult::Complete,
+@@ -455,6 +523,7 @@ pub(super) async fn unload_thread_without_subscribers(
+                 {
+                     info!("thread {thread_id} was replaced or removed before teardown finalized");
+                     pending_thread_unloads.lock().await.remove(&thread_id);
++                    thread_state_manager.publish_runtime(thread_id).await;
+                     return;
+                 }
+                 thread_watch_manager
+@@ -467,13 +536,16 @@ pub(super) async fn unload_thread_without_subscribers(
+                     .send_server_notification(ServerNotification::ThreadClosed(notification))
+                     .await;
+                 pending_thread_unloads.lock().await.remove(&thread_id);
++                thread_state_manager.publish_runtime(thread_id).await;
+             }
+             ThreadShutdownResult::SubmitFailed => {
+                 pending_thread_unloads.lock().await.remove(&thread_id);
++                thread_state_manager.publish_runtime(thread_id).await;
+                 warn!("failed to submit Shutdown to thread {thread_id}");
+             }
+             ThreadShutdownResult::TimedOut => {
+                 pending_thread_unloads.lock().await.remove(&thread_id);
++                thread_state_manager.publish_runtime(thread_id).await;
+                 warn!("thread {thread_id} shutdown timed out; leaving thread loaded");
+             }
+         }
+@@ -567,10 +639,6 @@ pub(super) async fn handle_thread_listener_command(
+ }
+ 
+ #[allow(clippy::too_many_arguments)]
+-#[expect(
+-    clippy::await_holding_invalid_type,
+-    reason = "running-thread resume subscription must be serialized against pending unloads"
+-)]
+ pub(super) async fn handle_pending_thread_resume_request(
+     conversation_id: ThreadId,
+     conversation: &Arc<CodexThread>,
+@@ -679,10 +747,15 @@ pub(super) async fn handle_pending_thread_resume_request(
+         }
+     }
+ 
++    match thread_state_manager
++        .try_add_connection_to_thread_unless_pending_unload(
++            pending_thread_unloads.as_ref(),
++            conversation_id,
++            connection_id,
++        )
++        .await
+     {
+-        let pending_thread_unloads = pending_thread_unloads.lock().await;
+-        if pending_thread_unloads.contains(&conversation_id) {
+-            drop(pending_thread_unloads);
++        PendingUnloadSubscription::PendingUnload => {
+             outgoing
+                 .send_error(
+                     request_id,
+@@ -693,10 +766,7 @@ pub(super) async fn handle_pending_thread_resume_request(
+                 .await;
+             return;
+         }
+-        if !thread_state_manager
+-            .try_add_connection_to_thread(conversation_id, connection_id)
+-            .await
+-        {
++        PendingUnloadSubscription::ConnectionClosed => {
+             tracing::debug!(
+                 thread_id = %conversation_id,
+                 connection_id = ?connection_id,
+@@ -704,6 +774,7 @@ pub(super) async fn handle_pending_thread_resume_request(
+             );
+             return;
+         }
++        PendingUnloadSubscription::Subscribed(()) => {}
+     }
+ 
+     let (turns_backwards_cursor, items_backwards_cursor) = if let Some(thread_store) =
+diff --git a/codex-rs/app-server/src/request_processors/thread_lifecycle_tests.rs b/codex-rs/app-server/src/request_processors/thread_lifecycle_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..efb9a25901da69f4dbb2f7090b5e8faba23f3b0e
+--- /dev/null
++++ b/codex-rs/app-server/src/request_processors/thread_lifecycle_tests.rs
+@@ -0,0 +1,19 @@
++use super::*;
++
++#[test]
++fn unloading_target_conversion_uses_saturating_remaining_duration() {
++    let before = std::time::SystemTime::now()
++        .duration_since(std::time::UNIX_EPOCH)
++        .expect("system time")
++        .as_secs();
++    let target = Instant::now() + Duration::from_secs(60);
++
++    let converted = unloading_target_unix(target);
++
++    let after = std::time::SystemTime::now()
++        .duration_since(std::time::UNIX_EPOCH)
++        .expect("system time")
++        .as_secs();
++    assert!(converted >= i64::try_from(before.saturating_add(59)).unwrap_or(i64::MAX));
++    assert!(converted <= i64::try_from(after.saturating_add(60)).unwrap_or(i64::MAX));
++}
+diff --git a/codex-rs/app-server/src/session_runtime/mod.rs b/codex-rs/app-server/src/session_runtime/mod.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..3e36cbd67bdd38b4d5eb701bac5202c8be6e3886
+--- /dev/null
++++ b/codex-rs/app-server/src/session_runtime/mod.rs
+@@ -0,0 +1,254 @@
++#[allow(dead_code)]
++mod operations;
++mod pagination;
++mod snapshot;
++
++use std::collections::HashMap;
++use std::collections::HashSet;
++use std::sync::Arc;
++use std::sync::atomic::AtomicU64;
++use std::sync::atomic::Ordering;
++
++use codex_app_server_protocol::JSONRPCErrorError;
++use codex_app_server_protocol::ServerNotification;
++use codex_app_server_protocol::SessionRuntimeChangedNotification;
++use codex_app_server_protocol::SessionRuntimeListParams;
++use codex_app_server_protocol::SessionRuntimeListResponse;
++use codex_app_server_protocol::SessionRuntimeSnapshot;
++use codex_core::ThreadManager;
++use codex_protocol::ThreadId;
++use codex_thread_store::ThreadStore;
++use tokio::sync::Mutex;
++use tokio::sync::Semaphore;
++
++use self::operations::OperationCache;
++use self::pagination::CachedSnapshot;
++use crate::account_registry::AccountRegistry;
++use crate::error_code::internal_error;
++use crate::outgoing_message::OutgoingMessageSender;
++use crate::thread_state::ThreadStateManager;
++use crate::thread_status::ThreadWatchManager;
++
++const BUILD_ATTEMPTS: usize = 4;
++
++pub(crate) struct SessionRuntimeEngine {
++    instance_epoch: String,
++    dirty_generation: AtomicU64,
++    build_lock: Semaphore,
++    state: Mutex<EngineState>,
++    thread_store: Arc<dyn ThreadStore>,
++    thread_manager: Arc<ThreadManager>,
++    thread_state_manager: ThreadStateManager,
++    thread_watch_manager: ThreadWatchManager,
++    pending_thread_unloads: Arc<Mutex<HashSet<ThreadId>>>,
++    account_registry: Arc<AccountRegistry>,
++    outgoing: Arc<OutgoingMessageSender>,
++}
++
++#[derive(Default)]
++struct EngineState {
++    sequence: u64,
++    threads: HashMap<ThreadId, RuntimeThreadState>,
++    listed_threads: HashSet<ThreadId>,
++    pages: pagination::SnapshotCache,
++    #[allow(dead_code)]
++    operations: OperationCache,
++}
++
++#[derive(Default)]
++struct RuntimeThreadState {
++    revision: u64,
++    last_activity_at: Option<i64>,
++    last_snapshot: Option<SessionRuntimeSnapshot>,
++}
++
++impl SessionRuntimeEngine {
++    #[allow(clippy::too_many_arguments)]
++    pub(crate) fn new(
++        thread_store: Arc<dyn ThreadStore>,
++        thread_manager: Arc<ThreadManager>,
++        thread_state_manager: ThreadStateManager,
++        thread_watch_manager: ThreadWatchManager,
++        pending_thread_unloads: Arc<Mutex<HashSet<ThreadId>>>,
++        account_registry: Arc<AccountRegistry>,
++        outgoing: Arc<OutgoingMessageSender>,
++    ) -> Self {
++        Self {
++            instance_epoch: uuid::Uuid::new_v4().to_string(),
++            dirty_generation: AtomicU64::new(0),
++            build_lock: Semaphore::new(/*permits*/ 1),
++            state: Mutex::new(EngineState::default()),
++            thread_store,
++            thread_manager,
++            thread_state_manager,
++            thread_watch_manager,
++            pending_thread_unloads,
++            account_registry,
++            outgoing,
++        }
++    }
++
++    pub(crate) fn mark_dirty(&self) {
++        self.dirty_generation.fetch_add(1, Ordering::AcqRel);
++    }
++
++    pub(crate) async fn list(
++        &self,
++        params: SessionRuntimeListParams,
++    ) -> Result<SessionRuntimeListResponse, JSONRPCErrorError> {
++        let limit = pagination::requested_limit(params.limit)?;
++        if let Some(cursor) = params.cursor.as_deref() {
++            if params.thread_id.is_some() {
++                return Err(crate::error_code::invalid_params(
++                    "sessionRuntime/list threadId cannot be combined with cursor",
++                ));
++            }
++            return self.list_cached(cursor, limit).await;
++        }
++
++        let _build_guard = self
++            .build_lock
++            .acquire()
++            .await
++            .map_err(|_| internal_error("session runtime publisher is unavailable"))?;
++        let mut snapshots = self
++            .build_consistent_snapshots(params.thread_id.as_deref())
++            .await?;
++        let capabilities = self.process_capabilities().await;
++        let mut state = self.state.lock().await;
++        let mut changed = false;
++        for snapshot in &mut snapshots {
++            changed |= Self::apply_runtime_state(&mut state, snapshot, RuntimeActivity::Observe);
++        }
++        if params.thread_id.is_none() {
++            let listed_threads = snapshots
++                .iter()
++                .filter_map(|snapshot| ThreadId::from_string(&snapshot.thread_id).ok())
++                .collect::<HashSet<_>>();
++            if state.listed_threads != listed_threads {
++                state.listed_threads = listed_threads;
++                changed = true;
++            }
++        }
++        if changed {
++            state.sequence = state.sequence.saturating_add(1);
++        }
++        let sequence = state.sequence;
++        let cached = CachedSnapshot::new(sequence, snapshots);
++        let response = cached.first_page(&self.instance_epoch, limit, capabilities)?;
++        state.pages.insert(cached);
++        Ok(response)
++    }
++
++    async fn list_cached(
++        &self,
++        cursor: &str,
++        limit: usize,
++    ) -> Result<SessionRuntimeListResponse, JSONRPCErrorError> {
++        let capabilities = self.process_capabilities().await;
++        let state = self.state.lock().await;
++        state.pages.page(
++            cursor,
++            &self.instance_epoch,
++            state.sequence,
++            limit,
++            capabilities,
++        )
++    }
++
++    pub(crate) async fn publish_thread(&self, thread_id: ThreadId) {
++        self.mark_dirty();
++        let Ok(_build_guard) = self.build_lock.acquire().await else {
++            return;
++        };
++        let thread_id_text = thread_id.to_string();
++        let Ok(mut snapshots) = self
++            .build_consistent_snapshots(Some(thread_id_text.as_str()))
++            .await
++        else {
++            return;
++        };
++        let Some(mut snapshot) = snapshots.pop() else {
++            return;
++        };
++        let notification = {
++            let mut state = self.state.lock().await;
++            Self::apply_runtime_state(&mut state, &mut snapshot, RuntimeActivity::Activity);
++            state.sequence = state.sequence.saturating_add(1);
++            SessionRuntimeChangedNotification {
++                instance_epoch: self.instance_epoch.clone(),
++                sequence: state.sequence,
++                snapshot,
++            }
++        };
++        self.outgoing
++            .send_server_notification(ServerNotification::SessionRuntimeChanged(notification))
++            .await;
++    }
++
++    async fn build_consistent_snapshots(
++        &self,
++        thread_id: Option<&str>,
++    ) -> Result<Vec<SessionRuntimeSnapshot>, JSONRPCErrorError> {
++        for _ in 0..BUILD_ATTEMPTS {
++            let generation = self.dirty_generation.load(Ordering::Acquire);
++            let records = self.runtime_records(thread_id).await?;
++            let mut snapshots = Vec::with_capacity(records.len());
++            for record in records {
++                snapshots.push(self.build_snapshot(record).await);
++            }
++            snapshots.sort_by(|left, right| left.thread_id.cmp(&right.thread_id));
++            if generation == self.dirty_generation.load(Ordering::Acquire) {
++                return Ok(snapshots);
++            }
++        }
++        Err(crate::error_code::invalid_params(
++            "session runtime changed while building snapshot; retry",
++        ))
++    }
++
++    fn apply_runtime_state(
++        state: &mut EngineState,
++        snapshot: &mut SessionRuntimeSnapshot,
++        activity: RuntimeActivity,
++    ) -> bool {
++        let Ok(thread_id) = ThreadId::from_string(&snapshot.thread_id) else {
++            return false;
++        };
++        let runtime = state.threads.entry(thread_id).or_default();
++        match activity {
++            RuntimeActivity::Activity => runtime.last_activity_at = Some(unix_timestamp()),
++            RuntimeActivity::Observe if runtime.last_activity_at.is_none() => {
++                runtime.last_activity_at = snapshot.lifecycle.last_activity_at;
++            }
++            RuntimeActivity::Observe => {}
++        }
++        snapshot.lifecycle.last_activity_at = runtime.last_activity_at;
++        let mut comparable = snapshot.clone();
++        comparable.state_revision = 0;
++        let changed = runtime.last_snapshot.as_ref() != Some(&comparable);
++        if changed {
++            runtime.revision = runtime.revision.saturating_add(1).max(1);
++            runtime.last_snapshot = Some(comparable);
++        }
++        snapshot.state_revision = runtime.revision;
++        changed
++    }
++}
++
++#[derive(Clone, Copy)]
++enum RuntimeActivity {
++    Observe,
++    Activity,
++}
++
++fn unix_timestamp() -> i64 {
++    std::time::SystemTime::now()
++        .duration_since(std::time::UNIX_EPOCH)
++        .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
++        .unwrap_or(0)
++}
++
++#[cfg(test)]
++#[path = "tests.rs"]
++mod tests;
+diff --git a/codex-rs/app-server/src/session_runtime/operations.rs b/codex-rs/app-server/src/session_runtime/operations.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..65f8adb49dc789a66a88d5a33e9357ede9363742
+--- /dev/null
++++ b/codex-rs/app-server/src/session_runtime/operations.rs
+@@ -0,0 +1,212 @@
++use std::collections::HashMap;
++use std::collections::VecDeque;
++
++use codex_app_server_protocol::JSONRPCErrorError;
++use codex_app_server_protocol::ServerNotification;
++use codex_app_server_protocol::SessionRuntimeOperation;
++use codex_app_server_protocol::SessionRuntimeOperationError;
++use codex_app_server_protocol::SessionRuntimeOperationStatus;
++use codex_app_server_protocol::SessionRuntimeOperationUpdatedNotification;
++
++#[cfg(test)]
++use super::EngineState;
++use super::SessionRuntimeEngine;
++use super::unix_timestamp;
++use crate::error_code::internal_error;
++use crate::error_code::invalid_params;
++
++const MAX_TERMINAL_OPERATIONS: usize = 128;
++
++#[derive(Default)]
++pub(super) struct OperationCache {
++    pub(super) operations: HashMap<String, SessionRuntimeOperation>,
++    pub(super) terminal_order: VecDeque<String>,
++}
++
++impl SessionRuntimeEngine {
++    pub(crate) async fn begin_operation(
++        &self,
++        operation: SessionRuntimeOperation,
++    ) -> Result<SessionRuntimeOperation, JSONRPCErrorError> {
++        let _build_guard = self
++            .build_lock
++            .acquire()
++            .await
++            .map_err(|_| internal_error("session runtime publisher is unavailable"))?;
++        let notification = {
++            let mut state = self.state.lock().await;
++            if let Some(existing) = state.operations.operations.get(&operation.operation_id) {
++                if !same_operation_identity(existing, &operation) {
++                    return Err(invalid_params(
++                        "operationId was already used for a different request",
++                    ));
++                }
++                return Ok(existing.clone());
++            }
++            if !valid_initial_status(operation.status) {
++                return Err(invalid_params(
++                    "new runtime operations must start in accepted status",
++                ));
++            }
++            state.sequence = state.sequence.saturating_add(1);
++            state
++                .operations
++                .operations
++                .insert(operation.operation_id.clone(), operation.clone());
++            operation_notification(self, state.sequence, operation.clone())
++        };
++        self.outgoing.send_server_notification(notification).await;
++        Ok(operation)
++    }
++
++    pub(crate) async fn update_operation(
++        &self,
++        operation: SessionRuntimeOperation,
++    ) -> Result<SessionRuntimeOperation, JSONRPCErrorError> {
++        let _build_guard = self
++            .build_lock
++            .acquire()
++            .await
++            .map_err(|_| internal_error("session runtime publisher is unavailable"))?;
++        let notification = {
++            let mut state = self.state.lock().await;
++            let Some(existing) = state
++                .operations
++                .operations
++                .get(&operation.operation_id)
++                .cloned()
++            else {
++                return Err(invalid_params(
++                    "operationId is not active in this server process",
++                ));
++            };
++            if !same_operation_identity(&existing, &operation) {
++                return Err(invalid_params(
++                    "operationId was already used for a different request",
++                ));
++            }
++            if existing == operation
++                || (existing.status == operation.status && is_terminal(existing.status))
++                || !valid_transition(existing.status, operation.status)
++            {
++                return Ok(existing);
++            }
++            state.sequence = state.sequence.saturating_add(1);
++            if !is_terminal(existing.status) && is_terminal(operation.status) {
++                state
++                    .operations
++                    .terminal_order
++                    .push_back(operation.operation_id.clone());
++            }
++            state
++                .operations
++                .operations
++                .insert(operation.operation_id.clone(), operation.clone());
++            evict_terminal_operations(&mut state.operations);
++            operation_notification(self, state.sequence, operation.clone())
++        };
++        self.outgoing.send_server_notification(notification).await;
++        Ok(operation)
++    }
++
++    pub(crate) async fn update_operation_status(
++        &self,
++        operation_id: &str,
++        status: SessionRuntimeOperationStatus,
++        error: Option<SessionRuntimeOperationError>,
++    ) -> Result<SessionRuntimeOperation, JSONRPCErrorError> {
++        let mut operation = {
++            let state = self.state.lock().await;
++            state
++                .operations
++                .operations
++                .get(operation_id)
++                .cloned()
++                .ok_or_else(|| invalid_params("operationId is not active in this server process"))?
++        };
++        operation.status = status;
++        operation.error = error;
++        operation.updated_at = unix_timestamp();
++        self.update_operation(operation).await
++    }
++}
++
++fn operation_notification(
++    engine: &SessionRuntimeEngine,
++    sequence: u64,
++    operation: SessionRuntimeOperation,
++) -> ServerNotification {
++    ServerNotification::SessionRuntimeOperationUpdated(SessionRuntimeOperationUpdatedNotification {
++        instance_epoch: engine.instance_epoch.clone(),
++        sequence,
++        operation,
++    })
++}
++
++pub(super) fn evict_terminal_operations(cache: &mut OperationCache) {
++    while cache.terminal_order.len() > MAX_TERMINAL_OPERATIONS {
++        let Some(operation_id) = cache.terminal_order.pop_front() else {
++            break;
++        };
++        if cache
++            .operations
++            .get(&operation_id)
++            .is_some_and(|operation| is_terminal(operation.status))
++        {
++            cache.operations.remove(&operation_id);
++        }
++    }
++}
++
++pub(super) fn same_operation_identity(
++    left: &SessionRuntimeOperation,
++    right: &SessionRuntimeOperation,
++) -> bool {
++    left.operation_id == right.operation_id
++        && left.request_fingerprint == right.request_fingerprint
++        && left.action == right.action
++        && left.thread_id == right.thread_id
++        && left.account_slot_id == right.account_slot_id
++}
++
++pub(super) fn valid_transition(
++    current: SessionRuntimeOperationStatus,
++    next: SessionRuntimeOperationStatus,
++) -> bool {
++    match current {
++        SessionRuntimeOperationStatus::Accepted => true,
++        SessionRuntimeOperationStatus::Running => next != SessionRuntimeOperationStatus::Accepted,
++        SessionRuntimeOperationStatus::Ready => {
++            matches!(
++                next,
++                SessionRuntimeOperationStatus::Ready | SessionRuntimeOperationStatus::Failed
++            )
++        }
++        SessionRuntimeOperationStatus::Released => next == SessionRuntimeOperationStatus::Released,
++        SessionRuntimeOperationStatus::Failed => next == SessionRuntimeOperationStatus::Failed,
++    }
++}
++
++pub(super) fn valid_initial_status(status: SessionRuntimeOperationStatus) -> bool {
++    status == SessionRuntimeOperationStatus::Accepted
++}
++
++pub(super) fn is_terminal(status: SessionRuntimeOperationStatus) -> bool {
++    matches!(
++        status,
++        SessionRuntimeOperationStatus::Released
++            | SessionRuntimeOperationStatus::Ready
++            | SessionRuntimeOperationStatus::Failed
++    )
++}
++
++#[cfg(test)]
++pub(super) fn retained_counts(state: &EngineState) -> (usize, usize) {
++    let active = state
++        .operations
++        .operations
++        .values()
++        .filter(|operation| !is_terminal(operation.status))
++        .count();
++    (active, state.operations.terminal_order.len())
++}
+diff --git a/codex-rs/app-server/src/session_runtime/pagination.rs b/codex-rs/app-server/src/session_runtime/pagination.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..f592a683ecc7f9b61d21235d29faa73f2ec2df8e
+--- /dev/null
++++ b/codex-rs/app-server/src/session_runtime/pagination.rs
+@@ -0,0 +1,147 @@
++use std::collections::VecDeque;
++
++use base64::Engine;
++use base64::engine::general_purpose::URL_SAFE_NO_PAD;
++use codex_app_server_protocol::JSONRPCErrorError;
++use codex_app_server_protocol::SessionRuntimeCapability;
++use codex_app_server_protocol::SessionRuntimeListResponse;
++use codex_app_server_protocol::SessionRuntimeSnapshot;
++use serde::Deserialize;
++use serde::Serialize;
++
++use crate::error_code::internal_error;
++use crate::error_code::invalid_params;
++
++const DEFAULT_LIMIT: usize = 50;
++const MAX_LIMIT: usize = 100;
++const MAX_CACHED_SNAPSHOTS: usize = 16;
++
++#[derive(Default)]
++pub(super) struct SnapshotCache {
++    snapshots: VecDeque<CachedSnapshot>,
++}
++
++pub(super) struct CachedSnapshot {
++    id: String,
++    sequence: u64,
++    snapshots: Vec<SessionRuntimeSnapshot>,
++}
++
++#[derive(Debug, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++struct RuntimeCursor {
++    instance_epoch: String,
++    snapshot_sequence: u64,
++    snapshot_id: String,
++    after_thread_id: String,
++}
++
++impl SnapshotCache {
++    pub(super) fn insert(&mut self, snapshot: CachedSnapshot) {
++        self.snapshots.push_back(snapshot);
++        while self.snapshots.len() > MAX_CACHED_SNAPSHOTS {
++            self.snapshots.pop_front();
++        }
++    }
++
++    pub(super) fn page(
++        &self,
++        encoded_cursor: &str,
++        instance_epoch: &str,
++        current_sequence: u64,
++        limit: usize,
++        capabilities: Vec<SessionRuntimeCapability>,
++    ) -> Result<SessionRuntimeListResponse, JSONRPCErrorError> {
++        let cursor = decode_cursor(encoded_cursor)?;
++        if cursor.instance_epoch != instance_epoch || cursor.snapshot_sequence != current_sequence {
++            return Err(stale_cursor());
++        }
++        let snapshot = self
++            .snapshots
++            .iter()
++            .find(|snapshot| {
++                snapshot.id == cursor.snapshot_id && snapshot.sequence == cursor.snapshot_sequence
++            })
++            .ok_or_else(stale_cursor)?;
++        let start = snapshot
++            .snapshots
++            .iter()
++            .position(|item| item.thread_id == cursor.after_thread_id)
++            .map(|index| index + 1)
++            .ok_or_else(|| invalid_params("sessionRuntime/list cursor is invalid"))?;
++        snapshot.page(instance_epoch, start, limit, capabilities)
++    }
++}
++
++impl CachedSnapshot {
++    pub(super) fn new(sequence: u64, snapshots: Vec<SessionRuntimeSnapshot>) -> Self {
++        Self {
++            id: uuid::Uuid::new_v4().to_string(),
++            sequence,
++            snapshots,
++        }
++    }
++
++    pub(super) fn first_page(
++        &self,
++        instance_epoch: &str,
++        limit: usize,
++        capabilities: Vec<SessionRuntimeCapability>,
++    ) -> Result<SessionRuntimeListResponse, JSONRPCErrorError> {
++        self.page(instance_epoch, /*start*/ 0, limit, capabilities)
++    }
++
++    fn page(
++        &self,
++        instance_epoch: &str,
++        start: usize,
++        limit: usize,
++        capabilities: Vec<SessionRuntimeCapability>,
++    ) -> Result<SessionRuntimeListResponse, JSONRPCErrorError> {
++        let end = start.saturating_add(limit).min(self.snapshots.len());
++        let data = self.snapshots[start..end].to_vec();
++        let next_cursor = if end == 0 || end >= self.snapshots.len() {
++            None
++        } else {
++            Some(encode_cursor(&RuntimeCursor {
++                instance_epoch: instance_epoch.to_string(),
++                snapshot_sequence: self.sequence,
++                snapshot_id: self.id.clone(),
++                after_thread_id: self.snapshots[end - 1].thread_id.clone(),
++            })?)
++        };
++        Ok(SessionRuntimeListResponse {
++            data,
++            next_cursor,
++            instance_epoch: instance_epoch.to_string(),
++            snapshot_sequence: self.sequence,
++            capabilities,
++        })
++    }
++}
++
++pub(super) fn requested_limit(limit: Option<u32>) -> Result<usize, JSONRPCErrorError> {
++    match limit.map(|limit| limit as usize) {
++        Some(0) => Err(invalid_params("sessionRuntime/list limit must be positive")),
++        Some(limit) => Ok(limit.min(MAX_LIMIT)),
++        None => Ok(DEFAULT_LIMIT),
++    }
++}
++
++fn encode_cursor(cursor: &RuntimeCursor) -> Result<String, JSONRPCErrorError> {
++    serde_json::to_vec(cursor)
++        .map(|cursor| URL_SAFE_NO_PAD.encode(cursor))
++        .map_err(|_| internal_error("session runtime cursor could not be serialized"))
++}
++
++fn decode_cursor(cursor: &str) -> Result<RuntimeCursor, JSONRPCErrorError> {
++    let cursor = URL_SAFE_NO_PAD
++        .decode(cursor)
++        .map_err(|_| invalid_params("sessionRuntime/list cursor is invalid"))?;
++    serde_json::from_slice(&cursor)
++        .map_err(|_| invalid_params("sessionRuntime/list cursor is invalid"))
++}
++
++fn stale_cursor() -> JSONRPCErrorError {
++    invalid_params("sessionRuntime/list cursor is stale; restart pagination")
++}
+diff --git a/codex-rs/app-server/src/session_runtime/snapshot.rs b/codex-rs/app-server/src/session_runtime/snapshot.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..96be01563386fd49ef21caeb486929cb8b632d71
+--- /dev/null
++++ b/codex-rs/app-server/src/session_runtime/snapshot.rs
+@@ -0,0 +1,509 @@
++use std::collections::HashSet;
++
++use codex_app_server_protocol::GitInfo;
++use codex_app_server_protocol::JSONRPCErrorError;
++use codex_app_server_protocol::SessionRuntimeAccountBinding;
++use codex_app_server_protocol::SessionRuntimeAccountRef;
++use codex_app_server_protocol::SessionRuntimeAccountSwitchState;
++use codex_app_server_protocol::SessionRuntimeAction;
++use codex_app_server_protocol::SessionRuntimeActionAvailability;
++use codex_app_server_protocol::SessionRuntimeCapability;
++use codex_app_server_protocol::SessionRuntimeIdentity;
++use codex_app_server_protocol::SessionRuntimeLifecycle;
++use codex_app_server_protocol::SessionRuntimeLifecycleState;
++use codex_app_server_protocol::SessionRuntimePersistence;
++use codex_app_server_protocol::SessionRuntimePersistenceHealth;
++use codex_app_server_protocol::SessionRuntimePersistencePosition;
++use codex_app_server_protocol::SessionRuntimeSnapshot;
++use codex_app_server_protocol::SessionRuntimeWaitingOn;
++use codex_app_server_protocol::SessionRuntimeWriter;
++use codex_app_server_protocol::SessionRuntimeWriterState;
++use codex_app_server_protocol::ThreadActiveFlag;
++use codex_app_server_protocol::ThreadStatus;
++use codex_protocol::ThreadId;
++use codex_protocol::protocol::AgentStatus;
++use codex_protocol::protocol::ExecutionAccountBinding;
++use codex_protocol::protocol::SessionSource;
++use codex_protocol::protocol::SubAgentSource;
++use codex_thread_store::ListThreadsParams;
++use codex_thread_store::ReadThreadParams;
++use codex_thread_store::RuntimePersistenceHealth;
++use codex_thread_store::RuntimePersistencePosition;
++use codex_thread_store::RuntimeWriterOwnership;
++use codex_thread_store::SortDirection;
++use codex_thread_store::StoredThread;
++use codex_thread_store::ThreadSortKey;
++use codex_thread_store::ThreadStoreError;
++use codex_thread_store::WriterControlCapability;
++
++use super::SessionRuntimeEngine;
++use crate::error_code::internal_error;
++use crate::error_code::invalid_params;
++use crate::request_processors::thread_settings_from_config_snapshot;
++use crate::thread_status::resolve_thread_status;
++
++const STORE_PAGE_SIZE: usize = 200;
++const IDENTITY_CAPABILITY: &str = "ananke_session_identity_v1";
++const CONTROL_CAPABILITY: &str = "ananke_session_control_v1";
++const CONTROL_NOT_IMPLEMENTED: &str = "control_not_implemented";
++const RUNTIME_SNAPSHOT_UNAVAILABLE: &str = "thread store runtime state is unavailable";
++
++pub(super) enum RuntimeRecord {
++    Stored(Box<StoredThread>),
++    LoadedOnly {
++        thread_id: ThreadId,
++        session_id: String,
++        source: SessionSource,
++        cwd: String,
++        forked_from_id: Option<ThreadId>,
++        parent_thread_id: Option<ThreadId>,
++    },
++}
++
++impl SessionRuntimeEngine {
++    pub(super) async fn runtime_records(
++        &self,
++        exact_thread_id: Option<&str>,
++    ) -> Result<Vec<RuntimeRecord>, JSONRPCErrorError> {
++        if let Some(thread_id) = exact_thread_id {
++            let thread_id = ThreadId::from_string(thread_id)
++                .map_err(|_| invalid_params("sessionRuntime/list threadId is invalid"))?;
++            return self
++                .runtime_record(thread_id)
++                .await
++                .map(|record| record.into_iter().collect());
++        }
++
++        let mut stored = self.list_stored_threads().await?;
++        let mut seen = stored
++            .iter()
++            .map(|thread| thread.thread_id)
++            .collect::<HashSet<_>>();
++        let mut records = stored
++            .drain(..)
++            .map(|thread| RuntimeRecord::Stored(Box::new(thread)))
++            .collect::<Vec<_>>();
++        for thread_id in self.thread_manager.list_thread_ids().await {
++            if seen.insert(thread_id)
++                && let Some(record) = self.loaded_record(thread_id).await
++            {
++                records.push(record);
++            }
++        }
++        Ok(records)
++    }
++
++    async fn runtime_record(
++        &self,
++        thread_id: ThreadId,
++    ) -> Result<Option<RuntimeRecord>, JSONRPCErrorError> {
++        match self
++            .thread_store
++            .read_thread(ReadThreadParams {
++                thread_id,
++                include_archived: true,
++                include_history: false,
++            })
++            .await
++        {
++            Ok(thread) => Ok(Some(RuntimeRecord::Stored(Box::new(thread)))),
++            Err(ThreadStoreError::ThreadNotFound { .. }) => Ok(self.loaded_record(thread_id).await),
++            Err(_) => Err(internal_error(
++                "session runtime identity store is unavailable",
++            )),
++        }
++    }
++
++    async fn loaded_record(&self, thread_id: ThreadId) -> Option<RuntimeRecord> {
++        let thread = self.thread_manager.get_thread(thread_id).await.ok()?;
++        let configured = thread.session_configured();
++        let config = thread.config_snapshot().await;
++        Some(RuntimeRecord::LoadedOnly {
++            thread_id,
++            session_id: configured.session_id.to_string(),
++            source: config.session_source.clone(),
++            cwd: config.cwd().as_path().to_string_lossy().into_owned(),
++            forked_from_id: config.forked_from_thread_id,
++            parent_thread_id: config.parent_thread_id,
++        })
++    }
++
++    async fn list_stored_threads(&self) -> Result<Vec<StoredThread>, JSONRPCErrorError> {
++        let mut cursor = None;
++        let mut threads = Vec::new();
++        loop {
++            let page = self
++                .thread_store
++                .list_threads(ListThreadsParams {
++                    page_size: STORE_PAGE_SIZE,
++                    cursor,
++                    sort_key: ThreadSortKey::CreatedAt,
++                    sort_direction: SortDirection::Asc,
++                    allowed_sources: Vec::new(),
++                    model_providers: Some(Vec::new()),
++                    cwd_filters: None,
++                    section: None,
++                    project_id: None,
++                    archived: false,
++                    search_term: None,
++                    relation_filter: None,
++                    use_state_db_only: false,
++                })
++                .await
++                .map_err(|_| internal_error("session runtime identity store is unavailable"))?;
++            threads.extend(page.items);
++            let Some(next_cursor) = page.next_cursor else {
++                break;
++            };
++            cursor = Some(next_cursor);
++        }
++        Ok(threads)
++    }
++
++    pub(super) async fn build_snapshot(&self, record: RuntimeRecord) -> SessionRuntimeSnapshot {
++        let thread_id = record.thread_id();
++        let loaded_thread = self.thread_manager.get_thread(thread_id).await.ok();
++        let (settings, loaded_session_id) = match loaded_thread.as_ref() {
++            Some(thread) => {
++                let configured = thread.session_configured();
++                (
++                    Some(thread_settings_from_config_snapshot(
++                        &thread.config_snapshot().await,
++                    )),
++                    Some(configured.session_id.to_string()),
++                )
++            }
++            None => (None, None),
++        };
++        let subscriptions = self.thread_state_manager.runtime_snapshot(thread_id).await;
++        let mut status = self
++            .thread_watch_manager
++            .loaded_status_for_thread(&thread_id.to_string())
++            .await;
++        if let Some(thread) = loaded_thread.as_ref()
++            && record.is_thread_spawn_subagent()
++            && matches!(status, ThreadStatus::NotLoaded)
++        {
++            status = subagent_status(thread.agent_status().await);
++        }
++        let closing = self
++            .pending_thread_unloads
++            .lock()
++            .await
++            .contains(&thread_id);
++        let pending_server_request = !self
++            .outgoing
++            .pending_requests_for_thread(thread_id)
++            .await
++            .is_empty();
++        let store_runtime = self
++            .thread_store
++            .runtime_snapshot(thread_id)
++            .await
++            .unwrap_or_else(|_| {
++                codex_thread_store::ThreadStoreRuntimeSnapshot::unavailable(
++                    RUNTIME_SNAPSHOT_UNAVAILABLE,
++                )
++            });
++        let current_binding = match loaded_thread.as_ref() {
++            Some(thread) => Ok(Some(thread.execution_account().binding.clone())),
++            None => self.thread_store.execution_account_binding(thread_id).await,
++        };
++        let active_binding = match subscriptions.active_turn_id.as_ref() {
++            Some(turn_id) => self
++                .thread_store
++                .turn_execution_account(thread_id, turn_id.clone())
++                .await
++                .ok()
++                .flatten(),
++            None => None,
++        };
++        let account_capability = self.account_registry.runtime_capability().await.ok();
++        let lifecycle = lifecycle_snapshot(
++            status,
++            loaded_thread.is_some(),
++            closing,
++            subscriptions.active_turn_id,
++            subscriptions.subscriber_count,
++            subscriptions.client_incarnations,
++            pending_server_request,
++            record.updated_at(),
++            subscriptions.unload_at,
++        );
++        let writer = writer_snapshot(&store_runtime);
++        let account =
++            account_snapshot(current_binding, active_binding, account_capability.as_ref());
++        SessionRuntimeSnapshot {
++            thread_id: thread_id.to_string(),
++            state_revision: 0,
++            identity: record.identity(settings.or(subscriptions.settings), loaded_session_id),
++            lifecycle,
++            writer,
++            persistence: persistence_snapshot(&store_runtime),
++            account,
++            actions: unavailable_actions(),
++        }
++    }
++
++    pub(super) async fn process_capabilities(&self) -> Vec<SessionRuntimeCapability> {
++        let (available, deny_reason) = match self.thread_store.writer_control_capability() {
++            WriterControlCapability::Enabled { .. } => (true, None),
++            WriterControlCapability::Disabled { reason } => (false, Some(reason)),
++        };
++        vec![
++            SessionRuntimeCapability {
++                name: IDENTITY_CAPABILITY.to_string(),
++                available: true,
++                deny_reason: None,
++            },
++            SessionRuntimeCapability {
++                name: CONTROL_CAPABILITY.to_string(),
++                available,
++                deny_reason,
++            },
++        ]
++    }
++}
++
++impl RuntimeRecord {
++    fn thread_id(&self) -> ThreadId {
++        match self {
++            Self::Stored(thread) => thread.thread_id,
++            Self::LoadedOnly { thread_id, .. } => *thread_id,
++        }
++    }
++
++    fn updated_at(&self) -> Option<i64> {
++        match self {
++            Self::Stored(thread) => Some(thread.updated_at.timestamp()),
++            Self::LoadedOnly { .. } => None,
++        }
++    }
++
++    fn is_thread_spawn_subagent(&self) -> bool {
++        matches!(
++            self.source(),
++            SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
++        )
++    }
++
++    fn source(&self) -> &SessionSource {
++        match self {
++            Self::Stored(thread) => &thread.source,
++            Self::LoadedOnly { source, .. } => source,
++        }
++    }
++
++    fn identity(
++        self,
++        settings: Option<codex_app_server_protocol::ThreadSettings>,
++        loaded_session_id: Option<String>,
++    ) -> SessionRuntimeIdentity {
++        match self {
++            Self::Stored(thread) => SessionRuntimeIdentity {
++                session_id: loaded_session_id.unwrap_or_else(|| thread.thread_id.to_string()),
++                forked_from_id: thread.forked_from_id.map(|id| id.to_string()),
++                parent_thread_id: thread.parent_thread_id.map(|id| id.to_string()),
++                name: thread.name,
++                source: thread.source.to_string(),
++                cwd: thread.cwd.to_string_lossy().into_owned(),
++                git_info: thread.git_info.map(|git| GitInfo {
++                    sha: git.commit_hash.map(|sha| sha.0),
++                    branch: git.branch,
++                    origin_url: git.repository_url.and_then(sanitize_git_origin),
++                }),
++                settings,
++            },
++            Self::LoadedOnly {
++                thread_id: _,
++                session_id,
++                source,
++                cwd,
++                forked_from_id,
++                parent_thread_id,
++            } => SessionRuntimeIdentity {
++                session_id,
++                forked_from_id: forked_from_id.map(|id| id.to_string()),
++                parent_thread_id: parent_thread_id.map(|id| id.to_string()),
++                name: None,
++                source: source.to_string(),
++                cwd,
++                git_info: None,
++                settings,
++            },
++        }
++    }
++}
++
++#[allow(clippy::too_many_arguments)]
++fn lifecycle_snapshot(
++    status: ThreadStatus,
++    loaded: bool,
++    closing: bool,
++    active_turn_id: Option<String>,
++    subscriber_count: u32,
++    client_incarnations: Vec<String>,
++    pending_server_request: bool,
++    last_activity_at: Option<i64>,
++    unload_at: Option<i64>,
++) -> SessionRuntimeLifecycle {
++    let mut waiting_on = match &status {
++        ThreadStatus::Active { active_flags } => active_flags
++            .iter()
++            .map(|flag| match flag {
++                ThreadActiveFlag::WaitingOnApproval => SessionRuntimeWaitingOn::Approval,
++                ThreadActiveFlag::WaitingOnUserInput => SessionRuntimeWaitingOn::UserInput,
++            })
++            .collect::<Vec<_>>(),
++        ThreadStatus::NotLoaded | ThreadStatus::Idle | ThreadStatus::SystemError => Vec::new(),
++    };
++    if pending_server_request {
++        waiting_on.push(SessionRuntimeWaitingOn::ServerRequest);
++    }
++    waiting_on.sort_by_key(|waiting| *waiting as u8);
++    waiting_on.dedup();
++    let state = if closing {
++        SessionRuntimeLifecycleState::Closing
++    } else {
++        match status {
++            ThreadStatus::NotLoaded if loaded => SessionRuntimeLifecycleState::Loaded,
++            ThreadStatus::NotLoaded => SessionRuntimeLifecycleState::NotLoaded,
++            ThreadStatus::SystemError if loaded => SessionRuntimeLifecycleState::Loaded,
++            ThreadStatus::SystemError => SessionRuntimeLifecycleState::NotLoaded,
++            ThreadStatus::Idle => SessionRuntimeLifecycleState::Idle,
++            ThreadStatus::Active { .. } => SessionRuntimeLifecycleState::Active,
++        }
++    };
++    SessionRuntimeLifecycle {
++        state,
++        active_turn_id,
++        waiting_on,
++        subscriber_count,
++        client_incarnations,
++        last_activity_at,
++        unload_at,
++    }
++}
++
++fn subagent_status(status: AgentStatus) -> ThreadStatus {
++    match status {
++        AgentStatus::Running => {
++            resolve_thread_status(ThreadStatus::Idle, /*has_in_progress_turn*/ true)
++        }
++        AgentStatus::PendingInit | AgentStatus::Interrupted | AgentStatus::Completed(_) => {
++            ThreadStatus::Idle
++        }
++        AgentStatus::Errored(_) => ThreadStatus::SystemError,
++        AgentStatus::Shutdown | AgentStatus::NotFound => ThreadStatus::NotLoaded,
++    }
++}
++
++fn writer_snapshot(
++    runtime: &codex_thread_store::ThreadStoreRuntimeSnapshot,
++) -> SessionRuntimeWriter {
++    SessionRuntimeWriter {
++        state: match runtime.writer_ownership {
++            RuntimeWriterOwnership::None => SessionRuntimeWriterState::None,
++            RuntimeWriterOwnership::OwnedHere => SessionRuntimeWriterState::OwnedHere,
++            RuntimeWriterOwnership::OwnedElsewhere => SessionRuntimeWriterState::OwnedElsewhere,
++            RuntimeWriterOwnership::Unavailable => SessionRuntimeWriterState::Unavailable,
++        },
++        store_id: runtime.writer_store_id.clone(),
++        writer_generation: runtime.writer_generation,
++        deny_reason: runtime.writer_deny_reason.clone(),
++    }
++}
++
++fn persistence_snapshot(
++    runtime: &codex_thread_store::ThreadStoreRuntimeSnapshot,
++) -> SessionRuntimePersistence {
++    SessionRuntimePersistence {
++        jsonl: runtime.jsonl.map(persistence_position),
++        sqlite: runtime.sqlite.map(persistence_position),
++        lag: runtime.lag,
++        flush_health: persistence_health(runtime.flush_health),
++        materialize_health: persistence_health(runtime.materialize_health),
++        flushed_at: runtime.flushed_at,
++        materialized_at: runtime.materialized_at,
++        deny_reason: runtime.persistence_deny_reason.clone(),
++    }
++}
++
++fn persistence_position(position: RuntimePersistencePosition) -> SessionRuntimePersistencePosition {
++    SessionRuntimePersistencePosition {
++        ordinal: position.ordinal,
++        offset: position.offset,
++    }
++}
++
++fn persistence_health(health: RuntimePersistenceHealth) -> SessionRuntimePersistenceHealth {
++    match health {
++        RuntimePersistenceHealth::Unknown => SessionRuntimePersistenceHealth::Unknown,
++        RuntimePersistenceHealth::Healthy => SessionRuntimePersistenceHealth::Healthy,
++        RuntimePersistenceHealth::Degraded => SessionRuntimePersistenceHealth::Degraded,
++        RuntimePersistenceHealth::Failed => SessionRuntimePersistenceHealth::Failed,
++    }
++}
++
++fn account_snapshot(
++    current: Result<Option<ExecutionAccountBinding>, ThreadStoreError>,
++    active_turn: Option<ExecutionAccountBinding>,
++    capability: Option<&codex_app_server_protocol::AccountSlotCapability>,
++) -> SessionRuntimeAccountBinding {
++    let (current, binding_error) = match current {
++        Ok(current) => (current.map(account_ref), None),
++        Err(_) => (
++            None,
++            Some("execution_account_binding_unavailable".to_string()),
++        ),
++    };
++    let deny_reason = binding_error
++        .or_else(|| capability.and_then(|capability| capability.deny_reason.clone()))
++        .or_else(|| current.is_none().then(|| "account_unbound".to_string()));
++    SessionRuntimeAccountBinding {
++        switch_state: if current.is_none() {
++            SessionRuntimeAccountSwitchState::Unbound
++        } else if capability.is_none() {
++            SessionRuntimeAccountSwitchState::Degraded
++        } else {
++            SessionRuntimeAccountSwitchState::Stable
++        },
++        current,
++        active_turn: active_turn.map(account_ref),
++        switch_target_slot_id: None,
++        deny_reason,
++    }
++}
++
++fn account_ref(binding: ExecutionAccountBinding) -> SessionRuntimeAccountRef {
++    SessionRuntimeAccountRef {
++        account_slot_id: binding.slot_id,
++        execution_generation: binding.generation,
++    }
++}
++
++fn unavailable_actions() -> Vec<SessionRuntimeActionAvailability> {
++    [
++        SessionRuntimeAction::Relinquish,
++        SessionRuntimeAction::SwitchAccount,
++    ]
++    .into_iter()
++    .map(|action| SessionRuntimeActionAvailability {
++        action,
++        allowed: false,
++        deny_reason: Some(CONTROL_NOT_IMPLEMENTED.to_string()),
++    })
++    .collect()
++}
++
++fn sanitize_git_origin(origin: String) -> Option<String> {
++    let mut url = url::Url::parse(&origin).ok()?;
++    if !matches!(url.scheme(), "http" | "https" | "ssh") || url.host().is_none() {
++        return None;
++    }
++    url.set_username("").ok()?;
++    url.set_password(None).ok()?;
++    url.set_query(None);
++    url.set_fragment(None);
++    Some(url.into())
++}
+diff --git a/codex-rs/app-server/src/session_runtime/tests.rs b/codex-rs/app-server/src/session_runtime/tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..20e4dd4a4ec4a8beb67c68ec58b6a40c354f02cf
+--- /dev/null
++++ b/codex-rs/app-server/src/session_runtime/tests.rs
+@@ -0,0 +1,190 @@
++use std::collections::VecDeque;
++
++use codex_app_server_protocol::SessionRuntimeAccountBinding;
++use codex_app_server_protocol::SessionRuntimeAccountSwitchState;
++use codex_app_server_protocol::SessionRuntimeIdentity;
++use codex_app_server_protocol::SessionRuntimeLifecycle;
++use codex_app_server_protocol::SessionRuntimeLifecycleState;
++use codex_app_server_protocol::SessionRuntimeOperation;
++use codex_app_server_protocol::SessionRuntimeOperationAction;
++use codex_app_server_protocol::SessionRuntimeOperationStatus;
++use codex_app_server_protocol::SessionRuntimePersistence;
++use codex_app_server_protocol::SessionRuntimePersistenceHealth;
++use codex_app_server_protocol::SessionRuntimeSnapshot;
++use codex_app_server_protocol::SessionRuntimeWriter;
++use codex_app_server_protocol::SessionRuntimeWriterState;
++use codex_protocol::ThreadId;
++use pretty_assertions::assert_eq;
++
++use super::EngineState;
++use super::RuntimeActivity;
++use super::SessionRuntimeEngine;
++use super::operations::OperationCache;
++use super::operations::evict_terminal_operations;
++use super::operations::retained_counts;
++use super::operations::valid_initial_status;
++use super::operations::valid_transition;
++use super::pagination::CachedSnapshot;
++use super::pagination::SnapshotCache;
++
++fn snapshot(thread_id: ThreadId) -> SessionRuntimeSnapshot {
++    SessionRuntimeSnapshot {
++        thread_id: thread_id.to_string(),
++        state_revision: 0,
++        identity: SessionRuntimeIdentity {
++            session_id: thread_id.to_string(),
++            forked_from_id: None,
++            parent_thread_id: None,
++            name: None,
++            source: "test".to_string(),
++            cwd: "/sanitized/project".to_string(),
++            git_info: None,
++            settings: None,
++        },
++        lifecycle: SessionRuntimeLifecycle {
++            state: SessionRuntimeLifecycleState::Idle,
++            active_turn_id: None,
++            waiting_on: Vec::new(),
++            subscriber_count: 1,
++            client_incarnations: vec!["opaque-client".to_string()],
++            last_activity_at: Some(10),
++            unload_at: None,
++        },
++        writer: SessionRuntimeWriter {
++            state: SessionRuntimeWriterState::OwnedHere,
++            store_id: Some("opaque-store".to_string()),
++            writer_generation: Some(3),
++            deny_reason: None,
++        },
++        persistence: SessionRuntimePersistence {
++            jsonl: None,
++            sqlite: None,
++            lag: None,
++            flush_health: SessionRuntimePersistenceHealth::Unknown,
++            materialize_health: SessionRuntimePersistenceHealth::Unknown,
++            flushed_at: None,
++            materialized_at: None,
++            deny_reason: None,
++        },
++        account: SessionRuntimeAccountBinding {
++            current: None,
++            active_turn: None,
++            switch_state: SessionRuntimeAccountSwitchState::Unbound,
++            switch_target_slot_id: None,
++            deny_reason: Some("account_unbound".to_string()),
++        },
++        actions: Vec::new(),
++    }
++}
++
++fn operation(id: usize, status: SessionRuntimeOperationStatus) -> SessionRuntimeOperation {
++    SessionRuntimeOperation {
++        operation_id: format!("operation-{id}"),
++        request_fingerprint: format!("fingerprint-{id}"),
++        action: SessionRuntimeOperationAction::ThreadRelinquish,
++        status,
++        thread_id: Some(ThreadId::default().to_string()),
++        account_slot_id: None,
++        state_revision: None,
++        writer_generation: None,
++        execution_generation: None,
++        error: None,
++        updated_at: 1,
++    }
++}
++
++#[test]
++fn pagination_cursor_is_stable_and_restarts_after_sequence_change() {
++    let snapshots = (0..3)
++        .map(|_index| snapshot(ThreadId::new()))
++        .collect::<Vec<_>>();
++    let cached = CachedSnapshot::new(7, snapshots);
++    let first = cached
++        .first_page("epoch-a", 1, Vec::new())
++        .expect("first page");
++    let cursor = first.next_cursor.expect("next cursor");
++    let mut cache = SnapshotCache::default();
++    cache.insert(cached);
++
++    let second = cache
++        .page(&cursor, "epoch-a", 7, 1, Vec::new())
++        .expect("stable second page");
++
++    assert_eq!(first.data.len(), 1);
++    assert_eq!(second.data.len(), 1);
++    assert!(cache.page(&cursor, "epoch-a", 8, 1, Vec::new()).is_err());
++    assert!(cache.page(&cursor, "epoch-b", 7, 1, Vec::new()).is_err());
++}
++
++#[test]
++fn material_changes_advance_only_the_thread_revision() {
++    let thread_id = ThreadId::default();
++    let mut state = EngineState::default();
++    let mut first = snapshot(thread_id);
++    SessionRuntimeEngine::apply_runtime_state(&mut state, &mut first, RuntimeActivity::Observe);
++    let mut identical = snapshot(thread_id);
++    SessionRuntimeEngine::apply_runtime_state(&mut state, &mut identical, RuntimeActivity::Observe);
++    let mut changed = snapshot(thread_id);
++    changed.writer.writer_generation = Some(4);
++    SessionRuntimeEngine::apply_runtime_state(&mut state, &mut changed, RuntimeActivity::Observe);
++
++    assert_eq!((first.state_revision, identical.state_revision), (1, 1));
++    assert_eq!(changed.state_revision, 2);
++}
++
++#[test]
++fn operation_cache_never_evicts_accepted_or_running_entries() {
++    let mut cache = OperationCache::default();
++    for index in 0..129 {
++        let operation = operation(index, SessionRuntimeOperationStatus::Ready);
++        cache
++            .operations
++            .insert(operation.operation_id.clone(), operation);
++    }
++    cache.terminal_order = (0..129)
++        .map(|index| format!("operation-{index}"))
++        .collect::<VecDeque<_>>();
++    for (index, status) in [
++        SessionRuntimeOperationStatus::Accepted,
++        SessionRuntimeOperationStatus::Running,
++    ]
++    .into_iter()
++    .enumerate()
++    {
++        let operation = operation(1000 + index, status);
++        cache
++            .operations
++            .insert(operation.operation_id.clone(), operation);
++    }
++
++    evict_terminal_operations(&mut cache);
++    let state = EngineState {
++        operations: cache,
++        ..EngineState::default()
++    };
++
++    assert_eq!(retained_counts(&state), (2, 128));
++    assert!(state.operations.operations.contains_key("operation-1000"));
++    assert!(state.operations.operations.contains_key("operation-1001"));
++    assert!(!state.operations.operations.contains_key("operation-0"));
++}
++
++#[test]
++fn operation_transitions_do_not_regress_terminal_state() {
++    assert!(valid_initial_status(
++        SessionRuntimeOperationStatus::Accepted
++    ));
++    assert!(!valid_initial_status(SessionRuntimeOperationStatus::Ready));
++    assert!(valid_transition(
++        SessionRuntimeOperationStatus::Accepted,
++        SessionRuntimeOperationStatus::Running,
++    ));
++    assert!(valid_transition(
++        SessionRuntimeOperationStatus::Running,
++        SessionRuntimeOperationStatus::Ready,
++    ));
++    assert!(!valid_transition(
++        SessionRuntimeOperationStatus::Ready,
++        SessionRuntimeOperationStatus::Running,
++    ));
++}
+diff --git a/codex-rs/app-server/src/thread_state.rs b/codex-rs/app-server/src/thread_state.rs
+index 46dc35a36b0b6cf892fa6265e249998442757347..13580f9d784df9e3bd374f1d7d3caa3948dc35b8 100644
+--- a/codex-rs/app-server/src/thread_state.rs
++++ b/codex-rs/app-server/src/thread_state.rs
+@@ -22,6 +22,7 @@ use codex_rollout::state_db::StateDbHandle;
+ use codex_utils_path_uri::LegacyAppPathString;
+ use std::collections::HashMap;
+ use std::collections::HashSet;
++use std::future::Future;
+ use std::sync::Arc;
+ use std::sync::Mutex as StdMutex;
+ use std::sync::Weak;
+@@ -109,7 +110,29 @@ pub(crate) struct ThreadState {
+     watch_registration: WatchRegistration,
+ }
+ 
++#[derive(Clone, Debug, Default)]
++pub(crate) struct ThreadSubscriptionSnapshot {
++    pub(crate) subscriber_count: u32,
++    pub(crate) client_incarnations: Vec<String>,
++    pub(crate) active_turn_id: Option<String>,
++    pub(crate) settings: Option<ThreadSettings>,
++    pub(crate) unload_at: Option<i64>,
++}
++
++pub(crate) enum PendingUnloadSubscription<T> {
++    PendingUnload,
++    ConnectionClosed,
++    Subscribed(T),
++}
++
+ impl ThreadState {
++    fn runtime_snapshot(&self) -> (Option<String>, Option<ThreadSettings>) {
++        (
++            self.active_turn_snapshot().map(|turn| turn.id),
++            self.last_thread_settings.clone(),
++        )
++    }
++
+     pub(crate) fn listener_matches(&self, conversation: &Arc<CodexThread>) -> bool {
+         self.listener_thread
+             .as_ref()
+@@ -261,6 +284,22 @@ mod tests {
+         assert_eq!(results, vec![true, false, true, false]);
+     }
+ 
++    #[tokio::test]
++    async fn unload_target_updates_and_clears_in_runtime_snapshot() {
++        let manager = ThreadStateManager::new();
++        let thread_id = ThreadId::default();
++        manager.thread_state(thread_id).await;
++
++        manager.set_unload_at(thread_id, Some(123)).await;
++        assert_eq!(
++            manager.runtime_snapshot(thread_id).await.unload_at,
++            Some(123)
++        );
++
++        manager.set_unload_at(thread_id, None).await;
++        assert_eq!(manager.runtime_snapshot(thread_id).await.unload_at, None);
++    }
++
+     fn thread_settings(model: &str) -> ThreadSettings {
+         ThreadSettings {
+             cwd: AbsolutePathBuf::from_absolute_path("/tmp").expect("absolute path"),
+@@ -293,6 +332,7 @@ struct ThreadEntry {
+     state: Arc<Mutex<ThreadState>>,
+     connection_ids: HashSet<ConnectionId>,
+     has_connections_watcher: watch::Sender<bool>,
++    unload_at: Option<i64>,
+ }
+ 
+ impl Default for ThreadEntry {
+@@ -301,6 +341,7 @@ impl Default for ThreadEntry {
+             state: Arc::new(Mutex::new(ThreadState::default())),
+             connection_ids: HashSet::new(),
+             has_connections_watcher: watch::channel(false).0,
++            unload_at: None,
+         }
+     }
+ }
+@@ -317,11 +358,17 @@ impl ThreadEntry {
+ 
+ #[derive(Default)]
+ struct ThreadStateManagerInner {
+-    live_connections: HashMap<ConnectionId, ConnectionCapabilities>,
++    live_connections: HashMap<ConnectionId, LiveConnection>,
+     threads: HashMap<ThreadId, ThreadEntry>,
+     thread_ids_by_connection: HashMap<ConnectionId, HashSet<ThreadId>>,
+ }
+ 
++#[derive(Clone, Copy)]
++struct LiveConnection {
++    capabilities: ConnectionCapabilities,
++    incarnation: uuid::Uuid,
++}
++
+ #[derive(Clone, Copy, Default)]
+ pub(crate) struct ConnectionCapabilities {
+     pub(crate) request_attestation: bool,
+@@ -334,6 +381,7 @@ pub(crate) struct ThreadStateManager {
+     // enqueue work on the active per-thread listener.
+     listener_commands:
+         Arc<StdMutex<HashMap<ThreadId, mpsc::UnboundedSender<ThreadListenerCommand>>>>,
++    runtime_engine: Arc<StdMutex<Option<Weak<crate::session_runtime::SessionRuntimeEngine>>>>,
+ }
+ 
+ impl ThreadStateManager {
+@@ -341,16 +389,49 @@ impl ThreadStateManager {
+         Self::default()
+     }
+ 
++    pub(crate) fn attach_runtime_engine(
++        &self,
++        runtime_engine: &Arc<crate::session_runtime::SessionRuntimeEngine>,
++    ) {
++        *self
++            .runtime_engine
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner) =
++            Some(Arc::downgrade(runtime_engine));
++    }
++
++    fn runtime_engine(&self) -> Option<Arc<crate::session_runtime::SessionRuntimeEngine>> {
++        self.runtime_engine
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .as_ref()
++            .and_then(Weak::upgrade)
++    }
++
++    pub(crate) async fn publish_runtime(&self, thread_id: ThreadId) {
++        if let Some(runtime_engine) = self.runtime_engine() {
++            runtime_engine.publish_thread(thread_id).await;
++        }
++    }
++
++    pub(crate) fn mark_runtime_dirty(&self) {
++        if let Some(runtime_engine) = self.runtime_engine() {
++            runtime_engine.mark_dirty();
++        }
++    }
++
+     pub(crate) async fn connection_initialized(
+         &self,
+         connection_id: ConnectionId,
+         capabilities: ConnectionCapabilities,
+     ) {
+-        self.state
+-            .lock()
+-            .await
+-            .live_connections
+-            .insert(connection_id, capabilities);
++        self.state.lock().await.live_connections.insert(
++            connection_id,
++            LiveConnection {
++                capabilities,
++                incarnation: uuid::Uuid::new_v4(),
++            },
++        );
+     }
+ 
+     pub(crate) async fn first_attestation_capable_connection_for_thread(
+@@ -367,6 +448,7 @@ impl ThreadStateManager {
+                 state
+                     .live_connections
+                     .get(connection_id)?
++                    .capabilities
+                     .request_attestation
+                     .then_some(*connection_id)
+             })
+@@ -399,6 +481,59 @@ impl ThreadStateManager {
+             .unwrap_or_default()
+     }
+ 
++    pub(crate) async fn runtime_snapshot(&self, thread_id: ThreadId) -> ThreadSubscriptionSnapshot {
++        let (state_handle, subscriber_count, client_incarnations, unload_at) = {
++            let state = self.state.lock().await;
++            let Some(entry) = state.threads.get(&thread_id) else {
++                return ThreadSubscriptionSnapshot::default();
++            };
++            let mut client_incarnations = entry
++                .connection_ids
++                .iter()
++                .filter_map(|connection_id| {
++                    state
++                        .live_connections
++                        .get(connection_id)
++                        .map(|connection| connection.incarnation.to_string())
++                })
++                .collect::<Vec<_>>();
++            client_incarnations.sort();
++            (
++                entry.state.clone(),
++                u32::try_from(entry.connection_ids.len()).unwrap_or(u32::MAX),
++                client_incarnations,
++                entry.unload_at,
++            )
++        };
++        let (active_turn_id, settings) = state_handle.lock().await.runtime_snapshot();
++        ThreadSubscriptionSnapshot {
++            subscriber_count,
++            client_incarnations,
++            active_turn_id,
++            settings,
++            unload_at,
++        }
++    }
++
++    pub(crate) async fn set_unload_at(&self, thread_id: ThreadId, unload_at: Option<i64>) {
++        self.mark_runtime_dirty();
++        let changed = {
++            let mut state = self.state.lock().await;
++            let Some(entry) = state.threads.get_mut(&thread_id) else {
++                return;
++            };
++            if entry.unload_at == unload_at {
++                false
++            } else {
++                entry.unload_at = unload_at;
++                true
++            }
++        };
++        if changed {
++            self.publish_runtime(thread_id).await;
++        }
++    }
++
+     pub(crate) async fn thread_state(&self, thread_id: ThreadId) -> Arc<Mutex<ThreadState>> {
+         let mut state = self.state.lock().await;
+         state.threads.entry(thread_id).or_default().state.clone()
+@@ -434,6 +569,7 @@ impl ThreadStateManager {
+     }
+ 
+     pub(crate) async fn remove_thread_state(&self, thread_id: ThreadId) {
++        self.mark_runtime_dirty();
+         let thread_state = {
+             let mut state = self.state.lock().await;
+             let thread_state = state
+@@ -459,6 +595,7 @@ impl ThreadStateManager {
+             );
+             thread_state.clear_listener();
+         }
++        self.publish_runtime(thread_id).await;
+     }
+ 
+     pub(crate) async fn clear_all_listeners(&self) {
+@@ -473,15 +610,18 @@ impl ThreadStateManager {
+ 
+         for (thread_id, thread_state) in thread_states {
+             self.unregister_listener_command_tx(thread_id);
+-            let mut thread_state = thread_state.lock().await;
+-            tracing::debug!(
+-                thread_id = %thread_id,
+-                listener_generation = thread_state.listener_generation,
+-                had_listener = thread_state.cancel_tx.is_some(),
+-                had_active_turn = thread_state.active_turn_snapshot().is_some(),
+-                "clearing thread listener during app-server shutdown"
+-            );
+-            thread_state.clear_listener();
++            {
++                let mut thread_state = thread_state.lock().await;
++                tracing::debug!(
++                    thread_id = %thread_id,
++                    listener_generation = thread_state.listener_generation,
++                    had_listener = thread_state.cancel_tx.is_some(),
++                    had_active_turn = thread_state.active_turn_snapshot().is_some(),
++                    "clearing thread listener during app-server shutdown"
++                );
++                thread_state.clear_listener();
++            }
++            self.set_unload_at(thread_id, None).await;
+         }
+     }
+ 
+@@ -490,6 +630,7 @@ impl ThreadStateManager {
+         thread_id: ThreadId,
+         connection_id: ConnectionId,
+     ) -> bool {
++        self.mark_runtime_dirty();
+         {
+             let mut state = self.state.lock().await;
+             if !state.threads.contains_key(&thread_id) {
+@@ -516,6 +657,7 @@ impl ThreadStateManager {
+             }
+         };
+ 
++        self.publish_runtime(thread_id).await;
+         true
+     }
+ 
+@@ -529,12 +671,50 @@ impl ThreadStateManager {
+             .is_some_and(|thread_entry| !thread_entry.connection_ids.is_empty())
+     }
+ 
++    #[cfg(test)]
+     pub(crate) async fn try_ensure_connection_subscribed(
+         &self,
+         thread_id: ThreadId,
+         connection_id: ConnectionId,
+         experimental_raw_events: bool,
+     ) -> Option<Arc<Mutex<ThreadState>>> {
++        let thread_state = self
++            .try_ensure_connection_subscribed_without_runtime_publish(
++                thread_id,
++                connection_id,
++                experimental_raw_events,
++            )
++            .await?;
++        self.publish_runtime(thread_id).await;
++        Some(thread_state)
++    }
++
++    pub(crate) async fn try_ensure_connection_subscribed_unless_pending_unload(
++        &self,
++        pending_thread_unloads: &Mutex<HashSet<ThreadId>>,
++        thread_id: ThreadId,
++        connection_id: ConnectionId,
++        experimental_raw_events: bool,
++    ) -> PendingUnloadSubscription<Arc<Mutex<ThreadState>>> {
++        self.subscribe_unless_pending_unload(
++            pending_thread_unloads,
++            thread_id,
++            self.try_ensure_connection_subscribed_without_runtime_publish(
++                thread_id,
++                connection_id,
++                experimental_raw_events,
++            ),
++        )
++        .await
++    }
++
++    async fn try_ensure_connection_subscribed_without_runtime_publish(
++        &self,
++        thread_id: ThreadId,
++        connection_id: ConnectionId,
++        experimental_raw_events: bool,
++    ) -> Option<Arc<Mutex<ThreadState>>> {
++        self.mark_runtime_dirty();
+         let thread_state = {
+             let mut state = self.state.lock().await;
+             if !state.live_connections.contains_key(&connection_id) {
+@@ -559,14 +739,44 @@ impl ThreadStateManager {
+         Some(thread_state)
+     }
+ 
++    #[cfg(test)]
+     pub(crate) async fn try_add_connection_to_thread(
+         &self,
+         thread_id: ThreadId,
+         connection_id: ConnectionId,
+     ) -> bool {
++        let subscribed = self
++            .try_add_connection_to_thread_without_runtime_publish(thread_id, connection_id)
++            .await;
++        if subscribed.is_some() {
++            self.publish_runtime(thread_id).await;
++        }
++        subscribed.is_some()
++    }
++
++    pub(crate) async fn try_add_connection_to_thread_unless_pending_unload(
++        &self,
++        pending_thread_unloads: &Mutex<HashSet<ThreadId>>,
++        thread_id: ThreadId,
++        connection_id: ConnectionId,
++    ) -> PendingUnloadSubscription<()> {
++        self.subscribe_unless_pending_unload(
++            pending_thread_unloads,
++            thread_id,
++            self.try_add_connection_to_thread_without_runtime_publish(thread_id, connection_id),
++        )
++        .await
++    }
++
++    async fn try_add_connection_to_thread_without_runtime_publish(
++        &self,
++        thread_id: ThreadId,
++        connection_id: ConnectionId,
++    ) -> Option<()> {
++        self.mark_runtime_dirty();
+         let mut state = self.state.lock().await;
+         if !state.live_connections.contains_key(&connection_id) {
+-            return false;
++            return None;
+         }
+         state
+             .thread_ids_by_connection
+@@ -576,11 +786,36 @@ impl ThreadStateManager {
+         let thread_entry = state.threads.entry(thread_id).or_default();
+         thread_entry.connection_ids.insert(connection_id);
+         thread_entry.update_has_connections();
+-        true
++        Some(())
++    }
++
++    #[expect(
++        clippy::await_holding_invalid_type,
++        reason = "the pending-unload fence must cover the subscriber-state mutation"
++    )]
++    async fn subscribe_unless_pending_unload<T>(
++        &self,
++        pending_thread_unloads: &Mutex<HashSet<ThreadId>>,
++        thread_id: ThreadId,
++        subscription: impl Future<Output = Option<T>>,
++    ) -> PendingUnloadSubscription<T> {
++        let subscribed = {
++            let pending_thread_unloads = pending_thread_unloads.lock().await;
++            if pending_thread_unloads.contains(&thread_id) {
++                return PendingUnloadSubscription::PendingUnload;
++            }
++            let Some(subscribed) = subscription.await else {
++                return PendingUnloadSubscription::ConnectionClosed;
++            };
++            subscribed
++        };
++        self.publish_runtime(thread_id).await;
++        PendingUnloadSubscription::Subscribed(subscribed)
+     }
+ 
+     pub(crate) async fn remove_connection(&self, connection_id: ConnectionId) -> Vec<ThreadId> {
+-        {
++        self.mark_runtime_dirty();
++        let (empty_thread_ids, affected_thread_ids) = {
+             let mut state = self.state.lock().await;
+             state.live_connections.remove(&connection_id);
+             let thread_ids = state
+@@ -593,16 +828,22 @@ impl ThreadStateManager {
+                     thread_entry.update_has_connections();
+                 }
+             }
+-            thread_ids
+-                .into_iter()
++            let empty_thread_ids = thread_ids
++                .iter()
++                .copied()
+                 .filter(|thread_id| {
+                     state
+                         .threads
+                         .get(thread_id)
+                         .is_some_and(|thread_entry| thread_entry.connection_ids.is_empty())
+                 })
+-                .collect::<Vec<_>>()
++                .collect::<Vec<_>>();
++            (empty_thread_ids, thread_ids)
++        };
++        for thread_id in affected_thread_ids {
++            self.publish_runtime(thread_id).await;
+         }
++        empty_thread_ids
+     }
+ 
+     pub(crate) async fn subscribe_to_has_connections(
+diff --git a/codex-rs/app-server/src/thread_status.rs b/codex-rs/app-server/src/thread_status.rs
+index 4f0a83e7056b987b52ae372a49ade989a5c527e6..01f993704aefe51c81f9537b1a9d247b89a84633 100644
+--- a/codex-rs/app-server/src/thread_status.rs
++++ b/codex-rs/app-server/src/thread_status.rs
+@@ -10,6 +10,8 @@ use codex_app_server_protocol::ThreadStatusChangedNotification;
+ use codex_protocol::ThreadId;
+ use std::collections::HashMap;
+ use std::sync::Arc;
++use std::sync::Mutex as StdMutex;
++use std::sync::Weak;
+ use tokio::sync::Mutex;
+ #[cfg(test)]
+ use tokio::sync::mpsc;
+@@ -20,6 +22,7 @@ pub(crate) struct ThreadWatchManager {
+     state: Arc<Mutex<ThreadWatchState>>,
+     outgoing: Option<Arc<OutgoingMessageSender>>,
+     running_turn_count_tx: watch::Sender<usize>,
++    runtime_engine: Arc<StdMutex<Option<Weak<crate::session_runtime::SessionRuntimeEngine>>>>,
+ }
+ 
+ pub(crate) struct ThreadWatchActiveGuard {
+@@ -76,6 +79,7 @@ impl ThreadWatchManager {
+             state: Arc::new(Mutex::new(ThreadWatchState::default())),
+             outgoing: None,
+             running_turn_count_tx,
++            runtime_engine: Arc::new(StdMutex::new(None)),
+         }
+     }
+ 
+@@ -85,9 +89,29 @@ impl ThreadWatchManager {
+             state: Arc::new(Mutex::new(ThreadWatchState::default())),
+             outgoing: Some(outgoing),
+             running_turn_count_tx,
++            runtime_engine: Arc::new(StdMutex::new(None)),
+         }
+     }
+ 
++    pub(crate) fn attach_runtime_engine(
++        &self,
++        runtime_engine: &Arc<crate::session_runtime::SessionRuntimeEngine>,
++    ) {
++        *self
++            .runtime_engine
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner) =
++            Some(Arc::downgrade(runtime_engine));
++    }
++
++    fn runtime_engine(&self) -> Option<Arc<crate::session_runtime::SessionRuntimeEngine>> {
++        self.runtime_engine
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .as_ref()
++            .and_then(Weak::upgrade)
++    }
++
+     pub(crate) async fn upsert_thread(&self, thread_id: &str) {
+         let thread_id = thread_id.to_string();
+         self.mutate_and_publish(move |state| {
+@@ -224,6 +248,10 @@ impl ThreadWatchManager {
+     where
+         F: FnOnce(&mut ThreadWatchState) -> Option<ThreadStatusChangedNotification>,
+     {
++        let runtime_engine = self.runtime_engine();
++        if let Some(runtime_engine) = &runtime_engine {
++            runtime_engine.mark_dirty();
++        }
+         let notification = {
+             let mut state = self.state.lock().await;
+             let notification = mutate(&mut state);
+@@ -243,6 +271,9 @@ impl ThreadWatchManager {
+             notification
+         };
+ 
++        let changed_thread_id = notification
++            .as_ref()
++            .and_then(|notification| ThreadId::from_string(&notification.thread_id).ok());
+         if let Some(notification) = notification
+             && let Some(outgoing) = &self.outgoing
+         {
+@@ -250,6 +281,11 @@ impl ThreadWatchManager {
+                 .send_server_notification(ServerNotification::ThreadStatusChanged(notification))
+                 .await;
+         }
++        if let Some(thread_id) = changed_thread_id
++            && let Some(runtime_engine) = runtime_engine
++        {
++            runtime_engine.publish_thread(thread_id).await;
++        }
+     }
+ 
+     pub(crate) async fn subscribe(
+diff --git a/codex-rs/rollout/src/lib.rs b/codex-rs/rollout/src/lib.rs
+index 9f38cd569af6a1bc0cd1e0475df882a900caa13b..70bae262ff7f65a5ee01cb02e909ef47cc3326ec 100644
+--- a/codex-rs/rollout/src/lib.rs
++++ b/codex-rs/rollout/src/lib.rs
+@@ -122,6 +122,7 @@ pub use persistence_metrics::measure_and_filter_rollout_items;
+ pub use policy::is_persisted_rollout_item;
+ pub use policy::persisted_rollout_items;
+ pub use policy::should_persist_response_item_for_memories;
++pub use recorder::RolloutProgress;
+ pub use recorder::RolloutRecorder;
+ pub use recorder::RolloutRecorderParams;
+ pub use recorder::append_rollout_item_to_path;
+diff --git a/codex-rs/rollout/src/recorder.rs b/codex-rs/rollout/src/recorder.rs
+index 6be4356c9978ede3be7d406fbe7bf6809d46dac6..2ccbfe075b9e63263e60ea57924b87d4b7f3afd1 100644
+--- a/codex-rs/rollout/src/recorder.rs
++++ b/codex-rs/rollout/src/recorder.rs
+@@ -89,6 +89,13 @@ pub struct RolloutRecorder {
+     pub(crate) rollout_path: PathBuf,
+ }
+ 
++/// Exact durable end position for a paginated rollout after a writer barrier.
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub struct RolloutProgress {
++    pub end_ordinal_exclusive: u64,
++    pub end_byte_offset: u64,
++}
++
+ #[derive(Clone)]
+ #[allow(clippy::large_enum_variant)]
+ pub enum RolloutRecorderParams {
+@@ -130,8 +137,11 @@ enum RolloutCmd {
+     Flush {
+         ack: oneshot::Sender<std::io::Result<()>>,
+     },
++    Progress {
++        ack: oneshot::Sender<std::io::Result<Option<RolloutProgress>>>,
++    },
+     Shutdown {
+-        ack: oneshot::Sender<std::io::Result<()>>,
++        ack: oneshot::Sender<std::io::Result<Option<RolloutProgress>>>,
+     },
+ }
+ 
+@@ -1006,6 +1016,27 @@ impl RolloutRecorder {
+         })?
+     }
+ 
++    /// Return the exact durable end position for a materialized paginated rollout.
++    ///
++    /// Legacy rollouts have no ordinal authority and deferred files have no durable
++    /// byte position, so both return `None`.
++    pub async fn progress(&self) -> std::io::Result<Option<RolloutProgress>> {
++        let (tx, rx) = oneshot::channel();
++        self.tx
++            .send(RolloutCmd::Progress { ack: tx })
++            .await
++            .map_err(|e| {
++                self.writer_task.terminal_failure().unwrap_or_else(|| {
++                    IoError::other(format!("failed to queue rollout progress read: {e}"))
++                })
++            })?;
++        rx.await.map_err(|e| {
++            self.writer_task.terminal_failure().unwrap_or_else(|| {
++                IoError::other(format!("failed waiting for rollout progress read: {e}"))
++            })
++        })?
++    }
++
+     pub async fn load_rollout_items(
+         path: &Path,
+     ) -> std::io::Result<(Vec<RolloutItem>, Option<ThreadId>, usize)> {
+@@ -1092,13 +1123,18 @@ impl RolloutRecorder {
+     ///
+     /// If draining fails, the writer stays alive so callers can continue retrying flush/shutdown.
+     pub async fn shutdown(&self) -> std::io::Result<()> {
++        self.shutdown_with_progress().await.map(drop)
++    }
++
++    /// Drain the writer and return its exact final paginated position.
++    pub async fn shutdown_with_progress(&self) -> std::io::Result<Option<RolloutProgress>> {
+         let (tx_done, rx_done) = oneshot::channel();
+         match self.tx.send(RolloutCmd::Shutdown { ack: tx_done }).await {
+             Ok(_) => rx_done.await.map_err(|e| {
+                 self.writer_task.terminal_failure().unwrap_or_else(|| {
+                     IoError::other(format!("failed waiting for rollout shutdown: {e}"))
+                 })
+-            })??,
++            })?,
+             Err(e) => {
+                 if let Some(err) = self.writer_task.terminal_failure() {
+                     warn!(
+@@ -1107,12 +1143,11 @@ impl RolloutRecorder {
+                     return Err(err);
+                 }
+                 warn!("failed to send rollout shutdown command: {e}");
+-                return Err(IoError::other(format!(
++                Err(IoError::other(format!(
+                     "failed to send rollout shutdown command: {e}"
+-                )));
++                )))
+             }
+-        };
+-        Ok(())
++        }
+     }
+ }
+ 
+@@ -1699,6 +1734,22 @@ impl RolloutWriterState {
+         self.write_pending_with_recovery("shutdown").await
+     }
+ 
++    async fn progress(&mut self) -> std::io::Result<Option<RolloutProgress>> {
++        if self.is_deferred() {
++            return Ok(None);
++        }
++        let Some(end_ordinal_exclusive) = self.ordinal_state.current()? else {
++            return Ok(None);
++        };
++        let Some(writer) = self.writer.as_mut() else {
++            return Ok(None);
++        };
++        Ok(Some(RolloutProgress {
++            end_ordinal_exclusive,
++            end_byte_offset: writer.file.metadata().await?.len(),
++        }))
++    }
++
+     async fn write_pending_with_recovery(&mut self, operation: &str) -> std::io::Result<()> {
+         match self.write_pending_once().await {
+             Ok(()) => {
+@@ -1834,11 +1885,19 @@ async fn rollout_writer(
+             RolloutCmd::Flush { ack } => {
+                 let _ = ack.send(state.flush().await);
+             }
++            RolloutCmd::Progress { ack } => {
++                let _ = ack.send(state.progress().await);
++            }
+             RolloutCmd::Shutdown { ack } => match state.shutdown().await {
+-                Ok(()) => {
+-                    let _ = ack.send(Ok(()));
+-                    break;
+-                }
++                Ok(()) => match state.progress().await {
++                    Ok(progress) => {
++                        let _ = ack.send(Ok(progress));
++                        break;
++                    }
++                    Err(err) => {
++                        let _ = ack.send(Err(err));
++                    }
++                },
+                 Err(err) => {
+                     let _ = ack.send(Err(err));
+                 }
+diff --git a/codex-rs/rollout/src/recorder_tests.rs b/codex-rs/rollout/src/recorder_tests.rs
+index 8bb8d54e49456fb64fef183f4ab3463f2ba7f347..89ba3b2c9ade83dc465bb9e7fa0630b280be15f5 100644
+--- a/codex-rs/rollout/src/recorder_tests.rs
++++ b/codex-rs/rollout/src/recorder_tests.rs
+@@ -711,6 +711,42 @@ async fn recorder_materializes_on_flush_with_pending_items() -> std::io::Result<
+     Ok(())
+ }
+ 
++#[tokio::test]
++async fn paginated_progress_matches_flush_barrier_and_resume_position() -> std::io::Result<()> {
++    let home = TempDir::new().expect("temp dir");
++    let config = test_config(home.path());
++    let recorder = RolloutRecorder::new(
++        &config,
++        RolloutRecorderParams::new(
++            ThreadId::new(),
++            /*forked_from_id*/ None,
++            /*parent_thread_id*/ None,
++            SessionSource::Exec,
++            /*thread_source*/ None,
++            "test_originator".to_string(),
++            BaseInstructions::default(),
++            Vec::new(),
++        )
++        .with_history_mode(ThreadHistoryMode::Paginated),
++    )
++    .await?;
++    recorder
++        .record_canonical_items(&[agent_message_item("durable progress")])
++        .await?;
++    recorder.flush().await?;
++    let rollout_path = recorder.rollout_path().to_path_buf();
++    let progress = recorder.progress().await?.expect("paginated progress");
++
++    assert_eq!(progress.end_ordinal_exclusive, 2);
++    assert_eq!(progress.end_byte_offset, fs::metadata(&rollout_path)?.len());
++    assert_eq!(recorder.shutdown_with_progress().await?, Some(progress));
++
++    let resumed =
++        RolloutRecorder::new(&config, RolloutRecorderParams::resume(rollout_path)).await?;
++    assert_eq!(resumed.progress().await?, Some(progress));
++    resumed.shutdown().await
++}
++
+ #[tokio::test]
+ async fn referenced_paginated_rollout_starts_at_history_cutoff_and_resumes() -> std::io::Result<()>
+ {
+diff --git a/codex-rs/thread-store/src/in_memory.rs b/codex-rs/thread-store/src/in_memory.rs
+index 0724a465526226df187f6b6d86a6ecb6cc0a2d7c..4529e319e1abf80e29f296be6235b35222327ed5 100644
+--- a/codex-rs/thread-store/src/in_memory.rs
++++ b/codex-rs/thread-store/src/in_memory.rs
+@@ -33,6 +33,8 @@ use crate::PersistContext;
+ use crate::ReadThreadByRolloutPathParams;
+ use crate::ReadThreadParams;
+ use crate::ResumeThreadParams;
++use crate::RuntimePersistenceHealth;
++use crate::RuntimeWriterOwnership;
+ use crate::StoredModelContext;
+ use crate::StoredThread;
+ use crate::StoredThreadHistory;
+@@ -44,6 +46,7 @@ use crate::ThreadStore;
+ use crate::ThreadStoreError;
+ use crate::ThreadStoreFuture;
+ use crate::ThreadStoreResult;
++use crate::ThreadStoreRuntimeSnapshot;
+ use crate::UpdateThreadMetadataParams;
+ use crate::error::reject_paginated_history_mode;
+ 
+@@ -918,6 +921,45 @@ impl ThreadStore for InMemoryThreadStore {
+         self
+     }
+ 
++    fn runtime_snapshot(
++        &self,
++        thread_id: ThreadId,
++    ) -> ThreadStoreFuture<'_, ThreadStoreRuntimeSnapshot> {
++        Box::pin(async move {
++            let state = self.state.lock().await;
++            let persisted = state.histories.contains_key(&thread_id);
++            Ok(ThreadStoreRuntimeSnapshot {
++                writer_ownership: if state.created_threads.contains_key(&thread_id) {
++                    RuntimeWriterOwnership::OwnedHere
++                } else {
++                    RuntimeWriterOwnership::None
++                },
++                writer_store_id: None,
++                writer_generation: None,
++                writer_deny_reason: Some(
++                    "persistent writer control requires the state database".to_string(),
++                ),
++                jsonl: None,
++                sqlite: None,
++                lag: None,
++                flush_health: if persisted {
++                    RuntimePersistenceHealth::Healthy
++                } else {
++                    RuntimePersistenceHealth::Unknown
++                },
++                materialize_health: if persisted {
++                    RuntimePersistenceHealth::Healthy
++                } else {
++                    RuntimePersistenceHealth::Unknown
++                },
++                flushed_at: None,
++                materialized_at: None,
++                persistence_deny_reason: persisted
++                    .then(|| "in-memory store has no durable position authority".to_string()),
++            })
++        })
++    }
++
+     fn execution_account_binding(
+         &self,
+         thread_id: ThreadId,
+diff --git a/codex-rs/thread-store/src/lib.rs b/codex-rs/thread-store/src/lib.rs
+index f63f60b997c4cf4c85489eebee59dadc0f82e5b3..09abeb2cb87a86bf597e5af2712f43ad52b7c740 100644
+--- a/codex-rs/thread-store/src/lib.rs
++++ b/codex-rs/thread-store/src/lib.rs
+@@ -48,8 +48,12 @@ pub use projects::UpdatedProject;
+ pub use queue_store::LocalQueueStore;
+ pub use queue_store::QueueStore;
+ pub use store::PersistContext;
++pub use store::RuntimePersistenceHealth;
++pub use store::RuntimePersistencePosition;
++pub use store::RuntimeWriterOwnership;
+ pub use store::ThreadStore;
+ pub use store::ThreadStoreFuture;
++pub use store::ThreadStoreRuntimeSnapshot;
+ pub use thread_sections::CreateThreadSectionParams;
+ pub use thread_sections::DeleteThreadSectionParams;
+ pub use thread_sections::ListThreadSectionsParams;
+diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
+index 187201709c38431f9f99ecae0a3bd0d869105763..76ff169d6e18cbcc4de799a7008c569f425ae82c 100644
+--- a/codex-rs/thread-store/src/local/mod.rs
++++ b/codex-rs/thread-store/src/local/mod.rs
+@@ -28,6 +28,9 @@ mod writer_lock;
+ #[path = "pending_thread_metadata_tests.rs"]
+ mod pending_thread_metadata_tests;
+ #[cfg(test)]
++#[path = "runtime_snapshot_tests.rs"]
++mod runtime_snapshot_tests;
++#[cfg(test)]
+ mod test_support;
+ 
+ use codex_protocol::ThreadId;
+@@ -76,6 +79,9 @@ use crate::ReadThreadParams;
+ use crate::RenameThreadSectionParams;
+ use crate::ResumeThreadParams;
+ use crate::RevertThreadParams;
++use crate::RuntimePersistenceHealth;
++use crate::RuntimePersistencePosition;
++use crate::RuntimeWriterOwnership;
+ use crate::SearchThreadOccurrencesParams;
+ use crate::SearchThreadsParams;
+ use crate::StoredModelContext;
+@@ -93,6 +99,7 @@ use crate::ThreadStore;
+ use crate::ThreadStoreError;
+ use crate::ThreadStoreFuture;
+ use crate::ThreadStoreResult;
++use crate::ThreadStoreRuntimeSnapshot;
+ use crate::TurnPage;
+ use crate::UpdateProjectParams;
+ use crate::UpdateThreadMetadataParams;
+@@ -112,6 +119,14 @@ pub use writer_lock::WriterControlCapability;
+ 
+ const WRITER_CONTROL_UNAVAILABLE_REASON: &str =
+     "persistent writer control requires the state database";
++const COLD_JSONL_POSITION_UNAVAILABLE_REASON: &str =
++    "cold JSONL position is unavailable without a live recorder";
++const LEGACY_POSITION_UNAVAILABLE_REASON: &str =
++    "legacy history has no paginated persistence position";
++const STATE_DB_POSITION_UNAVAILABLE_REASON: &str =
++    "SQLite projection position requires the state database";
++const SQLITE_PROJECTION_UNAVAILABLE_REASON: &str =
++    "paginated SQLite projection position is unavailable";
+ 
+ /// Local filesystem/SQLite-backed implementation of [`ThreadStore`].
+ ///
+@@ -467,6 +482,113 @@ impl ThreadStore for LocalThreadStore {
+         self
+     }
+ 
++    fn writer_control_capability(&self) -> WriterControlCapability {
++        match self.state_db.as_ref() {
++            Some(state_db) => WriterControlCapability::Enabled {
++                store_id: state_db.writer_store_id().to_string(),
++            },
++            None => WriterControlCapability::Disabled {
++                reason: WRITER_CONTROL_UNAVAILABLE_REASON.to_string(),
++            },
++        }
++    }
++
++    fn runtime_snapshot(
++        &self,
++        thread_id: ThreadId,
++    ) -> ThreadStoreFuture<'_, ThreadStoreRuntimeSnapshot> {
++        Box::pin(async move {
++            let authority = self.probe_writer_authority(thread_id).await?;
++            let live = {
++                let recorders = self.live_recorders.lock().await;
++                recorders
++                    .get(&thread_id)
++                    .map(|entry| (entry.recorder.clone(), entry.history_mode))
++            };
++            let (jsonl, live_history_mode) =
++                match live {
++                    Some((recorder, history_mode)) => {
++                        let progress = recorder.progress().await.map_err(|err| {
++                            ThreadStoreError::Internal {
++                                message: format!(
++                                    "failed to read live rollout progress for {thread_id}: {err}"
++                                ),
++                            }
++                        })?;
++                        (
++                            progress.map(|progress| RuntimePersistencePosition {
++                                ordinal: progress.end_ordinal_exclusive,
++                                offset: progress.end_byte_offset,
++                            }),
++                            Some(history_mode),
++                        )
++                    }
++                    None => (None, None),
++                };
++            let projection = thread_history::projection_state(self, thread_id).await?;
++            let sqlite = projection.as_ref().map(|state| RuntimePersistencePosition {
++                ordinal: state.next_ordinal,
++                offset: state.next_byte_offset,
++            });
++            let history_mode = if live_history_mode.is_some() {
++                live_history_mode
++            } else if let Some(state_db) = self.state_db.as_ref() {
++                state_db
++                    .get_thread(thread_id)
++                    .await
++                    .map_err(|err| ThreadStoreError::Internal {
++                        message: format!("failed to read history mode for {thread_id}: {err}"),
++                    })?
++                    .map(|thread| thread.history_mode)
++            } else {
++                None
++            };
++            let persistence_deny_reason = if self.state_db.is_none() {
++                Some(STATE_DB_POSITION_UNAVAILABLE_REASON.to_string())
++            } else if jsonl.is_none() && matches!(history_mode, Some(ThreadHistoryMode::Legacy)) {
++                Some(LEGACY_POSITION_UNAVAILABLE_REASON.to_string())
++            } else if jsonl.is_none() && sqlite.is_some() {
++                Some(COLD_JSONL_POSITION_UNAVAILABLE_REASON.to_string())
++            } else if jsonl.is_none() || sqlite.is_none() {
++                Some(SQLITE_PROJECTION_UNAVAILABLE_REASON.to_string())
++            } else {
++                None
++            };
++            let (writer_store_id, writer_deny_reason) = match authority.control {
++                WriterControlCapability::Enabled { store_id } => (Some(store_id), None),
++                WriterControlCapability::Disabled { reason } => (None, Some(reason)),
++            };
++            Ok(ThreadStoreRuntimeSnapshot {
++                writer_ownership: match authority.ownership {
++                    ThreadWriterOwnership::None => RuntimeWriterOwnership::None,
++                    ThreadWriterOwnership::OwnedHere => RuntimeWriterOwnership::OwnedHere,
++                    ThreadWriterOwnership::OwnedElsewhere => RuntimeWriterOwnership::OwnedElsewhere,
++                },
++                writer_store_id,
++                writer_generation: authority.generation,
++                writer_deny_reason,
++                jsonl,
++                sqlite,
++                lag: jsonl
++                    .zip(sqlite)
++                    .map(|(jsonl, sqlite)| jsonl.ordinal.saturating_sub(sqlite.ordinal)),
++                flush_health: if jsonl.is_some() {
++                    RuntimePersistenceHealth::Healthy
++                } else {
++                    RuntimePersistenceHealth::Unknown
++                },
++                materialize_health: if sqlite.is_some() {
++                    RuntimePersistenceHealth::Healthy
++                } else {
++                    RuntimePersistenceHealth::Unknown
++                },
++                flushed_at: None,
++                materialized_at: None,
++                persistence_deny_reason,
++            })
++        })
++    }
++
+     fn execution_account_binding(
+         &self,
+         thread_id: ThreadId,
+diff --git a/codex-rs/thread-store/src/local/runtime_snapshot_tests.rs b/codex-rs/thread-store/src/local/runtime_snapshot_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..8f79753cb25ade464f8eff8229de7f2caa251ed0
+--- /dev/null
++++ b/codex-rs/thread-store/src/local/runtime_snapshot_tests.rs
+@@ -0,0 +1,107 @@
++use codex_protocol::ThreadId;
++use codex_protocol::models::BaseInstructions;
++use codex_protocol::models::ContentItem;
++use codex_protocol::models::ResponseItem;
++use codex_protocol::protocol::SessionSource;
++use codex_protocol::protocol::ThreadHistoryMode;
++use codex_protocol::protocol::ThreadMemoryMode;
++use codex_rollout::RolloutItem;
++use pretty_assertions::assert_eq;
++use tempfile::TempDir;
++
++use super::LocalThreadStore;
++use super::STATE_DB_POSITION_UNAVAILABLE_REASON;
++use super::test_support::test_config;
++use crate::AppendThreadItemsParams;
++use crate::CreateThreadParams;
++use crate::RuntimePersistenceHealth;
++use crate::RuntimeWriterOwnership;
++use crate::ThreadPersistenceMetadata;
++use crate::ThreadStore;
++
++#[tokio::test]
++async fn live_paginated_snapshot_reports_exact_jsonl_and_state_db_deny() {
++    let home = TempDir::new().expect("temp dir");
++    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
++    let thread_id = ThreadId::new();
++    store
++        .create_thread(create_thread_params(thread_id))
++        .await
++        .expect("create live thread");
++    store
++        .append_items(AppendThreadItemsParams {
++            thread_id,
++            items: vec![user_message_item("persisted")],
++        })
++        .await
++        .expect("append item");
++    store
++        .flush_thread(thread_id)
++        .await
++        .expect("flush live thread");
++
++    let snapshot = store
++        .runtime_snapshot(thread_id)
++        .await
++        .expect("runtime snapshot");
++    assert_eq!(snapshot.writer_ownership, RuntimeWriterOwnership::OwnedHere);
++    assert_eq!(
++        snapshot.writer_deny_reason.as_deref(),
++        Some(super::WRITER_CONTROL_UNAVAILABLE_REASON)
++    );
++    assert!(
++        snapshot.jsonl.is_some_and(|position| position.offset > 0),
++        "live recorder must expose its durable byte position"
++    );
++    assert_eq!(snapshot.jsonl.map(|position| position.ordinal), Some(2));
++    assert_eq!(snapshot.sqlite, None);
++    assert_eq!(snapshot.lag, None);
++    assert_eq!(snapshot.flush_health, RuntimePersistenceHealth::Healthy);
++    assert_eq!(
++        snapshot.persistence_deny_reason.as_deref(),
++        Some(STATE_DB_POSITION_UNAVAILABLE_REASON)
++    );
++
++    store.shutdown_thread(thread_id).await.expect("shutdown");
++}
++
++fn create_thread_params(thread_id: ThreadId) -> CreateThreadParams {
++    CreateThreadParams {
++        session_id: thread_id.into(),
++        thread_id,
++        extra_config: None,
++        forked_from_id: None,
++        parent_thread_id: None,
++        source: SessionSource::Exec,
++        thread_source: None,
++        originator: "test_originator".to_string(),
++        base_instructions: BaseInstructions::default(),
++        dynamic_tools: Vec::new(),
++        selected_capability_roots: Vec::new(),
++        multi_agent_version: None,
++        history_mode: ThreadHistoryMode::Paginated,
++        history_base: None,
++        subagent_history_start_ordinal: None,
++        initial_window_id: uuid::Uuid::now_v7().to_string(),
++        metadata: ThreadPersistenceMetadata {
++            cwd: Some(std::env::current_dir().expect("cwd")),
++            model_provider: "test-provider".to_string(),
++            memory_mode: ThreadMemoryMode::Enabled,
++        },
++    }
++}
++
++fn user_message_item(message: &str) -> RolloutItem {
++    RolloutItem::ResponseItem(
++        ResponseItem::Message {
++            id: None,
++            role: "user".to_string(),
++            content: vec![ContentItem::InputText {
++                text: message.to_string(),
++            }],
++            phase: None,
++            internal_chat_message_metadata_passthrough: None,
++        }
++        .into(),
++    )
++}
+diff --git a/codex-rs/thread-store/src/store.rs b/codex-rs/thread-store/src/store.rs
+index f8f00b9915304a0afb2aab60955bfe59877eeeba..e4510eabde80e7c2bf18e552af49d65430bc2f3c 100644
+--- a/codex-rs/thread-store/src/store.rs
++++ b/codex-rs/thread-store/src/store.rs
+@@ -52,6 +52,7 @@ use crate::TurnPage;
+ use crate::UpdateProjectParams;
+ use crate::UpdateThreadMetadataParams;
+ use crate::UpdatedProject;
++use crate::WriterControlCapability;
+ 
+ /// Future returned by [`ThreadStore`] operations.
+ pub type ThreadStoreFuture<'a, T> = Pin<Box<dyn Future<Output = ThreadStoreResult<T>> + Send + 'a>>;
+@@ -65,6 +66,67 @@ pub enum PersistContext {
+     TurnStart,
+ }
+ 
++/// Storage-neutral writer ownership exposed to runtime observers.
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub enum RuntimeWriterOwnership {
++    None,
++    OwnedHere,
++    OwnedElsewhere,
++    Unavailable,
++}
++
++/// Storage-neutral durable position that never exposes a backing path.
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub struct RuntimePersistencePosition {
++    pub ordinal: u64,
++    pub offset: u64,
++}
++
++/// Health of one runtime persistence stage.
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub enum RuntimePersistenceHealth {
++    Unknown,
++    Healthy,
++    Degraded,
++    Failed,
++}
++
++/// Sanitized store state used by app-server runtime snapshots.
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct ThreadStoreRuntimeSnapshot {
++    pub writer_ownership: RuntimeWriterOwnership,
++    pub writer_store_id: Option<String>,
++    pub writer_generation: Option<u64>,
++    pub writer_deny_reason: Option<String>,
++    pub jsonl: Option<RuntimePersistencePosition>,
++    pub sqlite: Option<RuntimePersistencePosition>,
++    pub lag: Option<u64>,
++    pub flush_health: RuntimePersistenceHealth,
++    pub materialize_health: RuntimePersistenceHealth,
++    pub flushed_at: Option<i64>,
++    pub materialized_at: Option<i64>,
++    pub persistence_deny_reason: Option<String>,
++}
++
++impl ThreadStoreRuntimeSnapshot {
++    pub fn unavailable(reason: impl Into<String>) -> Self {
++        Self {
++            writer_ownership: RuntimeWriterOwnership::Unavailable,
++            writer_store_id: None,
++            writer_generation: None,
++            writer_deny_reason: Some(reason.into()),
++            jsonl: None,
++            sqlite: None,
++            lag: None,
++            flush_health: RuntimePersistenceHealth::Unknown,
++            materialize_health: RuntimePersistenceHealth::Unknown,
++            flushed_at: None,
++            materialized_at: None,
++            persistence_deny_reason: None,
++        }
++    }
++}
++
+ /// Storage-neutral thread persistence boundary.
+ pub trait ThreadStore: Any + Send + Sync {
+     /// Return this store as [`Any`] for implementation-owned escape hatches.
+@@ -78,6 +140,25 @@ pub trait ThreadStore: Any + Send + Sync {
+         ThreadHistoryMode::Legacy
+     }
+ 
++    /// Reports whether this process has persistent writer fencing for strict control operations.
++    fn writer_control_capability(&self) -> WriterControlCapability {
++        WriterControlCapability::Disabled {
++            reason: "persistent writer control requires the state database".to_string(),
++        }
++    }
++
++    /// Read sanitized writer and persistence state without scanning backing files.
++    fn runtime_snapshot(
++        &self,
++        _thread_id: ThreadId,
++    ) -> ThreadStoreFuture<'_, ThreadStoreRuntimeSnapshot> {
++        Box::pin(async {
++            Ok(ThreadStoreRuntimeSnapshot::unavailable(
++                "thread store runtime state is unavailable",
++            ))
++        })
++    }
++
+     fn execution_account_binding(
+         &self,
+         _thread_id: ThreadId,

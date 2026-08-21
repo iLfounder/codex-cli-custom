@@ -1,0 +1,1556 @@
+From 07393ffa0f4a178964deb24d5b4d9d6d401a5b02 Mon Sep 17 00:00:00 2001
+From: patch-verifier <patch-verifier@localhost>
+Date: Fri, 21 Aug 2026 14:37:11 +0900
+Subject: [PATCH 03/11] feat(custom): add multi-account registry for 0.149
+
+---
+ codex-rs/app-server/src/account_registry.rs   | 570 ++++++++++++++++++
+ .../app-server/src/account_registry_tests.rs  | 161 +++++
+ codex-rs/app-server/src/lib.rs                |   1 +
+ codex-rs/app-server/src/message_processor.rs  |  19 +-
+ codex-rs/app-server/src/request_processors.rs |   2 +
+ .../request_processors/account_processor.rs   |  11 +
+ codex-rs/login/src/auth/auth_tests.rs         |  93 +++
+ codex-rs/login/src/auth/manager.rs            | 274 +++++++--
+ codex-rs/login/src/lib.rs                     |   1 +
+ 9 files changed, 1080 insertions(+), 52 deletions(-)
+ create mode 100644 codex-rs/app-server/src/account_registry.rs
+ create mode 100644 codex-rs/app-server/src/account_registry_tests.rs
+
+diff --git a/codex-rs/app-server/src/account_registry.rs b/codex-rs/app-server/src/account_registry.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..d77295e1acf4640ab4358d20f1dfe33dd6d7c6b9
+--- /dev/null
++++ b/codex-rs/app-server/src/account_registry.rs
+@@ -0,0 +1,570 @@
++use std::collections::HashSet;
++use std::io;
++use std::path::Path;
++use std::path::PathBuf;
++use std::sync::Arc;
++use std::sync::RwLock;
++
++use base64::Engine;
++use base64::engine::general_purpose::URL_SAFE_NO_PAD;
++use codex_app_server_protocol::AccountSlotActionAvailability;
++use codex_app_server_protocol::AccountSlotCapability;
++use codex_app_server_protocol::AccountSlotListParams;
++use codex_app_server_protocol::AccountSlotListResponse;
++use codex_app_server_protocol::AccountSlotSnapshot;
++use codex_app_server_protocol::AccountSlotStatus;
++use codex_app_server_protocol::JSONRPCErrorError;
++use codex_core::config::Config;
++use codex_core::path_utils::write_atomically;
++use codex_login::AuthConfig;
++use codex_login::AuthManager;
++use codex_login::AuthSourceKind;
++use codex_model_provider::create_model_provider;
++use codex_models_manager::manager::SharedModelsManager;
++use serde::Deserialize;
++use serde::Serialize;
++use tokio::sync::OnceCell;
++use uuid::Uuid;
++
++use crate::auth_mode::auth_mode_to_api;
++use crate::error_code::internal_error;
++use crate::error_code::invalid_params;
++
++const MANIFEST_FILE: &str = "account-slots.toml";
++const PRIVATE_HOMES_DIR: &str = "accounts";
++const MANIFEST_SCHEMA_VERSION: u32 = 1;
++const DEFAULT_SLOT_ID: &str = "default";
++const DEFAULT_LIST_LIMIT: usize = 50;
++const MAX_LIST_LIMIT: usize = 100;
++const MAX_MANIFEST_SLOTS: usize = 1_000;
++
++const DENY_MANIFEST_INVALID: &str = "account_slot_manifest_invalid";
++const DENY_HOST_ACCESS_TOKEN: &str = "host_owned_codex_access_token";
++const DENY_HOST_EXTERNAL_AUTH: &str = "host_owned_external_auth";
++const DENY_HOST_PROVIDER_AUTH: &str = "host_owned_provider_auth";
++const DENY_HOST_WORKLOAD_IDENTITY: &str = "host_owned_workload_identity";
++const DENY_LOGIN_NOT_AVAILABLE: &str = "account_slot_login_not_available";
++const DENY_SWITCH_NOT_AVAILABLE: &str = "thread_account_switch_not_available";
++
++#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++struct AccountSlotsManifest {
++    schema_version: u32,
++    revision: u64,
++    slots: Vec<AccountSlotManifest>,
++}
++
++#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++struct AccountSlotManifest {
++    account_slot_id: String,
++    label: String,
++    auth_home: PathBuf,
++    is_default: bool,
++    status: ManifestSlotStatus,
++    attempt_generation: u64,
++    updated_at: i64,
++    error_code: Option<String>,
++}
++
++#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub(crate) enum ManifestSlotStatus {
++    LoginRequired,
++    Ready,
++    Failed,
++}
++
++impl From<ManifestSlotStatus> for AccountSlotStatus {
++    fn from(status: ManifestSlotStatus) -> Self {
++        match status {
++            ManifestSlotStatus::LoginRequired => Self::LoginRequired,
++            ManifestSlotStatus::Ready => Self::Ready,
++            ManifestSlotStatus::Failed => Self::Failed,
++        }
++    }
++}
++
++impl AccountSlotsManifest {
++    fn load(path: &Path, process_home: &Path) -> io::Result<Option<Self>> {
++        let contents = match std::fs::read_to_string(path) {
++            Ok(contents) => contents,
++            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
++            Err(error) => return Err(error),
++        };
++        let manifest: Self = toml::from_str(&contents)
++            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid manifest"))?;
++        manifest.validate(process_home)?;
++        Ok(Some(manifest))
++    }
++
++    fn persist(&self, path: &Path) -> io::Result<()> {
++        let contents = toml::to_string(self)
++            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid manifest"))?;
++        write_atomically(path, &contents)
++    }
++
++    fn validate(&self, process_home: &Path) -> io::Result<()> {
++        if self.schema_version != MANIFEST_SCHEMA_VERSION
++            || self.revision == 0
++            || self.slots.is_empty()
++            || self.slots.len() > MAX_MANIFEST_SLOTS
++        {
++            return Err(io::Error::new(
++                io::ErrorKind::InvalidData,
++                "invalid manifest metadata",
++            ));
++        }
++
++        let private_homes_root = process_home.join(PRIVATE_HOMES_DIR);
++        let mut slot_ids = HashSet::with_capacity(self.slots.len());
++        let mut default_count = 0;
++        for slot in &self.slots {
++            if slot.label.trim().is_empty()
++                || slot.label.len() > 128
++                || !slot.auth_home.is_absolute()
++                || !slot_ids.insert(slot.account_slot_id.as_str())
++                || slot
++                    .error_code
++                    .as_ref()
++                    .is_some_and(|code| !valid_manifest_token(code))
++            {
++                return Err(io::Error::new(
++                    io::ErrorKind::InvalidData,
++                    "invalid account slot",
++                ));
++            }
++            if slot.is_default {
++                default_count += 1;
++                if slot.account_slot_id != DEFAULT_SLOT_ID || slot.auth_home != process_home {
++                    return Err(io::Error::new(
++                        io::ErrorKind::InvalidData,
++                        "invalid default account home",
++                    ));
++                }
++            } else {
++                if !valid_account_slot_id(&slot.account_slot_id) {
++                    return Err(io::Error::new(
++                        io::ErrorKind::InvalidData,
++                        "invalid account slot id",
++                    ));
++                }
++                validate_private_auth_home(
++                    process_home,
++                    &private_homes_root,
++                    &slot.account_slot_id,
++                    &slot.auth_home,
++                )?;
++            }
++        }
++        if default_count != 1 {
++            return Err(io::Error::new(
++                io::ErrorKind::InvalidData,
++                "manifest must contain one default slot",
++            ));
++        }
++        Ok(())
++    }
++}
++
++fn valid_account_slot_id(value: &str) -> bool {
++    Uuid::parse_str(value).is_ok_and(|uuid| uuid.simple().to_string() == value)
++}
++
++fn validate_private_auth_home(
++    process_home: &Path,
++    private_homes_root: &Path,
++    account_slot_id: &str,
++    auth_home: &Path,
++) -> io::Result<()> {
++    if auth_home != private_homes_root.join(account_slot_id) {
++        return Err(io::Error::new(
++            io::ErrorKind::InvalidData,
++            "invalid private account home",
++        ));
++    }
++
++    reject_symlink(private_homes_root)?;
++    reject_symlink(auth_home)?;
++
++    let canonical_private_root = match private_homes_root.canonicalize() {
++        Ok(path) => path,
++        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
++        Err(error) => return Err(error),
++    };
++    let canonical_process_home = process_home.canonicalize()?;
++    if canonical_private_root.parent() != Some(canonical_process_home.as_path()) {
++        return Err(io::Error::new(
++            io::ErrorKind::InvalidData,
++            "private account root escapes process home",
++        ));
++    }
++
++    let canonical_auth_home = match auth_home.canonicalize() {
++        Ok(path) => path,
++        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
++        Err(error) => return Err(error),
++    };
++    if canonical_auth_home.parent() != Some(canonical_private_root.as_path())
++        || canonical_auth_home.file_name() != Some(std::ffi::OsStr::new(account_slot_id))
++    {
++        return Err(io::Error::new(
++            io::ErrorKind::InvalidData,
++            "private account home escapes private root",
++        ));
++    }
++    Ok(())
++}
++
++fn reject_symlink(path: &Path) -> io::Result<()> {
++    match path.symlink_metadata() {
++        Ok(metadata) if metadata.file_type().is_symlink() => Err(io::Error::new(
++            io::ErrorKind::InvalidData,
++            "private account path must not be a symlink",
++        )),
++        Ok(_) => Ok(()),
++        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
++        Err(error) => Err(error),
++    }
++}
++
++fn valid_manifest_token(value: &str) -> bool {
++    !value.is_empty()
++        && value.len() <= 128
++        && value
++            .chars()
++            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
++}
++
++#[derive(Clone)]
++struct AccountSlotRecord {
++    manifest: AccountSlotManifest,
++    runtime: Arc<OnceCell<Arc<AccountRuntimeBundle>>>,
++}
++
++pub(crate) struct AccountRuntimeBundle {
++    pub(crate) auth_manager: Arc<AuthManager>,
++    pub(crate) models_manager: SharedModelsManager,
++}
++
++struct AccountRegistryState {
++    revision: u64,
++    slots: Vec<AccountSlotRecord>,
++    manifest_error: Option<&'static str>,
++}
++
++pub(crate) struct AccountRegistry {
++    config: Arc<Config>,
++    auth_config_template: AuthConfig,
++    state: RwLock<AccountRegistryState>,
++}
++
++impl AccountRegistry {
++    pub(crate) fn new(
++        config: Arc<Config>,
++        default_auth_manager: Arc<AuthManager>,
++        default_models_manager: SharedModelsManager,
++    ) -> Self {
++        let manifest_path = config.codex_home.join(MANIFEST_FILE);
++        let (manifest, manifest_error) =
++            match AccountSlotsManifest::load(&manifest_path, &config.codex_home) {
++                Ok(Some(manifest)) => (manifest, None),
++                Ok(None) => (virtual_default_manifest(&config.codex_home), None),
++                Err(_) => (
++                    virtual_default_manifest(&config.codex_home),
++                    Some(DENY_MANIFEST_INVALID),
++                ),
++            };
++        let default_runtime = Arc::new(AccountRuntimeBundle {
++            auth_manager: default_auth_manager,
++            models_manager: default_models_manager,
++        });
++        let mut slots = manifest
++            .slots
++            .into_iter()
++            .map(|manifest| {
++                let runtime = Arc::new(OnceCell::new());
++                if manifest.is_default {
++                    let _ = runtime.set(Arc::clone(&default_runtime));
++                }
++                AccountSlotRecord { manifest, runtime }
++            })
++            .collect::<Vec<_>>();
++        slots.sort_by(|left, right| {
++            left.manifest
++                .account_slot_id
++                .cmp(&right.manifest.account_slot_id)
++        });
++
++        Self {
++            auth_config_template: config.auth_config(),
++            config,
++            state: RwLock::new(AccountRegistryState {
++                revision: manifest.revision,
++                slots,
++                manifest_error,
++            }),
++        }
++    }
++
++    pub(crate) async fn list(
++        &self,
++        params: AccountSlotListParams,
++    ) -> Result<AccountSlotListResponse, JSONRPCErrorError> {
++        let (revision, slots, manifest_error) = {
++            let state = self
++                .state
++                .read()
++                .map_err(|_| internal_error("account slot registry is unavailable"))?;
++            (state.revision, state.slots.clone(), state.manifest_error)
++        };
++        let capability = self.capability(manifest_error);
++        let limit = match params.limit.map(|limit| limit as usize) {
++            Some(0) => return Err(invalid_params("accountSlot/list limit must be positive")),
++            Some(limit) => limit.min(MAX_LIST_LIMIT),
++            None => DEFAULT_LIST_LIMIT,
++        };
++        let start = cursor_start(params.cursor.as_deref(), revision, &slots)?;
++        let end = start.saturating_add(limit).min(slots.len());
++        let mut data = Vec::with_capacity(end.saturating_sub(start));
++        for slot in &slots[start..end] {
++            data.push(self.snapshot(slot, revision, &capability).await);
++        }
++        let next_cursor = if end < slots.len() {
++            Some(
++                encode_cursor(AccountSlotCursor {
++                    revision,
++                    after_slot_id: slots[end - 1].manifest.account_slot_id.clone(),
++                })
++                .map_err(|_| internal_error("account slot cursor could not be serialized"))?,
++            )
++        } else {
++            None
++        };
++
++        Ok(AccountSlotListResponse {
++            data,
++            next_cursor,
++            registry_revision: revision,
++            multi_account: capability,
++        })
++    }
++
++    pub(crate) async fn runtime_capability(
++        &self,
++    ) -> Result<AccountSlotCapability, JSONRPCErrorError> {
++        let manifest_error = self
++            .state
++            .read()
++            .map_err(|_| internal_error("account slot registry is unavailable"))?
++            .manifest_error;
++        Ok(self.capability(manifest_error))
++    }
++
++    pub(crate) async fn slot_snapshot(
++        &self,
++        account_slot_id: &str,
++    ) -> Result<AccountSlotSnapshot, JSONRPCErrorError> {
++        let (slot, revision, manifest_error) = {
++            let state = self
++                .state
++                .read()
++                .map_err(|_| internal_error("account slot registry is unavailable"))?;
++            let slot = state
++                .slots
++                .iter()
++                .find(|slot| slot.manifest.account_slot_id == account_slot_id)
++                .cloned()
++                .ok_or_else(|| invalid_params("account slot is unavailable"))?;
++            (slot, state.revision, state.manifest_error)
++        };
++        let capability = self.capability(manifest_error);
++        Ok(self.snapshot(&slot, revision, &capability).await)
++    }
++
++    async fn snapshot(
++        &self,
++        slot: &AccountSlotRecord,
++        revision: u64,
++        capability: &AccountSlotCapability,
++    ) -> AccountSlotSnapshot {
++        let runtime = if capability.available || slot.manifest.is_default {
++            Some(self.runtime(slot).await)
++        } else {
++            None
++        };
++        let auth_mode = runtime
++            .as_ref()
++            .and_then(|runtime| runtime.auth_manager.auth_mode())
++            .map(auth_mode_to_api);
++        let status = match (slot.manifest.is_default, auth_mode) {
++            (true, Some(_)) => AccountSlotStatus::Ready,
++            _ => slot.manifest.status.into(),
++        };
++        let error_code = (status == AccountSlotStatus::Failed)
++            .then(|| slot.manifest.error_code.clone())
++            .flatten();
++
++        AccountSlotSnapshot {
++            account_slot_id: slot.manifest.account_slot_id.clone(),
++            label: slot.manifest.label.clone(),
++            is_default: slot.manifest.is_default,
++            status,
++            auth_mode,
++            attempt_generation: slot.manifest.attempt_generation,
++            registry_revision: revision,
++            active_login_operation_id: None,
++            error_code,
++            actions: Vec::<AccountSlotActionAvailability>::new(),
++            updated_at: slot.manifest.updated_at,
++        }
++    }
++
++    async fn runtime(&self, slot: &AccountSlotRecord) -> Arc<AccountRuntimeBundle> {
++        slot.runtime
++            .get_or_init(|| async {
++                let mut auth_config = self.auth_config_template.clone();
++                auth_config.codex_home = slot.manifest.auth_home.clone();
++                let auth_manager = AuthManager::shared_from_managed_auth_config(auth_config).await;
++                let provider = create_model_provider(
++                    self.config.model_provider.clone(),
++                    Some(Arc::clone(&auth_manager)),
++                );
++                let models_manager = provider.models_manager(
++                    slot.manifest.auth_home.clone(),
++                    self.config.model_catalog.clone(),
++                );
++                Arc::new(AccountRuntimeBundle {
++                    auth_manager,
++                    models_manager,
++                })
++            })
++            .await
++            .clone()
++    }
++
++    fn capability(&self, manifest_error: Option<&'static str>) -> AccountSlotCapability {
++        let deny_reason = match self.default_auth_source() {
++            AuthSourceKind::CodexAccessTokenEnvironment => Some(DENY_HOST_ACCESS_TOKEN),
++            AuthSourceKind::WorkloadIdentity => Some(DENY_HOST_WORKLOAD_IDENTITY),
++            AuthSourceKind::External => Some(DENY_HOST_EXTERNAL_AUTH),
++            AuthSourceKind::ManagedStore | AuthSourceKind::CodexApiKeyEnvironment => manifest_error,
++        }
++        .or_else(|| {
++            self.provider_has_host_owned_auth()
++                .then_some(DENY_HOST_PROVIDER_AUTH)
++        });
++        AccountSlotCapability {
++            available: deny_reason.is_none(),
++            deny_reason: deny_reason.map(str::to_string),
++        }
++    }
++
++    fn default_auth_source(&self) -> AuthSourceKind {
++        self.state
++            .read()
++            .ok()
++            .and_then(|state| {
++                state
++                    .slots
++                    .iter()
++                    .find(|slot| slot.manifest.is_default)
++                    .cloned()
++            })
++            .and_then(|slot| slot.runtime.get().cloned())
++            .map(|runtime| runtime.auth_manager.auth_source_kind())
++            .unwrap_or(AuthSourceKind::External)
++    }
++
++    fn provider_has_host_owned_auth(&self) -> bool {
++        let provider = &self.config.model_provider;
++        provider.auth.is_some()
++            || provider.aws.is_some()
++            || provider.experimental_bearer_token.is_some()
++            || provider
++                .env_key
++                .as_ref()
++                .is_some_and(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
++            || provider.env_http_headers.as_ref().is_some_and(|headers| {
++                headers
++                    .values()
++                    .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
++            })
++    }
++}
++
++fn virtual_default_manifest(process_home: &Path) -> AccountSlotsManifest {
++    AccountSlotsManifest {
++        schema_version: MANIFEST_SCHEMA_VERSION,
++        revision: 1,
++        slots: vec![AccountSlotManifest {
++            account_slot_id: DEFAULT_SLOT_ID.to_string(),
++            label: "Default account".to_string(),
++            auth_home: process_home.to_path_buf(),
++            is_default: true,
++            status: ManifestSlotStatus::LoginRequired,
++            attempt_generation: 0,
++            updated_at: 0,
++            error_code: None,
++        }],
++    }
++}
++
++#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
++#[serde(rename_all = "camelCase")]
++struct AccountSlotCursor {
++    revision: u64,
++    after_slot_id: String,
++}
++
++#[derive(Debug, Eq, PartialEq)]
++enum CursorError {
++    Invalid,
++    Stale,
++}
++
++fn encode_cursor(cursor: AccountSlotCursor) -> Result<String, serde_json::Error> {
++    serde_json::to_vec(&cursor).map(|json| URL_SAFE_NO_PAD.encode(json))
++}
++
++fn decode_cursor(cursor: &str, revision: u64) -> Result<AccountSlotCursor, CursorError> {
++    let bytes = URL_SAFE_NO_PAD
++        .decode(cursor)
++        .map_err(|_| CursorError::Invalid)?;
++    let cursor: AccountSlotCursor =
++        serde_json::from_slice(&bytes).map_err(|_| CursorError::Invalid)?;
++    if cursor.revision != revision {
++        return Err(CursorError::Stale);
++    }
++    Ok(cursor)
++}
++
++fn cursor_start(
++    cursor: Option<&str>,
++    revision: u64,
++    slots: &[AccountSlotRecord],
++) -> Result<usize, JSONRPCErrorError> {
++    let Some(cursor) = cursor else {
++        return Ok(0);
++    };
++    let cursor = match decode_cursor(cursor, revision) {
++        Ok(cursor) => cursor,
++        Err(CursorError::Invalid) => {
++            return Err(invalid_params("accountSlot/list cursor is invalid"));
++        }
++        Err(CursorError::Stale) => {
++            return Err(invalid_params(
++                "accountSlot/list cursor is stale; restart pagination",
++            ));
++        }
++    };
++    slots
++        .iter()
++        .position(|slot| slot.manifest.account_slot_id == cursor.after_slot_id)
++        .map(|index| index + 1)
++        .ok_or_else(|| invalid_params("accountSlot/list cursor is invalid"))
++}
++
++#[cfg(test)]
++#[path = "account_registry_tests.rs"]
++mod tests;
+diff --git a/codex-rs/app-server/src/account_registry_tests.rs b/codex-rs/app-server/src/account_registry_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..af7c6527682beb7212f377b1287466890d3c9541
+--- /dev/null
++++ b/codex-rs/app-server/src/account_registry_tests.rs
+@@ -0,0 +1,161 @@
++use super::*;
++use codex_core::config::ConfigBuilder;
++use codex_login::CodexAuth;
++use pretty_assertions::assert_eq;
++use tempfile::tempdir;
++
++const SECOND_SLOT_ID: &str = "11111111111141118111111111111111";
++
++async fn registry_for_home(process_home: &Path) -> AccountRegistry {
++    let config = Arc::new(
++        ConfigBuilder::default()
++            .codex_home(process_home.to_path_buf())
++            .build()
++            .await
++            .expect("build config"),
++    );
++    let auth_manager = AuthManager::from_auth_for_testing_with_home(
++        CodexAuth::from_api_key("dummy"),
++        process_home.to_path_buf(),
++    );
++    let models_manager = codex_core::build_models_manager(config.as_ref(), auth_manager.clone());
++    AccountRegistry::new(config, auth_manager, models_manager)
++}
++
++fn manifest(process_home: &Path, revision: u64) -> AccountSlotsManifest {
++    AccountSlotsManifest {
++        schema_version: MANIFEST_SCHEMA_VERSION,
++        revision,
++        slots: vec![
++            AccountSlotManifest {
++                account_slot_id: DEFAULT_SLOT_ID.to_string(),
++                label: "Default account".to_string(),
++                auth_home: process_home.to_path_buf(),
++                is_default: true,
++                status: ManifestSlotStatus::Ready,
++                attempt_generation: 0,
++                updated_at: 10,
++                error_code: None,
++            },
++            AccountSlotManifest {
++                account_slot_id: SECOND_SLOT_ID.to_string(),
++                label: "Second account".to_string(),
++                auth_home: process_home.join(PRIVATE_HOMES_DIR).join(SECOND_SLOT_ID),
++                is_default: false,
++                status: ManifestSlotStatus::LoginRequired,
++                attempt_generation: 2,
++                updated_at: 20,
++                error_code: None,
++            },
++        ],
++    }
++}
++
++#[test]
++fn manifest_round_trips_through_atomic_replace() {
++    let process_home = tempdir().expect("temp process home");
++    let path = process_home.path().join(MANIFEST_FILE);
++    let first = manifest(process_home.path(), 1);
++    first.persist(&path).expect("persist first manifest");
++    assert_eq!(
++        AccountSlotsManifest::load(&path, process_home.path()).expect("load first manifest"),
++        Some(first)
++    );
++
++    let second = manifest(process_home.path(), 2);
++    second.persist(&path).expect("replace manifest");
++    assert_eq!(
++        AccountSlotsManifest::load(&path, process_home.path()).expect("load second manifest"),
++        Some(second)
++    );
++}
++
++#[test]
++fn manifest_rejects_non_private_secondary_home() {
++    let process_home = tempdir().expect("temp process home");
++    let outside_home = tempdir().expect("outside home");
++    let mut manifest = manifest(process_home.path(), 1);
++    manifest.slots[1].auth_home = outside_home.path().to_path_buf();
++
++    let error = manifest
++        .validate(process_home.path())
++        .expect_err("outside account home must be rejected");
++    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
++}
++
++#[test]
++fn manifest_rejects_non_uuid_slot_and_lexical_path_escape() {
++    let process_home = tempdir().expect("temp process home");
++    let mut invalid_id = manifest(process_home.path(), 1);
++    invalid_id.slots[1].account_slot_id = "..".to_string();
++    invalid_id.slots[1].auth_home = process_home.path().join(PRIVATE_HOMES_DIR).join("..");
++
++    let error = invalid_id
++        .validate(process_home.path())
++        .expect_err("non-UUID slot ID must be rejected");
++    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
++
++    let mut escaped_home = manifest(process_home.path(), 1);
++    escaped_home.slots[1].auth_home = process_home
++        .path()
++        .join(PRIVATE_HOMES_DIR)
++        .join(SECOND_SLOT_ID)
++        .join("..")
++        .join("..");
++    let error = escaped_home
++        .validate(process_home.path())
++        .expect_err("lexical path escape must be rejected");
++    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
++}
++
++#[cfg(unix)]
++#[test]
++fn manifest_rejects_symlinked_private_home() {
++    use std::os::unix::fs::symlink;
++
++    let process_home = tempdir().expect("temp process home");
++    let outside_home = tempdir().expect("outside home");
++    let private_root = process_home.path().join(PRIVATE_HOMES_DIR);
++    std::fs::create_dir(&private_root).expect("create private root");
++    symlink(outside_home.path(), private_root.join(SECOND_SLOT_ID)).expect("create escaping link");
++
++    let error = manifest(process_home.path(), 1)
++        .validate(process_home.path())
++        .expect_err("symlinked private home must be rejected");
++    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
++}
++
++#[test]
++fn cursor_is_bound_to_registry_revision() {
++    let encoded = encode_cursor(AccountSlotCursor {
++        revision: 7,
++        after_slot_id: SECOND_SLOT_ID.to_string(),
++    })
++    .expect("cursor should encode");
++    let decoded = decode_cursor(&encoded, 7).expect("cursor should decode");
++    assert_eq!(
++        decoded,
++        AccountSlotCursor {
++            revision: 7,
++            after_slot_id: SECOND_SLOT_ID.to_string(),
++        }
++    );
++    assert!(matches!(
++        decode_cursor(&encoded, 8),
++        Err(CursorError::Stale)
++    ));
++}
++
++#[tokio::test]
++async fn slot_snapshot_releases_registry_guard_before_capability_lookup() {
++    let process_home = tempdir().expect("temp process home");
++    let registry = registry_for_home(process_home.path()).await;
++
++    let snapshot = registry
++        .slot_snapshot(DEFAULT_SLOT_ID)
++        .await
++        .expect("default snapshot");
++
++    assert_eq!(snapshot.account_slot_id, DEFAULT_SLOT_ID);
++    assert!(snapshot.is_default);
++}
+diff --git a/codex-rs/app-server/src/lib.rs b/codex-rs/app-server/src/lib.rs
+index b0f5062389ebec738bb56321af3dd8b9308c9ea1..0c67d18e0e920b7c275ab07acce9582768aaf87f 100644
+--- a/codex-rs/app-server/src/lib.rs
++++ b/codex-rs/app-server/src/lib.rs
+@@ -82,6 +82,7 @@ use tracing_subscriber::util::SubscriberInitExt;
+ 
+ const SQLITE_RECOVERY_CONFIG_WARNING_SUMMARY: &str = "Codex rebuilt its local database.";
+ 
++mod account_registry;
+ mod analytics_utils;
+ mod app_info;
+ mod app_server_tracing;
+diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
+index 114254494db50fb043bf0b99d456e34f2bff4763..a1a473dc1fa9dffa536f410c20a67b36122e8872 100644
+--- a/codex-rs/app-server/src/message_processor.rs
++++ b/codex-rs/app-server/src/message_processor.rs
+@@ -4,6 +4,7 @@ use std::sync::Arc;
+ use std::sync::OnceLock;
+ use std::sync::atomic::AtomicBool;
+ 
++use crate::account_registry::AccountRegistry;
+ use crate::attestation::app_server_attestation_provider;
+ use crate::config_manager::ConfigManager;
+ use crate::connection_rpc_gate::ConnectionRpcGate;
+@@ -305,6 +306,13 @@ impl MessageProcessor {
+         let goal_service = Arc::new(GoalService::new());
+         let extension_event_sink =
+             app_server_extension_event_sink(outgoing.clone(), thread_state_manager.clone());
++        let default_models_manager =
++            codex_core::build_models_manager(config.as_ref(), auth_manager.clone());
++        let account_registry = Arc::new(AccountRegistry::new(
++            Arc::clone(&config),
++            Arc::clone(&auth_manager),
++            Arc::clone(&default_models_manager),
++        ));
+         let mut queue_service = None;
+         let thread_manager = Arc::new_cyclic(|thread_manager| {
+             queue_service = queue_store.map(|queue| {
+@@ -317,7 +325,7 @@ impl MessageProcessor {
+             let manager = ThreadManager::new(
+                 config.as_ref(),
+                 auth_manager.clone(),
+-                codex_core::build_models_manager(config.as_ref(), auth_manager.clone()),
++                default_models_manager,
+                 codex_core::CodexAppsToolsCache::default(),
+                 session_source,
+                 environment_manager,
+@@ -394,6 +402,7 @@ impl MessageProcessor {
+             );
+         let account_processor = AccountRequestProcessor::new(
+             auth_manager.clone(),
++            account_registry,
+             Arc::clone(&thread_manager),
+             outgoing.clone(),
+             Arc::clone(&config),
+@@ -959,9 +968,11 @@ impl MessageProcessor {
+             ClientRequest::SessionRuntimeList { .. } => Err(method_not_found(
+                 "sessionRuntime/list is not implemented yet",
+             )),
+-            ClientRequest::AccountSlotList { .. } => {
+-                Err(method_not_found("accountSlot/list is not implemented yet"))
+-            }
++            ClientRequest::AccountSlotList { params, .. } => self
++                .account_processor
++                .list_account_slots(params)
++                .await
++                .map(|response| Some(response.into())),
+             ClientRequest::AccountSlotLoginStart { .. } => Err(method_not_found(
+                 "accountSlot/login/start is not implemented yet",
+             )),
+diff --git a/codex-rs/app-server/src/request_processors.rs b/codex-rs/app-server/src/request_processors.rs
+index e1e359f1735fcebf83f9994d39e0485eeedc540f..c328a868cb5cd8f852a2bf3a4aa6a160553cd8ce 100644
+--- a/codex-rs/app-server/src/request_processors.rs
++++ b/codex-rs/app-server/src/request_processors.rs
+@@ -21,6 +21,8 @@ use codex_analytics::InputError;
+ use codex_analytics::TurnSteerRequestError;
+ use codex_app_server_protocol::Account;
+ use codex_app_server_protocol::AccountLoginCompletedNotification;
++use codex_app_server_protocol::AccountSlotListParams;
++use codex_app_server_protocol::AccountSlotListResponse;
+ use codex_app_server_protocol::AccountTokenUsageDailyBucket;
+ use codex_app_server_protocol::AccountTokenUsageSummary;
+ use codex_app_server_protocol::AccountUpdatedNotification;
+diff --git a/codex-rs/app-server/src/request_processors/account_processor.rs b/codex-rs/app-server/src/request_processors/account_processor.rs
+index 565bf730ddac5025569f8bb9adeac7b58fa79039..94685ca71b752fcf311d8ee6c2495aa223cc0b4a 100644
+--- a/codex-rs/app-server/src/request_processors/account_processor.rs
++++ b/codex-rs/app-server/src/request_processors/account_processor.rs
+@@ -1,6 +1,7 @@
+ use super::bedrock_auth::clear_user_model_provider_if_bedrock;
+ use super::bedrock_auth::set_user_model_provider_to_bedrock;
+ use super::*;
++use crate::account_registry::AccountRegistry;
+ use crate::auth_mode::auth_mode_to_api;
+ use crate::external_auth::ExternalAuthBridge;
+ use chrono::DateTime;
+@@ -72,6 +73,7 @@ impl Drop for ActiveLogin {
+ #[derive(Clone)]
+ pub(crate) struct AccountRequestProcessor {
+     auth_manager: Arc<AuthManager>,
++    account_registry: Arc<AccountRegistry>,
+     thread_manager: Arc<ThreadManager>,
+     outgoing: Arc<OutgoingMessageSender>,
+     config: Arc<Config>,
+@@ -82,6 +84,7 @@ pub(crate) struct AccountRequestProcessor {
+ impl AccountRequestProcessor {
+     pub(crate) fn new(
+         auth_manager: Arc<AuthManager>,
++        account_registry: Arc<AccountRegistry>,
+         thread_manager: Arc<ThreadManager>,
+         outgoing: Arc<OutgoingMessageSender>,
+         config: Arc<Config>,
+@@ -89,6 +92,7 @@ impl AccountRequestProcessor {
+     ) -> Self {
+         Self {
+             auth_manager,
++            account_registry,
+             thread_manager,
+             outgoing,
+             config,
+@@ -97,6 +101,13 @@ impl AccountRequestProcessor {
+         }
+     }
+ 
++    pub(crate) async fn list_account_slots(
++        &self,
++        params: AccountSlotListParams,
++    ) -> Result<AccountSlotListResponse, JSONRPCErrorError> {
++        self.account_registry.list(params).await
++    }
++
+     pub(crate) async fn login_account(
+         &self,
+         request_id: ConnectionRequestId,
+diff --git a/codex-rs/login/src/auth/auth_tests.rs b/codex-rs/login/src/auth/auth_tests.rs
+index 8a642b0a540e70b6f0192bd314867b75891308f8..19a9260b595d315516b83d5b7c3087fccb4103e5 100644
+--- a/codex-rs/login/src/auth/auth_tests.rs
++++ b/codex-rs/login/src/auth/auth_tests.rs
+@@ -33,6 +33,84 @@ const WORKSPACE_ID_ALLOWED: &str = "123e4567-e89b-42d3-a456-426614174000";
+ const WORKSPACE_ID_SECOND_ALLOWED: &str = "123e4567-e89b-42d3-a456-426614174001";
+ const WORKSPACE_ID_DISALLOWED: &str = "123e4567-e89b-42d3-a456-426614174002";
+ 
++#[tokio::test]
++#[serial(codex_auth_env)]
++async fn managed_auth_config_loads_only_its_private_store() {
++    let auth_home = tempdir().expect("temp auth home");
++    let access_token_guard = EnvVarGuard::set(CODEX_ACCESS_TOKEN_ENV_VAR, "invalid-slot-token");
++    login_with_api_key(
++        auth_home.path(),
++        "slot-key",
++        AuthCredentialsStoreMode::File,
++        AuthKeyringBackendKind::default(),
++    )
++    .expect("write slot auth");
++
++    let manager = AuthManager::shared_from_managed_auth_config(AuthConfig {
++        codex_home: auth_home.path().to_path_buf(),
++        auth_credentials_store_mode: AuthCredentialsStoreMode::File,
++        keyring_backend_kind: AuthKeyringBackendKind::default(),
++        forced_login_method: None,
++        chatgpt_base_url: None,
++        forced_chatgpt_workspace_id: None,
++        managed_auth_policy: ManagedAuthPolicy::default(),
++        auth_route_config: crate::test_support::transport_default_auth_route_config(),
++    })
++    .await;
++
++    assert_eq!(manager.auth_mode(), Some(AuthMode::ApiKey));
++    assert_eq!(manager.auth_source_kind(), AuthSourceKind::ManagedStore);
++    assert!(!manager.codex_api_key_env_enabled());
++    assert!(!manager.has_external_auth());
++    drop(access_token_guard);
++    let _late_access_token =
++        EnvVarGuard::set(CODEX_ACCESS_TOKEN_ENV_VAR, "invalid-late-slot-token");
++    assert_eq!(manager.auth_source_kind(), AuthSourceKind::ManagedStore);
++
++    assert!(!manager.reload().await);
++    assert_eq!(manager.auth_mode(), Some(AuthMode::ApiKey));
++    assert_eq!(manager.auth_source_kind(), AuthSourceKind::ManagedStore);
++}
++
++#[tokio::test]
++#[serial(codex_auth_env)]
++async fn explicit_reload_updates_the_cached_auth_source() {
++    let auth_home = tempdir().expect("temp auth home");
++    let _clean_api_key = EnvVarGuard::remove(CODEX_API_KEY_ENV_VAR);
++    login_with_api_key(
++        auth_home.path(),
++        "managed-key",
++        AuthCredentialsStoreMode::File,
++        AuthKeyringBackendKind::default(),
++    )
++    .expect("write managed auth");
++    let process_api_key = EnvVarGuard::set(CODEX_API_KEY_ENV_VAR, "process-key");
++    let manager = AuthManager::new(
++        auth_home.path().to_path_buf(),
++        /*enable_codex_api_key_env*/ true,
++        AuthCredentialsStoreMode::File,
++        /*forced_chatgpt_workspace_id*/ None,
++        /*chatgpt_base_url*/ None,
++        AuthKeyringBackendKind::default(),
++        crate::test_support::transport_default_auth_route_config(),
++    )
++    .await;
++    let access_token = EnvVarGuard::set(CODEX_ACCESS_TOKEN_ENV_VAR, "invalid-late-token");
++    assert_eq!(
++        manager.auth_source_kind(),
++        AuthSourceKind::CodexApiKeyEnvironment
++    );
++    drop(access_token);
++    assert_eq!(
++        manager.auth_source_kind(),
++        AuthSourceKind::CodexApiKeyEnvironment
++    );
++
++    drop(process_api_key);
++    manager.reload().await;
++    assert_eq!(manager.auth_source_kind(), AuthSourceKind::ManagedStore);
++}
++
+ #[test]
+ fn header_auth_exposes_a_valid_chatgpt_account_id() {
+     for (account_id_header, expected_account_id) in [
+@@ -1319,6 +1397,21 @@ impl ExternalAuth for StaticExternalAuth {
+     }
+ }
+ 
++#[tokio::test]
++async fn reload_resolves_and_preserves_installed_external_auth() {
++    let manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("seed"));
++    let external = CodexAuth::from_api_key("external-token");
++    manager
++        .set_external_auth(Arc::new(StaticExternalAuth(external.clone())))
++        .await
++        .expect("external auth should install");
++
++    manager.reload().await;
++
++    assert_eq!(manager.auth_cached(), Some(external));
++    assert_eq!(manager.auth_source_kind(), AuthSourceKind::External);
++}
++
+ struct RefreshingExternalAuth {
+     initial: CodexAuth,
+     refreshed: CodexAuth,
+diff --git a/codex-rs/login/src/auth/manager.rs b/codex-rs/login/src/auth/manager.rs
+index 01c039c0839a1d195ac529a284e476846a99327b..35fd8b58cbe46dde2fe9382f5b990182b909dd0f 100644
+--- a/codex-rs/login/src/auth/manager.rs
++++ b/codex-rs/login/src/auth/manager.rs
+@@ -211,6 +211,30 @@ pub enum RefreshTokenError {
+ #[error(transparent)]
+ pub struct AuthManagerInitializationError(AuthManagerInitializationErrorSource);
+ 
++/// Secret-free classification of the credential source currently selected by an auth manager.
++///
++/// Callers use this to decide whether multiple independently managed credential homes can coexist
++/// in one process. The classification never contains credential values or storage paths.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum AuthSourceKind {
++    ManagedStore,
++    CodexApiKeyEnvironment,
++    CodexAccessTokenEnvironment,
++    WorkloadIdentity,
++    External,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum AuthLoadPolicy {
++    ProcessSources,
++    ManagedStoreOnly,
++}
++
++struct LoadedAuth {
++    auth: Option<CodexAuth>,
++    source_kind: AuthSourceKind,
++}
++
+ #[derive(Debug, Error)]
+ enum AuthManagerInitializationErrorSource {
+     #[error(transparent)]
+@@ -1162,13 +1186,24 @@ impl AuthConfig {
+         &self,
+         enable_codex_api_key_env: bool,
+     ) -> std::io::Result<Option<CodexAuth>> {
++        self.load_auth_with_policy(enable_codex_api_key_env, AuthLoadPolicy::ProcessSources)
++            .await
++            .map(|loaded| loaded.auth)
++    }
++
++    async fn load_auth_with_policy(
++        &self,
++        enable_codex_api_key_env: bool,
++        load_policy: AuthLoadPolicy,
++    ) -> std::io::Result<LoadedAuth> {
+         let allowed_login_methods = self.allowed_login_methods();
+         let workspaces = self.effective_chatgpt_workspaces();
+         let agent_identity_authapi_base_url =
+             agent_identity_authapi_base_url(self.chatgpt_base_url.as_deref()).ok();
+-        let auth = load_auth(
++        let loaded = load_auth_with_policy(
+             &self.codex_home,
+             enable_codex_api_key_env,
++            load_policy,
+             self.auth_credentials_store_mode,
+             Some(&allowed_login_methods),
+             workspaces.as_deref(),
+@@ -1178,7 +1213,10 @@ impl AuthConfig {
+             &self.auth_route_config,
+         )
+         .await?;
+-        Ok(auth.filter(|auth| self.allows_auth(auth)))
++        Ok(LoadedAuth {
++            auth: loaded.auth.filter(|auth| self.allows_auth(auth)),
++            source_kind: loaded.source_kind,
++        })
+     }
+ 
+     fn allowed_login_methods(&self) -> Vec<ForcedLoginMethod> {
+@@ -1423,12 +1461,45 @@ async fn load_auth(
+     agent_identity_authapi_base_url: Option<&str>,
+     auth_route_config: &AuthRouteConfig,
+ ) -> std::io::Result<Option<CodexAuth>> {
++    load_auth_with_policy(
++        codex_home,
++        enable_codex_api_key_env,
++        AuthLoadPolicy::ProcessSources,
++        auth_credentials_store_mode,
++        allowed_login_methods,
++        forced_chatgpt_workspace_id,
++        chatgpt_base_url,
++        keyring_backend_kind,
++        agent_identity_authapi_base_url,
++        auth_route_config,
++    )
++    .await
++    .map(|loaded| loaded.auth)
++}
++
++#[allow(clippy::too_many_arguments)]
++async fn load_auth_with_policy(
++    codex_home: &Path,
++    enable_codex_api_key_env: bool,
++    load_policy: AuthLoadPolicy,
++    auth_credentials_store_mode: AuthCredentialsStoreMode,
++    allowed_login_methods: Option<&[ForcedLoginMethod]>,
++    forced_chatgpt_workspace_id: Option<&[String]>,
++    chatgpt_base_url: Option<&str>,
++    keyring_backend_kind: AuthKeyringBackendKind,
++    agent_identity_authapi_base_url: Option<&str>,
++    auth_route_config: &AuthRouteConfig,
++) -> std::io::Result<LoadedAuth> {
+     // API key via env var takes precedence over any other auth method.
+-    if enable_codex_api_key_env
++    if load_policy == AuthLoadPolicy::ProcessSources
++        && enable_codex_api_key_env
+         && auth_mode_is_allowed(allowed_login_methods, AuthMode::ApiKey)
+         && let Some(api_key) = read_codex_api_key_from_env()
+     {
+-        return Ok(Some(CodexAuth::from_api_key(api_key.as_str())));
++        return Ok(LoadedAuth {
++            auth: Some(CodexAuth::from_api_key(api_key.as_str())),
++            source_kind: AuthSourceKind::CodexApiKeyEnvironment,
++        });
+     }
+ 
+     // External ChatGPT auth tokens live in the in-memory (ephemeral) store. Always check this
+@@ -1457,36 +1528,48 @@ async fn load_auth(
+         if let CodexAuth::PersonalAccessToken(auth) = &auth {
+             ensure_auth_workspace_allowed(forced_chatgpt_workspace_id, auth.account_id())?;
+         }
+-        return Ok(Some(auth));
++        return Ok(LoadedAuth {
++            auth: Some(auth),
++            source_kind: AuthSourceKind::ManagedStore,
++        });
+     }
+ 
+-    if auth_mode_is_allowed(allowed_login_methods, AuthMode::AgentIdentity)
++    if load_policy == AuthLoadPolicy::ProcessSources
++        && auth_mode_is_allowed(allowed_login_methods, AuthMode::AgentIdentity)
+         && let Some(access_token) = read_codex_access_token_from_env()
+     {
+-        return match classify_codex_access_token(&access_token) {
++        let auth = match classify_codex_access_token(&access_token) {
+             CodexAccessToken::PersonalAccessToken(access_token) => {
+                 let auth = PersonalAccessTokenAuth::load(access_token, auth_route_config).await?;
+                 ensure_auth_workspace_allowed(forced_chatgpt_workspace_id, auth.account_id())?;
+-                Ok(Some(CodexAuth::PersonalAccessToken(auth)))
++                Ok(CodexAuth::PersonalAccessToken(auth))
+             }
+             CodexAccessToken::AgentIdentityJwt(jwt) => {
+-                let record = AgentIdentityAuthRecord::from_agent_identity_jwt(jwt)?;
+-                ensure_auth_workspace_allowed(forced_chatgpt_workspace_id, &record.account_id)?;
+-                CodexAuth::from_agent_identity_jwt_with_authapi_base_url(
+-                    jwt,
+-                    chatgpt_base_url,
+-                    require_agent_identity_authapi_base_url(agent_identity_authapi_base_url)?,
+-                    auth_route_config,
+-                )
++                {
++                    let record = AgentIdentityAuthRecord::from_agent_identity_jwt(jwt)?;
++                    ensure_auth_workspace_allowed(forced_chatgpt_workspace_id, &record.account_id)?;
++                    CodexAuth::from_agent_identity_jwt_with_authapi_base_url(
++                        jwt,
++                        chatgpt_base_url,
++                        require_agent_identity_authapi_base_url(agent_identity_authapi_base_url)?,
++                        auth_route_config,
++                    )
++                }
++                .await
+             }
+-            .await
+-            .map(Some),
+-        };
++        }?;
++        return Ok(LoadedAuth {
++            auth: Some(auth),
++            source_kind: AuthSourceKind::CodexAccessTokenEnvironment,
++        });
+     }
+ 
+     // If the caller explicitly requested ephemeral auth, there is no persisted fallback.
+     if auth_credentials_store_mode == AuthCredentialsStoreMode::Ephemeral {
+-        return Ok(None);
++        return Ok(LoadedAuth {
++            auth: None,
++            source_kind: AuthSourceKind::ManagedStore,
++        });
+     }
+ 
+     // Fall back to the configured persistent store (file/keyring/auto) for managed auth.
+@@ -1497,10 +1580,18 @@ async fn load_auth(
+     );
+     let auth_dot_json = match storage.load()? {
+         Some(auth) => auth,
+-        None => return Ok(None),
++        None => {
++            return Ok(LoadedAuth {
++                auth: None,
++                source_kind: AuthSourceKind::ManagedStore,
++            });
++        }
+     };
+     if !auth_mode_is_allowed(allowed_login_methods, auth_dot_json.resolved_mode()) {
+-        return Ok(None);
++        return Ok(LoadedAuth {
++            auth: None,
++            source_kind: AuthSourceKind::ManagedStore,
++        });
+     }
+     if let Some(agent_identity) = auth_dot_json.agent_identity.as_ref() {
+         ensure_agent_identity_workspace_allowed(forced_chatgpt_workspace_id, agent_identity)?;
+@@ -1519,7 +1610,10 @@ async fn load_auth(
+     if let CodexAuth::PersonalAccessToken(auth) = &auth {
+         ensure_auth_workspace_allowed(forced_chatgpt_workspace_id, auth.account_id())?;
+     }
+-    Ok(Some(auth))
++    Ok(LoadedAuth {
++        auth: Some(auth),
++        source_kind: AuthSourceKind::ManagedStore,
++    })
+ }
+ 
+ // Persist refreshed tokens into auth storage and update last_refresh.
+@@ -1752,6 +1846,7 @@ impl AuthDotJson {
+ #[derive(Clone)]
+ struct CachedAuth {
+     auth: Option<CodexAuth>,
++    source_kind: AuthSourceKind,
+     /// Permanent refresh failure cached for the current auth snapshot so
+     /// later refresh attempts for the same credentials fail fast without network.
+     permanent_refresh_failure: Option<AuthScopedRefreshFailure>,
+@@ -1770,6 +1865,7 @@ impl Debug for CachedAuth {
+                 "auth_mode",
+                 &self.auth.as_ref().map(CodexAuth::api_auth_mode),
+             )
++            .field("source_kind", &self.source_kind)
+             .field(
+                 "permanent_refresh_failure",
+                 &self
+@@ -2001,6 +2097,7 @@ pub struct AuthManager {
+     inner: RwLock<CachedAuth>,
+     auth_change_tx: watch::Sender<u64>,
+     enable_codex_api_key_env: bool,
++    auth_load_policy: AuthLoadPolicy,
+     auth_credentials_store_mode: AuthCredentialsStoreMode,
+     keyring_backend_kind: AuthKeyringBackendKind,
+     forced_login_method: Option<ForcedLoginMethod>,
+@@ -2106,16 +2203,24 @@ impl AuthManager {
+                 auth_route_config,
+             },
+             enable_codex_api_key_env,
++            AuthLoadPolicy::ProcessSources,
+         )
+         .await
+     }
+ 
+-    async fn new_from_auth_config(auth_config: AuthConfig, enable_codex_api_key_env: bool) -> Self {
+-        let managed_auth = auth_config
+-            .load_auth(enable_codex_api_key_env)
++    async fn new_from_auth_config(
++        auth_config: AuthConfig,
++        enable_codex_api_key_env: bool,
++        auth_load_policy: AuthLoadPolicy,
++    ) -> Self {
++        let loaded_auth = auth_config
++            .load_auth_with_policy(enable_codex_api_key_env, auth_load_policy)
+             .await
+             .ok()
+-            .flatten();
++            .unwrap_or(LoadedAuth {
++                auth: None,
++                source_kind: AuthSourceKind::ManagedStore,
++            });
+         let AuthConfig {
+             codex_home,
+             auth_credentials_store_mode,
+@@ -2132,11 +2237,13 @@ impl AuthManager {
+         Self {
+             codex_home,
+             inner: RwLock::new(CachedAuth {
+-                auth: managed_auth,
++                auth: loaded_auth.auth,
++                source_kind: loaded_auth.source_kind,
+                 permanent_refresh_failure: None,
+             }),
+             auth_change_tx,
+             enable_codex_api_key_env,
++            auth_load_policy,
+             auth_credentials_store_mode,
+             keyring_backend_kind,
+             forced_login_method,
+@@ -2162,6 +2269,7 @@ impl AuthManager {
+     pub(crate) fn from_optional_auth_for_testing(auth: Option<CodexAuth>) -> Arc<Self> {
+         let cached = CachedAuth {
+             auth,
++            source_kind: AuthSourceKind::ManagedStore,
+             permanent_refresh_failure: None,
+         };
+         let (auth_change_tx, _auth_change_rx) = watch::channel(0);
+@@ -2171,6 +2279,7 @@ impl AuthManager {
+             inner: RwLock::new(cached),
+             auth_change_tx,
+             enable_codex_api_key_env: false,
++            auth_load_policy: AuthLoadPolicy::ManagedStoreOnly,
+             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
+             keyring_backend_kind: AuthKeyringBackendKind::default(),
+             forced_login_method: None,
+@@ -2191,6 +2300,7 @@ impl AuthManager {
+     pub fn from_auth_for_testing_with_home(auth: CodexAuth, codex_home: PathBuf) -> Arc<Self> {
+         let cached = CachedAuth {
+             auth: Some(auth),
++            source_kind: AuthSourceKind::ManagedStore,
+             permanent_refresh_failure: None,
+         };
+         let (auth_change_tx, _auth_change_rx) = watch::channel(0);
+@@ -2199,6 +2309,7 @@ impl AuthManager {
+             inner: RwLock::new(cached),
+             auth_change_tx,
+             enable_codex_api_key_env: false,
++            auth_load_policy: AuthLoadPolicy::ManagedStoreOnly,
+             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
+             keyring_backend_kind: AuthKeyringBackendKind::default(),
+             forced_login_method: None,
+@@ -2223,6 +2334,7 @@ impl AuthManager {
+     ) -> Arc<Self> {
+         let cached = CachedAuth {
+             auth: Some(auth),
++            source_kind: AuthSourceKind::ManagedStore,
+             permanent_refresh_failure: None,
+         };
+         let (auth_change_tx, _auth_change_rx) = watch::channel(0);
+@@ -2231,6 +2343,7 @@ impl AuthManager {
+             inner: RwLock::new(cached),
+             auth_change_tx,
+             enable_codex_api_key_env: false,
++            auth_load_policy: AuthLoadPolicy::ManagedStoreOnly,
+             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
+             keyring_backend_kind: AuthKeyringBackendKind::default(),
+             forced_login_method: None,
+@@ -2257,10 +2370,12 @@ impl AuthManager {
+             codex_home: PathBuf::from("non-existent"),
+             inner: RwLock::new(CachedAuth {
+                 auth: None,
++                source_kind: AuthSourceKind::External,
+                 permanent_refresh_failure: None,
+             }),
+             auth_change_tx,
+             enable_codex_api_key_env: false,
++            auth_load_policy: AuthLoadPolicy::ManagedStoreOnly,
+             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
+             keyring_backend_kind: AuthKeyringBackendKind::default(),
+             forced_login_method: None,
+@@ -2390,8 +2505,8 @@ impl AuthManager {
+     /// Reloads auth from the active source. Returns whether the auth value changed.
+     pub async fn reload(&self) -> bool {
+         tracing::info!("Reloading auth");
+-        let new_auth = self.load_auth().await;
+-        self.set_cached_auth(new_auth)
++        let loaded = self.load_auth().await;
++        self.set_loaded_auth(loaded)
+     }
+ 
+     async fn reload_if_account_id_matches(
+@@ -2406,8 +2521,8 @@ impl AuthManager {
+             }
+         };
+ 
+-        let new_auth = self.load_auth().await;
+-        let new_account_id = new_auth.as_ref().and_then(CodexAuth::get_account_id);
++        let loaded = self.load_auth().await;
++        let new_account_id = loaded.auth.as_ref().and_then(CodexAuth::get_account_id);
+ 
+         if new_account_id.as_deref() != Some(expected_account_id) {
+             let found_account_id = new_account_id.as_deref().unwrap_or("unknown");
+@@ -2420,8 +2535,8 @@ impl AuthManager {
+         tracing::info!("Reloading auth for account {expected_account_id}");
+         let cached_before_reload = self.auth_cached();
+         let auth_changed =
+-            !Self::auths_equal_for_refresh(cached_before_reload.as_ref(), new_auth.as_ref());
+-        self.set_cached_auth(new_auth);
++            !Self::auths_equal_for_refresh(cached_before_reload.as_ref(), loaded.auth.as_ref());
++        self.set_loaded_auth(loaded);
+         if auth_changed {
+             ReloadOutcome::ReloadedChanged
+         } else {
+@@ -2482,16 +2597,19 @@ impl AuthManager {
+         }
+     }
+ 
+-    async fn load_auth(&self) -> Option<CodexAuth> {
++    async fn load_auth(&self) -> LoadedAuth {
+         if let Some(external_auth) = self.external_auth_provider() {
+             let cached_auth = self.auth_cached();
+             if cached_auth
+                 .as_ref()
+                 .is_some_and(|auth| self.refresh_failure_for_auth(auth).is_some())
+             {
+-                return cached_auth;
++                return LoadedAuth {
++                    auth: cached_auth,
++                    source_kind: AuthSourceKind::External,
++                };
+             }
+-            return match self.resolve_external_auth(external_auth.as_ref()).await {
++            let auth = match self.resolve_external_auth(external_auth.as_ref()).await {
+                 Ok(auth) => Some(auth),
+                 Err(err) => {
+                     tracing::error!("Failed to resolve external auth: {err}");
+@@ -2506,13 +2624,18 @@ impl AuthManager {
+                     }
+                 }
+             };
++            return LoadedAuth {
++                auth,
++                source_kind: AuthSourceKind::External,
++            };
+         }
+ 
+         let allowed_login_methods = self.allowed_login_methods();
+         let effective_chatgpt_workspaces = self.effective_chatgpt_workspaces();
+-        load_auth(
++        load_auth_with_policy(
+             &self.codex_home,
+             self.enable_codex_api_key_env,
++            self.auth_load_policy,
+             self.auth_credentials_store_mode,
+             Some(&allowed_login_methods),
+             effective_chatgpt_workspaces.as_deref(),
+@@ -2522,19 +2645,36 @@ impl AuthManager {
+             &self.auth_route_config,
+         )
+         .await
+-        .ok()
+-        .flatten()
+-        .filter(|auth| {
+-            validate_auth_restrictions(
+-                Some(&allowed_login_methods),
+-                effective_chatgpt_workspaces.as_deref(),
+-                auth,
+-            )
+-            .is_ok()
++        .map(|mut loaded| {
++            loaded.auth = loaded.auth.filter(|auth| {
++                validate_auth_restrictions(
++                    Some(&allowed_login_methods),
++                    effective_chatgpt_workspaces.as_deref(),
++                    auth,
++                )
++                .is_ok()
++            });
++            loaded
+         })
++        .unwrap_or(LoadedAuth {
++            auth: None,
++            source_kind: AuthSourceKind::ManagedStore,
++        })
++    }
++
++    fn set_loaded_auth(&self, loaded: LoadedAuth) -> bool {
++        self.set_cached_auth_with_source(loaded.auth, Some(loaded.source_kind))
+     }
+ 
+     fn set_cached_auth(&self, new_auth: Option<CodexAuth>) -> bool {
++        self.set_cached_auth_with_source(new_auth, /*source_kind*/ None)
++    }
++
++    fn set_cached_auth_with_source(
++        &self,
++        new_auth: Option<CodexAuth>,
++        source_kind: Option<AuthSourceKind>,
++    ) -> bool {
+         if let Ok(mut guard) = self.inner.write() {
+             let previous = guard.auth.as_ref();
+             let changed = !AuthManager::auths_equal(previous, new_auth.as_ref());
+@@ -2545,6 +2685,9 @@ impl AuthManager {
+             }
+             tracing::info!("Reloaded auth, changed: {changed}");
+             guard.auth = new_auth;
++            if let Some(source_kind) = source_kind {
++                guard.source_kind = source_kind;
++            }
+             if auth_changed_for_refresh {
+                 self.auth_change_tx.send_modify(|revision| *revision += 1);
+             }
+@@ -2646,6 +2789,20 @@ impl AuthManager {
+         self.enable_codex_api_key_env
+     }
+ 
++    /// Returns the active credential source without exposing credential material.
++    pub fn auth_source_kind(&self) -> AuthSourceKind {
++        if self.workload_identity_selected {
++            return AuthSourceKind::WorkloadIdentity;
++        }
++        if self.has_external_auth() {
++            return AuthSourceKind::External;
++        }
++        self.inner
++            .read()
++            .map(|cached| cached.source_kind)
++            .unwrap_or(AuthSourceKind::External)
++    }
++
+     /// Convenience constructor returning an `Arc` wrapper.
+     pub async fn shared(
+         codex_home: PathBuf,
+@@ -2684,7 +2841,12 @@ impl AuthManager {
+         enable_codex_api_key_env: bool,
+     ) -> Result<Arc<Self>, AuthManagerInitializationError> {
+         let external_auth = WorkloadIdentityExternalAuth::from_process_config(&auth_config)?;
+-        let mut manager = Self::new_from_auth_config(auth_config, enable_codex_api_key_env).await;
++        let mut manager = Self::new_from_auth_config(
++            auth_config,
++            enable_codex_api_key_env,
++            AuthLoadPolicy::ProcessSources,
++        )
++        .await;
+         manager.workload_identity_selected = external_auth.is_some();
+         let manager = Arc::new(manager);
+         if let Some(external_auth) = external_auth {
+@@ -2695,6 +2857,22 @@ impl AuthManager {
+         Ok(manager)
+     }
+ 
++    /// Builds a shared manager that only reads the credential stores owned by `auth_config`.
++    ///
++    /// This constructor deliberately ignores process credential environment variables and does
++    /// not install process-wide workload identity or another external auth provider. It is the
++    /// constructor for non-default account slots with their own private credential home.
++    pub async fn shared_from_managed_auth_config(auth_config: AuthConfig) -> Arc<Self> {
++        Arc::new(
++            Self::new_from_auth_config(
++                auth_config,
++                /*enable_codex_api_key_env*/ false,
++                AuthLoadPolicy::ManagedStoreOnly,
++            )
++            .await,
++        )
++    }
++
+     pub fn unauthorized_recovery(self: &Arc<Self>) -> UnauthorizedRecovery {
+         UnauthorizedRecovery::new(Arc::clone(self))
+     }
+diff --git a/codex-rs/login/src/lib.rs b/codex-rs/login/src/lib.rs
+index 717bd0f4b0316a4ae4ec24a2b4f4d837695a7955..f20d24e36f1349892836ef5e2ab653bfe6aad83f 100644
+--- a/codex-rs/login/src/lib.rs
++++ b/codex-rs/login/src/lib.rs
+@@ -34,6 +34,7 @@ pub use auth::AuthKeyringBackendKind;
+ pub use auth::AuthManager;
+ pub use auth::AuthManagerConfig;
+ pub use auth::AuthManagerInitializationError;
++pub use auth::AuthSourceKind;
+ pub use auth::CLIENT_ID;
+ pub use auth::CLIENT_ID_OVERRIDE_ENV_VAR;
+ pub use auth::CODEX_ACCESS_TOKEN_ENV_VAR;

@@ -4,98 +4,147 @@
 
 # Codex CLI Custom
 
-## Why this patch series exists
+## Why this fork exists
 
-Running several accounts through one long-lived app-server and TUI creates a problem that process-level identity cannot solve: every session needs an explicit execution account, durable writer ownership, and a safe way to hand that ownership to another process. External orchestrators also need authoritative session state and permitted controls instead of inferring them from files, process lifetime, or timing.
+Stock Codex treats authentication and much of runtime ownership as process-level concerns. That becomes limiting when one long-lived app-server and TUI must serve several accounts, keep each thread bound to the correct account, and let another process take over an explicitly closed thread without corrupting its history.
 
-This ordered patch series makes those boundaries explicit. It supports multiple account slots in one app-server/TUI, keeps authentication isolated per session and turn, enables sessions serving different workflow roles to retain the correct account context, provides observable session state and guarded control operations, and exposes enabled skills as slash commands.
+This fork turns those implicit boundaries into explicit contracts:
 
-This repository does not duplicate the full upstream source. It checks out one exact [`openai/codex`](https://github.com/openai/codex) commit and applies the verified P001–P011 series in order.
+- multiple isolated account slots inside one app-server;
+- an immutable execution account for each turn, with a guarded next-turn switch;
+- durable single-writer authority and strict handoff;
+- sanitized session identity, lifecycle, persistence, and allowed-control state for external consumers;
+- TUI controls that do not require leaving one account-specific app and attaching to another; and
+- installable, structured plugin commands plus bounded UI-only presentation components.
 
-> **Experimental:** This is not an official OpenAI distribution. The current series applies only to `rust-v0.148.0`.
+The goal is not to replace workflow or relay systems. It is to give them authoritative app-server state and safe controls instead of forcing them to infer ownership from a PID, socket, title, current directory, or timeout.
 
-## Base and reproducibility
+> **Experimental:** This is not an official OpenAI distribution.
 
-- Upstream tag: `rust-v0.148.0`
-- Upstream commit: `3ba0f711642a888aec92a611a3f3b2211157ff89`
-- Tree after all patches: `fe1cec7cc8a29dedd89896c4459474fb5cf2d54e`
-- Manifest: [`custom-patches/rust-v0.148.0/series.toml`](custom-patches/rust-v0.148.0/series.toml)
-- Applier: [`custom-patches/apply-series.sh`](custom-patches/apply-series.sh)
+## 0.149 publication status
 
-The applier requires a clean worktree at the exact upstream commit, verifies the SHA-256 digest of every patch, and checks the final Git tree. Patch numbers are an ordered dependency chain; they are not independent options and must not be skipped or reordered.
+The target is upstream [`rust-v0.149.0`](https://github.com/openai/codex/releases/tag/rust-v0.149.0), commit `758ef40f50c1a458425c7cfbf1eb12cbc07af0b0`.
 
-## Patch series
+| Area | Current status |
+|---|---|
+| P001–P011 implementation and focused checks | Complete |
+| Ordered 0.149 patch export and clean-apply verification | Complete; 11 patches reproduce tree `85d7f4039b29096250faa772e67f240d9f7a4a90` |
+| macOS arm64 release build and artifacts | Pending |
+| Final independent reviews | Pending |
+| 0.149 publication | Pending |
+
+The current candidate is [`custom-patches/rust-v0.149.0`](custom-patches/rust-v0.149.0/). The files under [`custom-patches/rust-v0.148.0`](custom-patches/rust-v0.148.0/) are retained only as the previous release series.
+
+## Intended P001–P011 boundaries
+
+Each number is a reviewable feature patch. The series is ordered because later patches consume earlier contracts; the numbering also makes future upstream updates a bounded per-feature port instead of one large fork merge.
 
 ### P001 — Shared writer authority
 
-**Intent:** Make session ownership unambiguous even when different account homes share the same session store. A persistent store ID and writer generation are kept in SQLite, while thread writer ownership can be probed without mutating it.
+**Why:** Two account homes may share one session and SQLite store, so account-local lock files cannot prevent duplicate writers.
+
+**Boundary:** Put durable `storeId` and monotonic `writerGeneration` authority in the shared SQLite root, retain advisory process locks, and reject stale ownership before mutation. No automatic writer stealing.
 
 ### P002 — Session runtime protocol
 
-**Intent:** Give clients a stable contract before adding runtime behavior. App-server v2 gains DTOs, methods, and notifications for runtime snapshots and operations, strict relinquish, execution-account switching, and account-slot listing and login.
+**Why:** TUI, relay adapters, and external orchestrators need one stable app-server v2 contract before control behavior is added.
+
+**Boundary:** Define bounded `sessionRuntime`, account-slot, login, relinquish, and switch DTOs, methods, notifications, pagination, and compile-safe stubs. It does not implement the controls themselves.
 
 ### P003 — Multi-account registry
 
-**Intent:** Keep several accounts available inside one app-server without collapsing their identities. The default account remains a virtual compatibility slot, while additional slots use private homes, managed credential loading, revision-bound pagination, and fail-closed checks for conflicting process-wide identities.
+**Why:** A single server must host several accounts without exposing credential paths or silently falling back to the process-default identity.
+
+**Boundary:** Add a host-managed account-slot manifest, private per-slot auth homes and model caches, a compatibility default slot, revision-bound listing, and fail-closed handling for unsupported process-global external/workload identities.
 
 ### P004 — Durable execution binding and history
 
-**Intent:** Ensure a thread resumes under the same execution account that previously owned its work. Thread-to-account bindings are persisted and updated with generation CAS; resume, fork, child, and review sessions inherit the binding, and each turn records immutable binding provenance.
+**Why:** Resume, fork, child, and review threads must continue under the account that owns their work.
 
-### P005 — Propagate execution account to auth consumers
+**Boundary:** Persist thread-to-slot binding with generation CAS, inherit it across thread creation paths, and record immutable turn provenance. A slot ID alone is never accepted as fresh credential identity.
 
-**Intent:** Prevent credentials or account-scoped state from crossing session boundaries. Model, connector, app, plugin, MCP, extension, memory, and review paths consume the account context captured for the thread or turn, with account-scoped services and caches.
+### P005 — Account propagation to every consumer
 
-### P006 — Publish session runtime state
+**Why:** Switching the model client is insufficient if connectors, apps, plugins, MCP, telemetry, memory, review, or cost polling still use default or stale credentials.
 
-**Intent:** Let external controllers observe and act on sessions without guessing. A sanitized `sessionRuntime` snapshot reports lifecycle and waiting state, subscribers, writer authority, persistence health and position, account binding, and currently allowed actions through revisioned snapshots and sequenced notifications.
+**Boundary:** Capture one account runtime per turn and propagate it through every credential-sensitive consumer, including account-scoped services and caches. Mid-turn credential mixing remains forbidden.
 
-### P007 — Live account registration
+### P006 — Externally visible session runtime
 
-**Intent:** Add or reauthenticate an account slot without restarting the app-server. API-key, browser, device-code, and external-refresh login flows run as slot-scoped operations, with connection and generation checks protecting browser ownership and late responses.
+**Why:** External management should know what a session is doing and what it may safely do next without guessing.
 
-### P008 — Strict thread writer relinquish
+**Boundary:** Publish sanitized, revisioned snapshots and sequenced notifications for stable identity, lifecycle and waiting state, subscribers, writer authority, persistence health/position, account binding, and currently allowed actions. Operation replay is bounded and no credential paths or secrets are exposed.
 
-**Intent:** Release a session only after its durable state is safe for another owner to continue. New turns and control transitions are serialized, and the writer guard is released only after flush, materialization, sync, and recorder shutdown all succeed; failures preserve ownership and publish a stable cause.
+### P007 — Zero-restart account registration
 
-### P009 — Hot execution-account switch
+**Why:** Adding or reauthenticating an account should not require restarting the app-server or disconnecting every TUI.
 
-**Intent:** Switch an idle thread to another account without disconnecting the app-server or TUI. The target runtime is prepared before a durable binding CAS updates the in-memory pointer, while an active turn keeps its captured account and the next turn receives the new one.
+**Boundary:** Provide slot-scoped API-key, browser, device-code, and external-refresh login operations plus secondary-slot logout. Exact connection ownership and generation CAS reject late OAuth or same-slot completions that have already been superseded.
 
-### P010 — TUI session and account controls
+### P008 — Strict writer relinquish
 
-**Intent:** Make multi-account session control usable directly from the terminal. The TUI adds an account picker, `/account`, slot-scoped `/logout`, and strict shutdown/release handling that waits for both writer release and terminal `ThreadClosed` instead of treating a timeout as success.
+**Why:** Closing a TUI is not proof that the writer has flushed, materialized, and released the thread for another account or process.
 
-### P011 — Enabled skills as slash commands
+**Boundary:** Serialize new work against the close transition; require flush, materialization, path sync, recorder shutdown, and exact-generation release to succeed; retain the owner on failure; and publish terminal `NotLoaded`, `Released`, and matching `ThreadClosed` before reopening admission.
 
-**Intent:** Make the skills enabled for the current thread, account, and working directory directly discoverable and runnable. Skills appear as `/name` or `/namespace:name`; deterministic collision handling covers built-ins, service tiers, and duplicate names, while generation fencing rejects stale skill lists after an account or directory change.
+### P009 — Zero-restart execution-account switch
 
-## Apply locally
+**Why:** An attached idle thread should be able to change its owning account without leaving the TUI or reconnecting to another account-specific app-server.
 
-The target repository must already have a Git commit identity configured because the applier uses `git am`.
+**Boundary:** Prepare the full target runtime before durable binding CAS and infallible pointer publication. The active turn keeps its captured account; the next turn uses the target. MCP, plugins, realtime, telemetry/network provenance, Guardian sampling, Goal runtime, and other persistent account-bound consumers are rebuilt or refreshed, including same-slot reauthentication.
 
-```bash
-git init upstream-codex
-git -C upstream-codex remote add origin https://github.com/openai/codex.git
-git -C upstream-codex fetch --depth=1 origin 3ba0f711642a888aec92a611a3f3b2211157ff89
-git -C upstream-codex checkout --detach FETCH_HEAD
-./custom-patches/apply-series.sh upstream-codex
+**Status:** Implemented in P009.
+
+### P010 — TUI account, exit, clear, and new-thread controls
+
+**Why:** The safety contracts are useful only if the terminal client exposes them without pretending a timeout or disconnect was success.
+
+**Boundary:** Add an account picker and account/logout controls, make explicit exit wait for strict terminal release, and expose typed `threadClear`/`threadNew` agent controls to both new and legacy-resumed threads. Clear/new replies first and changes the UI only after the exact successful completion event.
+
+**Status:** Implemented in P010.
+
+### P011 — Installable structured plugin commands and ephemeral presentation
+
+**Why:** Skills-as-text-slash-commands are not a sufficient component model. Plugins need typed actions and relay-friendly UI elements without injecting control data into the model transcript.
+
+**Boundary:** Preserve legacy plugin command paths while adding a normalized contribution overlay. Commands use canonical `/namespace:name` and may use `/name` only when unique. Targets are limited to a bounded prompt, an exact MCP tool, an allowlisted Rust app-server action such as goal get/set/clear, or a packaged executable with fixed argv, no shell, and the existing approval/sandbox path.
+
+Plugins may append bounded card, notice, or progress items to the exact thread's current subscribers and TUI. These items are ephemeral: they never enter rollout history, model context, or durable conversation history. `llc-relay` remains the routing and message-job authority.
+
+**Status:** Implemented in P011.
+
+## Runtime and relay boundary
+
+The custom app-server is the authority for account execution, thread writer ownership, persistence state, and safe control admission. External systems can consume those values and associate sessions with workflow roles, but this fork does not make a relay job equivalent to workflow state or responsibility assignment.
+
+`llc-relay` continues to move messages among Codex and Claude sessions. Plugin cards/notices/progress are a typed presentation surface for current subscribers, not a replacement transport, acknowledgement ledger, or proof that an agent completed a relayed request.
+
+## Packaging and updates
+
+The 0.149 candidate is eleven ordered exact-base patches with a digest manifest and clean-tree applier. Apply it only to the exact upstream commit:
+
+```sh
+git checkout 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
+/path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD"
 ```
 
-## Build and artifacts
+The applier rejects a dirty or wrong-base worktree, verifies every patch digest, applies P001–P011 in order, and requires final tree `85d7f4039b29096250faa772e67f240d9f7a4a90`.
 
-The [`Build custom Codex for macOS arm64`](.github/workflows/build-custom-macos-arm64.yml) GitHub Actions workflow is manual-only. On a standard `macos-15` runner it reapplies the series and builds these release binaries:
+This separation is the maintenance strategy: when upstream advances, each P-number can be inspected, adapted, and verified against its own feature boundary.
 
-- `codex`
-- `codex-app-server`
+## Build, review, and publication
 
-Its 14-day artifact contains both stripped binaries, their SHA-256 list, and build metadata recording the upstream commit, patched tree, runner, Rust compiler, Cargo, and macOS versions. To build locally after applying the series:
+The following remain before 0.149 can be called published:
 
-```bash
-cd upstream-codex/codex-rs
-cargo build --release -p codex-cli --bin codex
-cargo build --release -p codex-app-server --bin codex-app-server
-```
+1. build `codex` and `codex-app-server` for macOS arm64;
+2. inspect the same final candidate with two independent fresh-context reviews; and
+3. publish the manifest, patches, documentation, and build artifacts together.
+
+No release build, final review, artifact, or completed publication is claimed until those remaining rows are updated.
+
+## Historical working notes
+
+The original personal investigation and build notes are preserved as non-authoritative background under [`docs/handoff.md`](docs/handoff.md) and [`docs/codex-rs-build-guide.md`](docs/codex-rs-build-guide.md). They predate the current 0.149 design and are not the public runtime contract.
 
 ## License
 

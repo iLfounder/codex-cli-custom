@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   build:
-    name: rust-v0.148.0 / macOS arm64
+    name: rust-v0.149.0 / macOS arm64
     runs-on: macos-15
     timeout-minutes: 330
     env:
@@ -22,8 +22,8 @@ jobs:
       CARGO_PROFILE_RELEASE_LTO: "false"
       CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
       CARGO_TERM_COLOR: always
-      SOURCE_COMMIT: 3ba0f711642a888aec92a611a3f3b2211157ff89
-      PATCH_TREE: fe1cec7cc8a29dedd89896c4459474fb5cf2d54e
+      SOURCE_COMMIT: 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
+      PATCH_TREE: 85d7f4039b29096250faa772e67f240d9f7a4a90
 
     steps:
       - name: Check out patch repository
@@ -35,9 +35,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-rust-v0.148.0-${{ hashFiles('custom-patches/rust-v0.148.0/**') }}
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-rust-v0.149.0-${{ hashFiles('custom-patches/rust-v0.149.0/**') }}
           restore-keys: |
-            cargo-${{ runner.os }}-${{ runner.arch }}-rust-v0.148.0-
+            cargo-${{ runner.os }}-${{ runner.arch }}-rust-v0.149.0-
 
       - name: Fetch the exact upstream source
         shell: bash
@@ -85,17 +85,17 @@ jobs:
             cargo --version
             sw_vers
           } > dist/BUILD-METADATA.txt
-          COPYFILE_DISABLE=1 tar -C dist -czf codex-custom-rust-v0.148.0-macos-arm64.tar.gz .
-          shasum -a 256 codex-custom-rust-v0.148.0-macos-arm64.tar.gz \
-            > codex-custom-rust-v0.148.0-macos-arm64.tar.gz.sha256
+          COPYFILE_DISABLE=1 tar -C dist -czf codex-custom-rust-v0.149.0-macos-arm64.tar.gz .
+          shasum -a 256 codex-custom-rust-v0.149.0-macos-arm64.tar.gz \
+            > codex-custom-rust-v0.149.0-macos-arm64.tar.gz.sha256
           file dist/codex dist/codex-app-server
 
       - name: Upload macOS arm64 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: codex-custom-rust-v0.148.0-macos-arm64
+          name: codex-custom-rust-v0.149.0-macos-arm64
           path: |
-            codex-custom-rust-v0.148.0-macos-arm64.tar.gz
-            codex-custom-rust-v0.148.0-macos-arm64.tar.gz.sha256
+            codex-custom-rust-v0.149.0-macos-arm64.tar.gz
+            codex-custom-rust-v0.149.0-macos-arm64.tar.gz.sha256
           if-no-files-found: error
           retention-days: 14

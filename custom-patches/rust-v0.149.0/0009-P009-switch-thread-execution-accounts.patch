@@ -1,0 +1,3354 @@
+From 86904dd6c1f169ec89a7455c68a25bf724342ea3 Mon Sep 17 00:00:00 2001
+From: patch-verifier <patch-verifier@localhost>
+Date: Fri, 21 Aug 2026 19:13:43 +0900
+Subject: [PATCH 09/11] feat(custom): switch thread accounts without restart
+ for 0.149
+
+---
+ codex-rs/app-server/src/message_processor.rs  |   9 +-
+ .../app-server/src/session_runtime/mod.rs     |   2 +
+ .../src/session_runtime/relinquish.rs         |  10 +-
+ .../src/session_runtime/snapshot.rs           |  51 +-
+ .../src/session_runtime/switch_account.rs     | 274 +++++++++++
+ codex-rs/app-server/src/thread_state.rs       |  15 +
+ codex-rs/app-server/tests/suite/v2/mod.rs     |   1 +
+ .../tests/suite/v2/thread_account_switch.rs   | 284 ++++++++++++
+ codex-rs/codex-mcp/src/runtime.rs             |   6 +
+ codex-rs/core/src/codex_thread.rs             |  18 +-
+ .../src/config/network_proxy_spec_tests.rs    |   2 +-
+ codex-rs/core/src/environment_selection.rs    |  10 +-
+ codex-rs/core/src/execution_account.rs        |  34 ++
+ codex-rs/core/src/guardian/review.rs          |   7 +-
+ codex-rs/core/src/guardian/tests.rs           |   4 +-
+ codex-rs/core/src/hook_mcp_executor.rs        |   6 +-
+ codex-rs/core/src/realtime_conversation.rs    |  11 +-
+ codex-rs/core/src/session/handlers.rs         |   6 +-
+ codex-rs/core/src/session/mcp.rs              |  57 ++-
+ codex-rs/core/src/session/mcp_prewarm.rs      |  13 +-
+ codex-rs/core/src/session/mcp_runtime.rs      |  86 +++-
+ codex-rs/core/src/session/mod.rs              |  14 +-
+ codex-rs/core/src/session/session.rs          | 437 ++++++++++++++++--
+ codex-rs/core/src/session/tests.rs            |  62 ++-
+ codex-rs/core/src/session/turn_context.rs     |  29 +-
+ codex-rs/core/src/session_startup_prewarm.rs  |  16 +-
+ codex-rs/core/src/state/service.rs            |   2 +
+ codex-rs/core/src/thread_manager.rs           |  43 +-
+ .../ext/extension-api/src/contributors.rs     |   4 +
+ .../src/contributors/execution_account.rs     |  35 ++
+ codex-rs/ext/extension-api/src/lib.rs         |   3 +
+ codex-rs/ext/extension-api/src/registry.rs    |  20 +
+ codex-rs/ext/goal/src/extension.rs            |  61 +++
+ codex-rs/ext/goal/src/runtime.rs              |  53 ++-
+ .../guardian-v2/src/async_scorer/extension.rs | 129 ++++++
+ .../guardian-v2/src/async_scorer/sampler.rs   |  20 +
+ codex-rs/ext/skills/src/extension.rs          |  39 ++
+ codex-rs/network-proxy/src/proxy.rs           |   6 +-
+ .../network-proxy/src/remote_config_tests.rs  |  24 +-
+ codex-rs/network-proxy/src/runtime.rs         |  21 +-
+ 40 files changed, 1753 insertions(+), 171 deletions(-)
+ create mode 100644 codex-rs/app-server/src/session_runtime/switch_account.rs
+ create mode 100644 codex-rs/app-server/tests/suite/v2/thread_account_switch.rs
+ create mode 100644 codex-rs/ext/extension-api/src/contributors/execution_account.rs
+
+diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
+index 25f068b6d781021a0e9a682873423932e50860cd..688bacc852f99b72100c9626688d9bef546ef888 100644
+--- a/codex-rs/app-server/src/message_processor.rs
++++ b/codex-rs/app-server/src/message_processor.rs
+@@ -11,7 +11,6 @@ use crate::connection_rpc_gate::ConnectionRpcGate;
+ use crate::current_time::app_server_time_provider;
+ use crate::error_code::invalid_params;
+ use crate::error_code::invalid_request;
+-use crate::error_code::method_not_found;
+ use crate::extensions::ThreadExtensionDependencies;
+ use crate::extensions::app_server_extension_event_sink;
+ use crate::extensions::guardian_agent_spawner;
+@@ -1020,9 +1019,11 @@ impl MessageProcessor {
+             ClientRequest::AccountSlotLogout { params, .. } => {
+                 self.account_processor.logout_account_slot(params).await
+             }
+-            ClientRequest::ThreadAccountSwitch { .. } => Err(method_not_found(
+-                "thread/account/switch is not implemented yet",
+-            )),
++            ClientRequest::ThreadAccountSwitch { params, .. } => self
++                .session_runtime
++                .switch_account(connection_id, params)
++                .await
++                .map(|response| Some(response.into())),
+             ClientRequest::ThreadRelinquish { params, .. } => self
+                 .session_runtime
+                 .relinquish(connection_id, params)
+diff --git a/codex-rs/app-server/src/session_runtime/mod.rs b/codex-rs/app-server/src/session_runtime/mod.rs
+index 03fdb73e54400de114c21f1e1f7b65f947881ebc..64a7830b94ea225cc46230438d557f3ecd1dd7f7 100644
+--- a/codex-rs/app-server/src/session_runtime/mod.rs
++++ b/codex-rs/app-server/src/session_runtime/mod.rs
+@@ -3,6 +3,7 @@ mod operations;
+ mod pagination;
+ mod relinquish;
+ mod snapshot;
++mod switch_account;
+ 
+ use std::collections::HashMap;
+ use std::collections::HashSet;
+@@ -55,6 +56,7 @@ struct EngineState {
+     pages: pagination::SnapshotCache,
+     #[allow(dead_code)]
+     operations: OperationCache,
++    switching_accounts: HashMap<ThreadId, String>,
+ }
+ 
+ #[derive(Default)]
+diff --git a/codex-rs/app-server/src/session_runtime/relinquish.rs b/codex-rs/app-server/src/session_runtime/relinquish.rs
+index c74e85210dfd399be94082f6b7cded13a5e8bfe9..cb67942926b38cd719265feaf3e3d8b97c621ec3 100644
+--- a/codex-rs/app-server/src/session_runtime/relinquish.rs
++++ b/codex-rs/app-server/src/session_runtime/relinquish.rs
+@@ -213,7 +213,7 @@ impl SessionRuntimeEngine {
+         Ok(ThreadRelinquishResponse { operation })
+     }
+ 
+-    async fn refresh_snapshot_for_control(
++    pub(super) async fn refresh_snapshot_for_control(
+         &self,
+         thread_id: ThreadId,
+     ) -> Result<codex_app_server_protocol::SessionRuntimeSnapshot, JSONRPCErrorError> {
+@@ -261,6 +261,7 @@ impl SessionRuntimeEngine {
+             .await
+             .map_err(|_| internal_error("session runtime publisher is unavailable"))?;
+         let store_runtime = self.thread_store.runtime_snapshot(thread_id).await;
++        let multi_account = self.account_registry.runtime_capability().await.ok();
+         let (runtime_notification, operation_notification, operation) = {
+             let mut state = self.state.lock().await;
+             let mut snapshot = state
+@@ -289,7 +290,12 @@ impl SessionRuntimeEngine {
+                         Some("released_persistence_snapshot_unavailable".to_string());
+                 }
+             }
+-            snapshot.actions = action_snapshot(&snapshot.lifecycle, &snapshot.writer);
++            snapshot.actions = action_snapshot(
++                &snapshot.lifecycle,
++                &snapshot.writer,
++                &snapshot.account,
++                multi_account.as_ref(),
++            );
+             Self::apply_runtime_state(&mut state, &mut snapshot, RuntimeActivity::Activity);
+             state.sequence = state.sequence.saturating_add(1);
+             let runtime_notification = SessionRuntimeChangedNotification {
+diff --git a/codex-rs/app-server/src/session_runtime/snapshot.rs b/codex-rs/app-server/src/session_runtime/snapshot.rs
+index eeafa17114283ef03983c4fe4ae28f3455a9edc2..6ef11b03e64afa5623e93a3e779c2a801eacaf33 100644
+--- a/codex-rs/app-server/src/session_runtime/snapshot.rs
++++ b/codex-rs/app-server/src/session_runtime/snapshot.rs
+@@ -45,7 +45,6 @@ use crate::thread_status::resolve_thread_status;
+ const STORE_PAGE_SIZE: usize = 200;
+ const IDENTITY_CAPABILITY: &str = "ananke_session_identity_v1";
+ const CONTROL_CAPABILITY: &str = "ananke_session_control_v1";
+-const CONTROL_NOT_IMPLEMENTED: &str = "control_not_implemented";
+ const RUNTIME_SNAPSHOT_UNAVAILABLE: &str = "thread store runtime state is unavailable";
+ 
+ pub(super) enum RuntimeRecord {
+@@ -231,9 +230,21 @@ impl SessionRuntimeEngine {
+             subscriptions.unload_at,
+         );
+         let writer = writer_snapshot(&store_runtime);
+-        let account =
++        let mut account =
+             account_snapshot(current_binding, active_binding, account_capability.as_ref());
+-        let actions = action_snapshot(&lifecycle, &writer);
++        if let Some(target_slot_id) = self
++            .state
++            .lock()
++            .await
++            .switching_accounts
++            .get(&thread_id)
++            .cloned()
++        {
++            account.switch_state = SessionRuntimeAccountSwitchState::Preparing;
++            account.switch_target_slot_id = Some(target_slot_id);
++            account.deny_reason = None;
++        }
++        let actions = action_snapshot(&lifecycle, &writer, &account, account_capability.as_ref());
+         SessionRuntimeSnapshot {
+             thread_id: thread_id.to_string(),
+             state_revision: 0,
+@@ -462,12 +473,12 @@ fn account_snapshot(
+         .or_else(|| capability.and_then(|capability| capability.deny_reason.clone()))
+         .or_else(|| current.is_none().then(|| "account_unbound".to_string()));
+     SessionRuntimeAccountBinding {
+-        switch_state: if current.is_none() {
+-            SessionRuntimeAccountSwitchState::Unbound
+-        } else if capability.is_none() {
+-            SessionRuntimeAccountSwitchState::Degraded
+-        } else {
+-            SessionRuntimeAccountSwitchState::Stable
++        switch_state: match (current.is_some(), capability) {
++            (false, _) => SessionRuntimeAccountSwitchState::Unbound,
++            (true, Some(capability)) if capability.available => {
++                SessionRuntimeAccountSwitchState::Stable
++            }
++            (true, _) => SessionRuntimeAccountSwitchState::Degraded,
+         },
+         current,
+         active_turn: active_turn.map(account_ref),
+@@ -486,6 +497,8 @@ fn account_ref(binding: ExecutionAccountBinding) -> SessionRuntimeAccountRef {
+ pub(super) fn action_snapshot(
+     lifecycle: &SessionRuntimeLifecycle,
+     writer: &SessionRuntimeWriter,
++    account: &SessionRuntimeAccountBinding,
++    multi_account: Option<&codex_app_server_protocol::AccountSlotCapability>,
+ ) -> Vec<SessionRuntimeActionAvailability> {
+     let relinquish_denial = if lifecycle.state != SessionRuntimeLifecycleState::Idle
+         || lifecycle.active_turn_id.is_some()
+@@ -501,6 +514,22 @@ pub(super) fn action_snapshot(
+     } else {
+         None
+     };
++    let switch_denial = if let Some(reason) = relinquish_denial {
++        Some(reason)
++    } else if account.current.is_none() {
++        Some("account_unbound")
++    } else if account.switch_state != SessionRuntimeAccountSwitchState::Stable {
++        account
++            .deny_reason
++            .as_deref()
++            .or(Some("account_switch_in_progress"))
++    } else {
++        match multi_account {
++            Some(capability) if capability.available => None,
++            Some(capability) => capability.deny_reason.as_deref(),
++            None => Some("multi_account_unavailable"),
++        }
++    };
+     vec![
+         SessionRuntimeActionAvailability {
+             action: SessionRuntimeAction::Relinquish,
+@@ -509,8 +538,8 @@ pub(super) fn action_snapshot(
+         },
+         SessionRuntimeActionAvailability {
+             action: SessionRuntimeAction::SwitchAccount,
+-            allowed: false,
+-            deny_reason: Some(CONTROL_NOT_IMPLEMENTED.to_string()),
++            allowed: switch_denial.is_none(),
++            deny_reason: switch_denial.map(str::to_string),
+         },
+     ]
+ }
+diff --git a/codex-rs/app-server/src/session_runtime/switch_account.rs b/codex-rs/app-server/src/session_runtime/switch_account.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..92d3716a0731eae1c80071dec1ee4ab0e58e378b
+--- /dev/null
++++ b/codex-rs/app-server/src/session_runtime/switch_account.rs
+@@ -0,0 +1,274 @@
++use codex_app_server_protocol::JSONRPCErrorError;
++use codex_app_server_protocol::SessionRuntimeAccountSwitchState;
++use codex_app_server_protocol::SessionRuntimeLifecycleState;
++use codex_app_server_protocol::SessionRuntimeOperation;
++use codex_app_server_protocol::SessionRuntimeOperationAction;
++use codex_app_server_protocol::SessionRuntimeOperationError;
++use codex_app_server_protocol::SessionRuntimeOperationStatus;
++use codex_app_server_protocol::SessionRuntimeWriterState;
++use codex_app_server_protocol::ThreadAccountSwitchParams;
++use codex_app_server_protocol::ThreadAccountSwitchResponse;
++use codex_core::execution_account::ExecutionAccountSwitchError;
++use codex_protocol::ThreadId;
++use codex_protocol::protocol::ExecutionAccountBinding;
++use sha2::Digest;
++use sha2::Sha256;
++
++use super::SessionRuntimeEngine;
++use super::unix_timestamp;
++use crate::error_code::internal_error;
++use crate::error_code::invalid_params;
++use crate::outgoing_message::ConnectionId;
++
++impl SessionRuntimeEngine {
++    pub(crate) async fn switch_account(
++        &self,
++        connection_id: ConnectionId,
++        params: ThreadAccountSwitchParams,
++    ) -> Result<ThreadAccountSwitchResponse, JSONRPCErrorError> {
++        let thread_id = ThreadId::from_string(&params.thread_id)
++            .map_err(|_| invalid_params("thread/account/switch threadId is invalid"))?;
++        let _thread_list_guard = self
++            .thread_list_state_permit
++            .acquire()
++            .await
++            .map_err(|_| internal_error("thread lifecycle coordinator is unavailable"))?;
++        let operation = self.begin_operation(switch_operation(&params)).await?;
++        if operation.status != SessionRuntimeOperationStatus::Accepted {
++            return Ok(ThreadAccountSwitchResponse { operation });
++        }
++
++        if params.expected_instance_epoch != self.instance_epoch {
++            return self
++                .failed_switch(
++                    &params.operation_id,
++                    "stale_instance_epoch",
++                    "server process incarnation changed",
++                )
++                .await;
++        }
++        let snapshot = self.refresh_snapshot_for_control(thread_id).await?;
++        if snapshot.state_revision != params.expected_state_revision {
++            return self
++                .failed_switch(
++                    &params.operation_id,
++                    "stale_state_revision",
++                    "thread runtime state changed",
++                )
++                .await;
++        }
++        let Some(current) = snapshot.account.current.as_ref() else {
++            return self
++                .failed_switch(
++                    &params.operation_id,
++                    "account_unbound",
++                    "thread execution account is unavailable",
++                )
++                .await;
++        };
++        if current.execution_generation != params.expected_execution_generation {
++            return self
++                .failed_switch(
++                    &params.operation_id,
++                    "stale_execution_generation",
++                    "thread execution account changed",
++                )
++                .await;
++        }
++        let Ok(capability) = self.account_registry.runtime_capability().await else {
++            return self
++                .failed_switch(
++                    &params.operation_id,
++                    "multi_account_unavailable",
++                    "multi-account execution is unavailable",
++                )
++                .await;
++        };
++        if !capability.available
++            || snapshot.account.switch_state != SessionRuntimeAccountSwitchState::Stable
++        {
++            return self
++                .failed_switch(
++                    &params.operation_id,
++                    "multi_account_unavailable",
++                    "multi-account execution is unavailable",
++                )
++                .await;
++        }
++        if snapshot.writer.state != SessionRuntimeWriterState::OwnedHere {
++            return self
++                .failed_switch(
++                    &params.operation_id,
++                    "writer_not_owned",
++                    "thread writer is not owned by this process",
++                )
++                .await;
++        }
++        if snapshot.writer.store_id.is_none() || snapshot.writer.writer_generation.is_none() {
++            return self
++                .failed_switch(
++                    &params.operation_id,
++                    "writer_fence_unavailable",
++                    "thread writer authority is unavailable",
++                )
++                .await;
++        }
++        if snapshot.lifecycle.state != SessionRuntimeLifecycleState::Idle
++            || snapshot.lifecycle.active_turn_id.is_some()
++            || !snapshot.lifecycle.waiting_on.is_empty()
++        {
++            return self
++                .failed_switch(
++                    &params.operation_id,
++                    "thread_not_idle",
++                    "thread is not idle",
++                )
++                .await;
++        }
++        let (caller_subscribed, subscriber_count) = self
++            .thread_state_manager
++            .caller_subscription(thread_id, connection_id)
++            .await;
++        if subscriber_count > 1 || (subscriber_count == 1 && !caller_subscribed) {
++            return self
++                .failed_switch(
++                    &params.operation_id,
++                    "other_subscribers_present",
++                    "other subscribers are still attached",
++                )
++                .await;
++        }
++        if self.thread_manager.get_thread(thread_id).await.is_err() {
++            return self
++                .failed_switch(
++                    &params.operation_id,
++                    "thread_not_loaded",
++                    "thread runtime is not loaded",
++                )
++                .await;
++        }
++        let expected_slot_id = current.account_slot_id.clone();
++        let mut operation = self
++            .update_operation_status(
++                &params.operation_id,
++                SessionRuntimeOperationStatus::Running,
++                None,
++            )
++            .await?;
++        self.state
++            .lock()
++            .await
++            .switching_accounts
++            .insert(thread_id, params.target_account_slot_id.clone());
++        self.publish_thread(thread_id).await;
++
++        let switch_result = self
++            .thread_manager
++            .switch_thread_execution_account(
++                thread_id,
++                ExecutionAccountBinding {
++                    slot_id: expected_slot_id,
++                    generation: params.expected_execution_generation,
++                },
++                params.target_account_slot_id.clone(),
++            )
++            .await;
++        self.state
++            .lock()
++            .await
++            .switching_accounts
++            .remove(&thread_id);
++
++        let next = match switch_result {
++            Ok(next) => next,
++            Err(error) => {
++                self.publish_thread(thread_id).await;
++                let (code, message) = switch_error(error);
++                return self
++                    .failed_switch(&params.operation_id, code, message)
++                    .await;
++            }
++        };
++        self.publish_thread(thread_id).await;
++        operation.status = SessionRuntimeOperationStatus::Ready;
++        operation.state_revision = self
++            .state
++            .lock()
++            .await
++            .threads
++            .get(&thread_id)
++            .map(|runtime| runtime.revision);
++        operation.execution_generation = Some(next.generation);
++        operation.error = None;
++        operation.updated_at = unix_timestamp();
++        let operation = self.update_operation(operation).await?;
++        Ok(ThreadAccountSwitchResponse { operation })
++    }
++
++    async fn failed_switch(
++        &self,
++        operation_id: &str,
++        code: &str,
++        message: &str,
++    ) -> Result<ThreadAccountSwitchResponse, JSONRPCErrorError> {
++        let operation = self
++            .update_operation_status(
++                operation_id,
++                SessionRuntimeOperationStatus::Failed,
++                Some(SessionRuntimeOperationError {
++                    code: code.to_string(),
++                    message: message.to_string(),
++                }),
++            )
++            .await?;
++        Ok(ThreadAccountSwitchResponse { operation })
++    }
++}
++
++fn switch_operation(params: &ThreadAccountSwitchParams) -> SessionRuntimeOperation {
++    let fingerprint_input = format!(
++        "thread/account/switch:{}:{}:{}:{}:{}",
++        params.thread_id,
++        params.target_account_slot_id,
++        params.expected_instance_epoch,
++        params.expected_state_revision,
++        params.expected_execution_generation,
++    );
++    SessionRuntimeOperation {
++        operation_id: params.operation_id.clone(),
++        request_fingerprint: format!("{:x}", Sha256::digest(fingerprint_input.as_bytes())),
++        action: SessionRuntimeOperationAction::ThreadAccountSwitch,
++        status: SessionRuntimeOperationStatus::Accepted,
++        thread_id: Some(params.thread_id.clone()),
++        account_slot_id: Some(params.target_account_slot_id.clone()),
++        state_revision: Some(params.expected_state_revision),
++        writer_generation: None,
++        execution_generation: Some(params.expected_execution_generation),
++        error: None,
++        updated_at: unix_timestamp(),
++    }
++}
++
++fn switch_error(error: ExecutionAccountSwitchError) -> (&'static str, &'static str) {
++    match error {
++        ExecutionAccountSwitchError::TargetUnavailable => (
++            "target_account_unavailable",
++            "target execution account is unavailable",
++        ),
++        ExecutionAccountSwitchError::PreparationFailed => (
++            "target_runtime_prepare_failed",
++            "target execution runtime preparation failed",
++        ),
++        ExecutionAccountSwitchError::StaleGeneration => (
++            "stale_execution_generation",
++            "thread execution account changed",
++        ),
++        ExecutionAccountSwitchError::ThreadBusy => {
++            ("thread_not_idle", "thread execution runtime is busy")
++        }
++        ExecutionAccountSwitchError::PersistenceFailed => (
++            "execution_binding_persistence_failed",
++            "execution account binding persistence failed",
++        ),
++    }
++}
+diff --git a/codex-rs/app-server/src/thread_state.rs b/codex-rs/app-server/src/thread_state.rs
+index 51b8d0c65b2939c119dd8afabbc36e8c150aa31b..18b0e18922011d205405b378b20ce25a091dd81c 100644
+--- a/codex-rs/app-server/src/thread_state.rs
++++ b/codex-rs/app-server/src/thread_state.rs
+@@ -522,6 +522,21 @@ impl ThreadStateManager {
+         }
+     }
+ 
++    pub(crate) async fn caller_subscription(
++        &self,
++        thread_id: ThreadId,
++        connection_id: ConnectionId,
++    ) -> (bool, u32) {
++        let state = self.state.lock().await;
++        let Some(entry) = state.threads.get(&thread_id) else {
++            return (false, 0);
++        };
++        (
++            entry.connection_ids.contains(&connection_id),
++            u32::try_from(entry.connection_ids.len()).unwrap_or(u32::MAX),
++        )
++    }
++
+     /// Atomically fence new subscriptions and validate the caller's existing subscription set.
+     #[expect(
+         clippy::await_holding_invalid_type,
+diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
+index 3c39bcc4a6b757843d0e86fdef6f654f84176f71..40ee87194bf5c822218dece95085bd39d3109b2f 100644
+--- a/codex-rs/app-server/tests/suite/v2/mod.rs
++++ b/codex-rs/app-server/tests/suite/v2/mod.rs
+@@ -88,6 +88,7 @@ mod server_diagnostics;
+ mod session_end;
+ mod skills_list;
+ mod sleep;
++mod thread_account_switch;
+ mod thread_archive;
+ mod thread_delete;
+ mod thread_fork;
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_account_switch.rs b/codex-rs/app-server/tests/suite/v2/thread_account_switch.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..d81093e1504e63b7e39be6dd24b846d135d8b9df
+--- /dev/null
++++ b/codex-rs/app-server/tests/suite/v2/thread_account_switch.rs
+@@ -0,0 +1,284 @@
++use anyhow::Result;
++use app_test_support::MockResponsesConfig;
++use app_test_support::TestAppServer;
++use app_test_support::create_mock_responses_server_repeating_assistant;
++use codex_app_server_protocol::AccountSlotLoginStartParams;
++use codex_app_server_protocol::AccountSlotLoginStartResponse;
++use codex_app_server_protocol::ClientRequest;
++use codex_app_server_protocol::SessionRuntimeListParams;
++use codex_app_server_protocol::SessionRuntimeListResponse;
++use codex_app_server_protocol::SessionRuntimeOperationStatus;
++use codex_app_server_protocol::ThreadAccountSwitchParams;
++use codex_app_server_protocol::ThreadAccountSwitchResponse;
++use codex_app_server_protocol::ThreadStartParams;
++use codex_app_server_protocol::ThreadStartResponse;
++use codex_app_server_protocol::TurnStartParams;
++use codex_app_server_protocol::TurnStartResponse;
++use codex_app_server_protocol::UserInput;
++use codex_features::Feature;
++use codex_utils_absolute_path::test_support::PathExt;
++use pretty_assertions::assert_eq;
++use tempfile::TempDir;
++
++#[tokio::test]
++async fn idle_thread_switches_account_for_the_next_turn_without_reloading() -> Result<()> {
++    let codex_home = TempDir::new()?;
++    let server = create_mock_responses_server_repeating_assistant("switched account").await;
++    MockResponsesConfig::new(&server.uri())
++        .enable_feature(Feature::Sqlite)
++        .with_provider_config("requires_openai_auth = true")
++        .write(codex_home.path())?;
++    let sqlite_home = codex_home.path().to_string_lossy();
++    let mut app = TestAppServer::builder()
++        .with_codex_home(codex_home.path())
++        .with_env_overrides(&[
++            ("CODEX_API_KEY", Some("default-test-key")),
++            ("CODEX_ACCESS_TOKEN", None),
++            ("OPENAI_API_KEY", None),
++            ("CODEX_SQLITE_HOME", Some(sqlite_home.as_ref())),
++        ])
++        .build_initialized()
++        .await?;
++
++    let login_request = app
++        .send_raw_request(
++            "accountSlot/login/start",
++            Some(serde_json::to_value(AccountSlotLoginStartParams::ApiKey {
++                slot_id: None,
++                api_key: "target-test-key".to_string(),
++            })?),
++        )
++        .await?;
++    let login: AccountSlotLoginStartResponse = app.read_response(login_request).await?;
++    let target_slot_id = login.slot.account_slot_id;
++
++    let ThreadStartResponse { thread, .. } = app
++        .start_thread(ThreadStartParams {
++            model: Some("mock-model".to_string()),
++            ..Default::default()
++        })
++        .await?;
++    app.start_turn_and_wait_for_completion(TurnStartParams {
++        thread_id: thread.id.clone(),
++        input: vec![UserInput::Text {
++            text: "materialize the initial account binding".to_string(),
++            text_elements: Vec::new(),
++        }],
++        model: Some("mock-model".to_string()),
++        ..Default::default()
++    })
++    .await?;
++    let before: SessionRuntimeListResponse = app
++        .request(|request_id| ClientRequest::SessionRuntimeList {
++            request_id,
++            params: SessionRuntimeListParams {
++                thread_id: Some(thread.id.clone()),
++                cursor: None,
++                limit: None,
++            },
++        })
++        .await?;
++    let before_snapshot = before.data.into_iter().next().expect("runtime snapshot");
++    let before_account = before_snapshot
++        .account
++        .current
++        .as_ref()
++        .expect("initial account binding")
++        .clone();
++    let before_writer = before_snapshot.writer.clone();
++
++    let unavailable: ThreadAccountSwitchResponse = app
++        .request(|request_id| ClientRequest::ThreadAccountSwitch {
++            request_id,
++            params: ThreadAccountSwitchParams {
++                operation_id: "switch-to-missing-slot".to_string(),
++                thread_id: thread.id.clone(),
++                target_account_slot_id: "missing-slot".to_string(),
++                expected_instance_epoch: before.instance_epoch,
++                expected_state_revision: before_snapshot.state_revision,
++                expected_execution_generation: before_account.execution_generation,
++            },
++        })
++        .await?;
++    assert_eq!(
++        unavailable.operation.status,
++        SessionRuntimeOperationStatus::Failed
++    );
++
++    let restored: SessionRuntimeListResponse = app
++        .request(|request_id| ClientRequest::SessionRuntimeList {
++            request_id,
++            params: SessionRuntimeListParams {
++                thread_id: Some(thread.id.clone()),
++                cursor: None,
++                limit: None,
++            },
++        })
++        .await?;
++    let restored_snapshot = restored.data.into_iter().next().expect("runtime snapshot");
++    assert_eq!(restored_snapshot.writer, before_writer);
++    assert_eq!(
++        restored_snapshot.account.current,
++        Some(before_account.clone())
++    );
++
++    let switched: ThreadAccountSwitchResponse = app
++        .request(|request_id| ClientRequest::ThreadAccountSwitch {
++            request_id,
++            params: ThreadAccountSwitchParams {
++                operation_id: "switch-to-private-slot".to_string(),
++                thread_id: thread.id.clone(),
++                target_account_slot_id: target_slot_id.clone(),
++                expected_instance_epoch: restored.instance_epoch,
++                expected_state_revision: restored_snapshot.state_revision,
++                expected_execution_generation: before_account.execution_generation,
++            },
++        })
++        .await?;
++    assert_eq!(
++        switched.operation.status,
++        SessionRuntimeOperationStatus::Ready
++    );
++
++    let after: SessionRuntimeListResponse = app
++        .request(|request_id| ClientRequest::SessionRuntimeList {
++            request_id,
++            params: SessionRuntimeListParams {
++                thread_id: Some(thread.id.clone()),
++                cursor: None,
++                limit: None,
++            },
++        })
++        .await?;
++    let after_snapshot = after.data.into_iter().next().expect("runtime snapshot");
++    assert_eq!(after_snapshot.thread_id, thread.id);
++    assert_eq!(after_snapshot.writer, before_writer);
++    assert_eq!(
++        after_snapshot.account.current.as_ref().map(|account| (
++            account.account_slot_id.as_str(),
++            account.execution_generation,
++        )),
++        Some((
++            target_slot_id.as_str(),
++            before_account.execution_generation + 1,
++        ))
++    );
++    assert_eq!(after_snapshot.lifecycle.subscriber_count, 1);
++
++    let turn_request = app
++        .send_turn_start_request(TurnStartParams {
++            thread_id: thread.id,
++            input: vec![UserInput::Text {
++                text: "use the switched account".to_string(),
++                text_elements: Vec::new(),
++            }],
++            model: Some("mock-model".to_string()),
++            ..Default::default()
++        })
++        .await?;
++    let _: TurnStartResponse = app.read_response(turn_request).await?;
++    app.read_stream_until_notification_message("turn/completed")
++        .await?;
++
++    let requests = server.received_requests().await.expect("received requests");
++    let authorization = requests
++        .last()
++        .and_then(|request| request.headers.get("authorization"))
++        .and_then(|value| value.to_str().ok());
++    assert_eq!(authorization, Some("Bearer target-test-key"));
++
++    let switched_snapshot: SessionRuntimeListResponse = app
++        .request(|request_id| ClientRequest::SessionRuntimeList {
++            request_id,
++            params: SessionRuntimeListParams {
++                thread_id: Some(after_snapshot.thread_id.clone()),
++                cursor: None,
++                limit: None,
++            },
++        })
++        .await?;
++    let switched_snapshot = switched_snapshot
++        .data
++        .into_iter()
++        .next()
++        .expect("switched runtime snapshot");
++    let switched_account = switched_snapshot
++        .account
++        .current
++        .as_ref()
++        .expect("switched account binding")
++        .clone();
++    let state_db = codex_state::StateRuntime::init(
++        codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
++        "mock_provider".to_string(),
++    )
++    .await?;
++    let forced = state_db
++        .compare_and_swap_execution_account_binding(
++            codex_protocol::ThreadId::from_string(&after_snapshot.thread_id)?,
++            &codex_protocol::protocol::ExecutionAccountBinding {
++                slot_id: switched_account.account_slot_id.clone(),
++                generation: switched_account.execution_generation,
++            },
++            "forced-stale",
++        )
++        .await?;
++    assert!(forced.is_some(), "test must force the durable CAS to fail");
++
++    let failed: ThreadAccountSwitchResponse = app
++        .request(|request_id| ClientRequest::ThreadAccountSwitch {
++            request_id,
++            params: ThreadAccountSwitchParams {
++                operation_id: "switch-with-stale-durable-binding".to_string(),
++                thread_id: switched_snapshot.thread_id.clone(),
++                target_account_slot_id: before_account.account_slot_id.clone(),
++                expected_instance_epoch: after.instance_epoch,
++                expected_state_revision: switched_snapshot.state_revision,
++                expected_execution_generation: switched_account.execution_generation,
++            },
++        })
++        .await?;
++    assert_eq!(
++        failed.operation.status,
++        SessionRuntimeOperationStatus::Failed
++    );
++
++    let after_failed_cas: SessionRuntimeListResponse = app
++        .request(|request_id| ClientRequest::SessionRuntimeList {
++            request_id,
++            params: SessionRuntimeListParams {
++                thread_id: Some(switched_snapshot.thread_id.clone()),
++                cursor: None,
++                limit: None,
++            },
++        })
++        .await?;
++    let after_failed_cas = after_failed_cas
++        .data
++        .into_iter()
++        .next()
++        .expect("runtime snapshot after failed CAS");
++    assert_eq!(after_failed_cas.account.current, Some(switched_account));
++
++    let turn_request = app
++        .send_turn_start_request(TurnStartParams {
++            thread_id: switched_snapshot.thread_id,
++            input: vec![UserInput::Text {
++                text: "keep using the account after the failed switch".to_string(),
++                text_elements: Vec::new(),
++            }],
++            model: Some("mock-model".to_string()),
++            ..Default::default()
++        })
++        .await?;
++    let _: TurnStartResponse = app.read_response(turn_request).await?;
++    app.read_stream_until_notification_message("turn/completed")
++        .await?;
++    let requests = server.received_requests().await.expect("received requests");
++    let authorization = requests
++        .last()
++        .and_then(|request| request.headers.get("authorization"))
++        .and_then(|value| value.to_str().ok());
++    assert_eq!(authorization, Some("Bearer target-test-key"));
++    Ok(())
++}
+diff --git a/codex-rs/codex-mcp/src/runtime.rs b/codex-rs/codex-mcp/src/runtime.rs
+index ca85a035012e0b005287789ccabdf20ea588ecb4..8ea98a4556be0fba8461dbff4c7fdc52b6b2fb39 100644
+--- a/codex-rs/codex-mcp/src/runtime.rs
++++ b/codex-rs/codex-mcp/src/runtime.rs
+@@ -508,6 +508,12 @@ impl McpRuntime {
+     pub async fn shutdown(&self) {
+         self.latest_connections().shutdown().await;
+     }
++
++    /// Replaces this stable runtime handle with a fully prepared publication.
++    pub fn adopt_prepared(&self, prepared: &Self) {
++        self.current.store(prepared.current.load_full());
++        self.reconnect_pending.store(false, Ordering::Release);
++    }
+ }
+ 
+ #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index 6d12dd0a9d94e9f1492aeebf79690b17ad6847a0..6db2528b21c2a1fd50ed67f1fa0e5114a6a63589 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -200,13 +200,27 @@ impl CodexThread {
+ 
+     /// Returns the session telemetry handle for thread-scoped production instrumentation.
+     pub fn session_telemetry(&self) -> SessionTelemetry {
+-        self.session.services.session_telemetry.clone()
++        self.session.session_telemetry()
+     }
+ 
+     pub fn execution_account(&self) -> Arc<crate::execution_account::ExecutionAccountContext> {
+         self.session.execution_account()
+     }
+ 
++    pub(crate) async fn switch_execution_account(
++        &self,
++        expected: codex_protocol::protocol::ExecutionAccountBinding,
++        target: Arc<crate::execution_account::ExecutionAccountContext>,
++        services: crate::execution_account::ExecutionAccountServices,
++    ) -> Result<
++        codex_protocol::protocol::ExecutionAccountBinding,
++        crate::execution_account::ExecutionAccountSwitchError,
++    > {
++        self.session
++            .switch_execution_account(expected, target, services)
++            .await
++    }
++
+     /// Returns extension-owned data attached to this thread runtime.
+     pub fn thread_extension_data(&self) -> &codex_extension_api::ExtensionData {
+         &self.session.services.thread_extension_data
+@@ -569,7 +583,7 @@ impl CodexThread {
+ 
+     pub async fn guardian_trunk_rollout_path(&self) -> Option<PathBuf> {
+         self.session
+-            .guardian_review_session
++            .guardian_review_session()
+             .trunk_rollout_path()
+             .await
+     }
+diff --git a/codex-rs/core/src/config/network_proxy_spec_tests.rs b/codex-rs/core/src/config/network_proxy_spec_tests.rs
+index ff90af0c741391011d763795b430d6739a996f41..8051f5a38ac10f502a3f17ba4c909780a27bbaf6 100644
+--- a/codex-rs/core/src/config/network_proxy_spec_tests.rs
++++ b/codex-rs/core/src/config/network_proxy_spec_tests.rs
+@@ -37,7 +37,7 @@ fn build_state_with_audit_metadata_threads_metadata_to_state() {
+     let state = spec
+         .build_state_with_audit_metadata(metadata.clone())
+         .expect("state should build");
+-    assert_eq!(state.audit_metadata(), &metadata);
++    assert_eq!(state.audit_metadata(), metadata);
+ }
+ 
+ #[test]
+diff --git a/codex-rs/core/src/environment_selection.rs b/codex-rs/core/src/environment_selection.rs
+index 39a598bff95bd31c54a7111fa453eac8710d740b..cc8068dc03bbbb0d0776492ebf1295aab0d1c64e 100644
+--- a/codex-rs/core/src/environment_selection.rs
++++ b/codex-rs/core/src/environment_selection.rs
+@@ -155,7 +155,7 @@ impl StartingTurnEnvironment {
+ pub(crate) struct ThreadEnvironments {
+     environment_manager: Arc<EnvironmentManager>,
+     local_shell: Shell,
+-    shell_snapshot: ShellSnapshot,
++    shell_snapshot: ArcSwap<ShellSnapshot>,
+     non_blocking_snapshots: bool,
+     environments: ArcSwap<Vec<SelectedTurnEnvironment>>,
+     connection_event_tx: OnceLock<Sender<Event>>,
+@@ -206,7 +206,7 @@ impl ThreadEnvironments {
+         Self {
+             environment_manager,
+             local_shell,
+-            shell_snapshot,
++            shell_snapshot: ArcSwap::from_pointee(shell_snapshot),
+             non_blocking_snapshots,
+             environments: ArcSwap::from_pointee(environments),
+             connection_event_tx: OnceLock::new(),
+@@ -287,7 +287,7 @@ impl ThreadEnvironments {
+                 selected_environment.clone(),
+                 Arc::clone(&environment),
+                 self.local_shell.clone(),
+-                self.shell_snapshot.clone(),
++                self.shell_snapshot.load_full().as_ref().clone(),
+                 configuration_ready,
+             )
+             .remote_handle();
+@@ -339,6 +339,10 @@ impl ThreadEnvironments {
+         }
+     }
+ 
++    pub(crate) fn replace_shell_snapshot(&self, shell_snapshot: ShellSnapshot) {
++        self.shell_snapshot.store(Arc::new(shell_snapshot));
++    }
++
+     /// Projects canonical selections back to caller input form without losing config ownership.
+     pub(crate) fn selections(&self) -> Vec<TurnEnvironmentSelection> {
+         self.environments
+diff --git a/codex-rs/core/src/execution_account.rs b/codex-rs/core/src/execution_account.rs
+index 3cb564486a780101a82ade959ba96031d0718751..a7536fbac469b09ba0038fa8fdd94bea368d97a8 100644
+--- a/codex-rs/core/src/execution_account.rs
++++ b/codex-rs/core/src/execution_account.rs
+@@ -2,9 +2,11 @@ use std::future::Future;
+ use std::pin::Pin;
+ use std::sync::Arc;
+ 
++use codex_analytics::AnalyticsEventsClient;
+ use codex_core_plugins::PluginsManager;
+ use codex_login::AuthManager;
+ use codex_models_manager::manager::SharedModelsManager;
++use codex_otel::SessionTelemetry;
+ use codex_protocol::error::CodexErr;
+ use codex_protocol::error::Result as CodexResult;
+ use codex_protocol::protocol::ExecutionAccountBinding;
+@@ -24,6 +26,38 @@ pub struct ExecutionAccountServices {
+     pub mcp_manager: Arc<crate::mcp::McpManager>,
+ }
+ 
++/// Fully prepared account-sensitive runtime published atomically for future turns.
++///
++/// A hot switch constructs this value before updating the durable binding. Existing turns retain
++/// their captured runtime while the next turn observes the newly published bundle.
++pub(crate) struct ExecutionAccountRuntime {
++    pub(crate) execution_account: Arc<ExecutionAccountContext>,
++    pub(crate) services: ExecutionAccountServices,
++    pub(crate) mcp_runtime: Arc<codex_mcp::McpRuntime>,
++    pub(crate) model_client: crate::client::ModelClient,
++    pub(crate) analytics_events_client: AnalyticsEventsClient,
++    pub(crate) session_telemetry: SessionTelemetry,
++    pub(crate) network_proxy_audit_metadata: crate::config::NetworkProxyAuditMetadata,
++    pub(crate) shell_snapshot: crate::shell_snapshot::ShellSnapshot,
++    pub(crate) extension_runtimes:
++        Vec<Arc<dyn codex_extension_api::PreparedExecutionAccountRuntime>>,
++    pub(crate) guardian_review_session: Arc<crate::guardian::GuardianReviewSessionManager>,
++}
++
++#[derive(Debug, thiserror::Error, PartialEq, Eq)]
++pub enum ExecutionAccountSwitchError {
++    #[error("target execution account is unavailable")]
++    TargetUnavailable,
++    #[error("target execution account runtime preparation failed")]
++    PreparationFailed,
++    #[error("execution account generation changed")]
++    StaleGeneration,
++    #[error("thread execution runtime is busy")]
++    ThreadBusy,
++    #[error("execution account binding persistence failed")]
++    PersistenceFailed,
++}
++
+ impl std::fmt::Debug for ExecutionAccountServices {
+     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+         formatter
+diff --git a/codex-rs/core/src/guardian/review.rs b/codex-rs/core/src/guardian/review.rs
+index 93d36c52a8539a65d501ccc9233efcaa70b94956..ae9b57ff500df3ad301073e854c2154dd6cbf3be 100644
+--- a/codex-rs/core/src/guardian/review.rs
++++ b/codex-rs/core/src/guardian/review.rs
+@@ -219,15 +219,14 @@ fn track_guardian_review(
+     completed_at_ms: u64,
+ ) {
+     emit_guardian_review_metrics(
+-        &session.services.session_telemetry,
++        &session.session_telemetry(),
+         &result,
+         approval_request_source,
+         reviewed_action,
+         completed_at_ms.saturating_sub(tracking.started_at_ms),
+     );
+     session
+-        .services
+-        .analytics_events_client
++        .analytics_events_client()
+         .track_guardian_review(tracking, result, completed_at_ms);
+ }
+ 
+@@ -902,7 +901,7 @@ async fn run_guardian_review_session_before_deadline(
+     };
+     let (session_outcome, session_analytics_result) = Box::pin(
+         session
+-            .guardian_review_session
++            .guardian_review_session()
+             .run_review(GuardianReviewSessionParams {
+                 parent_session: Arc::clone(&session),
+                 parent_context: context.clone(),
+diff --git a/codex-rs/core/src/guardian/tests.rs b/codex-rs/core/src/guardian/tests.rs
+index 679f6f78d087ae14f5747e57abbf2caf58951b6e..f06640b99a510b8621dbc42642ff06f3be0b64aa 100644
+--- a/codex-rs/core/src/guardian/tests.rs
++++ b/codex-rs/core/src/guardian/tests.rs
+@@ -2252,7 +2252,7 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
+     )
+     .await;
+     let committed_rollout_items = session
+-        .guardian_review_session
++        .guardian_review_session()
+         .committed_fork_rollout_items_for_test()
+         .await
+         .expect("committed guardian fork snapshot");
+@@ -2570,7 +2570,7 @@ async fn guardian_reused_trunk_ignores_stale_prior_turn_completion() -> anyhow::
+     ));
+ 
+     session
+-        .guardian_review_session
++        .guardian_review_session()
+         .send_trunk_event_raw_for_test(Event {
+             id: "stale-turn".to_string(),
+             msg: EventMsg::TurnComplete(TurnCompleteEvent {
+diff --git a/codex-rs/core/src/hook_mcp_executor.rs b/codex-rs/core/src/hook_mcp_executor.rs
+index ea1252f931896a644aaddb753160b25826287f5d..9edfbb2cfac30aaa9b15ac46cc71e2066076f08a 100644
+--- a/codex-rs/core/src/hook_mcp_executor.rs
++++ b/codex-rs/core/src/hook_mcp_executor.rs
+@@ -10,7 +10,7 @@ use futures::future::BoxFuture;
+ use serde_json::Value;
+ 
+ pub(crate) struct CoreHookMcpExecutor {
+-    pub(crate) runtime: Arc<McpRuntime>,
++    pub(crate) runtime: Arc<arc_swap::ArcSwap<McpRuntime>>,
+     // Session-scoped MCP tools require the owning thread ID in request metadata.
+     pub(crate) thread_id: ThreadId,
+ }
+@@ -18,8 +18,8 @@ pub(crate) struct CoreHookMcpExecutor {
+ impl HookMcpExecutor for CoreHookMcpExecutor {
+     fn execute(&self, call: HookMcpCall) -> BoxFuture<'_, anyhow::Result<String>> {
+         async move {
+-            let result = self
+-                .runtime
++            let runtime = self.runtime.load_full();
++            let result = runtime
+                 .latest_call_tool(
+                     &call.server,
+                     &call.tool,
+diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
+index 6b76b7be007e83da3fc500baf5955b069ff158cc..3c0e050e354d530247421ca8c38d48b5107294bd 100644
+--- a/codex-rs/core/src/realtime_conversation.rs
++++ b/codex-rs/core/src/realtime_conversation.rs
+@@ -1144,6 +1144,7 @@ struct PreparedRealtimeConversationStart {
+     version: RealtimeWsVersion,
+     session_config: RealtimeSessionConfig,
+     transport: ConversationStartTransport,
++    model_client: ModelClient,
+ }
+ 
+ #[derive(Clone, Copy)]
+@@ -1157,11 +1158,11 @@ async fn prepare_realtime_start(
+     params: ConversationStartParams,
+ ) -> CodexResult<PreparedRealtimeConversationStart> {
+     let provider = sess.provider().await;
+-    let auth_manager = sess
+-        .services
++    let account_runtime = sess.execution_account_runtime();
++    let auth_manager = account_runtime
+         .model_client
+         .auth_manager()
+-        .unwrap_or_else(|| Arc::clone(&sess.services.auth_manager));
++        .unwrap_or_else(|| Arc::clone(&account_runtime.execution_account.auth_manager));
+     let auth = auth_manager.auth().await;
+     let config = sess.get_config().await;
+     let transport = params
+@@ -1240,6 +1241,7 @@ async fn prepare_realtime_start(
+         version,
+         session_config,
+         transport,
++        model_client: account_runtime.model_client.clone(),
+     })
+ }
+ 
+@@ -1462,6 +1464,7 @@ async fn handle_start_inner(
+         version,
+         session_config,
+         transport,
++        model_client,
+     } = prepared_start;
+     info!("starting realtime conversation");
+     let sdp = match transport {
+@@ -1484,7 +1487,7 @@ async fn handle_start_inner(
+         codex_response_handoff_channel_prefixes,
+         realtime_call_api_provider,
+         session_config,
+-        model_client: sess.services.model_client.clone(),
++        model_client,
+         sdp,
+     };
+     let start_output = sess.conversation.start(start, mode_instructions).await?;
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+index 35c1182aa21a5b52f91285b641ada185d95be390..f016ce31923d93395d5fc49cc227cdb5e449c8cb 100644
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -356,7 +356,7 @@ pub async fn thread_rollback(sess: &Arc<Session>, sub_id: String, num_turns: u32
+         .remove::<NodeReplReviewEvidence>()
+         .is_some()
+     {
+-        sess.guardian_review_session
++        sess.guardian_review_session()
+             .invalidate_for_node_repl_evidence()
+             .await;
+     }
+@@ -441,7 +441,7 @@ async fn shutdown_session_runtime(sess: &Arc<Session>) {
+         sess.mcp_refresh.close();
+         sess.services.mcp_runtime.shutdown().await;
+     }
+-    sess.guardian_review_session.shutdown().await;
++    sess.guardian_review_session().shutdown().await;
+ 
+     crate::hook_runtime::run_session_end_hooks(sess).await;
+ }
+@@ -465,7 +465,7 @@ pub async fn shutdown(sess: &Arc<Session>, sub_id: String) -> bool {
+         .raw_items()
+         .filter(|item| is_user_turn_boundary(item))
+         .count();
+-    sess.services.session_telemetry.counter(
++    sess.session_telemetry().counter(
+         "codex.conversation.turn.count",
+         i64::try_from(turn_count).unwrap_or(0),
+         &[],
+diff --git a/codex-rs/core/src/session/mcp.rs b/codex-rs/core/src/session/mcp.rs
+index caf6a279244a829564e6af1d62fabec4b43366a5..946cdb0c856460c658b3d481fe8416d04bacf785 100644
+--- a/codex-rs/core/src/session/mcp.rs
++++ b/codex-rs/core/src/session/mcp.rs
+@@ -160,9 +160,9 @@ impl Session {
+             return;
+         };
+         loop {
+-            let auth = self.services.auth_manager.auth_cached();
+-            if !self
+-                .services
++            let account_runtime = self.execution_account_runtime();
++            let auth = account_runtime.execution_account.auth_manager.auth_cached();
++            if !account_runtime
+                 .mcp_runtime
+                 .current_auth_matches(auth.as_ref())
+             {
+@@ -176,7 +176,7 @@ impl Session {
+                 refresh: &self.mcp_refresh,
+                 published: false,
+             };
+-            let auth = self.services.auth_manager.auth().await;
++            let auth = account_runtime.execution_account.auth_manager.auth().await;
+             let desired = self.latest_mcp_desired_state(auth).await;
+             let selected_capability_roots = self
+                 .resolve_selected_capability_roots_for_step(&desired.environments)
+@@ -191,7 +191,7 @@ impl Session {
+                     desired.windows_sandbox_level,
+                 )
+                 .await;
+-            let mcp_projection = self
++            let mcp_projection = account_runtime
+                 .services
+                 .mcp_manager
+                 .runtime_config_for_step(
+@@ -231,7 +231,8 @@ impl Session {
+             .acquire()
+             .await
+             .map_err(|_| anyhow::anyhow!("MCP runtime refresh semaphore closed"))?;
+-        let auth = self.services.auth_manager.auth().await;
++        let account_runtime = self.execution_account_runtime();
++        let auth = account_runtime.execution_account.auth_manager.auth().await;
+         let desired = self.latest_mcp_desired_state(auth).await;
+         let selected_capability_roots = self
+             .resolve_selected_capability_roots_for_step(&desired.environments)
+@@ -246,7 +247,7 @@ impl Session {
+                 desired.windows_sandbox_level,
+             )
+             .await;
+-        let mcp_projection = self
++        let mcp_projection = account_runtime
+             .services
+             .mcp_manager
+             .runtime_config_for_step(
+@@ -273,7 +274,7 @@ impl Session {
+             input.mcp_servers.contains_key(CODEX_APPS_MCP_SERVER_NAME),
+             "unknown MCP server '{CODEX_APPS_MCP_SERVER_NAME}'"
+         );
+-        let refreshed = self.services.mcp_runtime.replace_fresh(input).await;
++        let refreshed = account_runtime.mcp_runtime.replace_fresh(input).await;
+         self.services.thread_extension_data.insert(selected_plugins);
+         refreshed
+     }
+@@ -291,8 +292,8 @@ impl Session {
+     ) -> Arc<codex_mcp::McpBinding> {
+         let ready_selected_capability_roots =
+             Self::ready_selected_capability_roots(selected_capability_roots);
+-        if self
+-            .services
++        let account_runtime = self.execution_account_runtime();
++        if account_runtime
+             .mcp_runtime
+             .current_ready_selected_capability_roots()
+             != ready_selected_capability_roots
+@@ -300,15 +301,13 @@ impl Session {
+             self.mark_mcp_runtime_dirty();
+         }
+ 
+-        let recovered_oauth_servers = self
+-            .services
++        let recovered_oauth_servers = account_runtime
+             .mcp_runtime
+             .updated_oauth_credentials_after_auth_failure()
+             .await;
+         if !recovered_oauth_servers.is_empty()
+             && let Ok(_refresh) = self.mcp_refresh.acquire().await
+-            && self
+-                .services
++            && account_runtime
+                 .mcp_runtime
+                 .has_authentication_failed_servers(&recovered_oauth_servers)
+                 .await
+@@ -321,8 +320,8 @@ impl Session {
+             .chain(&recovered_oauth_servers)
+             .cloned()
+             .collect::<Vec<_>>();
+-        if let Some(binding) = self
+-            .services
++        let account_runtime = self.execution_account_runtime();
++        if let Some(binding) = account_runtime
+             .mcp_runtime
+             .current_binding_with_required_servers(&required_servers)
+             .await
+@@ -509,7 +508,11 @@ impl Session {
+         request_id: RequestId,
+         request: ElicitationRequest,
+     ) -> McpServerElicitationOutcome {
+-        if self.services.mcp_runtime.elicitations_auto_deny() {
++        if self
++            .execution_account_runtime()
++            .mcp_runtime
++            .elicitations_auto_deny()
++        {
+             return McpServerElicitationOutcome {
+                 response: Some(ElicitationResponse {
+                     action: codex_rmcp_client::ElicitationAction::Accept,
+@@ -602,7 +605,7 @@ impl Session {
+             return Ok(());
+         }
+ 
+-        self.services
++        self.execution_account_runtime()
+             .mcp_runtime
+             .resolve_elicitation(server_name, id, response)
+             .await
+@@ -618,15 +621,15 @@ impl Session {
+             error!("MCP runtime refresh semaphore closed");
+             return;
+         };
+-        let auth = self.services.auth_manager.auth().await;
++        let account_runtime = self.execution_account_runtime();
++        let auth = account_runtime.execution_account.auth_manager.auth().await;
+         {
+             let mut state = self.state.lock().await;
+             let mut config = (*state.session_configuration.original_config_do_not_use).clone();
+             config.mcp_servers = refresh_config.mcp_servers.clone();
+             state.session_configuration.original_config_do_not_use = Arc::new(config);
+         }
+-        let ready_selected_capability_roots = self
+-            .services
++        let ready_selected_capability_roots = account_runtime
+             .mcp_runtime
+             .current_ready_selected_capability_roots();
+         let environments = self.services.turn_environments.snapshot().await;
+@@ -638,7 +641,7 @@ impl Session {
+                 turn_context.windows_sandbox_level,
+             )
+             .await;
+-        let mcp_projection = self
++        let mcp_projection = account_runtime
+             .services
+             .mcp_manager
+             .runtime_config_for_step(
+@@ -675,7 +678,9 @@ impl Session {
+     }
+ 
+     pub(crate) fn cancel_mcp_startup(&self) {
+-        self.services.mcp_runtime.cancel_startup();
++        self.execution_account_runtime()
++            .mcp_runtime
++            .cancel_startup();
+     }
+ }
+ 
+@@ -689,7 +694,11 @@ async fn review_guardian_mcp_elicitation(
+         return Ok(None);
+     };
+ 
+-    let Some(mcp_config) = session.services.mcp_runtime.current_config() else {
++    let Some(mcp_config) = session
++        .execution_account_runtime()
++        .mcp_runtime
++        .current_config()
++    else {
+         return Ok(None);
+     };
+ 
+diff --git a/codex-rs/core/src/session/mcp_prewarm.rs b/codex-rs/core/src/session/mcp_prewarm.rs
+index f4b45b6e21aa7f952cf6a69d27d42afa9445ef92..788640de523871000451a93fbed4f36883e52f76 100644
+--- a/codex-rs/core/src/session/mcp_prewarm.rs
++++ b/codex-rs/core/src/session/mcp_prewarm.rs
+@@ -13,11 +13,15 @@ impl Session {
+ 
+     pub(super) fn start_mcp_prewarm_worker(
+         self: &Arc<Self>,
+-        requests: async_channel::Receiver<()>,
+         mut auth_changes: tokio::sync::watch::Receiver<u64>,
+     ) {
+         let session = Arc::downgrade(self);
+-        let shutdown = self.mcp_prewarm_shutdown.clone();
++        let requests = self.mcp_prewarm_rx.clone();
++        let shutdown = CancellationToken::new();
++        *self
++            .mcp_prewarm_shutdown
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner) = shutdown.clone();
+         let worker = self.services.runtime_handle.spawn(async move {
+             loop {
+                 let auth_changed = tokio::select! {
+@@ -60,7 +64,10 @@ impl Session {
+     }
+ 
+     pub(super) async fn stop_mcp_prewarm_worker(&self) {
+-        self.mcp_prewarm_shutdown.cancel();
++        self.mcp_prewarm_shutdown
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .cancel();
+         let worker = self
+             .mcp_prewarm_task
+             .lock()
+diff --git a/codex-rs/core/src/session/mcp_runtime.rs b/codex-rs/core/src/session/mcp_runtime.rs
+index 3c1bebb4db47c3d14a82789a35ec56b911416be4..674a173db0130ab606c58f0d82e1cc05b3d1030b 100644
+--- a/codex-rs/core/src/session/mcp_runtime.rs
++++ b/codex-rs/core/src/session/mcp_runtime.rs
+@@ -42,7 +42,7 @@ impl Session {
+     /// Waits on this session's refreshed server before tool execution is admitted.
+     pub(crate) async fn wait_for_mcp_server(self: &Arc<Self>, server: &str) {
+         self.refresh_mcp_if_dirty().await;
+-        self.services
++        self.execution_account_runtime()
+             .mcp_runtime
+             .wait_for_server_startup(server)
+             .await;
+@@ -55,7 +55,7 @@ impl Session {
+         tool: &str,
+     ) -> Option<PreparedMcpCall> {
+         self.refresh_mcp_if_dirty().await;
+-        self.services
++        self.execution_account_runtime()
+             .mcp_runtime
+             .current_binding_for_call(server)
+             .await?
+@@ -141,14 +141,17 @@ impl Session {
+         ready_selected_capability_roots: &[SelectedCapabilityRoot],
+         elicitation_reviewer: Option<ElicitationReviewerHandle>,
+     ) {
++        let account_runtime = self.execution_account_runtime();
+         let selected_plugins = mcp_projection.selected_plugins.clone();
+-        let input = self.build_mcp_runtime_input(
++        let input = self.build_mcp_runtime_input_for_account(
+             desired,
+             mcp_projection,
+             ready_selected_capability_roots,
+             elicitation_reviewer,
++            &account_runtime.services,
++            &account_runtime.execution_account.auth_manager,
+         );
+-        self.services.mcp_runtime.replace(input).await;
++        account_runtime.mcp_runtime.replace(input).await;
+         self.services.thread_extension_data.insert(selected_plugins);
+     }
+ 
+@@ -158,6 +161,26 @@ impl Session {
+         mcp_projection: McpRuntimeProjection,
+         ready_selected_capability_roots: &[SelectedCapabilityRoot],
+         elicitation_reviewer: Option<ElicitationReviewerHandle>,
++    ) -> McpRuntimeInput {
++        let runtime = self.execution_account_runtime();
++        self.build_mcp_runtime_input_for_account(
++            desired,
++            mcp_projection,
++            ready_selected_capability_roots,
++            elicitation_reviewer,
++            &runtime.services,
++            &runtime.execution_account.auth_manager,
++        )
++    }
++
++    fn build_mcp_runtime_input_for_account(
++        &self,
++        desired: &McpDesiredState,
++        mcp_projection: McpRuntimeProjection,
++        ready_selected_capability_roots: &[SelectedCapabilityRoot],
++        elicitation_reviewer: Option<ElicitationReviewerHandle>,
++        services: &crate::execution_account::ExecutionAccountServices,
++        auth_manager: &Arc<AuthManager>,
+     ) -> McpRuntimeInput {
+         let auth = desired.auth.clone();
+         let McpRuntimeProjection {
+@@ -190,7 +213,7 @@ impl Session {
+         );
+         let codex_apps_auth_manager =
+             codex_mcp::host_owned_codex_apps_enabled(&mcp_config, auth.as_ref())
+-                .then(|| Arc::clone(&self.services.auth_manager));
++                .then(|| Arc::clone(auth_manager));
+ 
+         McpRuntimeInput {
+             startup_policy: if matches!(desired.session_source, SessionSource::SubAgent(_)) {
+@@ -206,8 +229,8 @@ impl Session {
+             tx_event: Some(self.get_tx_event()),
+             startup_cancellation_token: CancellationToken::new(),
+             runtime_context,
+-            codex_apps_tools_cache: self.services.mcp_manager.codex_apps_tools_cache(),
+-            tool_catalog_cache: self.services.mcp_manager.tool_catalog_cache(),
++            codex_apps_tools_cache: services.mcp_manager.codex_apps_tools_cache(),
++            tool_catalog_cache: services.mcp_manager.tool_catalog_cache(),
+             codex_apps_tools_cache_key: connector_runtime_context_key(auth.as_ref()),
+             client_mcp_extensions: self.services.client_mcp_extensions.for_mcp_servers(),
+             auth,
+@@ -216,4 +239,53 @@ impl Session {
+             elicitation_lifecycle: Some(self.mcp_elicitation_lifecycle()),
+         }
+     }
++
++    pub(super) async fn prepare_mcp_runtime_for_execution_account(
++        self: &Arc<Self>,
++        execution_account: &crate::execution_account::ExecutionAccountContext,
++        services: &crate::execution_account::ExecutionAccountServices,
++    ) -> anyhow::Result<Arc<McpRuntime>> {
++        let auth = execution_account.auth_manager.auth().await;
++        let desired = self.latest_mcp_desired_state(auth).await;
++        let selected_capability_roots = self
++            .resolve_selected_capability_roots_for_step(&desired.environments)
++            .await;
++        let ready_selected_capability_roots =
++            Self::ready_selected_capability_roots(&selected_capability_roots);
++        let executor_capability_discovery = self
++            .executor_capability_discovery_for_step(
++                &desired.config,
++                &ready_selected_capability_roots,
++                &desired.environments,
++                desired.windows_sandbox_level,
++            )
++            .await;
++        let projection = services
++            .mcp_manager
++            .runtime_config_for_step(
++                &desired.config,
++                &self.services.mcp_thread_init,
++                &self.services.thread_extension_data,
++                McpThreadIdentity {
++                    session_source: &desired.session_source,
++                    originator: &desired.originator,
++                    environments: McpEnvironmentScope::Live(&self.services.turn_environments),
++                },
++                &ready_selected_capability_roots,
++                executor_capability_discovery.as_deref(),
++            )
++            .await;
++        let runtime = Arc::new(McpRuntime::empty(projection.config.prefix_mcp_tool_names));
++        let input = self.build_mcp_runtime_input_for_account(
++            &desired,
++            projection,
++            &ready_selected_capability_roots,
++            Some(self.mcp_elicitation_reviewer()),
++            services,
++            &execution_account.auth_manager,
++        );
++        runtime.replace(input).await;
++        runtime.validate_required_servers().await?;
++        Ok(runtime)
++    }
+ }
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 6fe06e2f93ea4974b4b5742bc134a1e7625eccf8..849624d78634a2e7fb630461e2d9c00098e480c8 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -1177,7 +1177,9 @@ impl Session {
+                 &self.services.network_approval,
+             ))),
+             self.services.managed_network_requirements_configured,
+-            self.services.network_proxy_audit_metadata.clone(),
++            self.execution_account_runtime()
++                .network_proxy_audit_metadata
++                .clone(),
+         )
+         .await
+         {
+@@ -3554,8 +3556,7 @@ impl Session {
+         {
+             developer_sections.push(developer_instructions.to_string());
+         }
+-        let loaded_plugins = self
+-            .services
++        let loaded_plugins = turn_context
+             .plugins_manager
+             .plugins_for_config(&turn_context.config.plugins_config_input())
+             .await;
+@@ -3565,9 +3566,12 @@ impl Session {
+             && (features.enabled(Feature::ToolSuggest)
+                 || features.enabled(Feature::RecommendedPlugins))
+         {
+-            let auth = self.services.auth_manager.auth().await;
++            let auth = match turn_context.auth_manager.as_ref() {
++                Some(auth_manager) => auth_manager.auth().await,
++                None => None,
++            };
+             let plugins_config = turn_context.config.plugins_config_input();
+-            self.services
++            turn_context
+                 .plugins_manager
+                 .recommended_plugin_candidates_for_config(RecommendedPluginCandidatesInput {
+                     plugins_config: &plugins_config,
+diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
+index 1ebed06e5d99705b84f329e7861377cdb8f7c793..7cc8a9b3db9713f7a6040757c9eb587f335a593d 100644
+--- a/codex-rs/core/src/session/session.rs
++++ b/codex-rs/core/src/session/session.rs
+@@ -39,7 +39,8 @@ use tokio::sync::Semaphore;
+ /// A session has at most 1 running task at a time, and can be interrupted by user input.
+ pub(crate) struct Session {
+     pub(crate) thread_id: ThreadId,
+-    pub(crate) execution_account: Arc<crate::execution_account::ExecutionAccountContext>,
++    pub(crate) execution_account_runtime:
++        arc_swap::ArcSwap<crate::execution_account::ExecutionAccountRuntime>,
+     pub(crate) installation_id: String,
+     pub(super) tx_event: Sender<Event>,
+     pub(super) agent_status: watch::Sender<AgentStatus>,
+@@ -58,7 +59,8 @@ pub(crate) struct Session {
+     pub(super) mcp_elicitation_reviewer_handle: OnceLock<codex_mcp::ElicitationReviewerHandle>,
+     pub(super) mcp_elicitation_lifecycle_handle: OnceLock<codex_mcp::ElicitationLifecycle>,
+     pub(super) mcp_prewarm_tx: async_channel::Sender<()>,
+-    pub(super) mcp_prewarm_shutdown: CancellationToken,
++    pub(super) mcp_prewarm_rx: async_channel::Receiver<()>,
++    pub(super) mcp_prewarm_shutdown: std::sync::Mutex<CancellationToken>,
+     pub(super) mcp_prewarm_task: std::sync::Mutex<Option<JoinHandle<()>>>,
+     pub(crate) conversation: Arc<RealtimeConversationManager>,
+     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
+@@ -66,7 +68,6 @@ pub(crate) struct Session {
+     pub(crate) execution_control_closing: AtomicBool,
+     pub(crate) async_hook_results: async_channel::Receiver<HookCompletedEvent>,
+     pub(crate) input_queue: InputQueue,
+-    pub(crate) guardian_review_session: GuardianReviewSessionManager,
+     pub(crate) services: SessionServices,
+     pub(super) git_enrichment_policy: GitEnrichmentPolicy,
+     pub(super) fork_persistence: ForkPersistence,
+@@ -647,7 +648,349 @@ impl Session {
+     pub(crate) fn execution_account(
+         &self,
+     ) -> Arc<crate::execution_account::ExecutionAccountContext> {
+-        Arc::clone(&self.execution_account)
++        Arc::clone(&self.execution_account_runtime.load_full().execution_account)
++    }
++
++    pub(crate) fn execution_account_runtime(
++        &self,
++    ) -> Arc<crate::execution_account::ExecutionAccountRuntime> {
++        self.execution_account_runtime.load_full()
++    }
++
++    pub(crate) fn guardian_review_session(&self) -> Arc<GuardianReviewSessionManager> {
++        Arc::clone(
++            &self
++                .execution_account_runtime
++                .load_full()
++                .guardian_review_session,
++        )
++    }
++
++    pub(crate) fn session_telemetry(&self) -> SessionTelemetry {
++        self.execution_account_runtime().session_telemetry.clone()
++    }
++
++    pub(crate) fn analytics_events_client(&self) -> AnalyticsEventsClient {
++        self.execution_account_runtime()
++            .analytics_events_client
++            .clone()
++    }
++
++    async fn prepare_execution_account_runtime(
++        self: &Arc<Self>,
++        execution_account: Arc<crate::execution_account::ExecutionAccountContext>,
++        services: crate::execution_account::ExecutionAccountServices,
++    ) -> Result<
++        Arc<crate::execution_account::ExecutionAccountRuntime>,
++        crate::execution_account::ExecutionAccountSwitchError,
++    > {
++        let session_configuration = self.state.lock().await.session_configuration.clone();
++        let config = Arc::new(self.build_effective_session_config(&session_configuration));
++        let environments = self.services.turn_environments.snapshot().await;
++        let _skill_errors = warm_plugins_and_skills_for_session_init(
++            Arc::clone(&config),
++            Arc::clone(&services.plugins_manager),
++            Arc::clone(&self.services.skills_service),
++            &environments,
++        )
++        .await;
++        let auth = execution_account.auth_manager.auth().await;
++        let auth_mode = auth
++            .as_ref()
++            .map(CodexAuth::auth_mode)
++            .map(TelemetryAuthMode::from);
++        let account_id = auth.as_ref().and_then(CodexAuth::get_account_id);
++        let account_email = auth.as_ref().and_then(CodexAuth::get_account_email);
++        let originator = session_configuration.originator.clone();
++        let terminal_type = user_agent();
++        let session_model = session_configuration.collaboration_mode.model().to_string();
++        let auth_env_telemetry = collect_auth_env_telemetry(
++            session_configuration.provider.info(),
++            execution_account.auth_manager.codex_api_key_env_enabled(),
++        );
++        let mut session_telemetry = SessionTelemetry::new(
++            self.thread_id,
++            session_model.as_str(),
++            session_model.as_str(),
++            account_id.clone(),
++            account_email.clone(),
++            auth_mode,
++            originator.clone(),
++            config.otel.log_user_prompt,
++            terminal_type.clone(),
++            session_configuration.session_source.clone(),
++        )
++        .with_auth_env(auth_env_telemetry.to_otel_metadata());
++        if let Some(service_name) = session_configuration.metrics_service_name.as_deref() {
++            session_telemetry = session_telemetry.with_metrics_service_name(service_name);
++        }
++        let network_proxy_audit_metadata = NetworkProxyAuditMetadata {
++            conversation_id: Some(self.thread_id.to_string()),
++            app_version: Some(env!("CARGO_PKG_VERSION").to_string()),
++            user_account_id: account_id,
++            auth_mode: auth_mode.map(|mode| mode.to_string()),
++            originator: Some(originator),
++            user_email: account_email,
++            terminal_type: Some(terminal_type),
++            model: Some(session_model.clone()),
++            slug: Some(session_model),
++        };
++        let shell_snapshot = if config.features.enabled(Feature::ShellSnapshot) {
++            ShellSnapshot::new(
++                config.codex_home.clone(),
++                self.thread_id,
++                session_telemetry.clone(),
++                self.services.state_db.clone(),
++            )
++        } else {
++            ShellSnapshot::disabled()
++        };
++        let analytics_events_client = AnalyticsEventsClient::new(
++            Arc::clone(&execution_account.auth_manager),
++            config.chatgpt_base_url.trim_end_matches('/').to_string(),
++            config.analytics_enabled,
++        );
++        services
++            .plugins_manager
++            .set_analytics_events_client(analytics_events_client.clone());
++        let model_client = ModelClient::new(
++            Some(Arc::clone(&execution_account.auth_manager)),
++            if config.features.enabled(Feature::UseAgentIdentity) {
++                AgentIdentityAuthPolicy::ChatGptAuth
++            } else {
++                AgentIdentityAuthPolicy::JwtOnly
++            },
++            self.thread_id,
++            session_configuration.provider.info().clone(),
++            session_configuration.session_source.clone(),
++            session_configuration.originator.clone(),
++            config.model_verbosity,
++            config.features.enabled(Feature::EnableRequestCompression),
++            config.features.enabled(Feature::RuntimeMetrics),
++            Self::build_model_client_beta_features_header(config.as_ref()),
++            config
++                .features
++                .enabled(Feature::ConcurrentReasoningSummaries),
++            self.services.attestation_provider.clone(),
++            config.http_client_factory(),
++        )
++        .with_prompt_cache_key_override(
++            crate::guardian::prompt_cache_key_override_for_review_session(
++                &session_configuration.session_source,
++                session_configuration.parent_thread_id,
++            ),
++        );
++        let mcp_runtime = self
++            .prepare_mcp_runtime_for_execution_account(&execution_account, &services)
++            .await
++            .map_err(|_| {
++                crate::execution_account::ExecutionAccountSwitchError::PreparationFailed
++            })?;
++        let target_session_store =
++            codex_extension_api::ExtensionData::new(self.session_id().to_string());
++        target_session_store.insert(execution_account.as_ref().clone());
++        target_session_store.insert(Arc::clone(&execution_account.auth_manager));
++        target_session_store.insert(analytics_events_client.clone());
++        let mcp_resource_client = Arc::new(McpResourceClient::new(Arc::clone(&mcp_runtime)));
++        let extension_metrics =
++            extension_metrics::from_session_telemetry(session_telemetry.clone());
++        let mut extension_runtimes = Vec::new();
++        for contributor in self
++            .services
++            .extensions
++            .execution_account_runtime_contributors()
++        {
++            let prepared = contributor
++                .prepare(codex_extension_api::ExecutionAccountRuntimePrepareInput {
++                    config: config.as_ref(),
++                    session_source: &session_configuration.session_source,
++                    session_store: &self.services.session_extension_data,
++                    target_session_store: &target_session_store,
++                    thread_store: &self.services.thread_extension_data,
++                    mcp_resource_client: Arc::clone(&mcp_resource_client),
++                    extension_metrics: Some(Arc::clone(&extension_metrics)),
++                })
++                .await
++                .map_err(|_| {
++                    crate::execution_account::ExecutionAccountSwitchError::PreparationFailed
++                })?;
++            extension_runtimes.push(prepared);
++        }
++        Ok(Arc::new(
++            crate::execution_account::ExecutionAccountRuntime {
++                execution_account,
++                services,
++                mcp_runtime,
++                model_client,
++                analytics_events_client,
++                session_telemetry,
++                network_proxy_audit_metadata,
++                shell_snapshot,
++                extension_runtimes,
++                guardian_review_session: Arc::new(GuardianReviewSessionManager::default()),
++            },
++        ))
++    }
++
++    #[expect(
++        clippy::await_holding_invalid_type,
++        reason = "account runtime preparation and durable binding commit share one transition fence"
++    )]
++    pub(crate) async fn switch_execution_account(
++        self: &Arc<Self>,
++        expected: codex_protocol::protocol::ExecutionAccountBinding,
++        target: Arc<crate::execution_account::ExecutionAccountContext>,
++        services: crate::execution_account::ExecutionAccountServices,
++    ) -> Result<
++        codex_protocol::protocol::ExecutionAccountBinding,
++        crate::execution_account::ExecutionAccountSwitchError,
++    > {
++        let _transition = self.execution_runtime_transition_lock.lock().await;
++        let _mcp_refresh = self.mcp_refresh.acquire().await.map_err(|_| {
++            crate::execution_account::ExecutionAccountSwitchError::PreparationFailed
++        })?;
++        if self.execution_account().binding != expected
++            || self.conversation.running_state().await.is_some()
++        {
++            return Err(crate::execution_account::ExecutionAccountSwitchError::ThreadBusy);
++        }
++        let prepared = self
++            .prepare_execution_account_runtime(Arc::clone(&target), services)
++            .await?;
++        if self.execution_account().binding != expected
++            || self.conversation.running_state().await.is_some()
++        {
++            return Err(crate::execution_account::ExecutionAccountSwitchError::ThreadBusy);
++        }
++        let previous = self.execution_account_runtime();
++        let rollback_mcp_runtime = self
++            .prepare_mcp_runtime_for_execution_account(
++                &previous.execution_account,
++                &previous.services,
++            )
++            .await
++            .map_err(|_| {
++                crate::execution_account::ExecutionAccountSwitchError::PreparationFailed
++            })?;
++        let rollback = Arc::new(crate::execution_account::ExecutionAccountRuntime {
++            execution_account: Arc::clone(&previous.execution_account),
++            services: previous.services.clone(),
++            mcp_runtime: Arc::clone(&previous.mcp_runtime),
++            model_client: previous.model_client.clone(),
++            analytics_events_client: previous.analytics_events_client.clone(),
++            session_telemetry: previous.session_telemetry.clone(),
++            network_proxy_audit_metadata: previous.network_proxy_audit_metadata.clone(),
++            shell_snapshot: previous.shell_snapshot.clone(),
++            extension_runtimes: previous.extension_runtimes.clone(),
++            guardian_review_session: Arc::new(GuardianReviewSessionManager::default()),
++        });
++        self.begin_execution_control_transition()
++            .await
++            .map_err(|()| crate::execution_account::ExecutionAccountSwitchError::ThreadBusy)?;
++        let rollback_base_instructions = self.get_base_instructions().await.text;
++        let startup_prewarm = self.take_session_startup_prewarm().await;
++        let restart_startup_prewarm = startup_prewarm.is_some();
++        if let Some(startup_prewarm) = startup_prewarm {
++            startup_prewarm.abort().await;
++        }
++        self.stop_mcp_prewarm_worker().await;
++        for extension_runtime in &prepared.extension_runtimes {
++            extension_runtime.quiesce().await.map_err(|_| {
++                crate::execution_account::ExecutionAccountSwitchError::PreparationFailed
++            })?;
++        }
++        previous.guardian_review_session.shutdown().await;
++        previous.mcp_runtime.shutdown().await;
++        let target_auth_changes = target.auth_manager.auth_change_receiver();
++        let result = async {
++            if self.execution_account().binding != expected {
++                return Err(crate::execution_account::ExecutionAccountSwitchError::StaleGeneration);
++            }
++            let next = self
++                .services
++                .thread_store
++                .compare_and_swap_execution_account_binding(
++                    self.thread_id,
++                    expected,
++                    target.binding.slot_id.clone(),
++                )
++                .await
++                .map_err(|_| {
++                    crate::execution_account::ExecutionAccountSwitchError::PersistenceFailed
++                })?
++                .ok_or(crate::execution_account::ExecutionAccountSwitchError::StaleGeneration)?;
++            if next != target.binding {
++                return Err(
++                    crate::execution_account::ExecutionAccountSwitchError::PersistenceFailed,
++                );
++            }
++
++            previous.mcp_runtime.adopt_prepared(&prepared.mcp_runtime);
++            self.services
++                .mcp_runtime
++                .adopt_prepared(&prepared.mcp_runtime);
++            self.services
++                .session_extension_data
++                .insert(target.as_ref().clone());
++            self.services
++                .session_extension_data
++                .insert(Arc::clone(&target.auth_manager));
++            self.services
++                .session_extension_data
++                .insert(prepared.analytics_events_client.clone());
++            self.services
++                .thread_extension_data
++                .insert(target.as_ref().clone());
++            self.services
++                .thread_extension_data
++                .insert(Arc::clone(&target.auth_manager));
++            self.services
++                .thread_extension_data
++                .insert(prepared.analytics_events_client.clone());
++            self.services
++                .hook_mcp_runtime
++                .store(Arc::clone(&prepared.mcp_runtime));
++            self.services
++                .turn_environments
++                .replace_shell_snapshot(prepared.shell_snapshot.clone());
++            if let Some(network_proxy) = self.services.network_proxy.load_full() {
++                network_proxy
++                    .proxy()
++                    .replace_audit_metadata(prepared.network_proxy_audit_metadata.clone());
++            }
++            for extension_runtime in &prepared.extension_runtimes {
++                extension_runtime.publish(
++                    &self.services.session_extension_data,
++                    &self.services.thread_extension_data,
++                );
++            }
++            self.execution_account_runtime.store(Arc::clone(&prepared));
++            self.start_mcp_prewarm_worker(target_auth_changes);
++            self.schedule_mcp_prewarm();
++            Ok(next)
++        }
++        .await;
++        if result.is_err() {
++            drop(prepared);
++            previous.mcp_runtime.adopt_prepared(&rollback_mcp_runtime);
++            self.services
++                .mcp_runtime
++                .adopt_prepared(&rollback_mcp_runtime);
++            self.execution_account_runtime.store(rollback);
++            self.start_mcp_prewarm_worker(
++                previous
++                    .execution_account
++                    .auth_manager
++                    .auth_change_receiver(),
++            );
++            self.schedule_mcp_prewarm();
++            if restart_startup_prewarm {
++                self.schedule_startup_prewarm(rollback_base_instructions)
++                    .await;
++            }
++        }
++        self.end_execution_control_transition();
++        result
+     }
+ 
+     /// Close the idle input boundary immediately before a writer-control commit.
+@@ -1199,7 +1542,7 @@ impl Session {
+                 environment_manager,
+                 default_shell.clone(),
+                 session_configuration.inferred_environment_config(),
+-                shell_snapshot,
++                shell_snapshot.clone(),
+                 inherited_environments.unwrap_or_default(),
+                 config.features.enabled(Feature::DeferredExecutor),
+             ));
+@@ -1308,6 +1651,7 @@ impl Session {
+             let mcp_runtime = Arc::new(McpRuntime::empty(
+                 mcp_projection.config.prefix_mcp_tool_names,
+             ));
++            let hook_mcp_runtime = Arc::new(arc_swap::ArcSwap::from(Arc::clone(&mcp_runtime)));
+             let hooks_config = build_hooks_config(
+                 &config,
+                 plugins_manager.as_ref(),
+@@ -1318,7 +1662,7 @@ impl Session {
+                 hooks_config,
+                 thread_id,
+                 Arc::new(CoreHookMcpExecutor {
+-                    runtime: Arc::clone(&mcp_runtime),
++                    runtime: Arc::clone(&hook_mcp_runtime),
+                     thread_id,
+                 }),
+             )?;
+@@ -1380,6 +1724,50 @@ impl Session {
+                 .features
+                 .enabled(Feature::ExecutedToolCallMetadata)
+                 .then(|| Arc::new(crate::state::ExecutedToolCallRecorder::default()));
++            let model_client = ModelClient::new(
++                Some(Arc::clone(&auth_manager)),
++                if config.features.enabled(Feature::UseAgentIdentity) {
++                    AgentIdentityAuthPolicy::ChatGptAuth
++                } else {
++                    AgentIdentityAuthPolicy::JwtOnly
++                },
++                thread_id,
++                session_configuration.provider.info().clone(),
++                session_configuration.session_source.clone(),
++                session_configuration.originator.clone(),
++                config.model_verbosity,
++                config.features.enabled(Feature::EnableRequestCompression),
++                config.features.enabled(Feature::RuntimeMetrics),
++                Self::build_model_client_beta_features_header(config.as_ref()),
++                /*concurrent_reasoning_summaries_enabled*/ config
++                    .features
++                    .enabled(Feature::ConcurrentReasoningSummaries),
++                attestation_provider.clone(),
++                config.http_client_factory(),
++            )
++            .with_prompt_cache_key_override(
++                crate::guardian::prompt_cache_key_override_for_review_session(
++                    &session_configuration.session_source,
++                    session_configuration.parent_thread_id,
++                ),
++            );
++            let execution_account_runtime = Arc::new(
++                crate::execution_account::ExecutionAccountRuntime {
++                    execution_account: Arc::clone(&execution_account),
++                    services: crate::execution_account::ExecutionAccountServices {
++                        plugins_manager: Arc::clone(&plugins_manager),
++                        mcp_manager: Arc::clone(&mcp_manager),
++                    },
++                    mcp_runtime: Arc::clone(&mcp_runtime),
++                    model_client: model_client.clone(),
++                    analytics_events_client: analytics_events_client.clone(),
++                    session_telemetry: session_telemetry.clone(),
++                    network_proxy_audit_metadata: network_proxy_audit_metadata.clone(),
++                    shell_snapshot: shell_snapshot.clone(),
++                    extension_runtimes: Vec::new(),
++                    guardian_review_session: Arc::new(GuardianReviewSessionManager::default()),
++                },
++            );
+             let services = SessionServices {
+                 // Start with an empty connection set. The initialized set is
+                 // published after SessionConfigured so MCP events follow it.
+@@ -1393,6 +1781,7 @@ impl Session {
+                 main_execve_wrapper_exe: config.main_execve_wrapper_exe.clone(),
+                 analytics_events_client,
+                 hooks: arc_swap::ArcSwap::from_pointee(hooks),
++                hook_mcp_runtime,
+                 rollout_thread_trace,
+                 user_shell: Arc::new(default_shell),
+                 show_raw_agent_reasoning: config.show_raw_agent_reasoning,
+@@ -1429,33 +1818,7 @@ impl Session {
+                 thread_store: Arc::clone(&thread_store),
+                 attestation_provider: attestation_provider.clone(),
+                 time_provider,
+-                model_client: ModelClient::new(
+-                    Some(Arc::clone(&auth_manager)),
+-                    if config.features.enabled(Feature::UseAgentIdentity) {
+-                        AgentIdentityAuthPolicy::ChatGptAuth
+-                    } else {
+-                        AgentIdentityAuthPolicy::JwtOnly
+-                    },
+-                    thread_id,
+-                    session_configuration.provider.info().clone(),
+-                    session_configuration.session_source.clone(),
+-                    session_configuration.originator.clone(),
+-                    config.model_verbosity,
+-                    config.features.enabled(Feature::EnableRequestCompression),
+-                    config.features.enabled(Feature::RuntimeMetrics),
+-                    Self::build_model_client_beta_features_header(config.as_ref()),
+-                    /*concurrent_reasoning_summaries_enabled*/ config
+-                        .features
+-                        .enabled(Feature::ConcurrentReasoningSummaries),
+-                    attestation_provider,
+-                    config.http_client_factory(),
+-                )
+-                .with_prompt_cache_key_override(
+-                    crate::guardian::prompt_cache_key_override_for_review_session(
+-                        &session_configuration.session_source,
+-                        session_configuration.parent_thread_id,
+-                    ),
+-                ),
++                model_client,
+                 executed_tool_calls,
+                 code_mode_service: crate::tools::code_mode::CodeModeService::new(
+                     Arc::clone(&code_mode_session_provider),
+@@ -1467,7 +1830,7 @@ impl Session {
+             let (mcp_prewarm_tx, mcp_prewarm_rx) = async_channel::bounded(1);
+             let sess = Arc::new(Session {
+                 thread_id,
+-                execution_account: Arc::clone(&execution_account),
++                execution_account_runtime: arc_swap::ArcSwap::from(execution_account_runtime),
+                 installation_id,
+                 tx_event: tx_event.clone(),
+                 agent_status,
+@@ -1480,7 +1843,8 @@ impl Session {
+                 mcp_elicitation_reviewer_handle: OnceLock::new(),
+                 mcp_elicitation_lifecycle_handle: OnceLock::new(),
+                 mcp_prewarm_tx,
+-                mcp_prewarm_shutdown: CancellationToken::new(),
++                mcp_prewarm_rx,
++                mcp_prewarm_shutdown: std::sync::Mutex::new(CancellationToken::new()),
+                 mcp_prewarm_task: std::sync::Mutex::new(None),
+                 conversation: Arc::new(RealtimeConversationManager::new()),
+                 active_turn: Mutex::new(None),
+@@ -1488,7 +1852,6 @@ impl Session {
+                 execution_control_closing: AtomicBool::new(false),
+                 async_hook_results,
+                 input_queue: InputQueue::new(),
+-                guardian_review_session: GuardianReviewSessionManager::default(),
+                 services,
+                 git_enrichment_policy,
+                 fork_persistence,
+@@ -1572,7 +1935,7 @@ impl Session {
+                 mcp_runtime_cwd,
+             )
+             .await?;
+-            sess.start_mcp_prewarm_worker(mcp_prewarm_rx, mcp_auth_changes);
++            sess.start_mcp_prewarm_worker(mcp_auth_changes);
+             sess.schedule_startup_prewarm(session_configuration.base_instructions.clone())
+                 .await;
+             let session_start_source = match &initial_history {
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index eca18ced0928c1562b073346045624efbed601d0..40421bd587d0460b2af207ad5ce7872d7b58cccf 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -92,6 +92,28 @@ fn default_execution_account(
+         models_manager: Arc::clone(models_manager),
+     })
+ }
++
++fn default_execution_account_runtime(
++    auth_manager: &Arc<AuthManager>,
++    models_manager: &SharedModelsManager,
++    services: &SessionServices,
++) -> arc_swap::ArcSwap<crate::execution_account::ExecutionAccountRuntime> {
++    arc_swap::ArcSwap::from_pointee(crate::execution_account::ExecutionAccountRuntime {
++        execution_account: default_execution_account(auth_manager, models_manager),
++        services: crate::execution_account::ExecutionAccountServices {
++            plugins_manager: Arc::clone(&services.plugins_manager),
++            mcp_manager: Arc::clone(&services.mcp_manager),
++        },
++        mcp_runtime: Arc::clone(&services.mcp_runtime),
++        model_client: services.model_client.clone(),
++        analytics_events_client: services.analytics_events_client.clone(),
++        session_telemetry: services.session_telemetry.clone(),
++        network_proxy_audit_metadata: services.network_proxy_audit_metadata.clone(),
++        shell_snapshot: ShellSnapshot::disabled(),
++        extension_runtimes: Vec::new(),
++        guardian_review_session: Arc::new(crate::guardian::GuardianReviewSessionManager::default()),
++    })
++}
+ use codex_tools::ToolSpec;
+ use codex_utils_path_uri::PathUri;
+ use std::collections::BTreeMap;
+@@ -829,7 +851,9 @@ async fn preview_session_start_hooks(
+         },
+         thread_id,
+         Arc::new(CoreHookMcpExecutor {
+-            runtime: Arc::new(McpRuntime::empty(config.prefix_mcp_tool_names())),
++            runtime: Arc::new(arc_swap::ArcSwap::from_pointee(McpRuntime::empty(
++                config.prefix_mcp_tool_names(),
++            ))),
+             thread_id,
+         }),
+     )
+@@ -5899,6 +5923,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+     ));
+     let network_approval = Arc::new(NetworkApprovalService::default());
+     let mcp_runtime = Arc::new(codex_mcp::McpRuntime::empty(config.prefix_mcp_tool_names()));
++    let hook_mcp_runtime = Arc::new(arc_swap::ArcSwap::from(Arc::clone(&mcp_runtime)));
+     let executed_tool_calls = config
+         .features
+         .enabled(Feature::ExecutedToolCallMetadata)
+@@ -5910,7 +5935,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+         },
+         thread_id,
+         Arc::new(CoreHookMcpExecutor {
+-            runtime: Arc::clone(&mcp_runtime),
++            runtime: Arc::clone(&hook_mcp_runtime),
+             thread_id,
+         }),
+     )
+@@ -5930,6 +5955,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+             config.analytics_enabled,
+         ),
+         hooks: arc_swap::ArcSwap::from_pointee(hooks),
++        hook_mcp_runtime,
+         rollout_thread_trace: codex_rollout_trace::ThreadTraceContext::disabled(),
+         user_shell: Arc::new(default_user_shell()),
+         show_raw_agent_reasoning: config.show_raw_agent_reasoning,
+@@ -5999,7 +6025,11 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+ 
+     let session = Session {
+         thread_id,
+-        execution_account: default_execution_account(&auth_manager, &models_manager),
++        execution_account_runtime: default_execution_account_runtime(
++            &auth_manager,
++            &models_manager,
++            &services,
++        ),
+         installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
+         tx_event,
+         agent_status: agent_status_tx,
+@@ -6013,7 +6043,8 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+         mcp_elicitation_reviewer_handle: OnceLock::new(),
+         mcp_elicitation_lifecycle_handle: OnceLock::new(),
+         mcp_prewarm_tx: async_channel::bounded(1).0,
+-        mcp_prewarm_shutdown: CancellationToken::new(),
++        mcp_prewarm_rx: async_channel::bounded(1).1,
++        mcp_prewarm_shutdown: std::sync::Mutex::new(CancellationToken::new()),
+         mcp_prewarm_task: std::sync::Mutex::new(None),
+         conversation: Arc::new(RealtimeConversationManager::new()),
+         active_turn: Mutex::new(None),
+@@ -6021,7 +6052,6 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+         execution_control_closing: std::sync::atomic::AtomicBool::new(false),
+         async_hook_results,
+         input_queue: super::input_queue::InputQueue::new(),
+-        guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
+         services,
+         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
+         fork_persistence: ForkPersistence::Copied,
+@@ -7883,7 +7913,7 @@ async fn shutdown_and_wait_shuts_down_cached_guardian_subagent() {
+         session_loop_termination: session_loop_termination_from_handle(child_session_loop_handle),
+     };
+     parent_session
+-        .guardian_review_session
++        .guardian_review_session()
+         .cache_for_test(child_session, child_io)
+         .await;
+ 
+@@ -7915,13 +7945,13 @@ async fn cached_guardian_subagent_exposes_its_rollout_path() {
+         session_loop_termination: session_loop_termination_from_handle(child_session_loop_handle),
+     };
+     parent_session
+-        .guardian_review_session
++        .guardian_review_session()
+         .cache_for_test(child_session, child_io)
+         .await;
+ 
+     assert_eq!(
+         parent_session
+-            .guardian_review_session
++            .guardian_review_session()
+             .trunk_rollout_path()
+             .await,
+         Some(child_rollout_path)
+@@ -7968,7 +7998,7 @@ async fn shutdown_and_wait_shuts_down_tracked_ephemeral_guardian_review() {
+         session_loop_termination: session_loop_termination_from_handle(child_session_loop_handle),
+     };
+     parent_session
+-        .guardian_review_session
++        .guardian_review_session()
+         .register_ephemeral_for_test(child_session, child_io)
+         .await;
+ 
+@@ -8118,6 +8148,7 @@ where
+     ));
+     let network_approval = Arc::new(NetworkApprovalService::default());
+     let mcp_runtime = Arc::new(codex_mcp::McpRuntime::empty(config.prefix_mcp_tool_names()));
++    let hook_mcp_runtime = Arc::new(arc_swap::ArcSwap::from(Arc::clone(&mcp_runtime)));
+     let executed_tool_calls = config
+         .features
+         .enabled(Feature::ExecutedToolCallMetadata)
+@@ -8129,7 +8160,7 @@ where
+         },
+         thread_id,
+         Arc::new(CoreHookMcpExecutor {
+-            runtime: Arc::clone(&mcp_runtime),
++            runtime: Arc::clone(&hook_mcp_runtime),
+             thread_id,
+         }),
+     )
+@@ -8149,6 +8180,7 @@ where
+             config.analytics_enabled,
+         ),
+         hooks: arc_swap::ArcSwap::from_pointee(hooks),
++        hook_mcp_runtime,
+         rollout_thread_trace: codex_rollout_trace::ThreadTraceContext::disabled(),
+         user_shell: Arc::new(default_user_shell()),
+         show_raw_agent_reasoning: config.show_raw_agent_reasoning,
+@@ -8218,7 +8250,11 @@ where
+ 
+     let session = Arc::new(Session {
+         thread_id,
+-        execution_account: default_execution_account(&auth_manager, &models_manager),
++        execution_account_runtime: default_execution_account_runtime(
++            &auth_manager,
++            &models_manager,
++            &services,
++        ),
+         installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
+         tx_event,
+         agent_status: agent_status_tx,
+@@ -8232,7 +8268,8 @@ where
+         mcp_elicitation_reviewer_handle: OnceLock::new(),
+         mcp_elicitation_lifecycle_handle: OnceLock::new(),
+         mcp_prewarm_tx: async_channel::bounded(1).0,
+-        mcp_prewarm_shutdown: CancellationToken::new(),
++        mcp_prewarm_rx: async_channel::bounded(1).1,
++        mcp_prewarm_shutdown: std::sync::Mutex::new(CancellationToken::new()),
+         mcp_prewarm_task: std::sync::Mutex::new(None),
+         conversation: Arc::new(RealtimeConversationManager::new()),
+         active_turn: Mutex::new(None),
+@@ -8240,7 +8277,6 @@ where
+         execution_control_closing: std::sync::atomic::AtomicBool::new(false),
+         async_hook_results,
+         input_queue: super::input_queue::InputQueue::new(),
+-        guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
+         services,
+         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
+         fork_persistence: ForkPersistence::Copied,
+diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
+index 60baf0d91bd9796d196ddf39cf6f1c8f77a693a6..243db9ea6fb5e5c71f908d9c15490a7001720aa9 100644
+--- a/codex-rs/core/src/session/turn_context.rs
++++ b/codex-rs/core/src/session/turn_context.rs
+@@ -860,9 +860,11 @@ impl Session {
+         session_configuration: SessionConfiguration,
+         final_output_json_schema: Option<Option<Value>>,
+     ) -> Arc<TurnContext> {
++        let execution_account_runtime = self.execution_account_runtime();
+         self.new_turn_context_from_configuration(
+             sub_id,
+             session_configuration,
++            execution_account_runtime,
+             final_output_json_schema,
+             TurnMultiAgentRuntime::ResolveAndStore,
+             self.git_enrichment_policy,
+@@ -875,9 +877,11 @@ impl Session {
+         sub_id: String,
+         session_configuration: SessionConfiguration,
+     ) -> Arc<TurnContext> {
++        let execution_account_runtime = self.execution_account_runtime();
+         self.new_turn_context_from_configuration(
+             sub_id,
+             session_configuration,
++            execution_account_runtime,
+             /*final_output_json_schema*/ None,
+             TurnMultiAgentRuntime::Preview,
+             GitEnrichmentPolicy::Skip,
+@@ -890,6 +894,7 @@ impl Session {
+         &self,
+         sub_id: String,
+         session_configuration: SessionConfiguration,
++        account_runtime: Arc<crate::execution_account::ExecutionAccountRuntime>,
+         final_output_json_schema: Option<Option<Value>>,
+         multi_agent_runtime: TurnMultiAgentRuntime,
+         git_enrichment_policy: GitEnrichmentPolicy,
+@@ -907,8 +912,8 @@ impl Session {
+             .map(TurnEnvironment::permission_profile)
+             .cloned()
+             .unwrap_or_else(|| session_configuration.permission_profile());
+-        let model_info = self
+-            .services
++        let execution_account = Arc::clone(&account_runtime.execution_account);
++        let model_info = execution_account
+             .models_manager
+             .get_model_info(
+                 session_configuration.collaboration_mode.model(),
+@@ -929,7 +934,7 @@ impl Session {
+             ),
+         };
+         let plugins_input = per_turn_config.plugins_config_input();
+-        let plugin_outcome = self
++        let plugin_outcome = account_runtime
+             .services
+             .plugins_manager
+             .plugins_for_config(&plugins_input)
+@@ -939,7 +944,7 @@ impl Session {
+             per_turn_config.codex_home.as_path(),
+         );
+         let effective_skill_roots = plugin_outcome.effective_plugin_skill_roots();
+-        let plugin_skill_snapshots = self
++        let plugin_skill_snapshots = account_runtime
+             .services
+             .plugins_manager
+             .plugin_skill_snapshots_for_config(&plugins_input);
+@@ -955,13 +960,13 @@ impl Session {
+         let mut turn_context: TurnContext = Self::make_turn_context(
+             self.thread_id(),
+             self.session_id(),
+-            Some(Arc::clone(&self.services.auth_manager)),
+-            self.execution_account(),
+-            self.services.model_client.clone(),
+-            Arc::clone(&self.services.plugins_manager),
+-            Arc::clone(&self.services.mcp_manager),
+-            self.services.analytics_events_client.clone(),
+-            &self.services.session_telemetry,
++            Some(Arc::clone(&execution_account.auth_manager)),
++            execution_account,
++            account_runtime.model_client.clone(),
++            Arc::clone(&account_runtime.services.plugins_manager),
++            Arc::clone(&account_runtime.services.mcp_manager),
++            account_runtime.analytics_events_client.clone(),
++            &account_runtime.session_telemetry,
+             session_configuration.provider.clone(),
+             &session_configuration,
+             multi_agent_version,
+@@ -970,7 +975,7 @@ impl Session {
+             self.services.main_execve_wrapper_exe.as_ref(),
+             per_turn_config,
+             model_info,
+-            &self.services.models_manager,
++            &account_runtime.execution_account.models_manager,
+             self.services
+                 .network_proxy
+                 .load_full()
+diff --git a/codex-rs/core/src/session_startup_prewarm.rs b/codex-rs/core/src/session_startup_prewarm.rs
+index 4d63cc8c77e59846fb2d548beb1e52ba7aa0635f..c17dae2c5c7c47e7c233dfbb815c22dd813e8739 100644
+--- a/codex-rs/core/src/session_startup_prewarm.rs
++++ b/codex-rs/core/src/session_startup_prewarm.rs
+@@ -183,10 +183,11 @@ impl SessionStartupPrewarmHandle {
+ 
+ impl Session {
+     pub(crate) async fn schedule_startup_prewarm(self: &Arc<Self>, base_instructions: String) {
+-        if !self.services.model_client.responses_websocket_enabled() {
++        let account_runtime = self.execution_account_runtime();
++        if !account_runtime.model_client.responses_websocket_enabled() {
+             // Without websocket prewarm, resolve auth once so Agent Identity bootstrap can
+             // register or engage this session's bearer fallback before the first user request.
+-            let model_client = self.services.model_client.clone();
++            let model_client = account_runtime.model_client.clone();
+             tokio::spawn(async move {
+                 if let Err(err) = model_client.prewarm_auth().await {
+                     warn!("startup auth prewarm failed: {err:#}");
+@@ -195,7 +196,7 @@ impl Session {
+             return;
+         }
+ 
+-        let session_telemetry = self.services.session_telemetry.clone();
++        let session_telemetry = account_runtime.session_telemetry.clone();
+         let websocket_connect_timeout = self.provider().await.websocket_connect_timeout();
+         let started_at = Instant::now();
+         let startup_prewarm_session = Arc::clone(self);
+@@ -242,7 +243,7 @@ impl Session {
+             };
+         };
+         startup_prewarm
+-            .resolve(&self.services.session_telemetry, cancellation_token)
++            .resolve(&self.session_telemetry(), cancellation_token)
+             .await
+     }
+ }
+@@ -265,7 +266,7 @@ async fn schedule_startup_prewarm_inner(
+         let guardian_parent_turn = Arc::clone(&startup_turn_context);
+         drop(tokio::spawn(async move {
+             if let Err(err) = guardian_session
+-                .guardian_review_session
++                .guardian_review_session()
+                 .initialize(Arc::clone(&guardian_session), guardian_parent_turn)
+                 .await
+             {
+@@ -309,7 +310,10 @@ async fn schedule_startup_prewarm_inner(
+             window_id,
+             CodexResponsesRequestKind::Prewarm,
+         );
+-    let mut client_session = session.services.model_client.new_session();
++    let mut client_session = session
++        .execution_account_runtime()
++        .model_client
++        .new_session();
+     let websocket_warmup_started_at = Instant::now();
+     client_session
+         .prewarm_websocket(
+diff --git a/codex-rs/core/src/state/service.rs b/codex-rs/core/src/state/service.rs
+index 0ef84c9b97172b8b4c8f9e9032818c333448adda..261f88f0bca9dbaca213b06074a945a6bccc96cc 100644
+--- a/codex-rs/core/src/state/service.rs
++++ b/codex-rs/core/src/state/service.rs
+@@ -56,6 +56,8 @@ pub(crate) struct SessionServices {
+     pub(crate) main_execve_wrapper_exe: Option<PathBuf>,
+     pub(crate) analytics_events_client: AnalyticsEventsClient,
+     pub(crate) hooks: ArcSwap<Hooks>,
++    /// Runtime selected by MCP-backed hook handlers for the current execution account.
++    pub(crate) hook_mcp_runtime: Arc<ArcSwap<McpRuntime>>,
+     pub(crate) rollout_thread_trace: ThreadTraceContext,
+     pub(crate) user_shell: Arc<crate::shell::Shell>,
+     pub(crate) show_raw_agent_reasoning: bool,
+diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
+index 47d18a7dd4c26968f2cfef5afcb0e31091a12a0f..61ef39aaab528ba12ccd10845deba53bda56297c 100644
+--- a/codex-rs/core/src/thread_manager.rs
++++ b/codex-rs/core/src/thread_manager.rs
+@@ -373,6 +373,7 @@ pub(crate) struct ThreadManagerState {
+ #[derive(Clone)]
+ struct AccountServiceEntry {
+     auth_manager: Arc<AuthManager>,
++    models_manager: SharedModelsManager,
+     services: ExecutionAccountServices,
+ }
+ 
+@@ -474,6 +475,7 @@ impl ThreadManager {
+             "default".to_string(),
+             AccountServiceEntry {
+                 auth_manager: Arc::clone(&auth_manager),
++                models_manager: Arc::clone(&models_manager),
+                 services: ExecutionAccountServices {
+                     plugins_manager: Arc::clone(&plugins_manager),
+                     mcp_manager: Arc::clone(&mcp_manager),
+@@ -642,10 +644,13 @@ impl ThreadManager {
+             skills_service.clone(),
+         ));
+         let mcp_manager = Arc::new(McpManager::new(Arc::clone(&plugins_manager)));
++        let models_manager = create_model_provider(provider, Some(auth_manager.clone()))
++            .models_manager(codex_home.clone(), /*config_model_catalog*/ None);
+         let account_services = HashMap::from([(
+             "default".to_string(),
+             AccountServiceEntry {
+                 auth_manager: Arc::clone(&auth_manager),
++                models_manager: Arc::clone(&models_manager),
+                 services: ExecutionAccountServices {
+                     plugins_manager: Arc::clone(&plugins_manager),
+                     mcp_manager: Arc::clone(&mcp_manager),
+@@ -663,8 +668,6 @@ impl ThreadManager {
+             state_db.clone(),
+         ));
+         let agent_graph_store = local_agent_graph_store_from_state_db(state_db.as_ref());
+-        let models_manager = create_model_provider(provider, Some(auth_manager.clone()))
+-            .models_manager(codex_home.clone(), /*config_model_catalog*/ None);
+         let execution_account_resolver = Arc::new(DefaultExecutionAccountResolver::new(
+             Arc::clone(&auth_manager),
+             Arc::clone(&models_manager),
+@@ -829,6 +832,39 @@ impl ThreadManager {
+         self.state.execution_account_services(execution_account)
+     }
+ 
++    /// Resolves, prepares, and commits an idle thread's next-turn account binding.
++    pub async fn switch_thread_execution_account(
++        &self,
++        thread_id: ThreadId,
++        expected: ExecutionAccountBinding,
++        target_slot_id: String,
++    ) -> Result<ExecutionAccountBinding, crate::execution_account::ExecutionAccountSwitchError>
++    {
++        let target_binding = ExecutionAccountBinding {
++            slot_id: target_slot_id,
++            generation: expected
++                .generation
++                .checked_add(1)
++                .ok_or(crate::execution_account::ExecutionAccountSwitchError::PreparationFailed)?,
++        };
++        let target = self
++            .state
++            .execution_account_resolver
++            .resolve(target_binding)
++            .await
++            .map_err(|_| {
++                crate::execution_account::ExecutionAccountSwitchError::TargetUnavailable
++            })?;
++        let services = self.execution_account_services(&target);
++        let thread = self
++            .get_thread(thread_id)
++            .await
++            .map_err(|_| crate::execution_account::ExecutionAccountSwitchError::StaleGeneration)?;
++        thread
++            .switch_execution_account(expected, target, services)
++            .await
++    }
++
+     pub fn clear_all_account_plugin_caches(&self) {
+         let services = self
+             .state
+@@ -1540,6 +1576,7 @@ impl ThreadManagerState {
+             .get(slot_id)
+             .cloned()
+             && Arc::ptr_eq(&entry.auth_manager, &execution_account.auth_manager)
++            && Arc::ptr_eq(&entry.models_manager, &execution_account.models_manager)
+         {
+             return entry.services;
+         }
+@@ -1550,6 +1587,7 @@ impl ThreadManagerState {
+             .unwrap_or_else(std::sync::PoisonError::into_inner);
+         if let Some(entry) = account_services.get(slot_id)
+             && Arc::ptr_eq(&entry.auth_manager, &execution_account.auth_manager)
++            && Arc::ptr_eq(&entry.models_manager, &execution_account.models_manager)
+         {
+             return entry.services.clone();
+         }
+@@ -1572,6 +1610,7 @@ impl ThreadManagerState {
+             slot_id.to_string(),
+             AccountServiceEntry {
+                 auth_manager: Arc::clone(&execution_account.auth_manager),
++                models_manager: Arc::clone(&execution_account.models_manager),
+                 services: services.clone(),
+             },
+         );
+diff --git a/codex-rs/ext/extension-api/src/contributors.rs b/codex-rs/ext/extension-api/src/contributors.rs
+index d51ee6597ee273f738e0310aa953e7c1b250d50c..67830b63d7f0b053083f3b6ebb4d479891897e87 100644
+--- a/codex-rs/ext/extension-api/src/contributors.rs
++++ b/codex-rs/ext/extension-api/src/contributors.rs
+@@ -13,6 +13,7 @@ use crate::ExtensionData;
+ use crate::ExtensionMetrics;
+ 
+ mod context;
++mod execution_account;
+ mod mcp;
+ mod prompt;
+ mod skill_invocation;
+@@ -23,6 +24,9 @@ mod turn_lifecycle;
+ mod world_state;
+ 
+ pub use context::TurnContextContributionInput;
++pub use execution_account::ExecutionAccountRuntimeContributor;
++pub use execution_account::ExecutionAccountRuntimePrepareInput;
++pub use execution_account::PreparedExecutionAccountRuntime;
+ pub use mcp::McpServerContribution;
+ pub use mcp::McpServerContributionContext;
+ pub use mcp::SelectedPluginIdentity;
+diff --git a/codex-rs/ext/extension-api/src/contributors/execution_account.rs b/codex-rs/ext/extension-api/src/contributors/execution_account.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..673b01813a3a363b1ca43595e1d2884daef873be
+--- /dev/null
++++ b/codex-rs/ext/extension-api/src/contributors/execution_account.rs
+@@ -0,0 +1,35 @@
++use std::sync::Arc;
++
++use codex_mcp::McpResourceClient;
++use codex_protocol::protocol::SessionSource;
++
++use crate::ExtensionData;
++use crate::ExtensionFuture;
++use crate::ExtensionMetrics;
++
++/// Inputs used to prepare extension-owned state for an execution-account switch.
++pub struct ExecutionAccountRuntimePrepareInput<'a, C> {
++    pub config: &'a C,
++    pub session_source: &'a SessionSource,
++    pub session_store: &'a ExtensionData,
++    pub target_session_store: &'a ExtensionData,
++    pub thread_store: &'a ExtensionData,
++    pub mcp_resource_client: Arc<McpResourceClient>,
++    pub extension_metrics: Option<Arc<dyn ExtensionMetrics>>,
++}
++
++/// Prepared extension state that can be quiesced before and published after the host CAS.
++pub trait PreparedExecutionAccountRuntime: Send + Sync {
++    fn quiesce(&self) -> ExtensionFuture<'_, Result<(), String>>;
++
++    /// Publishes only already-prepared state and must not block or fail.
++    fn publish(&self, session_store: &ExtensionData, thread_store: &ExtensionData);
++}
++
++/// Extension hook for account-sensitive state that outlives one turn.
++pub trait ExecutionAccountRuntimeContributor<C: Sync>: Send + Sync {
++    fn prepare<'a>(
++        &'a self,
++        input: ExecutionAccountRuntimePrepareInput<'a, C>,
++    ) -> ExtensionFuture<'a, Result<Arc<dyn PreparedExecutionAccountRuntime>, String>>;
++}
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index 54c329ae226ff641091db8fcee233a979617976c..ea0662457a3a5d355fdd147926cf2b7e72794529 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -38,10 +38,13 @@ pub use codex_tools::parse_tool_input_schema_without_compaction;
+ pub use contributors::ApprovalReviewContributor;
+ pub use contributors::ConfigContributor;
+ pub use contributors::ContextContributor;
++pub use contributors::ExecutionAccountRuntimeContributor;
++pub use contributors::ExecutionAccountRuntimePrepareInput;
+ pub use contributors::ExtensionFuture;
+ pub use contributors::McpServerContribution;
+ pub use contributors::McpServerContributionContext;
+ pub use contributors::McpServerContributor;
++pub use contributors::PreparedExecutionAccountRuntime;
+ pub use contributors::PreviousWorldStateSection;
+ pub use contributors::PromptFragment;
+ pub use contributors::PromptSlot;
+diff --git a/codex-rs/ext/extension-api/src/registry.rs b/codex-rs/ext/extension-api/src/registry.rs
+index be4670cbba09a370cdb1c1d38937a9b12ea6533f..555915fbb0e75a00506a10c1dcd94961cf65faf7 100644
+--- a/codex-rs/ext/extension-api/src/registry.rs
++++ b/codex-rs/ext/extension-api/src/registry.rs
+@@ -5,6 +5,7 @@ use codex_protocol::protocol::ReviewDecision;
+ use crate::ApprovalReviewContributor;
+ use crate::ConfigContributor;
+ use crate::ContextContributor;
++use crate::ExecutionAccountRuntimeContributor;
+ use crate::ExtensionData;
+ use crate::ExtensionEventSink;
+ use crate::ExtensionMetrics;
+@@ -29,6 +30,7 @@ impl<C: Sync> Default for ExtensionRegistryBuilder<C> {
+         Self {
+             registry: ExtensionRegistry {
+                 event_sink: Arc::new(NoopExtensionEventSink),
++                execution_account_runtime_contributors: Vec::new(),
+                 thread_lifecycle_contributors: Vec::new(),
+                 turn_lifecycle_contributors: Vec::new(),
+                 config_contributors: Vec::new(),
+@@ -79,6 +81,16 @@ impl<C: Sync> ExtensionRegistryBuilder<C> {
+             .push(contributor);
+     }
+ 
++    /// Registers account-sensitive extension state that must follow a hot switch.
++    pub fn execution_account_runtime_contributor(
++        &mut self,
++        contributor: Arc<dyn ExecutionAccountRuntimeContributor<C>>,
++    ) {
++        self.registry
++            .execution_account_runtime_contributors
++            .push(contributor);
++    }
++
+     /// Registers one turn-lifecycle contributor.
+     pub fn turn_lifecycle_contributor(&mut self, contributor: Arc<dyn TurnLifecycleContributor>) {
+         self.registry.turn_lifecycle_contributors.push(contributor);
+@@ -143,6 +155,7 @@ impl<C: Sync> ExtensionRegistryBuilder<C> {
+ /// Immutable typed registry produced after extensions are installed.
+ pub struct ExtensionRegistry<C: Sync> {
+     event_sink: Arc<dyn ExtensionEventSink>,
++    execution_account_runtime_contributors: Vec<Arc<dyn ExecutionAccountRuntimeContributor<C>>>,
+     thread_lifecycle_contributors: Vec<Arc<dyn ThreadLifecycleContributor<C>>>,
+     turn_lifecycle_contributors: Vec<Arc<dyn TurnLifecycleContributor>>,
+     config_contributors: Vec<Arc<dyn ConfigContributor<C>>>,
+@@ -163,6 +176,13 @@ impl<C: Sync> ExtensionRegistry<C> {
+         Arc::clone(&self.event_sink)
+     }
+ 
++    /// Returns account-sensitive runtime contributors in registration order.
++    pub fn execution_account_runtime_contributors(
++        &self,
++    ) -> &[Arc<dyn ExecutionAccountRuntimeContributor<C>>] {
++        &self.execution_account_runtime_contributors
++    }
++
+     /// Returns the registered thread-lifecycle contributors.
+     pub fn thread_lifecycle_contributors(&self) -> &[Arc<dyn ThreadLifecycleContributor<C>>] {
+         &self.thread_lifecycle_contributors
+diff --git a/codex-rs/ext/goal/src/extension.rs b/codex-rs/ext/goal/src/extension.rs
+index 649f12f21820ff7fdb06f23b651ba9fbb6057259..774c6945a7f904be280c333b02d79d47a0674d3b 100644
+--- a/codex-rs/ext/goal/src/extension.rs
++++ b/codex-rs/ext/goal/src/extension.rs
+@@ -1,13 +1,17 @@
+ use std::sync::Arc;
++use std::sync::Mutex;
+ use std::sync::Weak;
+ 
+ use codex_analytics::AnalyticsEventsClient;
+ use codex_core::ThreadManager;
+ use codex_extension_api::ConfigContributor;
++use codex_extension_api::ExecutionAccountRuntimeContributor;
++use codex_extension_api::ExecutionAccountRuntimePrepareInput;
+ use codex_extension_api::ExtensionData;
+ use codex_extension_api::ExtensionEventSink;
+ use codex_extension_api::ExtensionFuture;
+ use codex_extension_api::ExtensionRegistryBuilder;
++use codex_extension_api::PreparedExecutionAccountRuntime;
+ use codex_extension_api::ThreadIdleInput;
+ use codex_extension_api::ThreadLifecycleContributor;
+ use codex_extension_api::ThreadResumeInput;
+@@ -31,6 +35,7 @@ use codex_protocol::protocol::SessionSource;
+ use codex_protocol::protocol::SubAgentSource;
+ use codex_protocol::protocol::ThreadGoalStatus;
+ use codex_protocol::protocol::TokenUsageInfo;
++use tokio::sync::OwnedSemaphorePermit;
+ 
+ use crate::accounting::BudgetLimitedGoalDisposition;
+ use crate::accounting::GoalAccountingState;
+@@ -174,6 +179,61 @@ where
+     }
+ }
+ 
++struct PreparedGoalAccountRuntime {
++    runtime: Option<Arc<GoalRuntimeHandle>>,
++    analytics: GoalAnalytics,
++    permit: Mutex<Option<OwnedSemaphorePermit>>,
++}
++
++impl PreparedExecutionAccountRuntime for PreparedGoalAccountRuntime {
++    fn quiesce(&self) -> ExtensionFuture<'_, Result<(), String>> {
++        Box::pin(async move {
++            let Some(runtime) = self.runtime.as_ref() else {
++                return Ok(());
++            };
++            let permit = runtime.quiesce_account_runtime().await?;
++            *self
++                .permit
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(permit);
++            Ok(())
++        })
++    }
++
++    fn publish(&self, _session_store: &ExtensionData, _thread_store: &ExtensionData) {
++        if let Some(runtime) = self.runtime.as_ref() {
++            runtime.replace_analytics(self.analytics.clone());
++        }
++        self.permit
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .take();
++    }
++}
++
++impl<C> ExecutionAccountRuntimeContributor<C> for GoalExtension<C>
++where
++    C: Send + Sync + 'static,
++{
++    fn prepare<'a>(
++        &'a self,
++        input: ExecutionAccountRuntimePrepareInput<'a, C>,
++    ) -> ExtensionFuture<'a, Result<Arc<dyn PreparedExecutionAccountRuntime>, String>> {
++        Box::pin(async move {
++            let analytics = input
++                .target_session_store
++                .get::<AnalyticsEventsClient>()
++                .map(|client| GoalAnalytics::new(client.as_ref().clone()))
++                .ok_or_else(|| "target goal analytics are unavailable".to_string())?;
++            Ok(Arc::new(PreparedGoalAccountRuntime {
++                runtime: goal_runtime_handle(input.thread_store),
++                analytics,
++                permit: Mutex::new(None),
++            }) as Arc<dyn PreparedExecutionAccountRuntime>)
++        })
++    }
++}
++
+ impl<C> ConfigContributor<C> for GoalExtension<C>
+ where
+     C: Send + Sync + 'static,
+@@ -486,6 +546,7 @@ pub fn install_with_backend<C>(
+         goal_config,
+     ));
+     registry.thread_lifecycle_contributor(extension.clone());
++    registry.execution_account_runtime_contributor(extension.clone());
+     registry.config_contributor(extension.clone());
+     registry.turn_lifecycle_contributor(extension.clone());
+     registry.token_usage_contributor(extension.clone());
+diff --git a/codex-rs/ext/goal/src/runtime.rs b/codex-rs/ext/goal/src/runtime.rs
+index 28cc32712700ef0de5506eb8c05ecc45e776cfe1..f87cbe9f8c32ba271cc248ceb7efdca65db91e5b 100644
+--- a/codex-rs/ext/goal/src/runtime.rs
++++ b/codex-rs/ext/goal/src/runtime.rs
+@@ -1,4 +1,5 @@
+ use std::sync::Arc;
++use std::sync::RwLock;
+ use std::sync::Weak;
+ use std::sync::atomic::AtomicBool;
+ use std::sync::atomic::Ordering;
+@@ -20,6 +21,7 @@ use crate::metrics::GoalMetrics;
+ use crate::steering::continuation_steering_item;
+ use crate::steering::objective_updated_steering_item;
+ use crate::tool::protocol_goal_from_state;
++use tokio::sync::OwnedSemaphorePermit;
+ use tokio::sync::Semaphore;
+ use tokio::sync::SemaphorePermit;
+ 
+@@ -42,14 +44,14 @@ pub(crate) enum ActiveGoalStopReason {
+ struct GoalRuntimeInner {
+     thread_id: ThreadId,
+     state_dbs: Arc<codex_state::StateRuntime>,
+-    analytics: GoalAnalytics,
++    analytics: RwLock<GoalAnalytics>,
+     event_emitter: GoalEventEmitter,
+     metrics: GoalMetrics,
+     thread_manager: Weak<ThreadManager>,
+     accounting_state: Arc<GoalAccountingState>,
+     enabled: AtomicBool,
+     tools_available_for_thread: bool,
+-    goal_state_lock: Semaphore,
++    goal_state_lock: Arc<Semaphore>,
+ }
+ 
+ pub(crate) struct AccountedGoalProgress {
+@@ -94,14 +96,14 @@ impl GoalRuntimeHandle {
+             inner: Arc::new(GoalRuntimeInner {
+                 thread_id,
+                 state_dbs,
+-                analytics: config.analytics,
++                analytics: RwLock::new(config.analytics),
+                 event_emitter,
+                 metrics,
+                 thread_manager,
+                 accounting_state,
+                 enabled: AtomicBool::new(config.enabled),
+                 tools_available_for_thread: config.tools_available_for_thread,
+-                goal_state_lock: Semaphore::new(/*permits*/ 1),
++                goal_state_lock: Arc::new(Semaphore::new(/*permits*/ 1)),
+             }),
+         }
+     }
+@@ -134,6 +136,29 @@ impl GoalRuntimeHandle {
+             .map_err(|err| err.to_string())
+     }
+ 
++    pub(crate) async fn quiesce_account_runtime(&self) -> Result<OwnedSemaphorePermit, String> {
++        Arc::clone(&self.inner.goal_state_lock)
++            .acquire_owned()
++            .await
++            .map_err(|_| "goal runtime is unavailable".to_string())
++    }
++
++    pub(crate) fn replace_analytics(&self, analytics: GoalAnalytics) {
++        *self
++            .inner
++            .analytics
++            .write()
++            .unwrap_or_else(std::sync::PoisonError::into_inner) = analytics;
++    }
++
++    fn analytics(&self) -> GoalAnalytics {
++        self.inner
++            .analytics
++            .read()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .clone()
++    }
++
+     pub async fn prepare_external_goal_mutation(&self) -> Result<(), String> {
+         if !self.is_enabled() {
+             return Ok(());
+@@ -173,8 +198,7 @@ impl GoalRuntimeHandle {
+             .is_some_and(|previous_goal| previous_goal.goal_id != goal.goal_id);
+         if previous_goal.is_none() || replaced_existing_goal {
+             self.inner.metrics.record_created();
+-            self.inner
+-                .analytics
++            self.analytics()
+                 .created(&goal, GoalEventAttribution::NoTurn);
+         }
+         let previous_status = previous_goal
+@@ -186,8 +210,7 @@ impl GoalRuntimeHandle {
+         self.inner
+             .metrics
+             .record_terminal_if_status_changed(previous_status, &goal);
+-        self.inner
+-            .analytics
++        self.analytics()
+             .status_changed(&goal, previous_status, GoalEventAttribution::NoTurn);
+         let objective_changed = previous_goal.as_ref().is_some_and(|previous_goal| {
+             !replaced_existing_goal && previous_goal.objective != goal.objective
+@@ -233,7 +256,7 @@ impl GoalRuntimeHandle {
+             return Ok(());
+         }
+ 
+-        self.inner.analytics.cleared(&goal);
++        self.analytics().cleared(&goal);
+         self.inner.accounting_state.clear_active_goal();
+         Ok(())
+     }
+@@ -320,7 +343,7 @@ impl GoalRuntimeHandle {
+         self.inner
+             .metrics
+             .record_terminal_if_status_changed(previous_status, &goal);
+-        self.inner.analytics.status_changed(
++        self.analytics().status_changed(
+             &goal,
+             previous_status,
+             GoalEventAttribution::Turn(turn_id),
+@@ -490,10 +513,9 @@ impl GoalRuntimeHandle {
+                 self.inner
+                     .metrics
+                     .record_terminal_if_status_changed(previous_status, &goal);
+-                self.inner
+-                    .analytics
++                self.analytics()
+                     .usage_accounted(&goal, GoalEventAttribution::Turn(turn_id));
+-                self.inner.analytics.status_changed(
++                self.analytics().status_changed(
+                     &goal,
+                     previous_status,
+                     GoalEventAttribution::Turn(turn_id),
+@@ -552,10 +574,9 @@ impl GoalRuntimeHandle {
+                 self.inner
+                     .metrics
+                     .record_terminal_if_status_changed(previous_status, &goal);
+-                self.inner
+-                    .analytics
++                self.analytics()
+                     .usage_accounted(&goal, GoalEventAttribution::NoTurn);
+-                self.inner.analytics.status_changed(
++                self.analytics().status_changed(
+                     &goal,
+                     previous_status,
+                     GoalEventAttribution::NoTurn,
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/extension.rs b/codex-rs/ext/guardian-v2/src/async_scorer/extension.rs
+index d571d38b87a6a8ba76cbe7b355fbddc77912a960..f549c91d6622701cd73bc68e1eb7b1a35210469c 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/extension.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/extension.rs
+@@ -1,5 +1,6 @@
+ use std::collections::BTreeMap;
+ use std::sync::Arc;
++use std::sync::Mutex;
+ use std::sync::Weak;
+ use std::sync::atomic::AtomicUsize;
+ use std::sync::atomic::Ordering;
+@@ -12,12 +13,15 @@ use codex_core::ThreadManager;
+ use codex_core::config::Config;
+ use codex_core::context::NodeReplReviewEvidence;
+ use codex_extension_api::ApprovalReviewContributor;
++use codex_extension_api::ExecutionAccountRuntimeContributor;
++use codex_extension_api::ExecutionAccountRuntimePrepareInput;
+ use codex_extension_api::ExtensionData;
+ use codex_extension_api::ExtensionEventSink;
+ use codex_extension_api::ExtensionFuture;
+ use codex_extension_api::ExtensionMetrics;
+ use codex_extension_api::ExtensionRegistryBuilder;
+ use codex_extension_api::ExtensionWarning;
++use codex_extension_api::PreparedExecutionAccountRuntime;
+ use codex_extension_api::ResponseItem;
+ use codex_extension_api::ThreadLifecycleContributor;
+ use codex_extension_api::ThreadOriginator;
+@@ -36,6 +40,7 @@ use codex_protocol::protocol::ReviewDecision;
+ use codex_protocol::protocol::TruncationPolicy;
+ use codex_protocol::security_risk::SecurityRiskScore;
+ use serde_json::json;
++use tokio::sync::OwnedSemaphorePermit;
+ 
+ use super::config::GuardianV2Config;
+ use super::sampler::LunaSampler;
+@@ -218,6 +223,64 @@ pub enum StrictReviewReason {
+ 
+ struct GuardianV2Enabled;
+ 
++struct PreparedGuardianV2AccountRuntime {
++    current_sampler: Option<Arc<LunaSampler>>,
++    target_sampler: Mutex<Option<LunaSampler>>,
++    target_config: Option<GuardianV2Config>,
++    target_metrics: Option<Arc<dyn ExtensionMetrics>>,
++    quiesce_permit: Mutex<Option<OwnedSemaphorePermit>>,
++}
++
++impl PreparedExecutionAccountRuntime for PreparedGuardianV2AccountRuntime {
++    fn quiesce(&self) -> ExtensionFuture<'_, Result<(), String>> {
++        Box::pin(async move {
++            let Some(sampler) = self.current_sampler.as_ref() else {
++                return Ok(());
++            };
++            let permit = sampler.quiesce().await?;
++            *self
++                .quiesce_permit
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(permit);
++            Ok(())
++        })
++    }
++
++    fn publish(&self, _session_store: &ExtensionData, thread_store: &ExtensionData) {
++        let target_sampler = self
++            .target_sampler
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .take();
++        match (target_sampler, self.target_config.as_ref()) {
++            (Some(sampler), Some(config)) => {
++                if config.transcript.include_images {
++                    thread_store
++                        .get_or_init(NodeReplReviewEvidence::default)
++                        .enable_image_capture();
++                }
++                thread_store.insert(sampler);
++                thread_store.insert(config.clone());
++                thread_store.insert(GuardianV2ScoreProgress {
++                    metrics: self.target_metrics.clone(),
++                    ..Default::default()
++                });
++                thread_store.insert(GuardianV2Enabled);
++            }
++            _ => {
++                thread_store.remove::<LunaSampler>();
++                thread_store.remove::<GuardianV2Config>();
++                thread_store.remove::<GuardianV2ScoreProgress>();
++                thread_store.remove::<GuardianV2Enabled>();
++            }
++        }
++        self.quiesce_permit
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .take();
++    }
++}
++
+ // Sampled when the approval contributor evaluates the cached Luna score.
+ const TOOL_CALL_LAG_METRIC: &str = "codex.guardian_v2.tool_call_lag";
+ const REVIEW_FALLBACK_METRIC: &str = "codex.guardian_v2.review_fallback";
+@@ -338,6 +401,71 @@ impl ThreadLifecycleContributor<Config> for GuardianV2Extension {
+     }
+ }
+ 
++impl ExecutionAccountRuntimeContributor<Config> for GuardianV2Extension {
++    fn prepare<'a>(
++        &'a self,
++        input: ExecutionAccountRuntimePrepareInput<'a, Config>,
++    ) -> ExtensionFuture<'a, Result<Arc<dyn PreparedExecutionAccountRuntime>, String>> {
++        Box::pin(async move {
++            let current_sampler = input.thread_store.get::<LunaSampler>();
++            if !input.config.features.enabled(Feature::GuardianV2)
++                || !input.config.features.enabled(Feature::GuardianApproval)
++            {
++                return Ok(Arc::new(PreparedGuardianV2AccountRuntime {
++                    current_sampler,
++                    target_sampler: Mutex::new(None),
++                    target_config: None,
++                    target_metrics: input.extension_metrics,
++                    quiesce_permit: Mutex::new(None),
++                })
++                    as Arc<dyn PreparedExecutionAccountRuntime>);
++            }
++
++            let execution_account = input
++                .target_session_store
++                .get::<ExecutionAccountContext>()
++                .ok_or_else(|| "target Guardian V2 account runtime is unavailable".to_string())?;
++            let guardian_config = GuardianV2Config::resolve(input.config)?;
++            let luna_compaction_hash = execution_account
++                .models_manager
++                .get_model_info(MODEL, &input.config.to_models_manager_config())
++                .await
++                .comp_hash;
++            let sampler = LunaSampler::connect(LunaSamplerConfig {
++                provider: create_model_provider(
++                    input.config.model_provider.clone(),
++                    Some(Arc::clone(&execution_account.auth_manager)),
++                ),
++                http_client_factory: input.config.http_client_factory(),
++                agent_identity_policy: if input.config.features.enabled(Feature::UseAgentIdentity) {
++                    AgentIdentityAuthPolicy::ChatGptAuth
++                } else {
++                    AgentIdentityAuthPolicy::JwtOnly
++                },
++                session_source: input.session_source.clone(),
++                session_id: input.target_session_store.level_id().to_string(),
++                thread_id: input.thread_store.level_id().to_string(),
++                originator: input
++                    .thread_store
++                    .get::<ThreadOriginator>()
++                    .map(|originator| originator.0.clone()),
++                service_tier: input.config.service_tier.clone(),
++                luna_compaction_hash,
++                metrics: input.extension_metrics.clone(),
++            })
++            .await
++            .map_err(|error| format!("Guardian V2 Luna initialization failed: {error}"))?;
++            Ok(Arc::new(PreparedGuardianV2AccountRuntime {
++                current_sampler,
++                target_sampler: Mutex::new(Some(sampler)),
++                target_config: Some(guardian_config),
++                target_metrics: input.extension_metrics,
++                quiesce_permit: Mutex::new(None),
++            }) as Arc<dyn PreparedExecutionAccountRuntime>)
++        })
++    }
++}
++
+ impl ApprovalReviewContributor for GuardianV2Extension {
+     fn contribute<'a>(
+         &'a self,
+@@ -763,6 +891,7 @@ pub fn install(
+         thread_manager,
+     });
+     registry.thread_lifecycle_contributor(extension.clone());
++    registry.execution_account_runtime_contributor(extension.clone());
+     registry.approval_review_contributor(extension.clone());
+     registry.tool_lifecycle_contributor(extension);
+ }
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
+index 258e9a9c3521936e709e09213979b7f47d551bbe..1fd9e309a74a3d21f733d8de77c76488c8fe238b 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
+@@ -211,6 +211,26 @@ impl LunaSampler {
+         Ok(sampler)
+     }
+ 
++    pub(crate) async fn quiesce(&self) -> Result<OwnedSemaphorePermit, String> {
++        let active_requests = std::mem::take(
++            &mut *self
++                .active_requests
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner),
++        );
++        for request in active_requests {
++            let _ = request.supersede.send(());
++        }
++        self.idle_connections
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .clear();
++        Arc::clone(&self.capacity)
++            .acquire_many_owned(MAX_WEBSOCKET_CONNECTIONS as u32)
++            .await
++            .map_err(|_| "Guardian V2 sampler is unavailable".to_string())
++    }
++
+     async fn open_connection(&self) -> Result<PooledConnection, LunaSamplerError> {
+         let provider = self
+             .config
+diff --git a/codex-rs/ext/skills/src/extension.rs b/codex-rs/ext/skills/src/extension.rs
+index 0ac722182d198446891d1db4234ea0e74fca28a5..f28a76f302607475bbace29102e612f01be9461a 100644
+--- a/codex-rs/ext/skills/src/extension.rs
++++ b/codex-rs/ext/skills/src/extension.rs
+@@ -11,12 +11,15 @@ use codex_exec_server::ResolvedSelectedCapabilityRoot;
+ use codex_extension_api::ConfigContributor;
+ use codex_extension_api::ContextContributor;
+ use codex_extension_api::ContextualUserFragment;
++use codex_extension_api::ExecutionAccountRuntimeContributor;
++use codex_extension_api::ExecutionAccountRuntimePrepareInput;
+ use codex_extension_api::ExtensionData;
+ use codex_extension_api::ExtensionEventSink;
+ use codex_extension_api::ExtensionFuture;
+ use codex_extension_api::ExtensionMetrics;
+ use codex_extension_api::ExtensionRegistryBuilder;
+ use codex_extension_api::ExtensionWarning;
++use codex_extension_api::PreparedExecutionAccountRuntime;
+ use codex_extension_api::PromptFragment;
+ use codex_extension_api::SelectedPluginSnapshot;
+ use codex_extension_api::SkillInvocationContributor;
+@@ -81,6 +84,41 @@ struct SkillsExtension<C> {
+     shadow_selection: Arc<ShadowSelectionExperiment>,
+ }
+ 
++struct PreparedSkillsAccountRuntime {
++    mcp_resources: Arc<McpResourceClient>,
++    extension_metrics: Option<Arc<dyn ExtensionMetrics>>,
++}
++
++impl PreparedExecutionAccountRuntime for PreparedSkillsAccountRuntime {
++    fn quiesce(&self) -> ExtensionFuture<'_, Result<(), String>> {
++        Box::pin(async { Ok(()) })
++    }
++
++    fn publish(&self, session_store: &ExtensionData, _thread_store: &ExtensionData) {
++        session_store.insert(SkillsSessionState {
++            mcp_resources: Some(Arc::clone(&self.mcp_resources)),
++            extension_metrics: self.extension_metrics.clone(),
++        });
++    }
++}
++
++impl<C> ExecutionAccountRuntimeContributor<C> for SkillsExtension<C>
++where
++    C: Send + Sync + 'static,
++{
++    fn prepare<'a>(
++        &'a self,
++        input: ExecutionAccountRuntimePrepareInput<'a, C>,
++    ) -> ExtensionFuture<'a, Result<Arc<dyn PreparedExecutionAccountRuntime>, String>> {
++        Box::pin(async move {
++            Ok(Arc::new(PreparedSkillsAccountRuntime {
++                mcp_resources: input.mcp_resource_client,
++                extension_metrics: input.extension_metrics,
++            }) as Arc<dyn PreparedExecutionAccountRuntime>)
++        })
++    }
++}
++
+ #[derive(Default)]
+ struct RenderedCatalog {
+     fragment: Option<AvailableSkillsInstructions>,
+@@ -664,6 +702,7 @@ pub fn install_with_providers_and_metrics<C>(
+         shadow_selection: Arc::new(ShadowSelectionExperiment::new(metrics_client)),
+     });
+     registry.thread_lifecycle_contributor(extension.clone());
++    registry.execution_account_runtime_contributor(extension.clone());
+     registry.config_contributor(extension.clone());
+     registry.prompt_contributor(extension.clone());
+     registry.turn_input_contributor(extension.clone());
+diff --git a/codex-rs/network-proxy/src/proxy.rs b/codex-rs/network-proxy/src/proxy.rs
+index 6577259405f457c8e70042fff088dcd48bf1329e..e7b40df694d2176a4b58dfb922eb0bf62e4887a5 100644
+--- a/codex-rs/network-proxy/src/proxy.rs
++++ b/codex-rs/network-proxy/src/proxy.rs
+@@ -825,6 +825,10 @@ impl NetworkProxy {
+         NetworkProxyBuilder::default()
+     }
+ 
++    pub fn replace_audit_metadata(&self, audit_metadata: crate::NetworkProxyAuditMetadata) {
++        self.state.replace_audit_metadata(audit_metadata);
++    }
++
+     pub fn http_addr(&self) -> SocketAddr {
+         self.http_addr
+     }
+@@ -898,7 +902,7 @@ impl NetworkProxy {
+             .unwrap_or_default();
+         Ok(crate::RemoteNetworkProxyLaunchConfig {
+             proxy,
+-            audit_metadata: self.state.audit_metadata().clone(),
++            audit_metadata: self.state.audit_metadata(),
+             environment_id,
+             execution_id,
+             policy_decision_timeout_ms: None,
+diff --git a/codex-rs/network-proxy/src/remote_config_tests.rs b/codex-rs/network-proxy/src/remote_config_tests.rs
+index 5094acfaade237cc27e8f8c0eea1fa710d5f5c1d..31e44b43cc7653f32ae9ae1400a14dcf8aaaea70 100644
+--- a/codex-rs/network-proxy/src/remote_config_tests.rs
++++ b/codex-rs/network-proxy/src/remote_config_tests.rs
+@@ -115,11 +115,33 @@ fn launch_config_materializes_audit_and_execution_attribution() {
+     })
+     .expect("remote launch state");
+ 
+-    assert_eq!(state.audit_metadata(), &audit_metadata);
++    assert_eq!(state.audit_metadata(), audit_metadata);
+     assert_eq!(state.environment_id(), Some("remote"));
+     assert_eq!(state.execution_id().as_deref(), Some("execution-1"));
+ }
+ 
++#[test]
++fn audit_metadata_replacement_is_visible_to_existing_state_clones() {
++    let proxy = RemoteNetworkProxyConfig::from_effective_config(&NetworkProxyConfig {
++        enabled: true,
++        ..NetworkProxyConfig::default()
++    })
++    .expect("supported remote config");
++    let state =
++        NetworkProxyState::from_remote_launch_config(RemoteNetworkProxyLaunchConfig::new(proxy))
++            .expect("remote launch state");
++    let cloned = state.clone();
++    let replacement = NetworkProxyAuditMetadata {
++        conversation_id: Some("conversation-2".to_string()),
++        user_account_id: Some("account-2".to_string()),
++        ..NetworkProxyAuditMetadata::default()
++    };
++
++    state.replace_audit_metadata(replacement.clone());
++
++    assert_eq!(cloned.audit_metadata(), replacement);
++}
++
+ #[test]
+ fn policy_decision_callback_timeout_round_trips() {
+     let config = RemoteNetworkProxyConfig::from_effective_config(&NetworkProxyConfig::default())
+diff --git a/codex-rs/network-proxy/src/runtime.rs b/codex-rs/network-proxy/src/runtime.rs
+index 1a449a44381fafa4a5d6a5d0e08753f425f339fc..b261f5506aab9b758a5868811d0b6123a201efe0 100644
+--- a/codex-rs/network-proxy/src/runtime.rs
++++ b/codex-rs/network-proxy/src/runtime.rs
+@@ -36,6 +36,7 @@ use std::path::Path;
+ use std::pin::Pin;
+ use std::sync::Arc;
+ use std::sync::Mutex;
++use std::sync::RwLock as SyncRwLock;
+ use std::time::Duration;
+ use time::OffsetDateTime;
+ use tokio::net::lookup_host;
+@@ -235,7 +236,7 @@ pub struct NetworkProxyState {
+     blocked_request_observer: Arc<RwLock<Option<Arc<dyn BlockedRequestObserver>>>>,
+     pub(crate) policy_audit_observer: Option<NetworkPolicyAuditObserver>,
+     credential_broker: CredentialBroker,
+-    audit_metadata: NetworkProxyAuditMetadata,
++    audit_metadata: Arc<SyncRwLock<NetworkProxyAuditMetadata>>,
+     execution_attributions: Arc<Mutex<HashMap<String, ExecutionAttribution>>>,
+     environment_id: Option<Arc<str>>,
+     execution_id: Option<Arc<str>>,
+@@ -270,7 +271,7 @@ impl Clone for NetworkProxyState {
+             blocked_request_observer: self.blocked_request_observer.clone(),
+             policy_audit_observer: self.policy_audit_observer.clone(),
+             credential_broker: self.credential_broker.clone(),
+-            audit_metadata: self.audit_metadata.clone(),
++            audit_metadata: Arc::clone(&self.audit_metadata),
+             execution_attributions: self.execution_attributions.clone(),
+             environment_id: self.environment_id.clone(),
+             execution_id: self.execution_id.clone(),
+@@ -355,7 +356,7 @@ impl NetworkProxyState {
+             reloader,
+             blocked_request_observer: Arc::new(RwLock::new(blocked_request_observer)),
+             policy_audit_observer: None,
+-            audit_metadata,
++            audit_metadata: Arc::new(SyncRwLock::new(audit_metadata)),
+             execution_attributions: Arc::new(Mutex::new(HashMap::new())),
+             environment_id: None,
+             execution_id: None,
+@@ -422,8 +423,18 @@ impl NetworkProxyState {
+         self.policy_audit_observer = Some(observer);
+     }
+ 
+-    pub fn audit_metadata(&self) -> &NetworkProxyAuditMetadata {
+-        &self.audit_metadata
++    pub fn audit_metadata(&self) -> NetworkProxyAuditMetadata {
++        self.audit_metadata
++            .read()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .clone()
++    }
++
++    pub fn replace_audit_metadata(&self, audit_metadata: NetworkProxyAuditMetadata) {
++        *self
++            .audit_metadata
++            .write()
++            .unwrap_or_else(std::sync::PoisonError::into_inner) = audit_metadata;
+     }
+ 
+     pub fn virtualize_child_credentials(&self, env: &mut HashMap<String, String>) {
