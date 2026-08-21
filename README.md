@@ -29,8 +29,8 @@ The target is upstream [`rust-v0.149.0`](https://github.com/openai/codex/release
 |---|---|
 | P001–P011 implementation and focused checks | Complete |
 | Ordered 0.149 patch export and clean-apply verification | Complete; 11 patches reproduce tree `e5915796b021e81b88bd40406b62fa6c3bf89e76` |
-| macOS arm64 release build and artifacts | Final review fixes pending rebuild; [run 32485937374](https://github.com/iLfounder/codex-cli-custom/actions/runs/32485937374) proves the superseded pre-review tree |
-| Final independent reviews | Pending |
+| macOS arm64 release build and artifacts | Complete; [run 32517743230](https://github.com/iLfounder/codex-cli-custom/actions/runs/32517743230), artifact `9462237252`, digest `sha256:4845802188c3f2a1bf3f030d1dcd8409d47278198015a205ceb55b9864ea0f42` |
+| Final independent reviews | In progress against the built final tree |
 | 0.149 publication | Pending |
 
 The current candidate is [`custom-patches/rust-v0.149.0`](custom-patches/rust-v0.149.0/). The files under [`custom-patches/rust-v0.148.0`](custom-patches/rust-v0.148.0/) are retained only as the previous release series.
@@ -138,12 +138,12 @@ The older custom series used migration numbers that official 0.149 later claimed
 
 ## Build, review, and publication
 
-The following remain before 0.149 can be called fully reviewed and published:
+The following remains before 0.149 can be called fully reviewed and published:
 
-1. inspect the built final candidate with two independent fresh-context reviews; and
-2. resolve any material findings and update the publication status.
+1. complete two independent fresh-context reviews of the built final candidate; and
+2. resolve any material findings, if any, and update the publication status.
 
-[Actions run 32485937374](https://github.com/iLfounder/codex-cli-custom/actions/runs/32485937374) built the pre-review tree. The final review fixes require a new build and artifact before completed publication is claimed.
+[Actions run 32517743230](https://github.com/iLfounder/codex-cli-custom/actions/runs/32517743230) built tree `e5915796b021e81b88bd40406b62fa6c3bf89e76` and uploaded artifact `9462237252` with digest `sha256:4845802188c3f2a1bf3f030d1dcd8409d47278198015a205ceb55b9864ea0f42`.
 
 ## Historical working notes
 

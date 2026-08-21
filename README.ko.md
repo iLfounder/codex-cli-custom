@@ -29,8 +29,8 @@ Stock Codex는 인증과 runtime 소유권의 많은 부분을 process 단위로
 |---|---|
 | P001–P011 구현과 focused check | 완료 |
 | 순서형 0.149 patch export와 clean-apply 검증 | 완료; 11개 patch가 tree `e5915796b021e81b88bd40406b62fa6c3bf89e76`를 재현함 |
-| macOS arm64 release build와 artifact | final review 수정 후 rebuild 대기; [run 32485937374](https://github.com/iLfounder/codex-cli-custom/actions/runs/32485937374)는 교체된 review 전 tree의 증거임 |
-| 최종 독립 review | Pending |
+| macOS arm64 release build와 artifact | 완료; [run 32517743230](https://github.com/iLfounder/codex-cli-custom/actions/runs/32517743230), artifact `9462237252`, digest `sha256:4845802188c3f2a1bf3f030d1dcd8409d47278198015a205ceb55b9864ea0f42` |
+| 최종 독립 review | build된 final tree를 대상으로 진행 중 |
 | 0.149 publication | Pending |
 
 현재 candidate는 [`custom-patches/rust-v0.149.0`](custom-patches/rust-v0.149.0/)이다. [`custom-patches/rust-v0.148.0`](custom-patches/rust-v0.148.0/)은 이전 release series로만 보존한다.
@@ -140,10 +140,10 @@ Applier는 dirty 또는 잘못된 base worktree를 거절하고, 각 patch diges
 
 0.149를 최종 검토·공개 완료라고 부르기 전에 다음 작업이 남아 있다.
 
-1. build된 동일 final candidate에 대한 fresh-context 독립 review 2회
-2. material finding 반영과 최종 publication 상태 갱신
+1. build된 동일 final candidate에 대한 fresh-context 독립 review 2회 완료
+2. material finding이 있으면 반영하고 최종 publication 상태 갱신
 
-[Actions run 32485937374](https://github.com/iLfounder/codex-cli-custom/actions/runs/32485937374)는 review 전 tree를 build했다. final review 수정본은 새 build와 artifact가 완료되기 전까지 publication 완료로 주장하지 않는다.
+[Actions run 32517743230](https://github.com/iLfounder/codex-cli-custom/actions/runs/32517743230)은 tree `e5915796b021e81b88bd40406b62fa6c3bf89e76`를 build했고 artifact `9462237252`를 digest `sha256:4845802188c3f2a1bf3f030d1dcd8409d47278198015a205ceb55b9864ea0f42`로 업로드했다.
 
 ## 과거 작업 참고자료
 
