@@ -56,6 +56,8 @@ pub(crate) struct SessionServices {
     pub(crate) main_execve_wrapper_exe: Option<PathBuf>,
     pub(crate) analytics_events_client: AnalyticsEventsClient,
     pub(crate) hooks: ArcSwap<Hooks>,
+    /// Runtime selected by MCP-backed hook handlers for the current execution account.
+    pub(crate) hook_mcp_runtime: Arc<ArcSwap<McpRuntime>>,
     pub(crate) rollout_thread_trace: ThreadTraceContext,
     pub(crate) user_shell: Arc<crate::shell::Shell>,
     pub(crate) show_raw_agent_reasoning: bool,

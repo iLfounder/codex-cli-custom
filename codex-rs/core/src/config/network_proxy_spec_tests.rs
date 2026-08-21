@@ -37,7 +37,7 @@ fn build_state_with_audit_metadata_threads_metadata_to_state() {
     let state = spec
         .build_state_with_audit_metadata(metadata.clone())
         .expect("state should build");
-    assert_eq!(state.audit_metadata(), &metadata);
+    assert_eq!(state.audit_metadata(), metadata);
 }
 
 #[test]

@@ -522,6 +522,21 @@ impl ThreadStateManager {
         }
     }
 
+    pub(crate) async fn caller_subscription(
+        &self,
+        thread_id: ThreadId,
+        connection_id: ConnectionId,
+    ) -> (bool, u32) {
+        let state = self.state.lock().await;
+        let Some(entry) = state.threads.get(&thread_id) else {
+            return (false, 0);
+        };
+        (
+            entry.connection_ids.contains(&connection_id),
+            u32::try_from(entry.connection_ids.len()).unwrap_or(u32::MAX),
+        )
+    }
+
     /// Atomically fence new subscriptions and validate the caller's existing subscription set.
     #[expect(
         clippy::await_holding_invalid_type,

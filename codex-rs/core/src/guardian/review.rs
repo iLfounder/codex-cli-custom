@@ -219,15 +219,14 @@ fn track_guardian_review(
     completed_at_ms: u64,
 ) {
     emit_guardian_review_metrics(
-        &session.services.session_telemetry,
+        &session.session_telemetry(),
         &result,
         approval_request_source,
         reviewed_action,
         completed_at_ms.saturating_sub(tracking.started_at_ms),
     );
     session
-        .services
-        .analytics_events_client
+        .analytics_events_client()
         .track_guardian_review(tracking, result, completed_at_ms);
 }
 
@@ -902,7 +901,7 @@ async fn run_guardian_review_session_before_deadline(
     };
     let (session_outcome, session_analytics_result) = Box::pin(
         session
-            .guardian_review_session
+            .guardian_review_session()
             .run_review(GuardianReviewSessionParams {
                 parent_session: Arc::clone(&session),
                 parent_context: context.clone(),

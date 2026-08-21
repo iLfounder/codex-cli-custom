@@ -200,11 +200,25 @@ impl CodexThread {
 
     /// Returns the session telemetry handle for thread-scoped production instrumentation.
     pub fn session_telemetry(&self) -> SessionTelemetry {
-        self.session.services.session_telemetry.clone()
+        self.session.session_telemetry()
     }
 
     pub fn execution_account(&self) -> Arc<crate::execution_account::ExecutionAccountContext> {
         self.session.execution_account()
+    }
+
+    pub(crate) async fn switch_execution_account(
+        &self,
+        expected: codex_protocol::protocol::ExecutionAccountBinding,
+        target: Arc<crate::execution_account::ExecutionAccountContext>,
+        services: crate::execution_account::ExecutionAccountServices,
+    ) -> Result<
+        codex_protocol::protocol::ExecutionAccountBinding,
+        crate::execution_account::ExecutionAccountSwitchError,
+    > {
+        self.session
+            .switch_execution_account(expected, target, services)
+            .await
     }
 
     /// Returns extension-owned data attached to this thread runtime.
@@ -569,7 +583,7 @@ impl CodexThread {
 
     pub async fn guardian_trunk_rollout_path(&self) -> Option<PathBuf> {
         self.session
-            .guardian_review_session
+            .guardian_review_session()
             .trunk_rollout_path()
             .await
     }

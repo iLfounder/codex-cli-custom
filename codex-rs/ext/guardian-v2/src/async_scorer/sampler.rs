@@ -211,6 +211,26 @@ impl LunaSampler {
         Ok(sampler)
     }
 
+    pub(crate) async fn quiesce(&self) -> Result<OwnedSemaphorePermit, String> {
+        let active_requests = std::mem::take(
+            &mut *self
+                .active_requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        for request in active_requests {
+            let _ = request.supersede.send(());
+        }
+        self.idle_connections
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        Arc::clone(&self.capacity)
+            .acquire_many_owned(MAX_WEBSOCKET_CONNECTIONS as u32)
+            .await
+            .map_err(|_| "Guardian V2 sampler is unavailable".to_string())
+    }
+
     async fn open_connection(&self) -> Result<PooledConnection, LunaSamplerError> {
         let provider = self
             .config

@@ -1,13 +1,17 @@
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::Weak;
 
 use codex_analytics::AnalyticsEventsClient;
 use codex_core::ThreadManager;
 use codex_extension_api::ConfigContributor;
+use codex_extension_api::ExecutionAccountRuntimeContributor;
+use codex_extension_api::ExecutionAccountRuntimePrepareInput;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionEventSink;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::PreparedExecutionAccountRuntime;
 use codex_extension_api::ThreadIdleInput;
 use codex_extension_api::ThreadLifecycleContributor;
 use codex_extension_api::ThreadResumeInput;
@@ -31,6 +35,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadGoalStatus;
 use codex_protocol::protocol::TokenUsageInfo;
+use tokio::sync::OwnedSemaphorePermit;
 
 use crate::accounting::BudgetLimitedGoalDisposition;
 use crate::accounting::GoalAccountingState;
@@ -170,6 +175,61 @@ where
             if let Some(runtime) = goal_runtime_handle(input.thread_store) {
                 self.goal_service.unregister_runtime(&runtime);
             }
+        })
+    }
+}
+
+struct PreparedGoalAccountRuntime {
+    runtime: Option<Arc<GoalRuntimeHandle>>,
+    analytics: GoalAnalytics,
+    permit: Mutex<Option<OwnedSemaphorePermit>>,
+}
+
+impl PreparedExecutionAccountRuntime for PreparedGoalAccountRuntime {
+    fn quiesce(&self) -> ExtensionFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            let Some(runtime) = self.runtime.as_ref() else {
+                return Ok(());
+            };
+            let permit = runtime.quiesce_account_runtime().await?;
+            *self
+                .permit
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(permit);
+            Ok(())
+        })
+    }
+
+    fn publish(&self, _session_store: &ExtensionData, _thread_store: &ExtensionData) {
+        if let Some(runtime) = self.runtime.as_ref() {
+            runtime.replace_analytics(self.analytics.clone());
+        }
+        self.permit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+    }
+}
+
+impl<C> ExecutionAccountRuntimeContributor<C> for GoalExtension<C>
+where
+    C: Send + Sync + 'static,
+{
+    fn prepare<'a>(
+        &'a self,
+        input: ExecutionAccountRuntimePrepareInput<'a, C>,
+    ) -> ExtensionFuture<'a, Result<Arc<dyn PreparedExecutionAccountRuntime>, String>> {
+        Box::pin(async move {
+            let analytics = input
+                .target_session_store
+                .get::<AnalyticsEventsClient>()
+                .map(|client| GoalAnalytics::new(client.as_ref().clone()))
+                .ok_or_else(|| "target goal analytics are unavailable".to_string())?;
+            Ok(Arc::new(PreparedGoalAccountRuntime {
+                runtime: goal_runtime_handle(input.thread_store),
+                analytics,
+                permit: Mutex::new(None),
+            }) as Arc<dyn PreparedExecutionAccountRuntime>)
         })
     }
 }
@@ -486,6 +546,7 @@ pub fn install_with_backend<C>(
         goal_config,
     ));
     registry.thread_lifecycle_contributor(extension.clone());
+    registry.execution_account_runtime_contributor(extension.clone());
     registry.config_contributor(extension.clone());
     registry.turn_lifecycle_contributor(extension.clone());
     registry.token_usage_contributor(extension.clone());

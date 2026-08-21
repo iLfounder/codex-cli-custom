@@ -213,7 +213,7 @@ impl SessionRuntimeEngine {
         Ok(ThreadRelinquishResponse { operation })
     }
 
-    async fn refresh_snapshot_for_control(
+    pub(super) async fn refresh_snapshot_for_control(
         &self,
         thread_id: ThreadId,
     ) -> Result<codex_app_server_protocol::SessionRuntimeSnapshot, JSONRPCErrorError> {
@@ -261,6 +261,7 @@ impl SessionRuntimeEngine {
             .await
             .map_err(|_| internal_error("session runtime publisher is unavailable"))?;
         let store_runtime = self.thread_store.runtime_snapshot(thread_id).await;
+        let multi_account = self.account_registry.runtime_capability().await.ok();
         let (runtime_notification, operation_notification, operation) = {
             let mut state = self.state.lock().await;
             let mut snapshot = state
@@ -289,7 +290,12 @@ impl SessionRuntimeEngine {
                         Some("released_persistence_snapshot_unavailable".to_string());
                 }
             }
-            snapshot.actions = action_snapshot(&snapshot.lifecycle, &snapshot.writer);
+            snapshot.actions = action_snapshot(
+                &snapshot.lifecycle,
+                &snapshot.writer,
+                &snapshot.account,
+                multi_account.as_ref(),
+            );
             Self::apply_runtime_state(&mut state, &mut snapshot, RuntimeActivity::Activity);
             state.sequence = state.sequence.saturating_add(1);
             let runtime_notification = SessionRuntimeChangedNotification {

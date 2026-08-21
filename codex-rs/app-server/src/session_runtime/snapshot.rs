@@ -45,7 +45,6 @@ use crate::thread_status::resolve_thread_status;
 const STORE_PAGE_SIZE: usize = 200;
 const IDENTITY_CAPABILITY: &str = "ananke_session_identity_v1";
 const CONTROL_CAPABILITY: &str = "ananke_session_control_v1";
-const CONTROL_NOT_IMPLEMENTED: &str = "control_not_implemented";
 const RUNTIME_SNAPSHOT_UNAVAILABLE: &str = "thread store runtime state is unavailable";
 
 pub(super) enum RuntimeRecord {
@@ -231,9 +230,21 @@ impl SessionRuntimeEngine {
             subscriptions.unload_at,
         );
         let writer = writer_snapshot(&store_runtime);
-        let account =
+        let mut account =
             account_snapshot(current_binding, active_binding, account_capability.as_ref());
-        let actions = action_snapshot(&lifecycle, &writer);
+        if let Some(target_slot_id) = self
+            .state
+            .lock()
+            .await
+            .switching_accounts
+            .get(&thread_id)
+            .cloned()
+        {
+            account.switch_state = SessionRuntimeAccountSwitchState::Preparing;
+            account.switch_target_slot_id = Some(target_slot_id);
+            account.deny_reason = None;
+        }
+        let actions = action_snapshot(&lifecycle, &writer, &account, account_capability.as_ref());
         SessionRuntimeSnapshot {
             thread_id: thread_id.to_string(),
             state_revision: 0,
@@ -462,12 +473,12 @@ fn account_snapshot(
         .or_else(|| capability.and_then(|capability| capability.deny_reason.clone()))
         .or_else(|| current.is_none().then(|| "account_unbound".to_string()));
     SessionRuntimeAccountBinding {
-        switch_state: if current.is_none() {
-            SessionRuntimeAccountSwitchState::Unbound
-        } else if capability.is_none() {
-            SessionRuntimeAccountSwitchState::Degraded
-        } else {
-            SessionRuntimeAccountSwitchState::Stable
+        switch_state: match (current.is_some(), capability) {
+            (false, _) => SessionRuntimeAccountSwitchState::Unbound,
+            (true, Some(capability)) if capability.available => {
+                SessionRuntimeAccountSwitchState::Stable
+            }
+            (true, _) => SessionRuntimeAccountSwitchState::Degraded,
         },
         current,
         active_turn: active_turn.map(account_ref),
@@ -486,6 +497,8 @@ fn account_ref(binding: ExecutionAccountBinding) -> SessionRuntimeAccountRef {
 pub(super) fn action_snapshot(
     lifecycle: &SessionRuntimeLifecycle,
     writer: &SessionRuntimeWriter,
+    account: &SessionRuntimeAccountBinding,
+    multi_account: Option<&codex_app_server_protocol::AccountSlotCapability>,
 ) -> Vec<SessionRuntimeActionAvailability> {
     let relinquish_denial = if lifecycle.state != SessionRuntimeLifecycleState::Idle
         || lifecycle.active_turn_id.is_some()
@@ -501,6 +514,22 @@ pub(super) fn action_snapshot(
     } else {
         None
     };
+    let switch_denial = if let Some(reason) = relinquish_denial {
+        Some(reason)
+    } else if account.current.is_none() {
+        Some("account_unbound")
+    } else if account.switch_state != SessionRuntimeAccountSwitchState::Stable {
+        account
+            .deny_reason
+            .as_deref()
+            .or(Some("account_switch_in_progress"))
+    } else {
+        match multi_account {
+            Some(capability) if capability.available => None,
+            Some(capability) => capability.deny_reason.as_deref(),
+            None => Some("multi_account_unavailable"),
+        }
+    };
     vec![
         SessionRuntimeActionAvailability {
             action: SessionRuntimeAction::Relinquish,
@@ -509,8 +538,8 @@ pub(super) fn action_snapshot(
         },
         SessionRuntimeActionAvailability {
             action: SessionRuntimeAction::SwitchAccount,
-            allowed: false,
-            deny_reason: Some(CONTROL_NOT_IMPLEMENTED.to_string()),
+            allowed: switch_denial.is_none(),
+            deny_reason: switch_denial.map(str::to_string),
         },
     ]
 }

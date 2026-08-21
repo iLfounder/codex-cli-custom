@@ -10,7 +10,7 @@ use futures::future::BoxFuture;
 use serde_json::Value;
 
 pub(crate) struct CoreHookMcpExecutor {
-    pub(crate) runtime: Arc<McpRuntime>,
+    pub(crate) runtime: Arc<arc_swap::ArcSwap<McpRuntime>>,
     // Session-scoped MCP tools require the owning thread ID in request metadata.
     pub(crate) thread_id: ThreadId,
 }
@@ -18,8 +18,8 @@ pub(crate) struct CoreHookMcpExecutor {
 impl HookMcpExecutor for CoreHookMcpExecutor {
     fn execute(&self, call: HookMcpCall) -> BoxFuture<'_, anyhow::Result<String>> {
         async move {
-            let result = self
-                .runtime
+            let runtime = self.runtime.load_full();
+            let result = runtime
                 .latest_call_tool(
                     &call.server,
                     &call.tool,

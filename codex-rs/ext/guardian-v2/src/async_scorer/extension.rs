@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::Weak;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -12,12 +13,15 @@ use codex_core::ThreadManager;
 use codex_core::config::Config;
 use codex_core::context::NodeReplReviewEvidence;
 use codex_extension_api::ApprovalReviewContributor;
+use codex_extension_api::ExecutionAccountRuntimeContributor;
+use codex_extension_api::ExecutionAccountRuntimePrepareInput;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionEventSink;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionMetrics;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::ExtensionWarning;
+use codex_extension_api::PreparedExecutionAccountRuntime;
 use codex_extension_api::ResponseItem;
 use codex_extension_api::ThreadLifecycleContributor;
 use codex_extension_api::ThreadOriginator;
@@ -36,6 +40,7 @@ use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::TruncationPolicy;
 use codex_protocol::security_risk::SecurityRiskScore;
 use serde_json::json;
+use tokio::sync::OwnedSemaphorePermit;
 
 use super::config::GuardianV2Config;
 use super::sampler::LunaSampler;
@@ -218,6 +223,64 @@ pub enum StrictReviewReason {
 
 struct GuardianV2Enabled;
 
+struct PreparedGuardianV2AccountRuntime {
+    current_sampler: Option<Arc<LunaSampler>>,
+    target_sampler: Mutex<Option<LunaSampler>>,
+    target_config: Option<GuardianV2Config>,
+    target_metrics: Option<Arc<dyn ExtensionMetrics>>,
+    quiesce_permit: Mutex<Option<OwnedSemaphorePermit>>,
+}
+
+impl PreparedExecutionAccountRuntime for PreparedGuardianV2AccountRuntime {
+    fn quiesce(&self) -> ExtensionFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            let Some(sampler) = self.current_sampler.as_ref() else {
+                return Ok(());
+            };
+            let permit = sampler.quiesce().await?;
+            *self
+                .quiesce_permit
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(permit);
+            Ok(())
+        })
+    }
+
+    fn publish(&self, _session_store: &ExtensionData, thread_store: &ExtensionData) {
+        let target_sampler = self
+            .target_sampler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        match (target_sampler, self.target_config.as_ref()) {
+            (Some(sampler), Some(config)) => {
+                if config.transcript.include_images {
+                    thread_store
+                        .get_or_init(NodeReplReviewEvidence::default)
+                        .enable_image_capture();
+                }
+                thread_store.insert(sampler);
+                thread_store.insert(config.clone());
+                thread_store.insert(GuardianV2ScoreProgress {
+                    metrics: self.target_metrics.clone(),
+                    ..Default::default()
+                });
+                thread_store.insert(GuardianV2Enabled);
+            }
+            _ => {
+                thread_store.remove::<LunaSampler>();
+                thread_store.remove::<GuardianV2Config>();
+                thread_store.remove::<GuardianV2ScoreProgress>();
+                thread_store.remove::<GuardianV2Enabled>();
+            }
+        }
+        self.quiesce_permit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+    }
+}
+
 // Sampled when the approval contributor evaluates the cached Luna score.
 const TOOL_CALL_LAG_METRIC: &str = "codex.guardian_v2.tool_call_lag";
 const REVIEW_FALLBACK_METRIC: &str = "codex.guardian_v2.review_fallback";
@@ -334,6 +397,71 @@ impl ThreadLifecycleContributor<Config> for GuardianV2Extension {
                     message: format!("Guardian V2 Luna initialization failed: {error}"),
                 }),
             }
+        })
+    }
+}
+
+impl ExecutionAccountRuntimeContributor<Config> for GuardianV2Extension {
+    fn prepare<'a>(
+        &'a self,
+        input: ExecutionAccountRuntimePrepareInput<'a, Config>,
+    ) -> ExtensionFuture<'a, Result<Arc<dyn PreparedExecutionAccountRuntime>, String>> {
+        Box::pin(async move {
+            let current_sampler = input.thread_store.get::<LunaSampler>();
+            if !input.config.features.enabled(Feature::GuardianV2)
+                || !input.config.features.enabled(Feature::GuardianApproval)
+            {
+                return Ok(Arc::new(PreparedGuardianV2AccountRuntime {
+                    current_sampler,
+                    target_sampler: Mutex::new(None),
+                    target_config: None,
+                    target_metrics: input.extension_metrics,
+                    quiesce_permit: Mutex::new(None),
+                })
+                    as Arc<dyn PreparedExecutionAccountRuntime>);
+            }
+
+            let execution_account = input
+                .target_session_store
+                .get::<ExecutionAccountContext>()
+                .ok_or_else(|| "target Guardian V2 account runtime is unavailable".to_string())?;
+            let guardian_config = GuardianV2Config::resolve(input.config)?;
+            let luna_compaction_hash = execution_account
+                .models_manager
+                .get_model_info(MODEL, &input.config.to_models_manager_config())
+                .await
+                .comp_hash;
+            let sampler = LunaSampler::connect(LunaSamplerConfig {
+                provider: create_model_provider(
+                    input.config.model_provider.clone(),
+                    Some(Arc::clone(&execution_account.auth_manager)),
+                ),
+                http_client_factory: input.config.http_client_factory(),
+                agent_identity_policy: if input.config.features.enabled(Feature::UseAgentIdentity) {
+                    AgentIdentityAuthPolicy::ChatGptAuth
+                } else {
+                    AgentIdentityAuthPolicy::JwtOnly
+                },
+                session_source: input.session_source.clone(),
+                session_id: input.target_session_store.level_id().to_string(),
+                thread_id: input.thread_store.level_id().to_string(),
+                originator: input
+                    .thread_store
+                    .get::<ThreadOriginator>()
+                    .map(|originator| originator.0.clone()),
+                service_tier: input.config.service_tier.clone(),
+                luna_compaction_hash,
+                metrics: input.extension_metrics.clone(),
+            })
+            .await
+            .map_err(|error| format!("Guardian V2 Luna initialization failed: {error}"))?;
+            Ok(Arc::new(PreparedGuardianV2AccountRuntime {
+                current_sampler,
+                target_sampler: Mutex::new(Some(sampler)),
+                target_config: Some(guardian_config),
+                target_metrics: input.extension_metrics,
+                quiesce_permit: Mutex::new(None),
+            }) as Arc<dyn PreparedExecutionAccountRuntime>)
         })
     }
 }
@@ -763,6 +891,7 @@ pub fn install(
         thread_manager,
     });
     registry.thread_lifecycle_contributor(extension.clone());
+    registry.execution_account_runtime_contributor(extension.clone());
     registry.approval_review_contributor(extension.clone());
     registry.tool_lifecycle_contributor(extension);
 }

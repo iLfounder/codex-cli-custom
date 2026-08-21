@@ -508,6 +508,12 @@ impl McpRuntime {
     pub async fn shutdown(&self) {
         self.latest_connections().shutdown().await;
     }
+
+    /// Replaces this stable runtime handle with a fully prepared publication.
+    pub fn adopt_prepared(&self, prepared: &Self) {
+        self.current.store(prepared.current.load_full());
+        self.reconnect_pending.store(false, Ordering::Release);
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]

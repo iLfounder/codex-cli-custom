@@ -13,6 +13,7 @@ use crate::ExtensionData;
 use crate::ExtensionMetrics;
 
 mod context;
+mod execution_account;
 mod mcp;
 mod prompt;
 mod skill_invocation;
@@ -23,6 +24,9 @@ mod turn_lifecycle;
 mod world_state;
 
 pub use context::TurnContextContributionInput;
+pub use execution_account::ExecutionAccountRuntimeContributor;
+pub use execution_account::ExecutionAccountRuntimePrepareInput;
+pub use execution_account::PreparedExecutionAccountRuntime;
 pub use mcp::McpServerContribution;
 pub use mcp::McpServerContributionContext;
 pub use mcp::SelectedPluginIdentity;

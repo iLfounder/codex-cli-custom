@@ -825,6 +825,10 @@ impl NetworkProxy {
         NetworkProxyBuilder::default()
     }
 
+    pub fn replace_audit_metadata(&self, audit_metadata: crate::NetworkProxyAuditMetadata) {
+        self.state.replace_audit_metadata(audit_metadata);
+    }
+
     pub fn http_addr(&self) -> SocketAddr {
         self.http_addr
     }
@@ -898,7 +902,7 @@ impl NetworkProxy {
             .unwrap_or_default();
         Ok(crate::RemoteNetworkProxyLaunchConfig {
             proxy,
-            audit_metadata: self.state.audit_metadata().clone(),
+            audit_metadata: self.state.audit_metadata(),
             environment_id,
             execution_id,
             policy_decision_timeout_ms: None,

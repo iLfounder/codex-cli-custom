@@ -1177,7 +1177,9 @@ impl Session {
                 &self.services.network_approval,
             ))),
             self.services.managed_network_requirements_configured,
-            self.services.network_proxy_audit_metadata.clone(),
+            self.execution_account_runtime()
+                .network_proxy_audit_metadata
+                .clone(),
         )
         .await
         {
@@ -3554,8 +3556,7 @@ impl Session {
         {
             developer_sections.push(developer_instructions.to_string());
         }
-        let loaded_plugins = self
-            .services
+        let loaded_plugins = turn_context
             .plugins_manager
             .plugins_for_config(&turn_context.config.plugins_config_input())
             .await;
@@ -3565,9 +3566,12 @@ impl Session {
             && (features.enabled(Feature::ToolSuggest)
                 || features.enabled(Feature::RecommendedPlugins))
         {
-            let auth = self.services.auth_manager.auth().await;
+            let auth = match turn_context.auth_manager.as_ref() {
+                Some(auth_manager) => auth_manager.auth().await,
+                None => None,
+            };
             let plugins_config = turn_context.config.plugins_config_input();
-            self.services
+            turn_context
                 .plugins_manager
                 .recommended_plugin_candidates_for_config(RecommendedPluginCandidatesInput {
                     plugins_config: &plugins_config,

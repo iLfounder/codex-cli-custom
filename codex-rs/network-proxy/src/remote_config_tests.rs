@@ -115,9 +115,31 @@ fn launch_config_materializes_audit_and_execution_attribution() {
     })
     .expect("remote launch state");
 
-    assert_eq!(state.audit_metadata(), &audit_metadata);
+    assert_eq!(state.audit_metadata(), audit_metadata);
     assert_eq!(state.environment_id(), Some("remote"));
     assert_eq!(state.execution_id().as_deref(), Some("execution-1"));
+}
+
+#[test]
+fn audit_metadata_replacement_is_visible_to_existing_state_clones() {
+    let proxy = RemoteNetworkProxyConfig::from_effective_config(&NetworkProxyConfig {
+        enabled: true,
+        ..NetworkProxyConfig::default()
+    })
+    .expect("supported remote config");
+    let state =
+        NetworkProxyState::from_remote_launch_config(RemoteNetworkProxyLaunchConfig::new(proxy))
+            .expect("remote launch state");
+    let cloned = state.clone();
+    let replacement = NetworkProxyAuditMetadata {
+        conversation_id: Some("conversation-2".to_string()),
+        user_account_id: Some("account-2".to_string()),
+        ..NetworkProxyAuditMetadata::default()
+    };
+
+    state.replace_audit_metadata(replacement.clone());
+
+    assert_eq!(cloned.audit_metadata(), replacement);
 }
 
 #[test]

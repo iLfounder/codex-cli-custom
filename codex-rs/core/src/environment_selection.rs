@@ -155,7 +155,7 @@ impl StartingTurnEnvironment {
 pub(crate) struct ThreadEnvironments {
     environment_manager: Arc<EnvironmentManager>,
     local_shell: Shell,
-    shell_snapshot: ShellSnapshot,
+    shell_snapshot: ArcSwap<ShellSnapshot>,
     non_blocking_snapshots: bool,
     environments: ArcSwap<Vec<SelectedTurnEnvironment>>,
     connection_event_tx: OnceLock<Sender<Event>>,
@@ -206,7 +206,7 @@ impl ThreadEnvironments {
         Self {
             environment_manager,
             local_shell,
-            shell_snapshot,
+            shell_snapshot: ArcSwap::from_pointee(shell_snapshot),
             non_blocking_snapshots,
             environments: ArcSwap::from_pointee(environments),
             connection_event_tx: OnceLock::new(),
@@ -287,7 +287,7 @@ impl ThreadEnvironments {
                 selected_environment.clone(),
                 Arc::clone(&environment),
                 self.local_shell.clone(),
-                self.shell_snapshot.clone(),
+                self.shell_snapshot.load_full().as_ref().clone(),
                 configuration_ready,
             )
             .remote_handle();
@@ -337,6 +337,10 @@ impl ThreadEnvironments {
         for task in removed_connection_tasks {
             task.abort();
         }
+    }
+
+    pub(crate) fn replace_shell_snapshot(&self, shell_snapshot: ShellSnapshot) {
+        self.shell_snapshot.store(Arc::new(shell_snapshot));
     }
 
     /// Projects canonical selections back to caller input form without losing config ownership.

@@ -88,6 +88,7 @@ mod server_diagnostics;
 mod session_end;
 mod skills_list;
 mod sleep;
+mod thread_account_switch;
 mod thread_archive;
 mod thread_delete;
 mod thread_fork;

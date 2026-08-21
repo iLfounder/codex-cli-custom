@@ -2,9 +2,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use codex_analytics::AnalyticsEventsClient;
 use codex_core_plugins::PluginsManager;
 use codex_login::AuthManager;
 use codex_models_manager::manager::SharedModelsManager;
+use codex_otel::SessionTelemetry;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::protocol::ExecutionAccountBinding;
@@ -22,6 +24,38 @@ pub struct ExecutionAccountContext {
 pub struct ExecutionAccountServices {
     pub plugins_manager: Arc<PluginsManager>,
     pub mcp_manager: Arc<crate::mcp::McpManager>,
+}
+
+/// Fully prepared account-sensitive runtime published atomically for future turns.
+///
+/// A hot switch constructs this value before updating the durable binding. Existing turns retain
+/// their captured runtime while the next turn observes the newly published bundle.
+pub(crate) struct ExecutionAccountRuntime {
+    pub(crate) execution_account: Arc<ExecutionAccountContext>,
+    pub(crate) services: ExecutionAccountServices,
+    pub(crate) mcp_runtime: Arc<codex_mcp::McpRuntime>,
+    pub(crate) model_client: crate::client::ModelClient,
+    pub(crate) analytics_events_client: AnalyticsEventsClient,
+    pub(crate) session_telemetry: SessionTelemetry,
+    pub(crate) network_proxy_audit_metadata: crate::config::NetworkProxyAuditMetadata,
+    pub(crate) shell_snapshot: crate::shell_snapshot::ShellSnapshot,
+    pub(crate) extension_runtimes:
+        Vec<Arc<dyn codex_extension_api::PreparedExecutionAccountRuntime>>,
+    pub(crate) guardian_review_session: Arc<crate::guardian::GuardianReviewSessionManager>,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ExecutionAccountSwitchError {
+    #[error("target execution account is unavailable")]
+    TargetUnavailable,
+    #[error("target execution account runtime preparation failed")]
+    PreparationFailed,
+    #[error("execution account generation changed")]
+    StaleGeneration,
+    #[error("thread execution runtime is busy")]
+    ThreadBusy,
+    #[error("execution account binding persistence failed")]
+    PersistenceFailed,
 }
 
 impl std::fmt::Debug for ExecutionAccountServices {

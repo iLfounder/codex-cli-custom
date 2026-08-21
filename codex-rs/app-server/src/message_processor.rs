@@ -11,7 +11,6 @@ use crate::connection_rpc_gate::ConnectionRpcGate;
 use crate::current_time::app_server_time_provider;
 use crate::error_code::invalid_params;
 use crate::error_code::invalid_request;
-use crate::error_code::method_not_found;
 use crate::extensions::ThreadExtensionDependencies;
 use crate::extensions::app_server_extension_event_sink;
 use crate::extensions::guardian_agent_spawner;
@@ -1020,9 +1019,11 @@ impl MessageProcessor {
             ClientRequest::AccountSlotLogout { params, .. } => {
                 self.account_processor.logout_account_slot(params).await
             }
-            ClientRequest::ThreadAccountSwitch { .. } => Err(method_not_found(
-                "thread/account/switch is not implemented yet",
-            )),
+            ClientRequest::ThreadAccountSwitch { params, .. } => self
+                .session_runtime
+                .switch_account(connection_id, params)
+                .await
+                .map(|response| Some(response.into())),
             ClientRequest::ThreadRelinquish { params, .. } => self
                 .session_runtime
                 .relinquish(connection_id, params)

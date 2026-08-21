@@ -356,7 +356,7 @@ pub async fn thread_rollback(sess: &Arc<Session>, sub_id: String, num_turns: u32
         .remove::<NodeReplReviewEvidence>()
         .is_some()
     {
-        sess.guardian_review_session
+        sess.guardian_review_session()
             .invalidate_for_node_repl_evidence()
             .await;
     }
@@ -441,7 +441,7 @@ async fn shutdown_session_runtime(sess: &Arc<Session>) {
         sess.mcp_refresh.close();
         sess.services.mcp_runtime.shutdown().await;
     }
-    sess.guardian_review_session.shutdown().await;
+    sess.guardian_review_session().shutdown().await;
 
     crate::hook_runtime::run_session_end_hooks(sess).await;
 }
@@ -465,7 +465,7 @@ pub async fn shutdown(sess: &Arc<Session>, sub_id: String) -> bool {
         .raw_items()
         .filter(|item| is_user_turn_boundary(item))
         .count();
-    sess.services.session_telemetry.counter(
+    sess.session_telemetry().counter(
         "codex.conversation.turn.count",
         i64::try_from(turn_count).unwrap_or(0),
         &[],

@@ -13,11 +13,15 @@ impl Session {
 
     pub(super) fn start_mcp_prewarm_worker(
         self: &Arc<Self>,
-        requests: async_channel::Receiver<()>,
         mut auth_changes: tokio::sync::watch::Receiver<u64>,
     ) {
         let session = Arc::downgrade(self);
-        let shutdown = self.mcp_prewarm_shutdown.clone();
+        let requests = self.mcp_prewarm_rx.clone();
+        let shutdown = CancellationToken::new();
+        *self
+            .mcp_prewarm_shutdown
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = shutdown.clone();
         let worker = self.services.runtime_handle.spawn(async move {
             loop {
                 let auth_changed = tokio::select! {
@@ -60,7 +64,10 @@ impl Session {
     }
 
     pub(super) async fn stop_mcp_prewarm_worker(&self) {
-        self.mcp_prewarm_shutdown.cancel();
+        self.mcp_prewarm_shutdown
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .cancel();
         let worker = self
             .mcp_prewarm_task
             .lock()

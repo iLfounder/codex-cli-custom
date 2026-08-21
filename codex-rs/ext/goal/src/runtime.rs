@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::sync::Weak;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -20,6 +21,7 @@ use crate::metrics::GoalMetrics;
 use crate::steering::continuation_steering_item;
 use crate::steering::objective_updated_steering_item;
 use crate::tool::protocol_goal_from_state;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
 use tokio::sync::SemaphorePermit;
 
@@ -42,14 +44,14 @@ pub(crate) enum ActiveGoalStopReason {
 struct GoalRuntimeInner {
     thread_id: ThreadId,
     state_dbs: Arc<codex_state::StateRuntime>,
-    analytics: GoalAnalytics,
+    analytics: RwLock<GoalAnalytics>,
     event_emitter: GoalEventEmitter,
     metrics: GoalMetrics,
     thread_manager: Weak<ThreadManager>,
     accounting_state: Arc<GoalAccountingState>,
     enabled: AtomicBool,
     tools_available_for_thread: bool,
-    goal_state_lock: Semaphore,
+    goal_state_lock: Arc<Semaphore>,
 }
 
 pub(crate) struct AccountedGoalProgress {
@@ -94,14 +96,14 @@ impl GoalRuntimeHandle {
             inner: Arc::new(GoalRuntimeInner {
                 thread_id,
                 state_dbs,
-                analytics: config.analytics,
+                analytics: RwLock::new(config.analytics),
                 event_emitter,
                 metrics,
                 thread_manager,
                 accounting_state,
                 enabled: AtomicBool::new(config.enabled),
                 tools_available_for_thread: config.tools_available_for_thread,
-                goal_state_lock: Semaphore::new(/*permits*/ 1),
+                goal_state_lock: Arc::new(Semaphore::new(/*permits*/ 1)),
             }),
         }
     }
@@ -132,6 +134,29 @@ impl GoalRuntimeHandle {
             .acquire()
             .await
             .map_err(|err| err.to_string())
+    }
+
+    pub(crate) async fn quiesce_account_runtime(&self) -> Result<OwnedSemaphorePermit, String> {
+        Arc::clone(&self.inner.goal_state_lock)
+            .acquire_owned()
+            .await
+            .map_err(|_| "goal runtime is unavailable".to_string())
+    }
+
+    pub(crate) fn replace_analytics(&self, analytics: GoalAnalytics) {
+        *self
+            .inner
+            .analytics
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = analytics;
+    }
+
+    fn analytics(&self) -> GoalAnalytics {
+        self.inner
+            .analytics
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub async fn prepare_external_goal_mutation(&self) -> Result<(), String> {
@@ -173,8 +198,7 @@ impl GoalRuntimeHandle {
             .is_some_and(|previous_goal| previous_goal.goal_id != goal.goal_id);
         if previous_goal.is_none() || replaced_existing_goal {
             self.inner.metrics.record_created();
-            self.inner
-                .analytics
+            self.analytics()
                 .created(&goal, GoalEventAttribution::NoTurn);
         }
         let previous_status = previous_goal
@@ -186,8 +210,7 @@ impl GoalRuntimeHandle {
         self.inner
             .metrics
             .record_terminal_if_status_changed(previous_status, &goal);
-        self.inner
-            .analytics
+        self.analytics()
             .status_changed(&goal, previous_status, GoalEventAttribution::NoTurn);
         let objective_changed = previous_goal.as_ref().is_some_and(|previous_goal| {
             !replaced_existing_goal && previous_goal.objective != goal.objective
@@ -233,7 +256,7 @@ impl GoalRuntimeHandle {
             return Ok(());
         }
 
-        self.inner.analytics.cleared(&goal);
+        self.analytics().cleared(&goal);
         self.inner.accounting_state.clear_active_goal();
         Ok(())
     }
@@ -320,7 +343,7 @@ impl GoalRuntimeHandle {
         self.inner
             .metrics
             .record_terminal_if_status_changed(previous_status, &goal);
-        self.inner.analytics.status_changed(
+        self.analytics().status_changed(
             &goal,
             previous_status,
             GoalEventAttribution::Turn(turn_id),
@@ -490,10 +513,9 @@ impl GoalRuntimeHandle {
                 self.inner
                     .metrics
                     .record_terminal_if_status_changed(previous_status, &goal);
-                self.inner
-                    .analytics
+                self.analytics()
                     .usage_accounted(&goal, GoalEventAttribution::Turn(turn_id));
-                self.inner.analytics.status_changed(
+                self.analytics().status_changed(
                     &goal,
                     previous_status,
                     GoalEventAttribution::Turn(turn_id),
@@ -552,10 +574,9 @@ impl GoalRuntimeHandle {
                 self.inner
                     .metrics
                     .record_terminal_if_status_changed(previous_status, &goal);
-                self.inner
-                    .analytics
+                self.analytics()
                     .usage_accounted(&goal, GoalEventAttribution::NoTurn);
-                self.inner.analytics.status_changed(
+                self.analytics().status_changed(
                     &goal,
                     previous_status,
                     GoalEventAttribution::NoTurn,
