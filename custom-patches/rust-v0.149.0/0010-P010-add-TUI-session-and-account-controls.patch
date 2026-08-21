@@ -1,4 +1,4 @@
-From 551b9b2b213a225268080dc24c0ad4e7f882032d Mon Sep 17 00:00:00 2001
+From ea1d7a398407b512aa1e21679ce1104e22577c66 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 19:45:26 +0900
 Subject: [PATCH] feat(custom): add release-aware TUI controls for 0.149
@@ -22,7 +22,7 @@ Subject: [PATCH] feat(custom): add release-aware TUI controls for 0.149
  .../core/tests/suite/realtime_conversation.rs |   1 +
  codex-rs/core/tests/suite/resume_warning.rs   |   1 +
  .../tests/suite/unstable_features_warning.rs  |   2 +
- codex-rs/tui/src/app.rs                       |  28 +-
+ codex-rs/tui/src/app.rs                       |  29 +-
  codex-rs/tui/src/app/account_controls.rs      | 426 ++++++++++++++++++
  codex-rs/tui/src/app/account_login.rs         | 205 +++++++++
  codex-rs/tui/src/app/account_picker.rs        | 163 +++++++
@@ -33,12 +33,12 @@ Subject: [PATCH] feat(custom): add release-aware TUI controls for 0.149
  codex-rs/tui/src/app/app_server_events.rs     |  43 ++
  .../tui/src/app/dynamic_thread_controls.rs    | 156 +++++++
  .../src/app/dynamic_thread_controls_tests.rs  |  66 +++
- codex-rs/tui/src/app/event_dispatch.rs        | 107 +++--
- codex-rs/tui/src/app/runtime_controls.rs      | 290 ++++++++++++
+ codex-rs/tui/src/app/event_dispatch.rs        | 108 +++--
+ codex-rs/tui/src/app/runtime_controls.rs      | 305 +++++++++++++
  .../tui/src/app/runtime_controls_tests.rs     |  55 +++
- codex-rs/tui/src/app/startup.rs               |  10 +-
- codex-rs/tui/src/app/test_support.rs          |  10 +-
- codex-rs/tui/src/app/tests.rs                 |  62 ++-
+ codex-rs/tui/src/app/startup.rs               |  13 +-
+ codex-rs/tui/src/app/test_support.rs          |  11 +-
+ codex-rs/tui/src/app/tests.rs                 |  64 ++-
  codex-rs/tui/src/app/thread_routing.rs        |  22 +-
  codex-rs/tui/src/app_event.rs                 |  48 ++
  codex-rs/tui/src/app_server_session.rs        | 201 +++++++++
@@ -46,7 +46,7 @@ Subject: [PATCH] feat(custom): add release-aware TUI controls for 0.149
  codex-rs/tui/src/chatwidget.rs                |   5 +
  codex-rs/tui/src/chatwidget/slash_dispatch.rs |   4 +
  codex-rs/tui/src/slash_command.rs             |   3 +
- 42 files changed, 2540 insertions(+), 84 deletions(-)
+ 42 files changed, 2562 insertions(+), 85 deletions(-)
  create mode 100644 codex-rs/tui/src/app/account_controls.rs
  create mode 100644 codex-rs/tui/src/app/account_login.rs
  create mode 100644 codex-rs/tui/src/app/account_picker.rs
@@ -5455,7 +5455,7 @@ index 552c70b5d..fbc6fb8ec 100644
              ClientMcpExtensions::default(),
          )
 diff --git a/codex-rs/tui/src/app.rs b/codex-rs/tui/src/app.rs
-index 70d147de5..30cd56b4f 100644
+index 70d147de5..eb91c37c3 100644
 --- a/codex-rs/tui/src/app.rs
 +++ b/codex-rs/tui/src/app.rs
 @@ -91,6 +91,8 @@ use crate::workspace_command::WorkspaceCommandRunner;
@@ -5503,7 +5503,7 @@ index 70d147de5..30cd56b4f 100644
  mod safety_buffering;
  mod session_lifecycle;
  mod side;
-@@ -581,15 +591,15 @@ pub(crate) struct App {
+@@ -581,15 +591,16 @@ pub(crate) struct App {
      /// Set when the user confirms an update; propagated on exit.
      pub(crate) pending_update_action: Option<UpdateAction>,
  
@@ -5518,6 +5518,7 @@ index 70d147de5..30cd56b4f 100644
 -    pending_shutdown_exit_thread_id: Option<ThreadId>,
 +    pending_shutdown: Option<runtime_controls::PendingShutdown>,
 +    shutdown_lookup_in_flight: bool,
++    shutdown_force_exit_armed: bool,
 +    account_slots: Vec<AccountSlotSnapshot>,
 +    account_slot_capability: Option<AccountSlotCapability>,
 +    account_registry_revision: u64,
@@ -7072,7 +7073,7 @@ index 000000000..c2752f999
 +    assert!(app.pending_dynamic_thread_control.is_none());
 +}
 diff --git a/codex-rs/tui/src/app/event_dispatch.rs b/codex-rs/tui/src/app/event_dispatch.rs
-index e967543b8..08c0e85d7 100644
+index e967543b8..2c32b900e 100644
 --- a/codex-rs/tui/src/app/event_dispatch.rs
 +++ b/codex-rs/tui/src/app/event_dispatch.rs
 @@ -17,8 +17,6 @@ use codex_app_server_protocol::ThreadGoalStatus;
@@ -7174,7 +7175,7 @@ index e967543b8..08c0e85d7 100644
              AppEvent::FatalExitRequest(message) => {
                  return Ok(AppRunControl::Exit(ExitReason::Fatal(message)));
              }
-@@ -2899,31 +2947,14 @@ impl App {
+@@ -2899,31 +2947,15 @@ impl App {
      ) -> AppRunControl {
          match mode {
              ExitMode::ShutdownFirst => {
@@ -7209,15 +7210,16 @@ index e967543b8..08c0e85d7 100644
              ExitMode::Immediate => {
 -                self.pending_shutdown_exit_thread_id = None;
 +                self.pending_shutdown = None;
++                self.shutdown_force_exit_armed = false;
                  AppRunControl::Exit(ExitReason::UserRequested)
              }
          }
 diff --git a/codex-rs/tui/src/app/runtime_controls.rs b/codex-rs/tui/src/app/runtime_controls.rs
 new file mode 100644
-index 000000000..6da84ac19
+index 000000000..3a8850bec
 --- /dev/null
 +++ b/codex-rs/tui/src/app/runtime_controls.rs
-@@ -0,0 +1,290 @@
+@@ -0,0 +1,305 @@
 +//! Strict release-aware shutdown for the active TUI thread.
 +
 +use super::*;
@@ -7275,9 +7277,21 @@ index 000000000..6da84ac19
 +        app_server: &AppServerSession,
 +        intent: ShutdownIntent,
 +    ) {
++        if intent == ShutdownIntent::Exit
++            && (self.shutdown_force_exit_armed
++                || self.pending_shutdown.is_some()
++                || self.shutdown_lookup_in_flight)
++        {
++            self.shutdown_force_exit_armed = false;
++            self.pending_shutdown = None;
++            self.shutdown_lookup_in_flight = false;
++            self.app_event_tx.send(AppEvent::Exit(ExitMode::Immediate));
++            return;
++        }
 +        if self.pending_shutdown.is_some() || self.shutdown_lookup_in_flight {
 +            return;
 +        }
++        self.shutdown_force_exit_armed = false;
 +        let Some(thread_id) = self.current_displayed_thread_id() else {
 +            match intent {
 +                ShutdownIntent::Exit => self.app_event_tx.send(AppEvent::Exit(ExitMode::Immediate)),
@@ -7490,6 +7504,7 @@ index 000000000..6da84ac19
 +        let Some(pending) = self.pending_shutdown.take() else {
 +            return;
 +        };
++        self.shutdown_force_exit_armed = false;
 +        match pending.intent {
 +            ShutdownIntent::Exit => self.app_event_tx.send(AppEvent::Exit(ExitMode::Immediate)),
 +            ShutdownIntent::LogoutDefault => self.app_event_tx.send(AppEvent::LogoutAfterRelease),
@@ -7499,9 +7514,11 @@ index 000000000..6da84ac19
 +    fn shutdown_control_failed(&mut self, message: String) {
 +        self.shutdown_lookup_in_flight = false;
 +        self.pending_shutdown = None;
++        self.shutdown_force_exit_armed = true;
 +        self.chat_widget.restore_after_shutdown_failure();
-+        self.chat_widget
-+            .add_error_message(format!("Could not safely release this session: {message}"));
++        self.chat_widget.add_error_message(format!(
++            "Could not safely release this session: {message} Repeat the quit shortcut to exit immediately."
++        ));
 +    }
 +}
 +
@@ -7570,16 +7587,17 @@ index 000000000..d03f36c5d
 +    assert!(app.pending_shutdown.is_none());
 +}
 diff --git a/codex-rs/tui/src/app/startup.rs b/codex-rs/tui/src/app/startup.rs
-index ee9b713a7..132a8b802 100644
+index ee9b713a7..ef51e9d3f 100644
 --- a/codex-rs/tui/src/app/startup.rs
 +++ b/codex-rs/tui/src/app/startup.rs
-@@ -476,7 +476,15 @@ See the Codex keymap documentation for supported actions and examples."
+@@ -476,7 +476,16 @@ See the Codex keymap documentation for supported actions and examples."
              environment_manager,
              app_server_target,
              pending_update_action: None,
 -            pending_shutdown_exit_thread_id: None,
 +            pending_shutdown: None,
 +            shutdown_lookup_in_flight: false,
++            shutdown_force_exit_armed: false,
 +            account_slots: Vec::new(),
 +            account_slot_capability: None,
 +            account_registry_revision: 0,
@@ -7590,17 +7608,27 @@ index ee9b713a7..132a8b802 100644
              windows_sandbox: WindowsSandboxState::default(),
              thread_event_channels: HashMap::new(),
              thread_event_listener_tasks: HashMap::new(),
+@@ -730,7 +739,7 @@ See the Codex keymap documentation for supported actions and examples."
+                             }
+                         } else {
+                             tracing::warn!("terminal input stream closed; shutting down active thread");
+-                            app.handle_exit_mode(&mut app_server, ExitMode::ShutdownFirst).await
++                            app.handle_exit_mode(&mut app_server, ExitMode::Immediate).await
+                         }
+                     }
+                     app_server_event = app_server.next_event(), if listen_for_app_server_events => {
 diff --git a/codex-rs/tui/src/app/test_support.rs b/codex-rs/tui/src/app/test_support.rs
-index acca925a6..4c99bc543 100644
+index acca925a6..d24cca69a 100644
 --- a/codex-rs/tui/src/app/test_support.rs
 +++ b/codex-rs/tui/src/app/test_support.rs
-@@ -57,7 +57,15 @@ pub(super) async fn make_test_app() -> App {
+@@ -57,7 +57,16 @@ pub(super) async fn make_test_app() -> App {
          environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
          app_server_target: crate::AppServerTarget::Embedded,
          pending_update_action: None,
 -        pending_shutdown_exit_thread_id: None,
 +        pending_shutdown: None,
 +        shutdown_lookup_in_flight: false,
++        shutdown_force_exit_armed: false,
 +        account_slots: Vec::new(),
 +        account_slot_capability: None,
 +        account_registry_revision: 0,
@@ -7612,7 +7640,7 @@ index acca925a6..4c99bc543 100644
          thread_event_channels: HashMap::new(),
          thread_event_listener_tasks: HashMap::new(),
 diff --git a/codex-rs/tui/src/app/tests.rs b/codex-rs/tui/src/app/tests.rs
-index 7b043346f..87176681a 100644
+index 7b043346f..c6f67de0e 100644
 --- a/codex-rs/tui/src/app/tests.rs
 +++ b/codex-rs/tui/src/app/tests.rs
 @@ -5037,7 +5037,16 @@ async fn active_non_primary_shutdown_target_returns_none_when_shutdown_exit_is_p
@@ -7651,13 +7679,14 @@ index 7b043346f..87176681a 100644
  
      assert_eq!(
          app.active_non_primary_shutdown_target(&thread_closed_notification(active_thread_id)),
-@@ -5282,7 +5300,15 @@ async fn make_test_app() -> App {
+@@ -5282,7 +5300,16 @@ async fn make_test_app() -> App {
          environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
          app_server_target: crate::AppServerTarget::Embedded,
          pending_update_action: None,
 -        pending_shutdown_exit_thread_id: None,
 +        pending_shutdown: None,
 +        shutdown_lookup_in_flight: false,
++        shutdown_force_exit_armed: false,
 +        account_slots: Vec::new(),
 +        account_slot_capability: None,
 +        account_registry_revision: 0,
@@ -7668,13 +7697,14 @@ index 7b043346f..87176681a 100644
          windows_sandbox: WindowsSandboxState::default(),
          thread_event_channels: HashMap::new(),
          thread_event_listener_tasks: HashMap::new(),
-@@ -5359,7 +5385,15 @@ async fn make_test_app_with_channels() -> (
+@@ -5359,7 +5386,16 @@ async fn make_test_app_with_channels() -> (
              environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
              app_server_target: crate::AppServerTarget::Embedded,
              pending_update_action: None,
 -            pending_shutdown_exit_thread_id: None,
 +            pending_shutdown: None,
 +            shutdown_lookup_in_flight: false,
++            shutdown_force_exit_armed: false,
 +            account_slots: Vec::new(),
 +            account_slot_capability: None,
 +            account_registry_revision: 0,
@@ -7685,7 +7715,7 @@ index 7b043346f..87176681a 100644
              windows_sandbox: WindowsSandboxState::default(),
              thread_event_channels: HashMap::new(),
              thread_event_listener_tasks: HashMap::new(),
-@@ -7552,7 +7586,7 @@ async fn new_session_requests_shutdown_for_previous_conversation() {
+@@ -7552,7 +7588,7 @@ async fn new_session_requests_shutdown_for_previous_conversation() {
  }
  
  #[tokio::test]
@@ -7694,7 +7724,7 @@ index 7b043346f..87176681a 100644
      let mut app = make_test_app().await;
      let thread_id = ThreadId::new();
      app.active_thread_id = Some(thread_id);
-@@ -7564,15 +7598,13 @@ async fn shutdown_first_exit_returns_immediate_exit_when_shutdown_submit_fails()
+@@ -7564,15 +7600,13 @@ async fn shutdown_first_exit_returns_immediate_exit_when_shutdown_submit_fails()
      .expect("embedded app server");
      let control = Box::pin(app.handle_exit_mode(&mut app_server, ExitMode::ShutdownFirst)).await;
  
@@ -7714,7 +7744,7 @@ index 7b043346f..87176681a 100644
      let (mut app, _app_event_rx, mut op_rx) = Box::pin(make_test_app_with_channels()).await;
      let thread_id = ThreadId::new();
      app.active_thread_id = Some(thread_id);
-@@ -7584,11 +7616,9 @@ async fn shutdown_first_exit_uses_app_server_shutdown_without_submitting_op() {
+@@ -7584,11 +7618,9 @@ async fn shutdown_first_exit_uses_app_server_shutdown_without_submitting_op() {
      .expect("embedded app server");
      let control = Box::pin(app.handle_exit_mode(&mut app_server, ExitMode::ShutdownFirst)).await;
  

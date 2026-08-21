@@ -1,4 +1,4 @@
-From 287ca4dce5c211cedfa616c123bda41a89788491 Mon Sep 17 00:00:00 2001
+From e140276b10f23e7c2f88dcaa50d8866a6418e474 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 16:05:16 +0900
 Subject: [PATCH] feat(custom): isolate account-sensitive consumers for 0.149

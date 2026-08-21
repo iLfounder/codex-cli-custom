@@ -1,4 +1,4 @@
-From 95089403849b9e28d782a1c20f8ab3673d1da0cf Mon Sep 17 00:00:00 2001
+From 21a9706704a2475810e3fc953338e2ed2c4aea99 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 17:31:24 +0900
 Subject: [PATCH] feat(custom): add live account registration for 0.149
@@ -14706,7 +14706,7 @@ index 000000000..916b106dd
 +    }
 +}
 diff --git a/codex-rs/app-server/src/session_runtime/mod.rs b/codex-rs/app-server/src/session_runtime/mod.rs
-index de9695c2e..7fba3f742 100644
+index 9459d21c6..b5533ded9 100644
 --- a/codex-rs/app-server/src/session_runtime/mod.rs
 +++ b/codex-rs/app-server/src/session_runtime/mod.rs
 @@ -17,6 +17,7 @@ use codex_app_server_protocol::SessionRuntimeListResponse;
@@ -14717,7 +14717,7 @@ index de9695c2e..7fba3f742 100644
  use codex_thread_store::ThreadStore;
  use tokio::sync::Mutex;
  use tokio::sync::Semaphore;
-@@ -204,6 +205,42 @@ impl SessionRuntimeEngine {
+@@ -207,6 +208,42 @@ impl SessionRuntimeEngine {
              .await;
      }
  

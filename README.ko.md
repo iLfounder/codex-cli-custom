@@ -28,9 +28,9 @@ Stock Codex는 인증과 runtime 소유권의 많은 부분을 process 단위로
 | 영역 | 현재 상태 |
 |---|---|
 | P001–P011 구현과 focused check | 완료 |
-| 순서형 0.149 patch export와 clean-apply 검증 | 완료; 11개 patch가 tree `60726621c5a599a513f76328a7791c332a2660bf`를 재현함 |
-| macOS arm64 release build와 artifact | final review 수정 후 rebuild 대기; [run 32517743230](https://github.com/iLfounder/codex-cli-custom/actions/runs/32517743230)은 직전 tree의 증거임 |
-| 최종 독립 review | rebuild된 final tree 대상으로 대기 |
+| 순서형 0.149 patch export와 clean-apply 검증 | 완료; 11개 patch가 tree `4d993b8b5960de01c6d2bafb4c1a7749c51280db`를 재현함 |
+| macOS arm64 release build와 artifact | final review 수정 후 rebuild 대기; [run 32528035039](https://github.com/iLfounder/codex-cli-custom/actions/runs/32528035039)은 바로 직전 tree의 증거임 |
+| 최종 독립 review | 내부 Codex 1회와 외부 Opus fresh-context review 1회 완료; 확인된 지적만 소스 실검 후 수정함 |
 | 0.149 publication | Pending |
 
 현재 candidate는 [`custom-patches/rust-v0.149.0`](custom-patches/rust-v0.149.0/)이다. [`custom-patches/rust-v0.148.0`](custom-patches/rust-v0.148.0/)은 이전 release series로만 보존한다.
@@ -128,7 +128,7 @@ git checkout 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
 /path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD"
 ```
 
-Applier는 dirty 또는 잘못된 base worktree를 거절하고, 각 patch digest를 검증하며, P001–P011을 순서대로 적용한 뒤 final tree `60726621c5a599a513f76328a7791c332a2660bf`를 요구한다.
+Applier는 dirty 또는 잘못된 base worktree를 거절하고, 각 patch digest를 검증하며, P001–P011을 순서대로 적용한 뒤 final tree `4d993b8b5960de01c6d2bafb4c1a7749c51280db`를 요구한다.
 
 이 분리가 유지보수 방식이다. upstream이 갱신되면 각 P번호를 자기 기능 경계 안에서 inspect·adapt·verify할 수 있다.
 
@@ -138,12 +138,12 @@ Applier는 dirty 또는 잘못된 base worktree를 거절하고, 각 patch diges
 
 ## Build, review, publication
 
-0.149를 최종 검토·공개 완료라고 부르기 전에 다음 작업이 남아 있다.
+0.149를 최종 build·공개 완료라고 부르기 전에 다음 작업이 남아 있다.
 
-1. build된 동일 final candidate에 대한 fresh-context 독립 review 2회 완료
-2. material finding이 있으면 반영하고 최종 publication 상태 갱신
+1. review 수정이 반영된 tree에서 두 release binary 재build
+2. 일치하는 artifact provenance 발행·확인
 
-[Actions run 32517743230](https://github.com/iLfounder/codex-cli-custom/actions/runs/32517743230)은 직전 review candidate를 build했다. final review 수정본은 새 artifact가 필요하다.
+[Actions run 32528035039](https://github.com/iLfounder/codex-cli-custom/actions/runs/32528035039)은 바로 직전 review candidate를 build했다. final review 수정본은 새 artifact가 필요하다.
 
 ## 과거 작업 참고자료
 

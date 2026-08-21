@@ -1,4 +1,4 @@
-From ff939ffc9c0957c9053068825126f8c3e3a4e8a9 Mon Sep 17 00:00:00 2001
+From 5a16683ccf6e5bb52e72e4cab7349673c4c4a32c Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 19:13:43 +0900
 Subject: [PATCH] feat(custom): switch thread accounts without restart for
@@ -433,7 +433,7 @@ index 25f068b6d..688bacc85 100644
                  .session_runtime
                  .relinquish(connection_id, params)
 diff --git a/codex-rs/app-server/src/session_runtime/mod.rs b/codex-rs/app-server/src/session_runtime/mod.rs
-index a94e32e40..6da6e4e37 100644
+index 8a93006cc..a7bd2208c 100644
 --- a/codex-rs/app-server/src/session_runtime/mod.rs
 +++ b/codex-rs/app-server/src/session_runtime/mod.rs
 @@ -3,6 +3,7 @@ mod operations;

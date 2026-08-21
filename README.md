@@ -28,9 +28,9 @@ The target is upstream [`rust-v0.149.0`](https://github.com/openai/codex/release
 | Area | Current status |
 |---|---|
 | P001–P011 implementation and focused checks | Complete |
-| Ordered 0.149 patch export and clean-apply verification | Complete; 11 patches reproduce tree `60726621c5a599a513f76328a7791c332a2660bf` |
-| macOS arm64 release build and artifacts | Final review corrections pending rebuild; [run 32517743230](https://github.com/iLfounder/codex-cli-custom/actions/runs/32517743230) proves the preceding tree |
-| Final independent reviews | Pending against the rebuilt final tree |
+| Ordered 0.149 patch export and clean-apply verification | Complete; 11 patches reproduce tree `4d993b8b5960de01c6d2bafb4c1a7749c51280db` |
+| macOS arm64 release build and artifacts | Final review corrections pending rebuild; [run 32528035039](https://github.com/iLfounder/codex-cli-custom/actions/runs/32528035039) proves the immediately preceding tree |
+| Final independent reviews | One internal Codex and one external Opus fresh-context review completed; confirmed findings were source-checked and corrected |
 | 0.149 publication | Pending |
 
 The current candidate is [`custom-patches/rust-v0.149.0`](custom-patches/rust-v0.149.0/). The files under [`custom-patches/rust-v0.148.0`](custom-patches/rust-v0.148.0/) are retained only as the previous release series.
@@ -128,7 +128,7 @@ git checkout 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
 /path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD"
 ```
 
-The applier rejects a dirty or wrong-base worktree, verifies every patch digest, applies P001–P011 in order, and requires final tree `60726621c5a599a513f76328a7791c332a2660bf`.
+The applier rejects a dirty or wrong-base worktree, verifies every patch digest, applies P001–P011 in order, and requires final tree `4d993b8b5960de01c6d2bafb4c1a7749c51280db`.
 
 This separation is the maintenance strategy: when upstream advances, each P-number can be inspected, adapted, and verified against its own feature boundary.
 
@@ -138,12 +138,12 @@ The older custom series used migration numbers that official 0.149 later claimed
 
 ## Build, review, and publication
 
-The following remains before 0.149 can be called fully reviewed and published:
+The following remains before 0.149 can be called fully built and published:
 
-1. complete two independent fresh-context reviews of the built final candidate; and
-2. resolve any material findings, if any, and update the publication status.
+1. rebuild both release binaries from the review-corrected tree; and
+2. publish and verify the matching artifact provenance.
 
-[Actions run 32517743230](https://github.com/iLfounder/codex-cli-custom/actions/runs/32517743230) built the preceding review candidate. The final review corrections require a new artifact before publication is complete.
+[Actions run 32528035039](https://github.com/iLfounder/codex-cli-custom/actions/runs/32528035039) built the immediately preceding review candidate. The final review corrections require a new artifact before publication is complete.
 
 ## Historical working notes
 

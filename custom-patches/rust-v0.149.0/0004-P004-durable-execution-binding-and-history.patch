@@ -1,4 +1,4 @@
-From f8a1c236c88250f9ff4e8d8fdcc1c535886b057f Mon Sep 17 00:00:00 2001
+From 1a15149a3f713fc01364dd26b19fa5e1ee1d443a Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 15:13:34 +0900
 Subject: [PATCH] feat(custom): add execution account binding for 0.149

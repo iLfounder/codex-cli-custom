@@ -1,4 +1,4 @@
-From 77f4bb23fbc09c7708a5195d86221de30363aeeb Mon Sep 17 00:00:00 2001
+From f8e12fce9c4349f7a8095e81e1cf7ffce5382388 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 14:30:42 +0900
 Subject: [PATCH] feat(custom): add session runtime protocol for 0.149

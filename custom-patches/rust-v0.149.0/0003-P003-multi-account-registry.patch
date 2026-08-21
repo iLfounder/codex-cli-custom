@@ -1,4 +1,4 @@
-From 6a06834ed05c293aa758fa05ad30f3b360500149 Mon Sep 17 00:00:00 2001
+From b97064d256a9135d37a717a6125dd0b1d566b8c9 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 14:37:11 +0900
 Subject: [PATCH] feat(custom): add multi-account registry for 0.149

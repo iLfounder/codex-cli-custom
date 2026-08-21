@@ -1,4 +1,4 @@
-From d1c319b3b79e92624c43c84191b1878e71075689 Mon Sep 17 00:00:00 2001
+From 6ae486ffaf2803a85f8a0a242766f079867f9db5 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 20:14:51 +0900
 Subject: [PATCH] feat(custom): add structured plugin commands and TUI
@@ -57,11 +57,12 @@ Subject: [PATCH] feat(custom): add structured plugin commands and TUI
  .../core/src/tasks/plugin_executable_tests.rs |  19 +
  codex-rs/exec/src/lib.rs                      |   1 +
  codex-rs/tui/src/app.rs                       |   2 +
+ codex-rs/tui/src/app/account_controls.rs      |   3 +
  .../tui/src/app/app_server_event_targets.rs   |   3 +
  codex-rs/tui/src/app/app_server_events.rs     |  19 +
  codex-rs/tui/src/app/event_dispatch.rs        |  30 +
  codex-rs/tui/src/app/history_ui.rs            |   1 +
- codex-rs/tui/src/app/plugin_commands.rs       | 326 +++++++++
+ codex-rs/tui/src/app/plugin_commands.rs       | 335 ++++++++++
  codex-rs/tui/src/app/plugin_commands_tests.rs |  66 ++
  codex-rs/tui/src/app/session_lifecycle.rs     |   3 +
  codex-rs/tui/src/app/startup.rs               |   1 +
@@ -84,7 +85,7 @@ Subject: [PATCH] feat(custom): add structured plugin commands and TUI
  codex-rs/tui/src/history_cell/mod.rs          |   2 +
  .../tui/src/history_cell/plugin_surfaces.rs   | 158 +++++
  .../src/history_cell/plugin_surfaces_tests.rs |  42 ++
- 79 files changed, 5371 insertions(+), 39 deletions(-)
+ 80 files changed, 5383 insertions(+), 39 deletions(-)
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/PluginCommandInvokeParams.json
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/PluginCommandInvokeResponse.json
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/PluginCommandListParams.json
@@ -16452,7 +16453,7 @@ index 68bf5cea1..9057ff784 100644
  
  mod cli;
 diff --git a/codex-rs/tui/src/app.rs b/codex-rs/tui/src/app.rs
-index 30cd56b4f..9758f8da7 100644
+index eb91c37c3..208362a3a 100644
 --- a/codex-rs/tui/src/app.rs
 +++ b/codex-rs/tui/src/app.rs
 @@ -234,6 +234,7 @@ mod loaded_threads;
@@ -16463,7 +16464,7 @@ index 30cd56b4f..9758f8da7 100644
  mod plugin_mentions;
  mod replay_filter;
  mod resize_reflow;
-@@ -600,6 +601,7 @@ pub(crate) struct App {
+@@ -601,6 +602,7 @@ pub(crate) struct App {
      account_request_generation: u64,
      pending_account_control: Option<account_picker::PendingAccountControl>,
      pending_dynamic_thread_control: Option<dynamic_thread_controls::PendingDynamicThreadControl>,
@@ -16471,6 +16472,34 @@ index 30cd56b4f..9758f8da7 100644
  
      windows_sandbox: WindowsSandboxState,
  
+diff --git a/codex-rs/tui/src/app/account_controls.rs b/codex-rs/tui/src/app/account_controls.rs
+index 1ef49dfbc..b86b30093 100644
+--- a/codex-rs/tui/src/app/account_controls.rs
++++ b/codex-rs/tui/src/app/account_controls.rs
+@@ -140,6 +140,7 @@ impl App {
+             expected_state_revision: runtime.state_revision,
+             expected_execution_generation: current.execution_generation,
+         };
++        self.invalidate_plugin_command_catalog();
+         self.pending_account_control = Some(PendingAccountControl::Switch {
+             operation_id: operation_id.clone(),
+             thread_id,
+@@ -269,6 +270,7 @@ impl App {
+                     .unwrap_or_else(|| "Account switch failed.".to_string());
+                 self.pending_account_control = None;
+                 self.chat_widget.add_error_message(message);
++                self.refresh_plugin_commands(app_server);
+             }
+             SessionRuntimeOperationStatus::Accepted | SessionRuntimeOperationStatus::Running => {}
+             SessionRuntimeOperationStatus::Released => return false,
+@@ -299,6 +301,7 @@ impl App {
+                 self.pending_account_control = None;
+                 self.chat_widget
+                     .add_error_message(format!("Account switch failed: {error}"));
++                self.refresh_plugin_commands(app_server);
+             }
+         }
+     }
 diff --git a/codex-rs/tui/src/app/app_server_event_targets.rs b/codex-rs/tui/src/app/app_server_event_targets.rs
 index 2589f626b..2eafe0bb7 100644
 --- a/codex-rs/tui/src/app/app_server_event_targets.rs
@@ -16523,7 +16552,7 @@ index 6c6bdc1da..dae73bf87 100644
          }
          if let ServerNotification::ThreadStarted(started) = &notification
 diff --git a/codex-rs/tui/src/app/event_dispatch.rs b/codex-rs/tui/src/app/event_dispatch.rs
-index 08c0e85d7..107b176a1 100644
+index 2c32b900e..d99bc5664 100644
 --- a/codex-rs/tui/src/app/event_dispatch.rs
 +++ b/codex-rs/tui/src/app/event_dispatch.rs
 @@ -2129,6 +2129,36 @@ impl App {
@@ -16577,10 +16606,10 @@ index 024288de5..fb20c6c64 100644
  
 diff --git a/codex-rs/tui/src/app/plugin_commands.rs b/codex-rs/tui/src/app/plugin_commands.rs
 new file mode 100644
-index 000000000..300a51ae5
+index 000000000..622676a61
 --- /dev/null
 +++ b/codex-rs/tui/src/app/plugin_commands.rs
-@@ -0,0 +1,326 @@
+@@ -0,0 +1,335 @@
 +//! Exact-thread plugin command catalog, invocation, and ephemeral presentation projection.
 +
 +use super::*;
@@ -16607,12 +16636,16 @@ index 000000000..300a51ae5
 +}
 +
 +impl PluginCommandState {
-+    pub(super) fn clear_projection(&mut self) {
++    pub(super) fn invalidate_catalog(&mut self) {
 +        self.thread_id = None;
 +        self.commands.clear();
++        self.request_generation = self.request_generation.wrapping_add(1);
++    }
++
++    pub(super) fn clear_projection(&mut self) {
++        self.invalidate_catalog();
 +        self.presentations.clear();
 +        self.presentation_order.clear();
-+        self.request_generation = self.request_generation.wrapping_add(1);
 +    }
 +
 +    pub(super) fn clear_presentations(&mut self) {
@@ -16683,6 +16716,11 @@ index 000000000..300a51ae5
 +mod tests;
 +
 +impl App {
++    pub(super) fn invalidate_plugin_command_catalog(&mut self) {
++        self.plugin_command_state.invalidate_catalog();
++        self.chat_widget.set_plugin_commands(Vec::new());
++    }
++
 +    pub(super) fn refresh_plugin_commands(&mut self, app_server: &AppServerSession) {
 +        let Some(thread_id) = self.current_displayed_thread_id() else {
 +            self.plugin_command_state.clear_projection();
@@ -16994,10 +17032,10 @@ index 60e6c5400..67a101803 100644
          Self::clear_terminal_for_thread_switch(&mut tui.terminal)?;
          Ok(())
 diff --git a/codex-rs/tui/src/app/startup.rs b/codex-rs/tui/src/app/startup.rs
-index 132a8b802..011639cae 100644
+index ef51e9d3f..e6eb90106 100644
 --- a/codex-rs/tui/src/app/startup.rs
 +++ b/codex-rs/tui/src/app/startup.rs
-@@ -485,6 +485,7 @@ See the Codex keymap documentation for supported actions and examples."
+@@ -486,6 +486,7 @@ See the Codex keymap documentation for supported actions and examples."
              account_request_generation: 0,
              pending_account_control: None,
              pending_dynamic_thread_control: None,
@@ -17006,10 +17044,10 @@ index 132a8b802..011639cae 100644
              thread_event_channels: HashMap::new(),
              thread_event_listener_tasks: HashMap::new(),
 diff --git a/codex-rs/tui/src/app/test_support.rs b/codex-rs/tui/src/app/test_support.rs
-index 4c99bc543..5de7686be 100644
+index d24cca69a..732741cdf 100644
 --- a/codex-rs/tui/src/app/test_support.rs
 +++ b/codex-rs/tui/src/app/test_support.rs
-@@ -66,6 +66,7 @@ pub(super) async fn make_test_app() -> App {
+@@ -67,6 +67,7 @@ pub(super) async fn make_test_app() -> App {
          account_request_generation: 0,
          pending_account_control: None,
          pending_dynamic_thread_control: None,
@@ -17018,10 +17056,10 @@ index 4c99bc543..5de7686be 100644
          thread_event_channels: HashMap::new(),
          thread_event_listener_tasks: HashMap::new(),
 diff --git a/codex-rs/tui/src/app/tests.rs b/codex-rs/tui/src/app/tests.rs
-index 87176681a..d2d28fd2a 100644
+index c6f67de0e..7059b508f 100644
 --- a/codex-rs/tui/src/app/tests.rs
 +++ b/codex-rs/tui/src/app/tests.rs
-@@ -5309,6 +5309,7 @@ async fn make_test_app() -> App {
+@@ -5310,6 +5310,7 @@ async fn make_test_app() -> App {
          account_request_generation: 0,
          pending_account_control: None,
          pending_dynamic_thread_control: None,
@@ -17029,7 +17067,7 @@ index 87176681a..d2d28fd2a 100644
          windows_sandbox: WindowsSandboxState::default(),
          thread_event_channels: HashMap::new(),
          thread_event_listener_tasks: HashMap::new(),
-@@ -5394,6 +5395,7 @@ async fn make_test_app_with_channels() -> (
+@@ -5396,6 +5397,7 @@ async fn make_test_app_with_channels() -> (
              account_request_generation: 0,
              pending_account_control: None,
              pending_dynamic_thread_control: None,

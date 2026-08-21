@@ -1,4 +1,4 @@
-From e5742169328c65028fa91f5d322cece93b2b4b03 Mon Sep 17 00:00:00 2001
+From b1ddc10c4b78e4d2fccce58e0388ec2c30f42c73 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 18:06:29 +0900
 Subject: [PATCH] feat(custom): relinquish thread writers strictly for 0.149
@@ -75,7 +75,7 @@ index e58c9df42..25f068b6d 100644
                  .config_processor
                  .read(params)
 diff --git a/codex-rs/app-server/src/session_runtime/mod.rs b/codex-rs/app-server/src/session_runtime/mod.rs
-index 7fba3f742..a94e32e40 100644
+index b5533ded9..8a93006cc 100644
 --- a/codex-rs/app-server/src/session_runtime/mod.rs
 +++ b/codex-rs/app-server/src/session_runtime/mod.rs
 @@ -1,6 +1,7 @@
@@ -1598,7 +1598,7 @@ index 000000000..a435c467c
 +    assert!(matches!(competing, Err(ThreadStoreError::Conflict { .. })));
 +}
 diff --git a/codex-rs/thread-store/src/local/writer_lock.rs b/codex-rs/thread-store/src/local/writer_lock.rs
-index 5ed33b957..292e2f721 100644
+index fa08b6b32..c8bb4f68b 100644
 --- a/codex-rs/thread-store/src/local/writer_lock.rs
 +++ b/codex-rs/thread-store/src/local/writer_lock.rs
 @@ -31,7 +31,7 @@ pub(super) struct WriterLockGuard {
@@ -1619,7 +1619,7 @@ index 5ed33b957..292e2f721 100644
          })
      }
  
-@@ -239,9 +239,15 @@ impl WriterLockCoordinator {
+@@ -270,9 +270,15 @@ impl WriterLockCoordinator {
  
  impl WriterLockGuard {
      pub(super) fn with_generation(mut self, generation: WriterGeneration) -> Self {

@@ -23,7 +23,7 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
       CARGO_TERM_COLOR: always
       SOURCE_COMMIT: 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
-      PATCH_TREE: 60726621c5a599a513f76328a7791c332a2660bf
+      PATCH_TREE: 4d993b8b5960de01c6d2bafb4c1a7749c51280db
 
     steps:
       - name: Check out patch repository

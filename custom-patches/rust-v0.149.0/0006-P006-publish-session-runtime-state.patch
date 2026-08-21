@@ -1,4 +1,4 @@
-From 447b1e41e38ffae9c20522d073bf22541a114ba2 Mon Sep 17 00:00:00 2001
+From f5c232cbb5c26e946ca98fbfb7a4ef9844f0621e Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 16:46:40 +0900
 Subject: [PATCH] feat(custom): publish session runtime state for 0.149
@@ -8,7 +8,7 @@ Subject: [PATCH] feat(custom): publish session runtime state for 0.149
  codex-rs/app-server/src/message_processor.rs  |  23 +-
  .../request_processors/thread_lifecycle.rs    | 159 ++++--
  .../thread_lifecycle_tests.rs                 |  19 +
- .../app-server/src/session_runtime/mod.rs     | 272 ++++++++++
+ .../app-server/src/session_runtime/mod.rs     | 275 ++++++++++
  .../src/session_runtime/operations.rs         | 235 ++++++++
  .../src/session_runtime/pagination.rs         | 160 ++++++
  .../src/session_runtime/snapshot.rs           | 509 ++++++++++++++++++
@@ -23,7 +23,7 @@ Subject: [PATCH] feat(custom): publish session runtime state for 0.149
  codex-rs/thread-store/src/local/mod.rs        | 122 +++++
  .../src/local/runtime_snapshot_tests.rs       | 107 ++++
  codex-rs/thread-store/src/store.rs            |  81 +++
- 19 files changed, 2318 insertions(+), 79 deletions(-)
+ 19 files changed, 2321 insertions(+), 79 deletions(-)
  create mode 100644 codex-rs/app-server/src/request_processors/thread_lifecycle_tests.rs
  create mode 100644 codex-rs/app-server/src/session_runtime/mod.rs
  create mode 100644 codex-rs/app-server/src/session_runtime/operations.rs
@@ -472,10 +472,10 @@ index 000000000..efb9a2590
 +}
 diff --git a/codex-rs/app-server/src/session_runtime/mod.rs b/codex-rs/app-server/src/session_runtime/mod.rs
 new file mode 100644
-index 000000000..de9695c2e
+index 000000000..9459d21c6
 --- /dev/null
 +++ b/codex-rs/app-server/src/session_runtime/mod.rs
-@@ -0,0 +1,272 @@
+@@ -0,0 +1,275 @@
 +#[allow(dead_code)]
 +mod operations;
 +mod pagination;
@@ -603,6 +603,9 @@ index 000000000..de9695c2e
 +                .iter()
 +                .filter_map(|snapshot| ThreadId::from_string(&snapshot.thread_id).ok())
 +                .collect::<HashSet<_>>();
++            state
++                .threads
++                .retain(|thread_id, _runtime| listed_threads.contains(thread_id));
 +            if state.listed_threads != listed_threads {
 +                state.listed_threads = listed_threads;
 +                changed = true;
