@@ -2985,6 +2985,7 @@ impl App {
             }
             ExitMode::Immediate => {
                 self.pending_shutdown = None;
+                self.shutdown_force_exit_armed = false;
                 AppRunControl::Exit(ExitReason::UserRequested)
             }
         }

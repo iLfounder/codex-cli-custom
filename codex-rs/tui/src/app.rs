@@ -594,6 +594,7 @@ pub(crate) struct App {
 
     pending_shutdown: Option<runtime_controls::PendingShutdown>,
     shutdown_lookup_in_flight: bool,
+    shutdown_force_exit_armed: bool,
     account_slots: Vec<AccountSlotSnapshot>,
     account_slot_capability: Option<AccountSlotCapability>,
     account_registry_revision: u64,

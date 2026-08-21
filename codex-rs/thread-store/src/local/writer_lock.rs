@@ -108,8 +108,8 @@ impl WriterLockCoordinator {
             }
         }
 
-        drop(coordination_lock);
         self.owned_threads().insert(thread_id);
+        drop(coordination_lock);
         Ok(WriterLockGuard {
             coordinator: Arc::clone(self),
             thread_id,
@@ -122,6 +122,37 @@ impl WriterLockCoordinator {
     pub(super) fn probe(&self, thread_id: ThreadId) -> ThreadStoreResult<ThreadWriterOwnership> {
         if self.owned_threads().contains(&thread_id) {
             return Ok(ThreadWriterOwnership::OwnedHere);
+        }
+
+        let coordination_path = self.directory.join(COORDINATION_LOCK_FILE);
+        let coordination_lock = match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&coordination_path)
+        {
+            Ok(file) => Some(file),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+            Err(err) => {
+                return Err(ThreadStoreError::Internal {
+                    message: format!(
+                        "failed to inspect thread writer coordination lock {}: {err}",
+                        coordination_path.display()
+                    ),
+                });
+            }
+        };
+        if let Some(coordination_lock) = coordination_lock.as_ref() {
+            coordination_lock
+                .lock()
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!(
+                        "failed to acquire thread writer coordination lock {}: {err}",
+                        coordination_path.display()
+                    ),
+                })?;
+            if self.owned_threads().contains(&thread_id) {
+                return Ok(ThreadWriterOwnership::OwnedHere);
+            }
         }
 
         let path = self.directory.join(format!("{thread_id}.lock"));

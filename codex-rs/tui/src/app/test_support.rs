@@ -59,6 +59,7 @@ pub(super) async fn make_test_app() -> App {
         pending_update_action: None,
         pending_shutdown: None,
         shutdown_lookup_in_flight: false,
+        shutdown_force_exit_armed: false,
         account_slots: Vec::new(),
         account_slot_capability: None,
         account_registry_revision: 0,

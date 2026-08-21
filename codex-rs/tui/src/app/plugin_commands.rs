@@ -24,12 +24,16 @@ pub(super) struct PluginCommandState {
 }
 
 impl PluginCommandState {
-    pub(super) fn clear_projection(&mut self) {
+    pub(super) fn invalidate_catalog(&mut self) {
         self.thread_id = None;
         self.commands.clear();
+        self.request_generation = self.request_generation.wrapping_add(1);
+    }
+
+    pub(super) fn clear_projection(&mut self) {
+        self.invalidate_catalog();
         self.presentations.clear();
         self.presentation_order.clear();
-        self.request_generation = self.request_generation.wrapping_add(1);
     }
 
     pub(super) fn clear_presentations(&mut self) {
@@ -100,6 +104,11 @@ fn project_commands(commands: Vec<PluginCommand>) -> Vec<PluginSlashCommand> {
 mod tests;
 
 impl App {
+    pub(super) fn invalidate_plugin_command_catalog(&mut self) {
+        self.plugin_command_state.invalidate_catalog();
+        self.chat_widget.set_plugin_commands(Vec::new());
+    }
+
     pub(super) fn refresh_plugin_commands(&mut self, app_server: &AppServerSession) {
         let Some(thread_id) = self.current_displayed_thread_id() else {
             self.plugin_command_state.clear_projection();

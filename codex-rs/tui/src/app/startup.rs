@@ -478,6 +478,7 @@ See the Codex keymap documentation for supported actions and examples."
             pending_update_action: None,
             pending_shutdown: None,
             shutdown_lookup_in_flight: false,
+            shutdown_force_exit_armed: false,
             account_slots: Vec::new(),
             account_slot_capability: None,
             account_registry_revision: 0,
@@ -739,7 +740,7 @@ See the Codex keymap documentation for supported actions and examples."
                             }
                         } else {
                             tracing::warn!("terminal input stream closed; shutting down active thread");
-                            app.handle_exit_mode(&mut app_server, ExitMode::ShutdownFirst).await
+                            app.handle_exit_mode(&mut app_server, ExitMode::Immediate).await
                         }
                     }
                     app_server_event = app_server.next_event(), if listen_for_app_server_events => {

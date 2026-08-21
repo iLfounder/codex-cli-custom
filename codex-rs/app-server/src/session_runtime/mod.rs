@@ -132,6 +132,9 @@ impl SessionRuntimeEngine {
                 .iter()
                 .filter_map(|snapshot| ThreadId::from_string(&snapshot.thread_id).ok())
                 .collect::<HashSet<_>>();
+            state
+                .threads
+                .retain(|thread_id, _runtime| listed_threads.contains(thread_id));
             if state.listed_threads != listed_threads {
                 state.listed_threads = listed_threads;
                 changed = true;

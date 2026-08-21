@@ -140,6 +140,7 @@ impl App {
             expected_state_revision: runtime.state_revision,
             expected_execution_generation: current.execution_generation,
         };
+        self.invalidate_plugin_command_catalog();
         self.pending_account_control = Some(PendingAccountControl::Switch {
             operation_id: operation_id.clone(),
             thread_id,
@@ -269,6 +270,7 @@ impl App {
                     .unwrap_or_else(|| "Account switch failed.".to_string());
                 self.pending_account_control = None;
                 self.chat_widget.add_error_message(message);
+                self.refresh_plugin_commands(app_server);
             }
             SessionRuntimeOperationStatus::Accepted | SessionRuntimeOperationStatus::Running => {}
             SessionRuntimeOperationStatus::Released => return false,
@@ -299,6 +301,7 @@ impl App {
                 self.pending_account_control = None;
                 self.chat_widget
                     .add_error_message(format!("Account switch failed: {error}"));
+                self.refresh_plugin_commands(app_server);
             }
         }
     }

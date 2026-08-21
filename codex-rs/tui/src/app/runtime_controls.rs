@@ -55,9 +55,21 @@ impl App {
         app_server: &AppServerSession,
         intent: ShutdownIntent,
     ) {
+        if intent == ShutdownIntent::Exit
+            && (self.shutdown_force_exit_armed
+                || self.pending_shutdown.is_some()
+                || self.shutdown_lookup_in_flight)
+        {
+            self.shutdown_force_exit_armed = false;
+            self.pending_shutdown = None;
+            self.shutdown_lookup_in_flight = false;
+            self.app_event_tx.send(AppEvent::Exit(ExitMode::Immediate));
+            return;
+        }
         if self.pending_shutdown.is_some() || self.shutdown_lookup_in_flight {
             return;
         }
+        self.shutdown_force_exit_armed = false;
         let Some(thread_id) = self.current_displayed_thread_id() else {
             match intent {
                 ShutdownIntent::Exit => self.app_event_tx.send(AppEvent::Exit(ExitMode::Immediate)),
@@ -270,6 +282,7 @@ impl App {
         let Some(pending) = self.pending_shutdown.take() else {
             return;
         };
+        self.shutdown_force_exit_armed = false;
         match pending.intent {
             ShutdownIntent::Exit => self.app_event_tx.send(AppEvent::Exit(ExitMode::Immediate)),
             ShutdownIntent::LogoutDefault => self.app_event_tx.send(AppEvent::LogoutAfterRelease),
@@ -279,9 +292,11 @@ impl App {
     fn shutdown_control_failed(&mut self, message: String) {
         self.shutdown_lookup_in_flight = false;
         self.pending_shutdown = None;
+        self.shutdown_force_exit_armed = true;
         self.chat_widget.restore_after_shutdown_failure();
-        self.chat_widget
-            .add_error_message(format!("Could not safely release this session: {message}"));
+        self.chat_widget.add_error_message(format!(
+            "Could not safely release this session: {message} Repeat the quit shortcut to exit immediately."
+        ));
     }
 }
 
