@@ -22,8 +22,8 @@ fn resolved(namespace: &str, name: &str) -> ResolvedCommand {
 #[test]
 fn assigns_only_unambiguous_short_names_and_disables_canonical_collisions() {
     let mut commands = vec![
-        resolved("alpha", "review"),
-        resolved("beta", "review"),
+        resolved("alpha", "deploy"),
+        resolved("beta", "deploy"),
         resolved("alpha", "ship"),
         resolved("alpha", "ship"),
     ];
@@ -34,6 +34,25 @@ fn assigns_only_unambiguous_short_names_and_disables_canonical_collisions() {
     assert_eq!(commands[1].api.short_name, None);
     assert!(!commands[2].api.available);
     assert!(!commands[3].api.available);
+}
+
+#[test]
+fn suppresses_builtin_and_builtin_alias_short_names() {
+    let mut commands = vec![
+        resolved("alpha", "review"),
+        resolved("alpha", "clean"),
+        resolved("alpha", "inspect"),
+    ];
+
+    assign_resolution_names(&mut commands);
+
+    assert_eq!(
+        commands
+            .iter()
+            .map(|command| command.api.short_name.as_deref())
+            .collect::<Vec<_>>(),
+        vec![None, None, Some("/inspect")]
+    );
 }
 
 #[test]

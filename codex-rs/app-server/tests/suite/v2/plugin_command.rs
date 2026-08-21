@@ -66,7 +66,7 @@ enabled = true
     let command = commands.next().expect("prompt command");
     assert_eq!(goal_command.canonical_name, "/fixture:goal");
     assert_eq!(command.canonical_name, "/fixture:review");
-    assert_eq!(command.short_name.as_deref(), Some("/review"));
+    assert_eq!(command.short_name, None);
     let invoked: PluginCommandInvokeResponse = app
         .request(|request_id| ClientRequest::PluginCommandInvoke {
             request_id,

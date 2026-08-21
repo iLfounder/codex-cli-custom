@@ -44,6 +44,72 @@ const MAX_MCP_RESPONSE_LEN: usize = 64 * 1024;
 const MAX_PRESENTATION_ID_LEN: usize = 128;
 const MAX_PRESENTATION_TITLE_LEN: usize = 256;
 const MAX_PRESENTATION_BODY_LEN: usize = 16 * 1024;
+// Keep this synchronized with the slash spellings recognized by the 0.149 TUI. Both canonical
+// spellings and accepted aliases are reserved because built-ins win slash-command dispatch.
+const RESERVED_BUILTIN_COMMAND_NAMES: &[&str] = &[
+    "model",
+    "ide",
+    "permissions",
+    "keymap",
+    "vim",
+    "setup-default-sandbox",
+    "sandbox-add-read-dir",
+    "experimental",
+    "approve",
+    "memories",
+    "skills",
+    "import",
+    "hooks",
+    "review",
+    "rename",
+    "new",
+    "archive",
+    "delete",
+    "resume",
+    "fork",
+    "app",
+    "init",
+    "compact",
+    "plan",
+    "goal",
+    "agents",
+    "side",
+    "btw",
+    "copy",
+    "export",
+    "raw",
+    "diff",
+    "mention",
+    "status",
+    "cd",
+    "pwd",
+    "cwd",
+    "usage",
+    "debug-config",
+    "title",
+    "statusline",
+    "theme",
+    "pets",
+    "pet",
+    "mcp",
+    "apps",
+    "account",
+    "plugins",
+    "logout",
+    "quit",
+    "exit",
+    "feedback",
+    "rollout",
+    "ps",
+    "stop",
+    "clean",
+    "clear",
+    "personality",
+    "test-approval",
+    "subagents",
+    "debug-m-drop",
+    "debug-m-update",
+];
 
 pub(crate) struct PluginCommandRequestProcessor {
     thread_manager: Arc<ThreadManager>,
@@ -400,7 +466,7 @@ fn assign_resolution_names(commands: &mut [ResolvedCommand]) {
             .canonical_name
             .rsplit_once(':')
             .map_or(command.api.canonical_name.as_str(), |(_, name)| name);
-        if short_counts[name] == 1 {
+        if short_counts[name] == 1 && !RESERVED_BUILTIN_COMMAND_NAMES.contains(&name) {
             command.api.short_name = Some(format!("/{name}"));
         }
     }

@@ -188,10 +188,10 @@ Example with notification opt-out:
 - `thread/goal/clear` — clear the current persisted goal for a materialized thread; returns whether a goal was removed and emits `thread/goal/cleared` when state changes.
 - `thread/goal/updated` — notification emitted whenever a thread goal changes; includes the full current goal.
 - `thread/goal/cleared` — notification emitted whenever a thread goal is removed.
-- `pluginCommand/list` — experimental; list the enabled plugins' structured commands for one loaded thread. Commands use opaque ids, always expose a canonical `/namespace:name`, and expose a short `/name` only when it is unambiguous and does not collide with a built-in command.
-- `pluginCommand/invoke` — experimental; invoke one listed command by its opaque id. Prompt, declared MCP tool, goal, and packaged executable targets retain their respective thread, approval, sandbox, and size boundaries; clients cannot supply executable arguments, environment variables, or a working directory.
-- `thread/presentation/append` — experimental; deliver a bounded, ephemeral card, notice, or progress item to the thread's current subscribers. Presentation items are not added to model context, rollout history, or persistent storage.
-- `thread/presentation/appended` — experimental notification sent only to current subscribers of the exact thread.
+- `pluginCommand/list` — list the enabled plugins' structured commands for one loaded thread. Commands use opaque ids, always expose a canonical `/namespace:name`, and expose a short `/name` only when it is unambiguous and does not collide with a built-in command.
+- `pluginCommand/invoke` — invoke one listed command by its opaque id. Prompt, declared MCP tool, goal, and packaged executable targets retain their respective thread, approval, sandbox, and size boundaries; clients cannot supply executable arguments, environment variables, or a working directory.
+- `thread/presentation/append` — deliver a bounded, ephemeral card, notice, or progress item to the thread's current subscribers. Presentation items are not added to model context, rollout history, or persistent storage.
+- `thread/presentation/appended` — notification sent only to current subscribers of the exact thread.
 - `thread/queue/add` — experimental; persist a user turn for automatic FIFO submission when the thread next becomes idle.
 - `thread/queue/list` — experimental; return one page of a thread's queued turns.
 - `thread/queue/update` — experimental; edit a queued turn while preserving its stable submission ID, client message ID, and position.
@@ -792,7 +792,7 @@ Use `thread/goal/clear` to remove the current goal.
 { "method": "thread/goal/cleared", "params": { "threadId": "thr_123" } }
 ```
 
-### Example: List and invoke plugin commands (experimental)
+### Example: List and invoke plugin commands
 
 List commands against the exact loaded thread, then invoke the selected opaque `id`. Clients should display `canonicalName` as the stable spelling and use `shortName` only when it is present.
 
@@ -805,9 +805,9 @@ List commands against the exact loaded thread, then invoke the selected opaque `
 { "id": 31, "result": { "data": [{
     "id": "opaque-command-id",
     "pluginId": "example-plugin",
-    "canonicalName": "/example:status",
-    "shortName": "/status",
-    "description": "Show plugin status",
+    "canonicalName": "/example:inspect",
+    "shortName": "/inspect",
+    "description": "Inspect plugin status",
     "target": { "type": "prompt" },
     "available": true,
     "denyReason": null
@@ -820,7 +820,7 @@ List commands against the exact loaded thread, then invoke the selected opaque `
 { "id": 32, "result": { "type": "prompt", "prompt": "Summarize plugin status." } }
 ```
 
-### Example: Append ephemeral thread presentation (experimental)
+### Example: Append ephemeral thread presentation
 
 Presentation delivery is subscriber-only and non-persistent. Reuse an item `id` when the client should update an existing card or progress row instead of adding another one.
 
