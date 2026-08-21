@@ -16,6 +16,8 @@ use crate::error_code::internal_error;
 use crate::error_code::invalid_params;
 
 const MAX_TERMINAL_OPERATIONS: usize = 128;
+const MAX_ACTIVE_OPERATIONS: usize = 128;
+const MAX_OPERATION_ID_BYTES: usize = 128;
 
 #[derive(Default)]
 pub(super) struct OperationCache {
@@ -28,6 +30,13 @@ impl SessionRuntimeEngine {
         &self,
         operation: SessionRuntimeOperation,
     ) -> Result<SessionRuntimeOperation, JSONRPCErrorError> {
+        if operation.operation_id.is_empty()
+            || operation.operation_id.len() > MAX_OPERATION_ID_BYTES
+        {
+            return Err(invalid_params(
+                "operationId must contain between 1 and 128 bytes",
+            ));
+        }
         let _build_guard = self
             .build_lock
             .acquire()
@@ -46,6 +55,18 @@ impl SessionRuntimeEngine {
             if !valid_initial_status(operation.status) {
                 return Err(invalid_params(
                     "new runtime operations must start in accepted status",
+                ));
+            }
+            if state
+                .operations
+                .operations
+                .values()
+                .filter(|operation| !is_terminal(operation.status))
+                .count()
+                >= MAX_ACTIVE_OPERATIONS
+            {
+                return Err(invalid_params(
+                    "too many runtime operations are still active",
                 ));
             }
             state.sequence = state.sequence.saturating_add(1);

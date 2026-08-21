@@ -47,7 +47,22 @@ impl SessionRuntimeEngine {
                 )
                 .await;
         }
-        let snapshot = self.refresh_snapshot_for_control(thread_id).await?;
+        let snapshot = match self.refresh_snapshot_for_control(thread_id).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                let _ = self
+                    .update_operation_status(
+                        &params.operation_id,
+                        SessionRuntimeOperationStatus::Failed,
+                        Some(SessionRuntimeOperationError {
+                            code: "runtime_snapshot_unavailable".to_string(),
+                            message: "thread runtime snapshot is unavailable".to_string(),
+                        }),
+                    )
+                    .await;
+                return Err(error);
+            }
+        };
         if snapshot.state_revision != params.expected_state_revision {
             return self
                 .failed_switch(
