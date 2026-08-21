@@ -105,6 +105,12 @@ pub use rollout_migration::RolloutMigrationOutcome;
 pub use rollout_migration::RolloutMigrationProgress;
 pub use rollout_migration::RolloutMigrationReport;
 pub use rollout_migration::RolloutMigrationStatus;
+pub use writer_lock::ThreadWriterAuthority;
+pub use writer_lock::ThreadWriterOwnership;
+pub use writer_lock::WriterControlCapability;
+
+const WRITER_CONTROL_UNAVAILABLE_REASON: &str =
+    "persistent writer control requires the state database";
 
 /// Local filesystem/SQLite-backed implementation of [`ThreadStore`].
 ///
@@ -231,7 +237,7 @@ impl std::fmt::Debug for LocalThreadStore {
 impl LocalThreadStore {
     /// Create a local store using an already initialized state DB handle.
     pub fn new(config: LocalThreadStoreConfig, state_db: Option<StateDbHandle>) -> Self {
-        let writer_lock_coordinator = Arc::new(WriterLockCoordinator::new(&config.codex_home));
+        let writer_lock_coordinator = Arc::new(WriterLockCoordinator::new(config.sqlite.home()));
         Self {
             config,
             live_recorders: Arc::new(Mutex::new(HashMap::new())),
@@ -247,6 +253,36 @@ impl LocalThreadStore {
     /// Return the state DB handle used by local rollout writers.
     pub async fn state_db(&self) -> Option<StateDbHandle> {
         self.state_db.clone()
+    }
+
+    /// Probe current writer ownership and persistent control metadata without
+    /// creating, deleting, or taking ownership of a thread lock.
+    pub async fn probe_writer_authority(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreResult<ThreadWriterAuthority> {
+        let ownership = self.writer_lock_coordinator.probe(thread_id)?;
+        let Some(state_db) = self.state_db.as_ref() else {
+            return Ok(ThreadWriterAuthority {
+                ownership,
+                generation: None,
+                control: WriterControlCapability::Disabled {
+                    reason: WRITER_CONTROL_UNAVAILABLE_REASON.to_string(),
+                },
+            });
+        };
+        let generation = state_db.writer_generation(thread_id).await.map_err(|err| {
+            ThreadStoreError::Internal {
+                message: format!("failed to read writer generation for {thread_id}: {err}"),
+            }
+        })?;
+        Ok(ThreadWriterAuthority {
+            ownership,
+            generation: generation.as_ref().map(|generation| generation.generation),
+            control: WriterControlCapability::Enabled {
+                store_id: state_db.writer_store_id().to_string(),
+            },
+        })
     }
 
     async fn thread_history_db(&self) -> ThreadStoreResult<&sqlx::SqlitePool> {
@@ -298,6 +334,20 @@ impl LocalThreadStore {
         Ok(())
     }
 
+    async fn acquire_writer_lock(&self, thread_id: ThreadId) -> ThreadStoreResult<WriterLockGuard> {
+        let writer_lock = self.writer_lock_coordinator.acquire(thread_id)?;
+        let Some(state_db) = self.state_db.as_ref() else {
+            return Ok(writer_lock);
+        };
+        let generation = state_db
+            .next_writer_generation(thread_id)
+            .await
+            .map_err(|err| ThreadStoreError::Internal {
+                message: format!("failed to advance writer generation for {thread_id}: {err}"),
+            })?;
+        Ok(writer_lock.with_generation(generation))
+    }
+
     async fn acquire_writer_locks(
         &self,
         thread_ids: &[ThreadId],
@@ -307,7 +357,7 @@ impl LocalThreadStore {
             if self.live_recorders.lock().await.contains_key(&thread_id) {
                 continue;
             }
-            writer_locks.push(self.writer_lock_coordinator.acquire(thread_id)?);
+            writer_locks.push(self.acquire_writer_lock(thread_id).await?);
         }
         Ok(writer_locks)
     }

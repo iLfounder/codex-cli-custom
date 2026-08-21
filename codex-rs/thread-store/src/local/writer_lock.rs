@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -5,10 +6,12 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
 use codex_protocol::ThreadId;
+use codex_state::WriterGeneration;
 use tracing::warn;
 
 use crate::ThreadStoreError;
@@ -20,19 +23,46 @@ const COORDINATION_LOCK_FILE: &str = ".coordination.lock";
 pub(super) struct WriterLockCoordinator {
     directory: PathBuf,
     cleanup_attempted: AtomicBool,
+    owned_threads: Mutex<HashSet<ThreadId>>,
 }
 
 pub(super) struct WriterLockGuard {
     coordinator: Arc<WriterLockCoordinator>,
+    thread_id: ThreadId,
     path: PathBuf,
     file: Option<File>,
+    _generation: Option<WriterGeneration>,
+}
+
+/// Filesystem ownership observed for one exact thread UUID.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ThreadWriterOwnership {
+    None,
+    OwnedHere,
+    OwnedElsewhere,
+}
+
+/// Whether persistent writer control metadata is available.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WriterControlCapability {
+    Enabled { store_id: String },
+    Disabled { reason: String },
+}
+
+/// Non-mutating writer authority snapshot for one exact thread UUID.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ThreadWriterAuthority {
+    pub ownership: ThreadWriterOwnership,
+    pub generation: Option<u64>,
+    pub control: WriterControlCapability,
 }
 
 impl WriterLockCoordinator {
-    pub(super) fn new(codex_home: &Path) -> Self {
+    pub(super) fn new(sqlite_home: &Path) -> Self {
         Self {
-            directory: codex_home.join(WRITER_LOCK_DIR),
+            directory: sqlite_home.join(WRITER_LOCK_DIR),
             cleanup_attempted: AtomicBool::new(false),
+            owned_threads: Mutex::new(HashSet::new()),
         }
     }
 
@@ -79,11 +109,46 @@ impl WriterLockCoordinator {
         }
 
         drop(coordination_lock);
+        self.owned_threads().insert(thread_id);
         Ok(WriterLockGuard {
             coordinator: Arc::clone(self),
+            thread_id,
             path,
             file: Some(file),
+            _generation: None,
         })
+    }
+
+    pub(super) fn probe(&self, thread_id: ThreadId) -> ThreadStoreResult<ThreadWriterOwnership> {
+        if self.owned_threads().contains(&thread_id) {
+            return Ok(ThreadWriterOwnership::OwnedHere);
+        }
+
+        let path = self.directory.join(format!("{thread_id}.lock"));
+        let file = match OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                return Ok(ThreadWriterOwnership::None);
+            }
+            Err(err) => {
+                return Err(ThreadStoreError::Internal {
+                    message: format!(
+                        "failed to inspect thread writer lock {}: {err}",
+                        path.display()
+                    ),
+                });
+            }
+        };
+        match file.try_lock() {
+            Ok(()) => Ok(ThreadWriterOwnership::None),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(ThreadWriterOwnership::OwnedElsewhere),
+            Err(std::fs::TryLockError::Error(err)) => Err(ThreadStoreError::Internal {
+                message: format!(
+                    "failed to inspect thread writer lock {}: {err}",
+                    path.display()
+                ),
+            }),
+        }
     }
 
     fn lock_coordination(&self) -> ThreadStoreResult<File> {
@@ -113,6 +178,13 @@ impl WriterLockCoordinator {
             ),
         })?;
         Ok(file)
+    }
+
+    fn owned_threads(&self) -> std::sync::MutexGuard<'_, HashSet<ThreadId>> {
+        match self.owned_threads.lock() {
+            Ok(owned_threads) => owned_threads,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 
     fn remove_stale_thread_locks(&self) -> io::Result<()> {
@@ -165,8 +237,16 @@ impl WriterLockCoordinator {
     }
 }
 
+impl WriterLockGuard {
+    pub(super) fn with_generation(mut self, generation: WriterGeneration) -> Self {
+        self._generation = Some(generation);
+        self
+    }
+}
+
 impl Drop for WriterLockGuard {
     fn drop(&mut self) {
+        self.coordinator.owned_threads().remove(&self.thread_id);
         let coordination_lock = match self.coordinator.lock_coordination() {
             Ok(lock) => lock,
             Err(err) => {

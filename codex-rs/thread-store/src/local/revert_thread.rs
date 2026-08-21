@@ -33,7 +33,7 @@ pub(super) async fn revert(
     let _lifecycle_guard = store.live_writer_locks.lock_lifecycle(thread_id).await;
     let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
     store.ensure_live_recorder_absent(thread_id).await?;
-    let _writer_lock = store.writer_lock_coordinator.acquire(thread_id)?;
+    let _writer_lock = store.acquire_writer_lock(thread_id).await?;
 
     // Resolution may return a compressed sibling. Keep SQLite's exact stored path for the CAS.
     let expected_sqlite_path = state_db
