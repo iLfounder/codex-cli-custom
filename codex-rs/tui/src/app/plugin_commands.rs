@@ -41,11 +41,17 @@ fn bounded(value: &str, max_chars: usize) -> String {
     result
 }
 
+fn projected_command_name(name: &str) -> String {
+    name.strip_prefix('/').unwrap_or(name).to_string()
+}
+
 fn project_commands(commands: Vec<PluginCommand>) -> Vec<PluginSlashCommand> {
     let mut short_counts = HashMap::new();
     for command in &commands {
         if let Some(short_name) = &command.short_name {
-            *short_counts.entry(short_name.clone()).or_insert(0usize) += 1;
+            *short_counts
+                .entry(projected_command_name(short_name))
+                .or_insert(0usize) += 1;
         }
     }
 
@@ -54,7 +60,7 @@ fn project_commands(commands: Vec<PluginCommand>) -> Vec<PluginSlashCommand> {
         .flat_map(|command| {
             let canonical = PluginSlashCommand {
                 id: command.id.clone(),
-                name: command.canonical_name,
+                name: projected_command_name(&command.canonical_name),
                 description: bounded(&command.description, 240),
                 available: command.available,
                 deny_reason: command
@@ -63,22 +69,29 @@ fn project_commands(commands: Vec<PluginCommand>) -> Vec<PluginSlashCommand> {
                     .map(|value| bounded(value, 240)),
                 canonical: true,
             };
-            let short = command.short_name.and_then(|name| {
-                (short_counts.get(&name) == Some(&1) && !is_builtin_command_name(&name)).then(
-                    || PluginSlashCommand {
-                        id: command.id,
-                        name,
-                        description: canonical.description.clone(),
-                        available: canonical.available,
-                        deny_reason: canonical.deny_reason.clone(),
-                        canonical: false,
-                    },
-                )
-            });
+            let short = command
+                .short_name
+                .map(|name| projected_command_name(&name))
+                .and_then(|name| {
+                    (short_counts.get(&name) == Some(&1) && !is_builtin_command_name(&name)).then(
+                        || PluginSlashCommand {
+                            id: command.id,
+                            name,
+                            description: canonical.description.clone(),
+                            available: canonical.available,
+                            deny_reason: canonical.deny_reason.clone(),
+                            canonical: false,
+                        },
+                    )
+                });
             std::iter::once(canonical).chain(short)
         })
         .collect()
 }
+
+#[cfg(test)]
+#[path = "plugin_commands_tests.rs"]
+mod tests;
 
 impl App {
     pub(super) fn refresh_plugin_commands(&mut self, app_server: &AppServerSession) {

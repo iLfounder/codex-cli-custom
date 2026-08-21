@@ -63,6 +63,10 @@ impl PluginExecutableTask {
     }
 }
 
+fn plugin_hook_command(command: &[String]) -> String {
+    codex_shell_command::parse_command::shlex_join(command)
+}
+
 impl SessionTask for PluginExecutableTask {
     fn kind(&self) -> TaskKind {
         TaskKind::Regular
@@ -156,7 +160,7 @@ async fn execute_plugin_executable(
     let request = ExecCommandRequest {
         command: command.clone(),
         shell_type,
-        hook_command: command.join(" "),
+        hook_command: plugin_hook_command(&command),
         process_id,
         yield_time_ms: MAX_YIELD_TIME_MS,
         max_output_tokens: Some(DEFAULT_MAX_OUTPUT_TOKENS),
@@ -207,3 +211,7 @@ async fn execute_plugin_executable(
         timed_out,
     })
 }
+
+#[cfg(test)]
+#[path = "plugin_executable_tests.rs"]
+mod tests;
