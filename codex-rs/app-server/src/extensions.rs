@@ -22,7 +22,6 @@ use codex_extension_api::ExtensionWarning;
 use codex_goal_extension::GoalExtensionConfig;
 use codex_goal_extension::GoalService;
 use codex_http_client::HttpClientFactory;
-use codex_login::AuthManager;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::protocol::Event;
@@ -37,7 +36,6 @@ use crate::thread_state::ThreadStateManager;
 
 pub(crate) struct ThreadExtensionDependencies {
     pub(crate) event_sink: Arc<dyn ExtensionEventSink>,
-    pub(crate) auth_manager: Arc<AuthManager>,
     pub(crate) state_db: Option<StateDbHandle>,
     pub(crate) analytics_events_client: AnalyticsEventsClient,
     pub(crate) thread_manager: Weak<ThreadManager>,
@@ -59,7 +57,6 @@ where
 {
     let ThreadExtensionDependencies {
         event_sink,
-        auth_manager,
         state_db,
         analytics_events_client,
         thread_manager,
@@ -88,23 +85,13 @@ where
             },
         );
     }
-    codex_git_attribution::install(
-        &mut builder,
-        auth_manager.clone(),
-        git_attribution_base_url,
-        http_client_factory,
-    );
-    codex_guardian_v2::install(
-        &mut builder,
-        guardian_agent_spawner,
-        auth_manager.clone(),
-        thread_manager,
-    );
+    codex_git_attribution::install(&mut builder, git_attribution_base_url, http_client_factory);
+    codex_guardian_v2::install(&mut builder, guardian_agent_spawner, thread_manager);
     codex_memories_extension::install(&mut builder, codex_otel::global());
     codex_mcp_extension::install(&mut builder);
     codex_mcp_extension::install_executor_plugins(&mut builder, environment_manager);
-    codex_web_search_extension::install(&mut builder, auth_manager.clone());
-    codex_image_generation_extension::install(&mut builder, auth_manager, |config: &Config| {
+    codex_web_search_extension::install(&mut builder);
+    codex_image_generation_extension::install(&mut builder, |config: &Config| {
         Some(config.codex_home.clone())
     });
     let skill_providers = codex_skills_extension::SkillProviders::new()

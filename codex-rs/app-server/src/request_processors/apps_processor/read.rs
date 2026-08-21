@@ -27,7 +27,10 @@ impl AppsRequestProcessor {
             .filter(|app_id| seen_app_ids.insert(app_id.clone()))
             .collect::<Vec<_>>();
         let config = self.load_apps_config(thread_id.as_deref()).await?;
-        let auth = self.auth_manager.auth().await;
+        let (auth_manager, execution_services) = self
+            .execution_account_resources(thread_id.as_deref())
+            .await?;
+        let auth = auth_manager.auth().await;
         if !config
             .features
             .apps_enabled_for_auth(auth.as_ref().is_some_and(CodexAuth::uses_codex_backend))
@@ -49,9 +52,8 @@ impl AppsRequestProcessor {
         } = connectors::read_connector_metadata(&config, auth, &app_ids, include_tools)
             .await
             .map_err(|err| internal_error(format!("failed to read app metadata: {err}")))?;
-        let loaded_plugins = self
-            .thread_manager
-            .plugins_manager()
+        let loaded_plugins = execution_services
+            .plugins_manager
             .plugins_for_config(&config.plugins_config_input())
             .await;
         let connector_snapshot =

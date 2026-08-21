@@ -19,9 +19,11 @@ use codex_core::config::Config;
 pub use codex_core::connectors::list_accessible_connectors_from_mcp_tools;
 pub use codex_core::connectors::list_accessible_connectors_from_mcp_tools_with_environment_manager;
 pub use codex_core::connectors::list_accessible_connectors_from_mcp_tools_with_mcp_manager;
+pub use codex_core::connectors::list_accessible_connectors_from_mcp_tools_with_mcp_manager_and_auth;
 pub use codex_core::connectors::list_accessible_connectors_from_mcp_tools_with_options;
 pub use codex_core::connectors::list_accessible_connectors_from_mcp_tools_with_options_and_status;
 pub use codex_core::connectors::list_cached_accessible_connectors_from_mcp_tools;
+pub use codex_core::connectors::list_cached_accessible_connectors_from_mcp_tools_with_auth;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_plugin::AppConnectorId;
@@ -39,6 +41,12 @@ async fn apps_enabled(config: &Config) -> anyhow::Result<bool> {
     Ok(config
         .features
         .apps_enabled_for_auth(auth.as_ref().is_some_and(CodexAuth::uses_codex_backend)))
+}
+
+fn apps_enabled_with_auth(config: &Config, auth: Option<&CodexAuth>) -> bool {
+    config
+        .features
+        .apps_enabled_for_auth(auth.is_some_and(CodexAuth::uses_codex_backend))
 }
 
 async fn connector_auth(config: &Config) -> anyhow::Result<CodexAuth> {
@@ -75,19 +83,21 @@ pub async fn list_connectors(config: &Config) -> anyhow::Result<Vec<AppInfo>> {
 }
 
 pub async fn list_all_connectors(config: &Config) -> anyhow::Result<Vec<AppInfo>> {
-    list_all_connectors_with_options(config, /*force_refetch*/ false, &[]).await
+    let auth = connector_auth(config).await?;
+    list_all_connectors_with_options(config, &auth, /*force_refetch*/ false, &[]).await
 }
 
 pub async fn list_cached_all_connectors(
     config: &Config,
+    auth: Option<&CodexAuth>,
     plugin_apps: &[AppConnectorId],
 ) -> Option<Vec<AppInfo>> {
-    if !apps_enabled(config).await.ok()? {
+    if !apps_enabled_with_auth(config, auth) {
         return Some(Vec::new());
     }
 
-    let auth = connector_auth(config).await.ok()?;
-    let cache_context = connector_directory_cache_context(config, &auth);
+    let auth = auth?;
+    let cache_context = connector_directory_cache_context(config, auth);
     let connectors = codex_connectors::cached_directory_connectors(&cache_context)?;
     Some(merge_directory_and_plugin_connectors(
         connectors,
@@ -97,14 +107,14 @@ pub async fn list_cached_all_connectors(
 
 pub async fn list_all_connectors_with_options(
     config: &Config,
+    auth: &CodexAuth,
     force_refetch: bool,
     plugin_apps: &[AppConnectorId],
 ) -> anyhow::Result<Vec<AppInfo>> {
-    if !apps_enabled(config).await? {
+    if !apps_enabled_with_auth(config, Some(auth)) {
         return Ok(Vec::new());
     }
-    let auth = connector_auth(config).await?;
-    let cache_context = connector_directory_cache_context(config, &auth);
+    let cache_context = connector_directory_cache_context(config, auth);
     let connectors = codex_connectors::list_all_connectors_with_options(
         cache_context,
         auth.is_workspace_account(),
@@ -112,6 +122,7 @@ pub async fn list_all_connectors_with_options(
         |path| async move {
             chatgpt_get_request_with_timeout::<DirectoryListResponse>(
                 config,
+                auth,
                 path,
                 Some(DIRECTORY_CONNECTORS_TIMEOUT),
             )

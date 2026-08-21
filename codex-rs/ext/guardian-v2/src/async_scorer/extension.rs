@@ -7,6 +7,7 @@ use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 
+use codex_core::ExecutionAccountContext;
 use codex_core::ThreadManager;
 use codex_core::config::Config;
 use codex_core::context::NodeReplReviewEvidence;
@@ -28,7 +29,6 @@ use codex_extension_api::ToolPayload;
 use codex_extension_api::ToolStartInput;
 use codex_features::Feature;
 use codex_login::AgentIdentityAuthPolicy;
-use codex_login::AuthManager;
 use codex_model_provider::create_model_provider;
 use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ModelInfo;
@@ -251,7 +251,6 @@ fn record_classification(
 
 #[derive(Clone)]
 struct GuardianV2Extension {
-    auth_manager: Arc<AuthManager>,
     event_sink: Arc<dyn ExtensionEventSink>,
     thread_manager: Weak<ThreadManager>,
 }
@@ -269,6 +268,10 @@ impl ThreadLifecycleContributor<Config> for GuardianV2Extension {
             }
 
             let thread_id = input.thread_store.level_id().to_string();
+            let Some(execution_account) = input.session_store.get::<ExecutionAccountContext>()
+            else {
+                return;
+            };
             let guardian_config = match GuardianV2Config::resolve(input.config) {
                 Ok(config) => config,
                 Err(error) => {
@@ -280,19 +283,15 @@ impl ThreadLifecycleContributor<Config> for GuardianV2Extension {
                     return;
                 }
             };
-            let luna_compaction_hash = if let Some(thread_manager) = self.thread_manager.upgrade() {
-                thread_manager
-                    .get_models_manager()
-                    .get_model_info(MODEL, &input.config.to_models_manager_config())
-                    .await
-                    .comp_hash
-            } else {
-                None
-            };
+            let luna_compaction_hash = execution_account
+                .models_manager
+                .get_model_info(MODEL, &input.config.to_models_manager_config())
+                .await
+                .comp_hash;
             let sampler = LunaSampler::connect(LunaSamplerConfig {
                 provider: create_model_provider(
                     input.config.model_provider.clone(),
-                    Some(Arc::clone(&self.auth_manager)),
+                    Some(Arc::clone(&execution_account.auth_manager)),
                 ),
                 http_client_factory: input.config.http_client_factory(),
                 agent_identity_policy: if input.config.features.enabled(Feature::UseAgentIdentity) {
@@ -544,7 +543,7 @@ impl GuardianV2Extension {
                 Ok((manager, thread))
             }
             .await;
-            let (manager, thread) = match thread_context {
+            let (_manager, thread) = match thread_context {
                 Ok(context) => context,
                 Err(error) => {
                     score_progress
@@ -602,14 +601,16 @@ impl GuardianV2Extension {
                 let config = thread.config().await;
                 let review_model_messages = if config.guardian_policy_config.is_none() {
                     let review_model_id = review_model_override.as_deref().unwrap_or_else(|| {
+                        let execution_account = thread.execution_account();
                         create_model_provider(
                             config.model_provider.clone(),
-                            Some(manager.auth_manager()),
+                            Some(Arc::clone(&execution_account.auth_manager)),
                         )
                         .approval_review_preferred_model()
                     });
-                    let review_model = manager
-                        .get_models_manager()
+                    let execution_account = thread.execution_account();
+                    let review_model = execution_account
+                        .models_manager
                         .get_model_info(review_model_id, &config.to_models_manager_config())
                         .await;
                     if review_model.used_fallback_model_metadata && review_model_override.is_none()
@@ -755,11 +756,9 @@ fn encrypted_parent_compaction<'a>(
 /// Installs feature-gated Guardian V2 tool classification for each thread.
 pub fn install(
     registry: &mut ExtensionRegistryBuilder<Config>,
-    auth_manager: Arc<AuthManager>,
     thread_manager: Weak<ThreadManager>,
 ) {
     let extension = Arc::new(GuardianV2Extension {
-        auth_manager,
         event_sink: registry.event_sink(),
         thread_manager,
     });

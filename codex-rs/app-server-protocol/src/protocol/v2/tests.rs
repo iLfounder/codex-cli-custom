@@ -3494,20 +3494,23 @@ fn hook_handler_metadata_only_exposes_async_for_commands() {
 fn skills_list_params_serialization_uses_force_reload() {
     assert_eq!(
         serde_json::to_value(SkillsListParams {
+            thread_id: None,
             cwds: Vec::new(),
             force_reload: false,
         })
         .unwrap(),
-        json!({}),
+        json!({ "threadId": null }),
     );
 
     assert_eq!(
         serde_json::to_value(SkillsListParams {
+            thread_id: None,
             cwds: vec![PathBuf::from("/repo")],
             force_reload: true,
         })
         .unwrap(),
         json!({
+            "threadId": null,
             "cwds": ["/repo"],
             "forceReload": true,
         }),

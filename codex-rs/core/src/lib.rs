@@ -113,6 +113,7 @@ pub use codex_prompts as review_prompts;
 pub use execution_account::ExecutionAccountContext;
 pub use execution_account::ExecutionAccountResolver;
 pub use execution_account::ExecutionAccountResolverFuture;
+pub use execution_account::ExecutionAccountServices;
 mod thread_manager;
 pub(crate) mod web_search;
 pub(crate) mod windows_sandbox_read_grants;

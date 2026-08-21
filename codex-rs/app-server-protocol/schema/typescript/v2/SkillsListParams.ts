@@ -4,6 +4,10 @@
 
 export type SkillsListParams = {
 /**
+ * When set, resolve account-bound plugins for this thread.
+ */
+threadId?: string | null,
+/**
  * When empty, defaults to the current session working directory.
  */
 cwds?: Array<string>,

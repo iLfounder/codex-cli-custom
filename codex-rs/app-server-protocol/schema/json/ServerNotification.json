@@ -465,6 +465,12 @@
             "$ref": "#/definitions/AppInfo"
           },
           "type": "array"
+        },
+        "threadId": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [

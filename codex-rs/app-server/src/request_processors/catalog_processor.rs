@@ -238,6 +238,39 @@ impl CatalogRequestProcessor {
             .map_err(|err| internal_error(format!("failed to reload config: {err}")))
     }
 
+    async fn account_catalog_context(
+        &self,
+        thread_id: Option<&str>,
+    ) -> Result<(Config, ExecutionAccountServices), JSONRPCErrorError> {
+        let Some(thread_id) = thread_id else {
+            return Ok((
+                self.load_latest_config(/*fallback_cwd*/ None).await?,
+                ExecutionAccountServices {
+                    plugins_manager: self.thread_manager.plugins_manager(),
+                    mcp_manager: self.thread_manager.mcp_manager(),
+                },
+            ));
+        };
+        let thread_id = ThreadId::from_string(thread_id)
+            .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
+        let thread = self
+            .thread_manager
+            .get_thread(thread_id)
+            .await
+            .map_err(|_| invalid_request(format!("thread not found: {thread_id}")))?;
+        let thread_config = thread.config().await;
+        let config = self
+            .config_manager
+            .load_latest_config_for_thread(thread_config.as_ref())
+            .await
+            .map_err(|err| internal_error(format!("failed to reload config: {err}")))?;
+        let execution_account = thread.execution_account();
+        let services = self
+            .thread_manager
+            .execution_account_services(&execution_account);
+        Ok((config, services))
+    }
+
     async fn list_models(
         thread_manager: Arc<ThreadManager>,
         http_client_factory: codex_http_client::HttpClientFactory,
@@ -471,16 +504,21 @@ impl CatalogRequestProcessor {
         &self,
         params: SkillsListParams,
     ) -> Result<SkillsListResponse, JSONRPCErrorError> {
-        let SkillsListParams { cwds, force_reload } = params;
+        let SkillsListParams {
+            thread_id,
+            cwds,
+            force_reload,
+        } = params;
         let cwds = if cwds.is_empty() {
             vec![self.config.cwd.to_path_buf()]
         } else {
             cwds
         };
 
-        let config = self.load_latest_config(/*fallback_cwd*/ None).await?;
+        let (config, execution_services) =
+            self.account_catalog_context(thread_id.as_deref()).await?;
         let skills_service = self.thread_manager.skills_service();
-        let plugins_manager = self.thread_manager.plugins_manager();
+        let plugins_manager = execution_services.plugins_manager;
         if force_reload && config.features.enabled(Feature::Plugins) {
             plugins_manager.clear_cache();
             skills_service.clear_cache();

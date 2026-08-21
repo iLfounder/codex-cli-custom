@@ -767,6 +767,7 @@ impl App {
                 self.handle_skills_list_result(
                     app_server
                         .skills_list(codex_app_server_protocol::SkillsListParams {
+                            thread_id: Some(thread_id.to_string()),
                             cwds: cwds.clone(),
                             force_reload: *force_reload,
                         })

@@ -887,6 +887,7 @@ pub(super) async fn fetch_skills_list(
         .request_typed(ClientRequest::SkillsList {
             request_id,
             params: SkillsListParams {
+                thread_id: None,
                 cwds: vec![cwd],
                 force_reload: true,
             },

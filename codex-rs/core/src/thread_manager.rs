@@ -10,6 +10,7 @@ use crate::environment_selection::default_thread_environment_selections;
 use crate::execution_account::DefaultExecutionAccountResolver;
 use crate::execution_account::ExecutionAccountContext;
 use crate::execution_account::ExecutionAccountResolver;
+use crate::execution_account::ExecutionAccountServices;
 use crate::mcp::McpManager;
 use crate::rollout::truncation;
 use crate::session::ForkPersistence;
@@ -61,6 +62,7 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecutionAccountBinding;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::Op;
+use codex_protocol::protocol::Product;
 use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -346,11 +348,14 @@ pub(crate) struct ThreadManagerState {
     auth_manager: Arc<AuthManager>,
     models_manager: SharedModelsManager,
     execution_account_resolver: Arc<dyn ExecutionAccountResolver>,
+    codex_home: PathBuf,
+    restriction_product: Option<Product>,
     environment_manager: Arc<EnvironmentManager>,
     starting_mcp_runtimes: std::sync::Mutex<Vec<std::sync::Weak<AtomicBool>>>,
     skills_service: Arc<HostSkillsService>,
     plugins_manager: Arc<PluginsManager>,
     mcp_manager: Arc<McpManager>,
+    account_services: std::sync::RwLock<HashMap<String, AccountServiceEntry>>,
     code_mode_session_provider: Arc<dyn CodeModeSessionProvider>,
     extensions: Arc<ExtensionRegistry<Config>>,
     user_instructions_provider: Arc<dyn UserInstructionsProvider>,
@@ -363,6 +368,12 @@ pub(crate) struct ThreadManagerState {
     analytics_events_client: Option<AnalyticsEventsClient>,
     // Captures submitted ops for testing purpose when test mode is enabled.
     ops_log: Option<SharedCapturedOps>,
+}
+
+#[derive(Clone)]
+struct AccountServiceEntry {
+    auth_manager: Arc<AuthManager>,
+    services: ExecutionAccountServices,
 }
 
 pub fn build_models_manager(
@@ -459,6 +470,16 @@ impl ThreadManager {
             Arc::clone(&extensions),
             codex_apps_tools_cache,
         ));
+        let account_services = HashMap::from([(
+            "default".to_string(),
+            AccountServiceEntry {
+                auth_manager: Arc::clone(&auth_manager),
+                services: ExecutionAccountServices {
+                    plugins_manager: Arc::clone(&plugins_manager),
+                    mcp_manager: Arc::clone(&mcp_manager),
+                },
+            },
+        )]);
         let code_mode_session_provider: Arc<dyn CodeModeSessionProvider> =
             if config.features.enabled(Feature::CodeModeHost)
                 || config.code_mode.disable_in_process_fallback
@@ -478,11 +499,14 @@ impl ThreadManager {
                 thread_id_generator: default_thread_id_generator(),
                 models_manager,
                 execution_account_resolver,
+                codex_home: codex_home.to_path_buf(),
+                restriction_product,
                 environment_manager,
                 starting_mcp_runtimes: std::sync::Mutex::new(Vec::new()),
                 skills_service,
                 plugins_manager,
                 mcp_manager,
+                account_services: std::sync::RwLock::new(account_services),
                 code_mode_session_provider,
                 extensions,
                 user_instructions_provider,
@@ -618,6 +642,16 @@ impl ThreadManager {
             skills_service.clone(),
         ));
         let mcp_manager = Arc::new(McpManager::new(Arc::clone(&plugins_manager)));
+        let account_services = HashMap::from([(
+            "default".to_string(),
+            AccountServiceEntry {
+                auth_manager: Arc::clone(&auth_manager),
+                services: ExecutionAccountServices {
+                    plugins_manager: Arc::clone(&plugins_manager),
+                    mcp_manager: Arc::clone(&mcp_manager),
+                },
+            },
+        )]);
         // This test constructor has no Config input. Tests that need a non-local
         // process store should construct ThreadManager::new with an explicit store.
         let thread_store: Arc<dyn ThreadStore> = Arc::new(LocalThreadStore::new(
@@ -630,7 +664,7 @@ impl ThreadManager {
         ));
         let agent_graph_store = local_agent_graph_store_from_state_db(state_db.as_ref());
         let models_manager = create_model_provider(provider, Some(auth_manager.clone()))
-            .models_manager(codex_home, /*config_model_catalog*/ None);
+            .models_manager(codex_home.clone(), /*config_model_catalog*/ None);
         let execution_account_resolver = Arc::new(DefaultExecutionAccountResolver::new(
             Arc::clone(&auth_manager),
             Arc::clone(&models_manager),
@@ -642,11 +676,14 @@ impl ThreadManager {
                 thread_id_generator: default_thread_id_generator(),
                 models_manager,
                 execution_account_resolver,
+                codex_home,
+                restriction_product,
                 environment_manager,
                 starting_mcp_runtimes: std::sync::Mutex::new(Vec::new()),
                 skills_service,
                 plugins_manager,
                 mcp_manager,
+                account_services: std::sync::RwLock::new(account_services),
                 code_mode_session_provider: Arc::new(DisabledCodeModeSessionProvider),
                 extensions: empty_extension_registry(),
                 user_instructions_provider: Arc::new(
@@ -783,6 +820,27 @@ impl ThreadManager {
 
     pub fn get_models_manager(&self) -> SharedModelsManager {
         self.state.models_manager.clone()
+    }
+
+    pub fn execution_account_services(
+        &self,
+        execution_account: &ExecutionAccountContext,
+    ) -> ExecutionAccountServices {
+        self.state.execution_account_services(execution_account)
+    }
+
+    pub fn clear_all_account_plugin_caches(&self) {
+        let services = self
+            .state
+            .account_services
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .map(|entry| Arc::clone(&entry.services.plugins_manager))
+            .collect::<Vec<_>>();
+        for plugins_manager in services {
+            plugins_manager.clear_cache();
+        }
     }
 
     pub async fn execution_account_for_thread(
@@ -1455,6 +1513,56 @@ impl ThreadManager {
 }
 
 impl ThreadManagerState {
+    fn execution_account_services(
+        &self,
+        execution_account: &ExecutionAccountContext,
+    ) -> ExecutionAccountServices {
+        let slot_id = execution_account.binding.slot_id.as_str();
+        if let Some(entry) = self
+            .account_services
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(slot_id)
+            .cloned()
+            && Arc::ptr_eq(&entry.auth_manager, &execution_account.auth_manager)
+        {
+            return entry.services;
+        }
+
+        let mut account_services = self
+            .account_services
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = account_services.get(slot_id)
+            && Arc::ptr_eq(&entry.auth_manager, &execution_account.auth_manager)
+        {
+            return entry.services.clone();
+        }
+        let plugins_manager = Arc::new(PluginsManager::new_with_options(
+            self.codex_home.clone(),
+            self.restriction_product,
+            Arc::clone(&execution_account.auth_manager),
+            self.skills_service.clone(),
+        ));
+        let mcp_manager = Arc::new(McpManager::new_with_extensions(
+            Arc::clone(&plugins_manager),
+            Arc::clone(&self.extensions),
+            CodexAppsToolsCache::default(),
+        ));
+        let services = ExecutionAccountServices {
+            plugins_manager,
+            mcp_manager,
+        };
+        account_services.insert(
+            slot_id.to_string(),
+            AccountServiceEntry {
+                auth_manager: Arc::clone(&execution_account.auth_manager),
+                services: services.clone(),
+            },
+        );
+        services
+    }
+
     pub(crate) fn agent_graph_store(&self) -> Option<Arc<dyn AgentGraphStore>> {
         self.agent_graph_store.clone()
     }
@@ -1995,6 +2103,22 @@ impl ThreadManagerState {
                 models_manager: Arc::clone(&self.models_manager),
             })
         };
+        let execution_services = self.execution_account_services(&execution_account);
+        let analytics_events_client =
+            if Arc::ptr_eq(&execution_account.auth_manager, &self.auth_manager) {
+                self.analytics_events_client.clone()
+            } else {
+                Some(AnalyticsEventsClient::new(
+                    Arc::clone(&execution_account.auth_manager),
+                    config.chatgpt_base_url.trim_end_matches('/').to_string(),
+                    config.analytics_enabled,
+                ))
+            };
+        if let Some(analytics_events_client) = analytics_events_client.as_ref() {
+            execution_services
+                .plugins_manager
+                .set_analytics_events_client(analytics_events_client.clone());
+        }
         let user_instructions = self
             .user_instructions_for_spawn(&session_source, parent_thread_id, forked_from_thread_id)
             .await;
@@ -2038,8 +2162,8 @@ impl ThreadManagerState {
             execution_account,
             environment_manager: Arc::clone(&self.environment_manager),
             skills_service: Arc::clone(&self.skills_service),
-            plugins_manager: Arc::clone(&self.plugins_manager),
-            mcp_manager: Arc::clone(&self.mcp_manager),
+            plugins_manager: execution_services.plugins_manager,
+            mcp_manager: execution_services.mcp_manager,
             code_mode_session_provider: Arc::clone(&self.code_mode_session_provider),
             extensions: Arc::clone(&self.extensions),
             conversation_history: initial_history,
@@ -2062,7 +2186,7 @@ impl ThreadManagerState {
             thread_extension_init,
             client_mcp_extensions,
             reserved_thread_id,
-            analytics_events_client: self.analytics_events_client.clone(),
+            analytics_events_client,
             thread_store: Arc::clone(&self.thread_store),
             attestation_provider: self.attestation_provider.clone(),
             external_time_provider: self.external_time_provider.clone(),

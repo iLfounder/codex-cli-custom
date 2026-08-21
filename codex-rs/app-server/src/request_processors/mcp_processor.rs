@@ -129,13 +129,17 @@ impl McpRequestProcessor {
             McpServerOauthClientRegistration::Dcr => McpOAuthClientRegistration::Dcr,
         };
 
-        let auth = self.auth_manager.auth().await;
-        let (mcp_config, runtime_context) = match thread_id.as_deref() {
+        let (auth_manager, mcp_config, runtime_context) = match thread_id.as_deref() {
             Some(thread_id) => {
                 let (_, thread) = self.load_thread(thread_id).await?;
+                let execution_account = thread.execution_account();
                 let (config, runtime_context) =
                     thread.current_mcp_config_and_runtime_context().await;
-                ((*config).clone(), runtime_context)
+                (
+                    Arc::clone(&execution_account.auth_manager),
+                    (*config).clone(),
+                    runtime_context,
+                )
             }
             None => {
                 let config = self.load_latest_config(/*fallback_cwd*/ None).await?;
@@ -148,9 +152,10 @@ impl McpRequestProcessor {
                     self.thread_manager.environment_manager(),
                     config.cwd.to_path_buf(),
                 );
-                (mcp_config, runtime_context)
+                (Arc::clone(&self.auth_manager), mcp_config, runtime_context)
             }
         };
+        let auth = auth_manager.auth().await;
         let effective_servers = codex_mcp::effective_mcp_servers(&mcp_config, auth.as_ref());
         let Some(server) = effective_servers.get(&name) else {
             return Err(invalid_request(format!(
@@ -255,7 +260,7 @@ impl McpRequestProcessor {
         let request = request_id.clone();
 
         let outgoing = Arc::clone(&self.outgoing);
-        let (config, thread) = match params.thread_id.as_deref() {
+        let (config, thread, auth_manager, mcp_manager) = match params.thread_id.as_deref() {
             Some(thread_id) => {
                 let (_, thread) = self.load_thread(thread_id).await?;
                 let thread_config = thread.config().await;
@@ -264,12 +269,25 @@ impl McpRequestProcessor {
                     .load_latest_config_for_thread(thread_config.as_ref())
                     .await
                     .map_err(|err| internal_error(format!("failed to reload config: {err}")))?;
-                (config, Some(thread))
+                let execution_account = thread.execution_account();
+                let execution_services = self
+                    .thread_manager
+                    .execution_account_services(&execution_account);
+                (
+                    config,
+                    Some(thread),
+                    Arc::clone(&execution_account.auth_manager),
+                    execution_services.mcp_manager,
+                )
             }
-            None => (self.load_latest_config(/*fallback_cwd*/ None).await?, None),
+            None => (
+                self.load_latest_config(/*fallback_cwd*/ None).await?,
+                None,
+                Arc::clone(&self.auth_manager),
+                self.thread_manager.mcp_manager(),
+            ),
         };
-        let mcp_manager = self.thread_manager.mcp_manager();
-        let auth = self.auth_manager.auth().await;
+        let auth = auth_manager.auth().await;
         let (mcp_config, runtime_context) = match thread {
             Some(thread) => thread.runtime_mcp_config_and_context(&config).await,
             None => {

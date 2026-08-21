@@ -48,6 +48,59 @@ use wiremock::MockServer;
 
 const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
 
+#[tokio::test]
+async fn account_services_replace_same_slot_when_auth_runtime_changes() {
+    let manager = ThreadManager::with_models_provider_for_tests(
+        CodexAuth::from_api_key("sk-one"),
+        test_config().await.model_provider,
+    );
+    let first_context = ExecutionAccountContext {
+        binding: ExecutionAccountBinding {
+            slot_id: "default".to_string(),
+            generation: 1,
+        },
+        auth_manager: Arc::clone(&manager.state.auth_manager),
+        models_manager: Arc::clone(&manager.state.models_manager),
+    };
+    let first_services = manager.execution_account_services(&first_context);
+    let first_services_again = manager.execution_account_services(&first_context);
+    assert!(Arc::ptr_eq(
+        &first_services.plugins_manager,
+        &first_services_again.plugins_manager,
+    ));
+    assert!(Arc::ptr_eq(
+        &first_services.mcp_manager,
+        &first_services_again.mcp_manager,
+    ));
+
+    let second_context = ExecutionAccountContext {
+        binding: ExecutionAccountBinding {
+            slot_id: "default".to_string(),
+            generation: 2,
+        },
+        auth_manager: AuthManager::from_auth_for_testing(CodexAuth::from_api_key("sk-two")),
+        models_manager: Arc::clone(&manager.state.models_manager),
+    };
+    let second_services = manager.execution_account_services(&second_context);
+    let second_services_again = manager.execution_account_services(&second_context);
+    assert!(!Arc::ptr_eq(
+        &first_services.plugins_manager,
+        &second_services.plugins_manager,
+    ));
+    assert!(!Arc::ptr_eq(
+        &first_services.mcp_manager,
+        &second_services.mcp_manager,
+    ));
+    assert!(Arc::ptr_eq(
+        &second_services.plugins_manager,
+        &second_services_again.plugins_manager,
+    ));
+    assert!(Arc::ptr_eq(
+        &second_services.mcp_manager,
+        &second_services_again.mcp_manager,
+    ));
+}
+
 /// Controls without a custom allocation policy still produce distinct thread identifiers.
 #[test]
 fn thread_id_generator_defaults_to_standard_ids() {

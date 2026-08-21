@@ -1,4 +1,5 @@
 use codex_core::CodexThread;
+use codex_core::ExecutionAccountContext;
 use codex_core::ModelClient;
 use codex_core::NewThread;
 use codex_core::Prompt;
@@ -71,6 +72,7 @@ pub(crate) struct MemoryStartupContext {
     thread_id: ThreadId,
     thread: Arc<CodexThread>,
     thread_manager: Arc<ThreadManager>,
+    execution_account: Option<Arc<ExecutionAccountContext>>,
     auth_manager: Arc<AuthManager>,
     provider: SharedModelProvider,
     session_telemetry: SessionTelemetry,
@@ -109,6 +111,7 @@ fn build_session_telemetry(
 }
 
 impl MemoryStartupContext {
+    #[cfg(test)]
     pub(crate) fn new(
         thread_manager: Arc<ThreadManager>,
         auth_manager: Arc<AuthManager>,
@@ -124,6 +127,31 @@ impl MemoryStartupContext {
         Self::new_with_provider(
             thread_manager,
             auth_manager,
+            None,
+            thread_id,
+            thread,
+            config,
+            source,
+            provider,
+        )
+    }
+
+    pub(crate) fn new_with_execution_account(
+        thread_manager: Arc<ThreadManager>,
+        execution_account: Arc<ExecutionAccountContext>,
+        thread_id: ThreadId,
+        thread: Arc<CodexThread>,
+        config: &Config,
+        source: SessionSource,
+    ) -> Self {
+        let provider = create_model_provider(
+            config.model_provider.clone(),
+            Some(Arc::clone(&execution_account.auth_manager)),
+        );
+        Self::new_with_provider(
+            thread_manager,
+            Arc::clone(&execution_account.auth_manager),
+            Some(execution_account),
             thread_id,
             thread,
             config,
@@ -145,6 +173,7 @@ impl MemoryStartupContext {
         Self::new_with_provider(
             thread_manager,
             auth_manager,
+            None,
             thread_id,
             thread,
             config,
@@ -156,6 +185,7 @@ impl MemoryStartupContext {
     fn new_with_provider(
         thread_manager: Arc<ThreadManager>,
         auth_manager: Arc<AuthManager>,
+        execution_account: Option<Arc<ExecutionAccountContext>>,
         thread_id: ThreadId,
         thread: Arc<CodexThread>,
         config: &Config,
@@ -176,6 +206,7 @@ impl MemoryStartupContext {
             thread_id,
             thread,
             thread_manager,
+            execution_account,
             auth_manager,
             provider,
             session_telemetry,
@@ -213,9 +244,12 @@ impl MemoryStartupContext {
         reasoning_effort: ReasoningEffort,
     ) -> StageOneRequestContext {
         let config_snapshot = self.thread.config_snapshot().await;
-        let model_info = self
-            .thread_manager
-            .get_models_manager()
+        let models_manager = self
+            .execution_account
+            .as_ref()
+            .map(|account| Arc::clone(&account.models_manager))
+            .unwrap_or_else(|| self.thread_manager.get_models_manager());
+        let model_info = models_manager
             .get_model_info(model_name, &config.to_models_manager_config())
             .await;
         let reasoning_summary = config
@@ -322,18 +356,22 @@ impl MemoryStartupContext {
         config: Config,
         prompt: Vec<UserInput>,
     ) -> anyhow::Result<SpawnedConsolidationAgent> {
+        let options = StartThreadOptions {
+            session_source: Some(SessionSource::Internal(
+                InternalSessionSource::MemoryConsolidation,
+            )),
+            thread_source: Some(ThreadSource::MemoryConsolidation),
+            ..StartThreadOptions::new(config)
+        };
         let NewThread {
             thread_id, thread, ..
-        } = self
-            .thread_manager
-            .start_thread(StartThreadOptions {
-                session_source: Some(SessionSource::Internal(
-                    InternalSessionSource::MemoryConsolidation,
-                )),
-                thread_source: Some(ThreadSource::MemoryConsolidation),
-                ..StartThreadOptions::new(config)
-            })
-            .await?;
+        } = if let Some(execution_account) = &self.execution_account {
+            self.thread_manager
+                .start_thread_with_execution_account(options, Arc::clone(execution_account))
+                .await?
+        } else {
+            self.thread_manager.start_thread(options).await?
+        };
 
         let agent = SpawnedConsolidationAgent { thread_id, thread };
         let submit_result = match agent

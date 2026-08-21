@@ -161,7 +161,7 @@ pub(crate) async fn run_turn(
     drain_async_hook_results(&sess, &turn_context, /*before_user_prompt*/ true).await;
 
     let mut client_session =
-        prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
+        prewarmed_client_session.unwrap_or_else(|| turn_context.model_client.new_session());
     // TODO(ccunningham): Pre-turn compaction runs before context updates and the
     // new user message are recorded. Estimate pending incoming items (context
     // diffs/full reinjection + user input) and trigger compaction preemptively
@@ -668,8 +668,7 @@ async fn required_mcp_servers_for_input(
     // Plugin capabilities depend on authentication, so project them only after
     // the runtime has aligned the plugin manager with its current account.
     sess.refresh_mcp_if_dirty().await;
-    let loaded_plugins = sess
-        .services
+    let loaded_plugins = turn_context
         .plugins_manager
         .plugins_for_config(&turn_context.config.plugins_config_input())
         .await;
@@ -703,9 +702,12 @@ async fn required_mcp_servers_for_input(
     }));
 
     let connector_slug_counts = if turn_context.apps_enabled() && !mentions.plain_names.is_empty() {
+        let auth = turn_context.execution_account.auth_manager.auth_cached();
         let cached_connectors =
-            connectors::list_cached_accessible_connectors_from_mcp_tools(&turn_context.config)
-                .await;
+            connectors::list_cached_accessible_connectors_from_mcp_tools_with_auth(
+                &turn_context.config,
+                auth.as_ref(),
+            );
         let accessible_connectors = match cached_connectors {
             Some(connectors) => connectors,
             None => sess
@@ -1095,7 +1097,10 @@ async fn maybe_run_previous_model_inline_compact(
     let previous_model = previous_turn_settings.model;
     let previous_model_turn_context = Arc::new(
         turn_context
-            .with_model(previous_model.clone(), &sess.services.models_manager)
+            .with_model(
+                previous_model.clone(),
+                &turn_context.execution_account.models_manager,
+            )
             .await,
     );
 
@@ -1448,24 +1453,22 @@ pub(crate) struct PreparedToolRecommendations {
 
 #[instrument(level = "trace", skip_all)]
 pub(crate) async fn prepare_tool_recommendations(
-    sess: &Session,
     turn_context: &TurnContext,
 ) -> PreparedToolRecommendations {
-    let loaded_plugins = sess
-        .services
+    let loaded_plugins = turn_context
         .plugins_manager
         .plugins_for_config(&turn_context.config.plugins_config_input())
         .instrument(trace_span!("built_tools.load_plugins"))
         .await;
     let tool_suggest_is_enabled = tool_suggest_enabled(turn_context);
     let auth = if tool_suggest_is_enabled {
-        sess.services.auth_manager.auth().await
+        turn_context.execution_account.auth_manager.auth().await
     } else {
         None
     };
     let endpoint_candidates = if tool_suggest_is_enabled {
         let plugins_config = turn_context.config.plugins_config_input();
-        sess.services
+        turn_context
             .plugins_manager
             .recommended_plugin_candidates_for_config(RecommendedPluginCandidatesInput {
                 plugins_config: &plugins_config,
@@ -1529,7 +1532,7 @@ pub(crate) async fn built_tools(
                     if let Some(accessible_connectors) = accessible_connectors.as_ref() {
                         match connectors::list_tool_suggest_discoverable_tools_with_auth(
                             &turn_context.config,
-                            sess.services.plugins_manager.as_ref(),
+                            turn_context.plugins_manager.as_ref(),
                             auth.as_ref(),
                             accessible_connectors.as_slice(),
                             &loaded_plugin_app_connector_ids,
@@ -2195,7 +2198,7 @@ async fn try_run_sampling_request(
         approval_policy = turn_context.approval_policy(),
         sandbox_policy = &turn_context.sandbox_policy(),
         effort = step_context.reasoning_effort,
-        auth_mode = sess.services.auth_manager.auth_mode(),
+        auth_mode = turn_context.execution_account.auth_manager.auth_mode(),
         features = sess.features.enabled_features(),
     );
     let inference_trace = sess.services.rollout_thread_trace.inference_trace_context(
@@ -2533,7 +2536,8 @@ async fn try_run_sampling_request(
             }
             ResponseEvent::ModelsEtag(etag) => {
                 // Update internal state with latest models etag
-                sess.services
+                turn_context
+                    .execution_account
                     .models_manager
                     .refresh_if_new_etag(etag, turn_context.config.http_client_factory())
                     .await;
@@ -2543,7 +2547,7 @@ async fn try_run_sampling_request(
                 token_usage,
                 end_turn,
             } => {
-                sess.services
+                turn_context
                     .analytics_events_client
                     .track_code_mode_tool_call(
                         codex_analytics::CodeModeToolCallFact::SamplingResponseCompleted {

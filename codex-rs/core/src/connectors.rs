@@ -124,13 +124,20 @@ pub async fn list_cached_accessible_connectors_from_mcp_tools(
             .await
             .ok()?;
     let auth = auth_manager.auth().await;
+    list_cached_accessible_connectors_from_mcp_tools_with_auth(config, auth.as_ref())
+}
+
+pub fn list_cached_accessible_connectors_from_mcp_tools_with_auth(
+    config: &Config,
+    auth: Option<&CodexAuth>,
+) -> Option<Vec<AppInfo>> {
     if !config
         .features
-        .apps_enabled_for_auth(auth.as_ref().is_some_and(CodexAuth::uses_codex_backend))
+        .apps_enabled_for_auth(auth.is_some_and(CodexAuth::uses_codex_backend))
     {
         return Some(Vec::new());
     }
-    let cache_key = accessible_connectors_cache_key(config, auth.as_ref());
+    let cache_key = accessible_connectors_cache_key(config, auth);
     read_cached_accessible_connectors(&cache_key)
 }
 
@@ -214,6 +221,25 @@ pub async fn list_accessible_connectors_from_mcp_tools_with_mcp_manager(
     let auth_manager =
         AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await?;
     let auth = auth_manager.auth().await;
+    list_accessible_connectors_from_mcp_tools_with_mcp_manager_and_auth(
+        config,
+        force_refetch,
+        environment_manager,
+        mcp_manager,
+        auth_manager,
+        auth,
+    )
+    .await
+}
+
+pub async fn list_accessible_connectors_from_mcp_tools_with_mcp_manager_and_auth(
+    config: &Config,
+    force_refetch: bool,
+    environment_manager: Arc<EnvironmentManager>,
+    mcp_manager: Arc<McpManager>,
+    auth_manager: Arc<AuthManager>,
+    auth: Option<CodexAuth>,
+) -> anyhow::Result<AccessibleConnectorsStatus> {
     if !config
         .features
         .apps_enabled_for_auth(auth.as_ref().is_some_and(CodexAuth::uses_codex_backend))
@@ -430,18 +456,6 @@ async fn cached_directory_connectors_for_tool_suggest_with_auth(
         return Vec::new();
     }
 
-    let loaded_auth;
-    let auth = if let Some(auth) = auth {
-        Some(auth)
-    } else {
-        let Ok(auth_manager) =
-            AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await
-        else {
-            return Vec::new();
-        };
-        loaded_auth = auth_manager.auth().await;
-        loaded_auth.as_ref()
-    };
     let Some(auth) = auth.filter(|auth| auth.uses_codex_backend()) else {
         return Vec::new();
     };

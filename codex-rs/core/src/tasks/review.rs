@@ -125,8 +125,8 @@ async fn start_review_conversation(
     sub_agent_config.model = Some(model);
     (run_codex_thread_one_shot(
         sub_agent_config,
-        Arc::clone(&session.services.auth_manager),
-        Arc::clone(&session.services.models_manager),
+        Arc::clone(&ctx.execution_account.auth_manager),
+        Arc::clone(&ctx.execution_account.models_manager),
         input,
         Arc::clone(&session),
         ctx.clone(),

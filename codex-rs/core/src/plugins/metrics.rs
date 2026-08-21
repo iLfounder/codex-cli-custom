@@ -13,7 +13,7 @@ pub(crate) async fn sidecar_for_command(
     cwd: &PathUri,
     environment: &Environment,
 ) -> Option<PluginMetricsSidecar> {
-    if !ctx.session.services.analytics_events_client.is_enabled() {
+    if !ctx.step_context.turn.analytics_events_client.is_enabled() {
         return None;
     }
     let resolved = ctx
@@ -42,9 +42,7 @@ pub(crate) async fn finish_and_track_measurements(
     let Some(batch) = metrics_sidecar.finish(exit_code).await else {
         return;
     };
-    session
-        .services
-        .analytics_events_client
+    turn.analytics_events_client
         .track_plugin_measurements(PluginMeasurementsInput {
             thread_id: session.thread_id().to_string(),
             turn_id: turn.sub_id.clone(),

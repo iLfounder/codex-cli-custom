@@ -2,6 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use codex_core_plugins::PluginsManager;
 use codex_login::AuthManager;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_protocol::error::CodexErr;
@@ -14,6 +15,21 @@ pub struct ExecutionAccountContext {
     pub binding: ExecutionAccountBinding,
     pub auth_manager: Arc<AuthManager>,
     pub models_manager: SharedModelsManager,
+}
+
+/// Account-scoped plugin and MCP services tied to one exact auth runtime.
+#[derive(Clone)]
+pub struct ExecutionAccountServices {
+    pub plugins_manager: Arc<PluginsManager>,
+    pub mcp_manager: Arc<crate::mcp::McpManager>,
+}
+
+impl std::fmt::Debug for ExecutionAccountServices {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExecutionAccountServices")
+            .finish_non_exhaustive()
+    }
 }
 
 impl std::fmt::Debug for ExecutionAccountContext {

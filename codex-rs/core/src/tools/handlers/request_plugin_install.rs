@@ -179,7 +179,7 @@ impl RequestPluginInstallHandler {
             })?;
         let tool = if self.presentation == ToolSuggestPresentation::RecommendationContext {
             let plugin_id = tool.id().to_string();
-            let auth = session.services.auth_manager.auth().await;
+            let auth = turn.execution_account.auth_manager.auth().await;
             let plugins_config = turn.config.plugins_config_input();
             match codex_core_plugins::hydrate_selected_recommended_plugin_install_metadata(
                 &plugins_config,
@@ -253,7 +253,7 @@ impl RequestPluginInstallHandler {
             .as_ref()
             .is_some_and(|response| response.action == ElicitationAction::Accept);
 
-        let auth = session.services.auth_manager.auth().await;
+        let auth = turn.execution_account.auth_manager.auth().await;
         let completed = if user_confirmed {
             verify_request_plugin_install_completed(&session, &turn, mcp, &tool, auth.as_ref())
                 .await
@@ -408,7 +408,6 @@ async fn verify_request_plugin_install_completed(
             if is_remote_plugin_install_suggestion(&plugin.id) {
                 let (_, accessible_connectors) = tokio::join!(
                     refresh_remote_installed_plugins_cache_after_install(
-                        session,
                         turn,
                         auth,
                         plugin.id.as_str(),
@@ -435,7 +434,7 @@ async fn verify_request_plugin_install_completed(
             let completed = verified_plugin_install_completed(
                 plugin.id.as_str(),
                 config.as_ref(),
-                session.services.plugins_manager.as_ref(),
+                turn.plugins_manager.as_ref(),
             );
             let _ = refresh_missing_requested_connectors(
                 session,
@@ -452,12 +451,11 @@ async fn verify_request_plugin_install_completed(
 }
 
 async fn refresh_remote_installed_plugins_cache_after_install(
-    session: &crate::session::session::Session,
     turn: &crate::session::turn_context::TurnContext,
     auth: Option<&codex_login::CodexAuth>,
     tool_id: &str,
 ) {
-    let plugins_manager = &session.services.plugins_manager;
+    let plugins_manager = &turn.plugins_manager;
     let plugins_config = turn.config.plugins_config_input();
     if let Err(err) = plugins_manager
         .build_and_cache_remote_installed_plugin_marketplaces(

@@ -733,7 +733,7 @@ async fn refresh_codex_apps_after_connector_auth(sess: &Arc<Session>, turn_conte
 
     match mcp_tools_result {
         Ok(mcp_tools) => {
-            let auth = sess.services.auth_manager.auth().await;
+            let auth = turn_context.execution_account.auth_manager.auth().await;
             connectors::refresh_accessible_connectors_cache_from_mcp_tools(
                 &turn_context.config,
                 auth.as_ref(),
@@ -1022,7 +1022,7 @@ async fn maybe_track_codex_app_used(
         turn_context.sub_id.clone(),
         turn_context.originator.clone(),
     );
-    sess.services.analytics_events_client.track_app_used(
+    turn_context.analytics_events_client.track_app_used(
         tracking,
         AppInvocation {
             connector_id,

@@ -24,7 +24,6 @@ use crate::world_state::git_attribution_world_state_section;
 /// Contributes model instructions for agent-created git commits and pull requests.
 #[derive(Clone)]
 struct GitAttributionExtension {
-    auth_manager: Arc<AuthManager>,
     base_url: String,
     http_client_factory: HttpClientFactory,
 }
@@ -35,8 +34,12 @@ impl ContextContributor for GitAttributionExtension {
         input: WorldStateContributionInput<'a>,
     ) -> ExtensionFuture<'a, Vec<WorldStateSectionContribution>> {
         Box::pin(async move {
+            let Some(auth_manager) = input.session_store.get::<Arc<AuthManager>>() else {
+                return Vec::new();
+            };
+            let auth_manager = auth_manager.as_ref();
             let enabled = loop {
-                let current_auth_generation = auth_generation(self.auth_manager.as_ref());
+                let current_auth_generation = auth_generation(auth_manager.as_ref());
                 let policy = match cached_attribution_policy(
                     input.thread_store,
                     input.turn_store,
@@ -51,7 +54,7 @@ impl ContextContributor for GitAttributionExtension {
                     }
                     None => {
                         match resolve_attribution_policy(
-                            &self.auth_manager,
+                            auth_manager,
                             &self.base_url,
                             &self.http_client_factory,
                         )
@@ -70,7 +73,7 @@ impl ContextContributor for GitAttributionExtension {
                                 policy
                             }
                             Err(_) => {
-                                let auth_generation = auth_generation(self.auth_manager.as_ref());
+                                let auth_generation = auth_generation(auth_manager.as_ref());
                                 if auth_generation == current_auth_generation {
                                     input.thread_store.insert(GitAttributionRetry {
                                         auth_generation,
@@ -85,7 +88,7 @@ impl ContextContributor for GitAttributionExtension {
                         }
                     }
                 };
-                if policy.auth_generation == auth_generation(self.auth_manager.as_ref()) {
+                if policy.auth_generation == auth_generation(auth_manager.as_ref()) {
                     break policy.enabled;
                 }
             };
@@ -97,12 +100,10 @@ impl ContextContributor for GitAttributionExtension {
 /// Installs the git-attribution contributor into the extension registry.
 pub fn install<C: Sync>(
     registry: &mut ExtensionRegistryBuilder<C>,
-    auth_manager: Arc<AuthManager>,
     base_url: String,
     http_client_factory: HttpClientFactory,
 ) {
     registry.prompt_contributor(Arc::new(GitAttributionExtension {
-        auth_manager,
         base_url,
         http_client_factory,
     }));

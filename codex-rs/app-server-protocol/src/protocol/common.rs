@@ -2282,6 +2282,7 @@ mod tests {
         let skills_list = ClientRequest::SkillsList {
             request_id: request_id(),
             params: v2::SkillsListParams {
+                thread_id: None,
                 cwds: Vec::new(),
                 force_reload: false,
             },

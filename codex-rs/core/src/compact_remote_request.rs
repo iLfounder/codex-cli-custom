@@ -74,8 +74,7 @@ pub(super) async fn run_remote_compact_attempt(
         window_id,
         CodexResponsesRequestKind::Compaction(compaction_metadata),
     );
-    let new_history = sess
-        .services
+    let new_history = turn_context
         .model_client
         .compact_conversation_history(
             &prompt,
@@ -84,7 +83,9 @@ pub(super) async fn run_remote_compact_attempt(
             CompactConversationRequestSettings {
                 effort: turn_context.reasoning_effort.clone(),
                 summary: turn_context.reasoning_summary,
-                service_tier: if sess.services.auth_manager.auth_mode() == Some(AuthMode::ApiKey) {
+                service_tier: if turn_context.execution_account.auth_manager.auth_mode()
+                    == Some(AuthMode::ApiKey)
+                {
                     None
                 } else {
                     turn_context.config.service_tier.clone()

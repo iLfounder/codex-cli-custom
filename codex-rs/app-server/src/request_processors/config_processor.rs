@@ -195,7 +195,7 @@ impl ConfigRequestProcessor {
     }
 
     pub(crate) async fn handle_config_mutation(&self) {
-        self.thread_manager.plugins_manager().clear_cache();
+        self.thread_manager.clear_all_account_plugin_caches();
         self.thread_manager.skills_service().clear_cache();
     }
 

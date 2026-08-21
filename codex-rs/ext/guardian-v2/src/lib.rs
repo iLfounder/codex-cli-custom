@@ -9,7 +9,6 @@ use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::ThreadLifecycleContributor;
 use codex_extension_api::ThreadStartInput;
-use codex_login::AuthManager;
 use codex_protocol::ThreadId;
 
 mod async_scorer;
@@ -79,11 +78,10 @@ where
 pub fn install<S>(
     registry: &mut ExtensionRegistryBuilder<Config>,
     agent_spawner: S,
-    auth_manager: Arc<AuthManager>,
     thread_manager: Weak<ThreadManager>,
 ) where
     S: Send + Sync + 'static,
 {
     registry.thread_lifecycle_contributor(Arc::new(GuardianExtension::new(agent_spawner)));
-    async_scorer::install(registry, auth_manager, thread_manager);
+    async_scorer::install(registry, thread_manager);
 }

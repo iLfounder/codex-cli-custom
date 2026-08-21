@@ -55,12 +55,10 @@ const TINY_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAD
 const TINY_PNG_DATA_URL: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
 
 fn image_generation_extensions(
-    auth: &CodexAuth,
     resolve_save_root: impl Fn(&Config) -> Option<AbsolutePathBuf> + Send + Sync + 'static,
 ) -> Arc<ExtensionRegistry<Config>> {
-    let auth_manager = codex_core::test_support::auth_manager_from_auth(auth.clone());
     let mut extension_builder = ExtensionRegistryBuilder::<Config>::new();
-    install_image_generation_extension(&mut extension_builder, auth_manager, resolve_save_root);
+    install_image_generation_extension(&mut extension_builder, resolve_save_root);
     Arc::new(extension_builder.build())
 }
 
@@ -70,7 +68,7 @@ async fn extension_tool_receives_turn_environment_sandbox() -> Result<()> {
 
     let server = responses::start_mock_server().await;
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
-    let extensions = image_generation_extensions(&auth, |config| Some(config.codex_home.clone()));
+    let extensions = image_generation_extensions(|config| Some(config.codex_home.clone()));
     let mut builder = test_codex()
         .with_auth(auth)
         .with_extensions(extensions)
@@ -166,7 +164,7 @@ async fn extension_tool_uses_granted_turn_permissions_without_host_local_persist
         .await;
 
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
-    let extensions = image_generation_extensions(&auth, |_config| None);
+    let extensions = image_generation_extensions(|_config| None);
     let base_permission_profile = PermissionProfile::workspace_write_with(
         &[],
         NetworkSandboxPolicy::Restricted,

@@ -138,7 +138,6 @@ impl std::fmt::Debug for TurnEnvironment {
 }
 
 /// The context needed for a single turn of the thread.
-#[derive(Debug)]
 pub struct TurnContext {
     pub(crate) sub_id: String,
     pub(crate) trace_id: Option<String>,
@@ -148,6 +147,10 @@ pub struct TurnContext {
     /// approvals reviewer from the corresponding `StepContext` fields instead.
     pub config: Arc<Config>,
     pub(crate) execution_account: Arc<crate::execution_account::ExecutionAccountContext>,
+    pub(crate) model_client: ModelClient,
+    pub(crate) plugins_manager: Arc<PluginsManager>,
+    pub(crate) mcp_manager: Arc<McpManager>,
+    pub(crate) analytics_events_client: AnalyticsEventsClient,
     pub(crate) auth_manager: Option<Arc<AuthManager>>,
     /// Legacy turn model; step-scoped execution should use `StepContext::model_info`.
     pub(crate) model_info: Arc<ModelInfo>,
@@ -188,6 +191,17 @@ pub struct TurnContext {
     pub(crate) terminal_error: Arc<Mutex<Option<ErrorEvent>>>,
     pub(crate) server_model_warning_emitted: AtomicBool,
     pub(crate) model_verification_emitted: AtomicBool,
+}
+
+impl std::fmt::Debug for TurnContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TurnContext")
+            .field("sub_id", &self.sub_id)
+            .field("execution_account", &self.execution_account)
+            .field("model", &self.model_info.slug)
+            .finish_non_exhaustive()
+    }
 }
 
 enum TurnMultiAgentRuntime {
@@ -404,6 +418,10 @@ impl TurnContext {
             code_mode_available: self.code_mode_available,
             config: Arc::new(config),
             execution_account: Arc::clone(&self.execution_account),
+            model_client: self.model_client.clone(),
+            plugins_manager: Arc::clone(&self.plugins_manager),
+            mcp_manager: Arc::clone(&self.mcp_manager),
+            analytics_events_client: self.analytics_events_client.clone(),
             auth_manager: self.auth_manager.clone(),
             model_info: Arc::clone(&model_info),
             session_telemetry: self
@@ -622,6 +640,10 @@ impl Session {
         session_id: SessionId,
         auth_manager: Option<Arc<AuthManager>>,
         execution_account: Arc<crate::execution_account::ExecutionAccountContext>,
+        model_client: ModelClient,
+        plugins_manager: Arc<PluginsManager>,
+        mcp_manager: Arc<McpManager>,
+        analytics_events_client: AnalyticsEventsClient,
         session_telemetry: &SessionTelemetry,
         provider: SharedModelProvider,
         session_configuration: &SessionConfiguration,
@@ -692,6 +714,8 @@ impl Session {
         let (current_date, timezone) = local_time_context();
         let extension_data = Arc::new(codex_extension_api::ExtensionData::new(sub_id.clone()));
         extension_data.insert(skills_snapshot);
+        extension_data.insert(execution_account.as_ref().clone());
+        extension_data.insert(analytics_events_client.clone());
         TurnContext {
             sub_id,
             trace_id: current_span_trace_id(),
@@ -699,6 +723,10 @@ impl Session {
             code_mode_available: true,
             config: per_turn_config,
             execution_account,
+            model_client,
+            plugins_manager,
+            mcp_manager,
+            analytics_events_client,
             auth_manager,
             model_info: Arc::new(model_info),
             session_telemetry: session_telemetry_for_context,
@@ -929,6 +957,10 @@ impl Session {
             self.session_id(),
             Some(Arc::clone(&self.services.auth_manager)),
             self.execution_account(),
+            self.services.model_client.clone(),
+            Arc::clone(&self.services.plugins_manager),
+            Arc::clone(&self.services.mcp_manager),
+            self.services.analytics_events_client.clone(),
             &self.services.session_telemetry,
             session_configuration.provider.clone(),
             &session_configuration,

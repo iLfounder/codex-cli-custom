@@ -1,4 +1,5 @@
 use codex_core::config::Config;
+use codex_login::AuthManager;
 use serde::Deserialize;
 
 use crate::chatgpt_client::chatgpt_get_request;
@@ -36,5 +37,11 @@ pub struct OutputDiff {
 
 pub(crate) async fn get_task(config: &Config, task_id: String) -> anyhow::Result<GetTaskResponse> {
     let path = format!("/wham/tasks/{task_id}");
-    chatgpt_get_request(config, path).await
+    let auth_manager =
+        AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await?;
+    let auth = auth_manager
+        .auth()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("ChatGPT auth not available"))?;
+    chatgpt_get_request(config, &auth, path).await
 }

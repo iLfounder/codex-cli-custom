@@ -34,11 +34,10 @@ use serde_json::Value;
 
 const RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
 
-fn responses_extensions(auth: &CodexAuth) -> Arc<ExtensionRegistry<Config>> {
-    let auth_manager = codex_core::test_support::auth_manager_from_auth(auth.clone());
+fn responses_extensions() -> Arc<ExtensionRegistry<Config>> {
     let mut extension_builder = ExtensionRegistryBuilder::<Config>::new();
-    install_web_search_extension(&mut extension_builder, Arc::clone(&auth_manager));
-    install_image_generation_extension(&mut extension_builder, auth_manager, |config| {
+    install_web_search_extension(&mut extension_builder);
+    install_image_generation_extension(&mut extension_builder, |config| {
         Some(config.codex_home.clone())
     });
     Arc::new(extension_builder.build())
@@ -306,7 +305,7 @@ async fn responses_lite_uses_standalone_web_search_and_image_generation() -> Res
     .await;
 
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
-    let extensions = responses_extensions(&auth);
+    let extensions = responses_extensions();
 
     let mut builder = test_codex()
         .with_auth(auth)
@@ -351,7 +350,7 @@ async fn responses_lite_exposes_standalone_tools_for_actor_authorized_provider()
     .await;
 
     let auth = CodexAuth::from_api_key("dummy");
-    let extensions = responses_extensions(&auth);
+    let extensions = responses_extensions();
     let mut builder = test_codex()
         .with_auth(auth)
         .with_extensions(extensions)
@@ -430,7 +429,7 @@ async fn responses_lite_does_not_expose_standalone_web_search_for_bedrock_provid
         api_key: "dummy".to_string(),
         region: "us-east-1".to_string(),
     });
-    let extensions = responses_extensions(&auth);
+    let extensions = responses_extensions();
     let mut builder = test_codex()
         .with_auth(auth)
         .with_extensions(extensions)
@@ -480,7 +479,7 @@ async fn assert_responses_lite_custom_provider_web_search(
     .await;
 
     let auth = CodexAuth::from_api_key("dummy");
-    let extensions = responses_extensions(&auth);
+    let extensions = responses_extensions();
     let mut builder = test_codex()
         .with_auth(auth)
         .with_extensions(extensions)
@@ -616,7 +615,7 @@ async fn non_lite_uses_standalone_image_generation_by_default() -> Result<()> {
     .await;
 
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
-    let extensions = responses_extensions(&auth);
+    let extensions = responses_extensions();
     let mut builder = test_codex()
         .with_auth(auth)
         .with_extensions(extensions)

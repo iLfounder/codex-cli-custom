@@ -74,7 +74,7 @@ impl CodeModeWaitHandler {
         } = invocation;
 
         let mut telemetry = CodeModeToolCallGuard::new(
-            session.services.analytics_events_client.clone(),
+            turn.analytics_events_client.clone(),
             session.thread_id.to_string(),
             turn.sub_id.clone(),
             call_id.clone(),

@@ -738,7 +738,7 @@ async fn trigger_memories_startup(test: &TestCodex) {
     let parent_permission_profile = config.permissions.effective_permission_profile();
     start_memories_startup_task(
         Arc::clone(&test.thread_manager),
-        test.thread_manager.auth_manager(),
+        test.codex.execution_account(),
         test.session_configured.thread_id,
         Arc::clone(&test.codex),
         Arc::new(config),

@@ -3211,7 +3211,7 @@ impl Session {
                     &selected_capability_roots,
                     required_servers,
                 ),
-                turn::prepare_tool_recommendations(self.as_ref(), turn_context.as_ref()),
+                turn::prepare_tool_recommendations(turn_context.as_ref()),
             )
         }
         .or_cancel(cancellation_token)

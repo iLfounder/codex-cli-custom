@@ -35,7 +35,6 @@ pub(crate) struct TurnCostWorker {
 #[derive(Clone)]
 pub(crate) struct TurnCostWorkerHandle {
     sender: mpsc::Sender<TurnCostObservation>,
-    auth_manager: Arc<AuthManager>,
 }
 
 enum TurnCostObservationKind {
@@ -51,6 +50,7 @@ enum TurnCostObservationKind {
 struct TurnCostObservation {
     thread_id: ThreadId,
     turn_id: String,
+    auth_manager: Arc<AuthManager>,
     kind: TurnCostObservationKind,
 }
 
@@ -63,6 +63,7 @@ enum TurnCostStatus {
 
 struct TurnCostEntry {
     thread_id: ThreadId,
+    auth_manager: Arc<AuthManager>,
     session_telemetry: SessionTelemetry,
     expected_response_count: u64,
     status: TurnCostStatus,
@@ -72,20 +73,11 @@ struct TurnCostEntry {
 
 struct WorkerRuntime {
     config: Arc<Config>,
-    auth_manager: Arc<AuthManager>,
     turns: HashMap<String, TurnCostEntry>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BackendAvailability {
-    AwaitingAuthChange,
-    RetryProbe,
-    Ready,
-    Disabled,
-}
-
 impl TurnCostWorker {
-    pub(crate) fn spawn(config: Arc<Config>, auth_manager: Arc<AuthManager>) -> Option<Self> {
+    pub(crate) fn spawn(config: Arc<Config>) -> Option<Self> {
         if !matches!(
             config.otel.exporter,
             OtelExporterKind::OtlpHttp { .. } | OtelExporterKind::OtlpGrpc { .. }
@@ -97,7 +89,6 @@ impl TurnCostWorker {
         let shutdown = CancellationToken::new();
         let runtime = WorkerRuntime {
             config: Arc::clone(&config),
-            auth_manager: Arc::clone(&auth_manager),
             turns: HashMap::new(),
         };
         let worker_shutdown = shutdown.clone();
@@ -105,10 +96,7 @@ impl TurnCostWorker {
             runtime.run(receiver, worker_shutdown).await;
         });
         Some(Self {
-            handle: TurnCostWorkerHandle {
-                sender,
-                auth_manager,
-            },
+            handle: TurnCostWorkerHandle { sender },
             shutdown,
             _task: task,
         })
@@ -134,18 +122,21 @@ impl TurnCostWorkerHandle {
         &self,
         thread_id: ThreadId,
         event: &Event,
+        auth_manager: Arc<AuthManager>,
         session_telemetry: impl FnOnce() -> SessionTelemetry,
     ) {
-        let Some(auth) = self.auth_manager.auth_cached() else {
-            return;
-        };
-        if !auth.is_api_key_auth() {
-            return;
-        }
         let kind = match &event.msg {
-            EventMsg::TurnStarted(_) => TurnCostObservationKind::Started {
-                session_telemetry: Box::new(session_telemetry()),
-            },
+            EventMsg::TurnStarted(_) => {
+                let Some(auth) = auth_manager.auth_cached() else {
+                    return;
+                };
+                if !auth.is_api_key_auth() {
+                    return;
+                }
+                TurnCostObservationKind::Started {
+                    session_telemetry: Box::new(session_telemetry()),
+                }
+            }
             EventMsg::RawResponseCompleted(_) => TurnCostObservationKind::ResponseCompleted,
             EventMsg::TurnComplete(_) => TurnCostObservationKind::Finished { interrupted: false },
             EventMsg::TurnAborted(_) => TurnCostObservationKind::Finished { interrupted: true },
@@ -154,25 +145,17 @@ impl TurnCostWorkerHandle {
         let _ = self.sender.try_send(TurnCostObservation {
             thread_id,
             turn_id: event.id.clone(),
+            auth_manager,
             kind,
         });
     }
 }
 
 impl WorkerRuntime {
-    async fn run(self, receiver: mpsc::Receiver<TurnCostObservation>, shutdown: CancellationToken) {
-        let auth_changes = self.auth_manager.auth_change_receiver();
-        let backend_availability = self.probe_backend().await;
-        self.run_with_backend_availability(receiver, shutdown, auth_changes, backend_availability)
-            .await;
-    }
-
-    async fn run_with_backend_availability(
+    async fn run(
         mut self,
         mut receiver: mpsc::Receiver<TurnCostObservation>,
         shutdown: CancellationToken,
-        mut auth_changes: tokio::sync::watch::Receiver<u64>,
-        mut backend_availability: BackendAvailability,
     ) {
         let mut ticker = tokio::time::interval(POLL_INTERVAL);
         ticker.tick().await;
@@ -180,97 +163,13 @@ impl WorkerRuntime {
             tokio::select! {
                 biased;
                 _ = shutdown.cancelled() => break,
-                changed = auth_changes.changed() => {
-                    if changed.is_err() {
-                        break;
-                    }
-                    self.turns.clear();
-                    while receiver.try_recv().is_ok() {}
-                    backend_availability = self.probe_backend().await;
-                }
                 observation = receiver.recv() => {
                     let Some(observation) = observation else {
                         break;
                     };
-                    if !matches!(
-                        backend_availability,
-                        BackendAvailability::Ready | BackendAvailability::RetryProbe
-                    ) {
-                        continue;
-                    }
                     self.record_observation(observation);
                 }
-                _ = ticker.tick() => {
-                    match backend_availability {
-                        BackendAvailability::Ready => self.poll_due().await,
-                        BackendAvailability::RetryProbe => {
-                            backend_availability = self.probe_backend().await;
-                        }
-                        BackendAvailability::AwaitingAuthChange
-                        | BackendAvailability::Disabled => {}
-                    }
-                }
-            }
-        }
-    }
-
-    async fn probe_backend(&self) -> BackendAvailability {
-        let Some(auth) = self.auth_manager.auth().await else {
-            return BackendAvailability::AwaitingAuthChange;
-        };
-        if !auth.is_api_key_auth() {
-            return BackendAvailability::AwaitingAuthChange;
-        }
-        let provider = match self
-            .config
-            .model_provider
-            .to_api_provider(Some(AuthMode::ApiKey))
-        {
-            Ok(provider) => provider,
-            Err(error) => {
-                warn!("failed to resolve OpenAI API-key provider headers: {error}");
-                return BackendAvailability::RetryProbe;
-            }
-        };
-        let client = BackendClient::from_auth(
-            self.config.chatgpt_base_url.clone(),
-            &auth,
-            self.config.http_client_factory(),
-        );
-        let probe_turn_ids = [uuid::Uuid::new_v4().to_string()];
-        match tokio::time::timeout(
-            REQUEST_TIMEOUT,
-            client.query_api_key_turn_costs(&probe_turn_ids, &provider.headers),
-        )
-        .await
-        {
-            Ok(Ok(_)) => BackendAvailability::Ready,
-            Ok(Err(error)) => match error.status().map(|status| status.as_u16()) {
-                Some(401 | 403) => {
-                    tracing::debug!(
-                        "turn cost worker waiting for auth change after backend availability check: {error}"
-                    );
-                    BackendAvailability::AwaitingAuthChange
-                }
-                Some(429) => BackendAvailability::RetryProbe,
-                Some(400..=499) => {
-                    tracing::debug!(
-                        "turn cost worker disabled by backend availability check: {error}"
-                    );
-                    BackendAvailability::Disabled
-                }
-                _ => {
-                    tracing::debug!(
-                        "turn cost worker backend availability check failed temporarily: {error}"
-                    );
-                    BackendAvailability::RetryProbe
-                }
-            },
-            Err(_) => {
-                tracing::debug!(
-                    "turn cost worker backend availability check timed out; will retry"
-                );
-                BackendAvailability::RetryProbe
+                _ = ticker.tick() => self.poll_due().await,
             }
         }
     }
@@ -283,6 +182,7 @@ impl WorkerRuntime {
                         .entry(observation.turn_id)
                         .or_insert(TurnCostEntry {
                             thread_id: observation.thread_id,
+                            auth_manager: observation.auth_manager,
                             session_telemetry: *session_telemetry,
                             expected_response_count: 0,
                             status: TurnCostStatus::Running,
@@ -316,24 +216,29 @@ impl WorkerRuntime {
     }
 
     async fn poll_due(&mut self) {
-        let Some(auth) = self.auth_manager.auth().await else {
-            return;
-        };
-        if !auth.is_api_key_auth() {
-            return;
-        }
         let now = Instant::now();
-        let due_turn_ids: Vec<String> = self
-            .turns
-            .iter()
-            .filter(|(_, entry)| {
-                entry.status != TurnCostStatus::Running && entry.next_poll_at <= now
-            })
-            .take(MAX_QUERY_TURNS)
-            .map(|(turn_id, _)| turn_id.clone())
-            .collect();
-        if !due_turn_ids.is_empty() {
-            self.poll_api_key_entries(&due_turn_ids, &auth).await;
+        let mut due_by_account: HashMap<usize, (Arc<AuthManager>, Vec<String>)> = HashMap::new();
+        for (turn_id, entry) in self.turns.iter().filter(|(_, entry)| {
+            entry.status != TurnCostStatus::Running && entry.next_poll_at <= now
+        }) {
+            let account_key = Arc::as_ptr(&entry.auth_manager) as usize;
+            let (_, turn_ids) = due_by_account
+                .entry(account_key)
+                .or_insert_with(|| (Arc::clone(&entry.auth_manager), Vec::new()));
+            if turn_ids.len() < MAX_QUERY_TURNS {
+                turn_ids.push(turn_id.clone());
+            }
+        }
+        for (_, (auth_manager, turn_ids)) in due_by_account {
+            let Some(auth) = auth_manager.auth().await else {
+                self.retry_entries(&turn_ids);
+                continue;
+            };
+            if !auth.is_api_key_auth() {
+                self.retry_entries(&turn_ids);
+                continue;
+            }
+            self.poll_api_key_entries(&turn_ids, &auth).await;
         }
     }
 

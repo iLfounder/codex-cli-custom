@@ -8,6 +8,7 @@ use codex_api::LocationType;
 use codex_api::SearchContextSize;
 use codex_api::SearchFilters;
 use codex_api::SearchSettings;
+use codex_core::ExecutionAccountContext;
 use codex_core::config::Config;
 use codex_extension_api::ConfigContributor;
 use codex_extension_api::ExtensionData;
@@ -26,9 +27,7 @@ use codex_protocol::config_types::WebSearchMode;
 use crate::tool::WebSearchTool;
 
 #[derive(Clone)]
-struct WebSearchExtension {
-    auth_manager: Arc<AuthManager>,
-}
+struct WebSearchExtension;
 
 #[derive(Clone)]
 struct WebSearchExtensionConfig {
@@ -128,13 +127,21 @@ impl ToolContributor for WebSearchExtension {
         if !config.available {
             return Vec::new();
         }
+        let auth_manager = session_store
+            .get::<ExecutionAccountContext>()
+            .map(|account| Arc::clone(&account.auth_manager))
+            .or_else(|| {
+                session_store
+                    .get::<Arc<AuthManager>>()
+                    .map(|auth| auth.as_ref().clone())
+            });
+        let Some(auth_manager) = auth_manager else {
+            return Vec::new();
+        };
 
         vec![Arc::new(WebSearchTool {
             session_id: session_store.level_id().to_string(),
-            provider: create_model_provider(
-                config.provider.clone(),
-                Some(self.auth_manager.clone()),
-            ),
+            provider: create_model_provider(config.provider.clone(), Some(auth_manager)),
             settings: config.settings.clone(),
             originator: thread_store
                 .get::<ThreadOriginator>()
@@ -143,8 +150,8 @@ impl ToolContributor for WebSearchExtension {
     }
 }
 
-pub fn install(registry: &mut ExtensionRegistryBuilder<Config>, auth_manager: Arc<AuthManager>) {
-    let extension = Arc::new(WebSearchExtension { auth_manager });
+pub fn install(registry: &mut ExtensionRegistryBuilder<Config>) {
+    let extension = Arc::new(WebSearchExtension);
     registry.thread_lifecycle_contributor(extension.clone());
     registry.config_contributor(extension.clone());
     registry.tool_contributor(extension);
@@ -192,12 +199,12 @@ mod tests {
     #[test]
     fn installed_extension_contributes_web_run_when_enabled() {
         let mut builder = ExtensionRegistryBuilder::<Config>::new();
-        install(
-            &mut builder,
-            AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy")),
-        );
+        install(&mut builder);
         let registry = builder.build();
         let session_store = ExtensionData::new("session");
+        session_store.insert(AuthManager::from_auth_for_testing(CodexAuth::from_api_key(
+            "dummy",
+        )));
         let thread_store = ExtensionData::new("11111111-1111-4111-8111-111111111111");
         thread_store.insert(WebSearchExtensionConfig {
             available: true,

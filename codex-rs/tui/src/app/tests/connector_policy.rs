@@ -126,12 +126,28 @@ async fn app_list_notifications_revalidate_installed_mentions_and_the_current_di
 
     let mut app_server =
         crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref()).await?;
+    let other_thread_notification =
+        ServerNotification::AppListUpdated(AppListUpdatedNotification {
+            thread_id: Some(ThreadId::new().to_string()),
+            data: vec![serde_json::from_str(
+                r#"{"id":"other-thread","name":"Other Thread","isAccessible":true}"#,
+            )?],
+        });
+    app.handle_app_server_event(
+        &app_server,
+        AppServerEvent::ServerNotification(Box::new(other_thread_notification)),
+    )
+    .await;
+    assert!(app_event_rx.try_recv().is_err());
+    assert!(!render_bottom_popup(&app.chat_widget, /*width*/ 80).contains("Other Thread"));
+
     for (id, name, should_refresh) in [
         ("scoped-app", "Scoped App", false),
         ("old-workspace", "Old Workspace", true),
         ("old-workspace", "Old Workspace", false),
     ] {
         let notification = ServerNotification::AppListUpdated(AppListUpdatedNotification {
+            thread_id: app.current_displayed_thread_id().map(|id| id.to_string()),
             data: vec![serde_json::from_value(serde_json::json!({
                 "id": id, "name": name, "isAccessible": true
             }))?],
@@ -180,6 +196,7 @@ async fn app_list_notifications_revalidate_installed_mentions_and_the_current_di
 
     // Revocations refresh mentions even if discovery already has this notification.
     let revoked_notification = ServerNotification::AppListUpdated(AppListUpdatedNotification {
+        thread_id: app.current_displayed_thread_id().map(|id| id.to_string()),
         data: vec![serde_json::from_str(
             r#"{"id":"scoped-app","name":"Scoped App","isAccessible":true}"#,
         )?],
@@ -204,6 +221,7 @@ async fn app_list_notifications_revalidate_installed_mentions_and_the_current_di
 
     let ready_app = r#"{"id":"newly-ready","name":"Newly Ready","isAccessible":true}"#;
     let ready_notification = ServerNotification::AppListUpdated(AppListUpdatedNotification {
+        thread_id: app.current_displayed_thread_id().map(|id| id.to_string()),
         data: vec![serde_json::from_str(ready_app)?],
     });
     app.handle_app_server_event(

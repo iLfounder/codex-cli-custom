@@ -333,7 +333,6 @@ impl MessageProcessor {
                     guardian_agent_spawner(thread_manager.clone()),
                     ThreadExtensionDependencies {
                         event_sink: Arc::clone(&extension_event_sink),
-                        auth_manager: auth_manager.clone(),
                         state_db: state_db.clone(),
                         analytics_events_client: analytics_events_client.clone(),
                         thread_manager: thread_manager.clone(),
@@ -373,8 +372,7 @@ impl MessageProcessor {
         let models_manager = thread_manager.get_models_manager();
         let models_refresh_worker =
             crate::models_refresh_worker::spawn(&models_manager, config.http_client_factory());
-        let turn_cost_worker =
-            TurnCostWorker::spawn(Arc::clone(&config), Arc::clone(&auth_manager));
+        let turn_cost_worker = TurnCostWorker::spawn(Arc::clone(&config));
         thread_manager
             .plugins_manager()
             .set_analytics_events_client(analytics_events_client.clone());
@@ -441,6 +439,7 @@ impl MessageProcessor {
             auth_manager.clone(),
             Arc::clone(&thread_manager),
             Arc::clone(&config),
+            config_manager.clone(),
             feedback,
             log_db.clone(),
             state_db.clone(),
@@ -494,7 +493,7 @@ impl MessageProcessor {
             Arc::clone(&thread_list_state_permit),
         );
         let thread_processor = ThreadRequestProcessor::new(
-            auth_manager.clone(),
+            auth_manager,
             Arc::clone(&thread_manager),
             outgoing.clone(),
             arg0_paths.clone(),
@@ -513,7 +512,6 @@ impl MessageProcessor {
             config_warnings,
         );
         let turn_processor = TurnRequestProcessor::new(
-            auth_manager,
             Arc::clone(&thread_manager),
             outgoing.clone(),
             analytics_events_client.clone(),

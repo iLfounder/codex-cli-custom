@@ -1882,13 +1882,16 @@ Example:
 $skill-creator Add a new skill for triaging flaky CI and include step-by-step usage.
 ```
 
-Use `skills/list` to fetch the available skills (optionally scoped by `cwds`, with `forceReload`).
+Use `skills/list` to fetch the available skills (optionally scoped by a loaded `threadId` and
+`cwds`, with `forceReload`). A provided `threadId` selects that thread's execution account and
+effective plugin configuration; omitting it uses the default account for compatibility.
 `skills/list` might reuse a cached skills result per `cwd`; setting `forceReload` to `true` refreshes the result from disk.
 The server also emits `skills/changed` notifications when watched local skill files change. Treat this as an invalidation signal and re-run `skills/list` with your current params when needed.
 Use `skills/extraRoots/set` to replace additional standalone skill roots for the current app-server process. These roots use the same layout as other standalone skill roots: each root contains skill directories, and each skill directory contains `SKILL.md`. Missing roots are accepted and load no skills until they exist. This setting is lost when app-server exits.
 
 ```json
 { "method": "skills/list", "id": 25, "params": {
+    "threadId": "thr_123",
     "cwds": ["/Users/me/project", "/Users/me/other-project"],
     "forceReload": true
 } }
@@ -2100,12 +2103,13 @@ When `threadId` is provided, app feature gating (`Feature::Apps`) is evaluated u
 
 `app/list` returns after both accessible apps and directory apps are loaded. Set `forceRefetch: true` to bypass app caches and fetch fresh data from sources. Cache entries are only replaced when those refetches succeed.
 
-The server also emits `app/list/updated` notifications when newly loaded accessible or directory apps change the merged app list. Each notification includes the latest merged app list. An initial cached `app/list` still emits one final notification so other initialized clients can refresh their app list, while reading an unchanged cached continuation page does not emit a duplicate notification; `forceRefetch: true` preserves the existing progressive notifications while fresh data loads.
+The server also emits `app/list/updated` notifications when newly loaded accessible or directory apps change the merged app list. Each notification includes the originating `threadId` (or `null` for a default-account request) and the latest merged app list, so clients can ignore updates for other threads. An initial cached `app/list` still emits one final notification so other initialized clients can refresh their app list, while reading an unchanged cached continuation page does not emit a duplicate notification; `forceRefetch: true` preserves the existing progressive notifications while fresh data loads.
 
 ```json
 {
   "method": "app/list/updated",
   "params": {
+    "threadId": "thr_123",
     "data": [
       {
         "id": "demo-app",

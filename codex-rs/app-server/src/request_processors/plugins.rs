@@ -525,7 +525,7 @@ impl PluginRequestProcessor {
     }
 
     fn clear_plugin_related_caches(&self) {
-        self.thread_manager.plugins_manager().clear_cache();
+        self.thread_manager.clear_all_account_plugin_caches();
         self.thread_manager.skills_service().clear_cache();
     }
 

@@ -267,5 +267,6 @@ pub struct AppsListResponse {
 #[ts(export_to = "v2/")]
 /// EXPERIMENTAL - notification emitted when the app list changes.
 pub struct AppListUpdatedNotification {
+    pub thread_id: Option<String>,
     pub data: Vec<AppInfo>,
 }

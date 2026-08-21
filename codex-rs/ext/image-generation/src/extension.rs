@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use codex_core::ExecutionAccountContext;
 use codex_core::config::Config;
 use codex_extension_api::ConfigContributor;
 use codex_extension_api::ExtensionData;
@@ -11,7 +12,6 @@ use codex_extension_api::ThreadStartInput;
 use codex_extension_api::ToolCall;
 use codex_extension_api::ToolContributor;
 use codex_extension_api::ToolExecutor;
-use codex_login::AuthManager;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -21,7 +21,6 @@ use crate::tool::ImageGenerationTool;
 
 #[derive(Clone)]
 struct ImageGenerationExtension {
-    auth_manager: Arc<AuthManager>,
     resolve_save_root: Arc<SaveRootResolver>,
 }
 
@@ -84,7 +83,7 @@ impl ToolContributor for ImageGenerationExtension {
     /// Creates the image-generation tool exposed by this installed extension.
     fn tools(
         &self,
-        _session_store: &ExtensionData,
+        session_store: &ExtensionData,
         thread_store: &ExtensionData,
     ) -> Vec<Arc<dyn ToolExecutor<ToolCall>>> {
         let Some(config) = thread_store.get::<ImageGenerationExtensionConfig>() else {
@@ -93,10 +92,16 @@ impl ToolContributor for ImageGenerationExtension {
         if !config.available {
             return Vec::new();
         }
+        let Some(execution_account) = session_store.get::<ExecutionAccountContext>() else {
+            return Vec::new();
+        };
 
         vec![Arc::new(ImageGenerationTool::new(
             CodexImagesBackend::new(
-                create_model_provider(config.provider.clone(), Some(self.auth_manager.clone())),
+                create_model_provider(
+                    config.provider.clone(),
+                    Some(Arc::clone(&execution_account.auth_manager)),
+                ),
                 thread_store
                     .get::<ThreadOriginator>()
                     .map(|originator| originator.0.clone()),
@@ -110,11 +115,9 @@ impl ToolContributor for ImageGenerationExtension {
 /// Installs the standalone image-generation extension contributors.
 pub fn install(
     registry: &mut ExtensionRegistryBuilder<Config>,
-    auth_manager: Arc<AuthManager>,
     resolve_save_root: impl Fn(&Config) -> Option<AbsolutePathBuf> + Send + Sync + 'static,
 ) {
     let extension = Arc::new(ImageGenerationExtension {
-        auth_manager,
         resolve_save_root: Arc::new(resolve_save_root),
     });
     registry.thread_lifecycle_contributor(extension.clone());

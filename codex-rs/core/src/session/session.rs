@@ -1326,6 +1326,8 @@ impl Session {
             }
             let session_extension_data =
                 codex_extension_api::ExtensionData::new(session_id.to_string());
+            session_extension_data.insert(execution_account.as_ref().clone());
+            session_extension_data.insert(Arc::clone(&execution_account.auth_manager));
             session_extension_data.insert(analytics_events_client.clone());
             let mcp_resource_client = Arc::new(McpResourceClient::new(Arc::clone(&mcp_runtime)));
             let extension_metrics =

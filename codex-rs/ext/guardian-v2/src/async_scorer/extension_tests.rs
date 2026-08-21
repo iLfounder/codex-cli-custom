@@ -110,13 +110,12 @@ async fn installed_extension_reconnects_after_auth_refresh() -> Result<()> {
     )));
     config.features.enable(Feature::GuardianV2)?;
     let mut builder = ExtensionRegistryBuilder::new();
-    super::install(
-        &mut builder,
-        auth_manager.clone(),
-        Arc::downgrade(&test.thread_manager),
-    );
+    super::install(&mut builder, Arc::downgrade(&test.thread_manager));
     let registry = builder.build();
     let session_store = ExtensionData::new("session-1");
+    let mut execution_account = test.codex.execution_account().as_ref().clone();
+    execution_account.auth_manager = Arc::clone(&auth_manager);
+    session_store.insert(execution_account);
     let thread_store = test.codex.thread_extension_data();
     registry.thread_lifecycle_contributors()[0]
         .on_thread_start(ThreadStartInput {
@@ -582,13 +581,12 @@ async fn sample_configured_conversation_history(
     config.model_provider = provider_info;
     config.features.enable(Feature::GuardianV2)?;
     let mut builder = ExtensionRegistryBuilder::new();
-    super::install(
-        &mut builder,
-        auth_manager,
-        Arc::downgrade(&test.thread_manager),
-    );
+    super::install(&mut builder, Arc::downgrade(&test.thread_manager));
     let registry = builder.build();
     let session_store = ExtensionData::new("session-1");
+    let mut execution_account = test.codex.execution_account().as_ref().clone();
+    execution_account.auth_manager = auth_manager;
+    session_store.insert(execution_account);
     let thread_store = test.codex.thread_extension_data();
     thread_store.insert(RecordingMetrics::default());
     let metrics = thread_store.get::<RecordingMetrics>().unwrap();
@@ -1740,13 +1738,12 @@ async fn contributor_reuses_the_latest_compatible_parent_compaction() -> Result<
         .get_model_info(MODEL, &config.to_models_manager_config())
         .await;
     let mut builder = ExtensionRegistryBuilder::new();
-    super::install(
-        &mut builder,
-        auth_manager,
-        Arc::downgrade(&test.thread_manager),
-    );
+    super::install(&mut builder, Arc::downgrade(&test.thread_manager));
     let registry = builder.build();
     let session_store = ExtensionData::new("session-1");
+    let mut execution_account = test.codex.execution_account().as_ref().clone();
+    execution_account.auth_manager = auth_manager;
+    session_store.insert(execution_account);
     let thread_store = test.codex.thread_extension_data();
     let metrics = Arc::new(RecordingMetrics::default());
     thread_store.insert(parent_model);

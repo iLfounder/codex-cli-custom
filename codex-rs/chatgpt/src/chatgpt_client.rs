@@ -1,7 +1,6 @@
 use codex_core::config::Config;
 use codex_http_client::HttpClient;
 use codex_http_client::HttpClientFactory;
-use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::default_client::RESIDENCY_HEADER_NAME;
 use codex_login::default_client::create_client;
@@ -54,23 +53,19 @@ fn psp_chatgpt_client(factory: HttpClientFactory) -> HttpClient {
 /// Make a GET request to the ChatGPT backend API.
 pub(crate) async fn chatgpt_get_request<T: DeserializeOwned>(
     config: &Config,
+    auth: &CodexAuth,
     path: String,
 ) -> anyhow::Result<T> {
-    chatgpt_get_request_with_timeout(config, path, /*timeout*/ None).await
+    chatgpt_get_request_with_timeout(config, auth, path, /*timeout*/ None).await
 }
 
 pub(crate) async fn chatgpt_get_request_with_timeout<T: DeserializeOwned>(
     config: &Config,
+    auth: &CodexAuth,
     path: String,
     timeout: Option<Duration>,
 ) -> anyhow::Result<T> {
     let chatgpt_base_url = &config.chatgpt_base_url;
-    let auth_manager =
-        AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await?;
-    let auth = auth_manager
-        .auth()
-        .await
-        .ok_or_else(|| anyhow::anyhow!("ChatGPT auth not available"))?;
     anyhow::ensure!(
         auth.uses_codex_backend(),
         "ChatGPT backend requests require Codex backend auth"
@@ -95,7 +90,7 @@ pub(crate) async fn chatgpt_get_request_with_timeout<T: DeserializeOwned>(
     let mut request = client
         .get(&url)
         .headers(default_headers())
-        .headers(codex_model_provider::auth_provider_from_auth(&auth).to_auth_headers())
+        .headers(codex_model_provider::auth_provider_from_auth(auth).to_auth_headers())
         .header(OAI_PRODUCT_SKU_HEADER, CODEX_PRODUCT_SKU)
         .header("Content-Type", "application/json");
     if let Some(timeout) = timeout {
