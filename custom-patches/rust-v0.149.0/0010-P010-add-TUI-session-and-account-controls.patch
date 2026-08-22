@@ -1,4 +1,4 @@
-From 1a74ce9a9af1b62609b686cb611e25da4161798c Mon Sep 17 00:00:00 2001
+From b49963b54c0762951aeca6d7e2be84f40a34e527 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 19:45:26 +0900
 Subject: [PATCH] feat(custom): add release-aware TUI controls for 0.149
@@ -43,10 +43,10 @@ Subject: [PATCH] feat(custom): add release-aware TUI controls for 0.149
  .../tui/src/app/account_picker_view_tests.rs  | 148 +++
  codex-rs/tui/src/app/account_validation.rs    | 136 +++
  .../tui/src/app/account_validation_tests.rs   |  14 +
- codex-rs/tui/src/app/app_server_events.rs     |  43 +
+ codex-rs/tui/src/app/app_server_events.rs     |  46 +
  codex-rs/tui/src/app/background_requests.rs   |  31 +-
- .../tui/src/app/dynamic_thread_controls.rs    | 156 ++++
- .../src/app/dynamic_thread_controls_tests.rs  |  66 ++
+ .../tui/src/app/dynamic_thread_controls.rs    | 186 ++++
+ .../src/app/dynamic_thread_controls_tests.rs  | 129 +++
  codex-rs/tui/src/app/event_dispatch.rs        | 108 ++-
  codex-rs/tui/src/app/runtime_controls.rs      | 305 +++++++
  .../tui/src/app/runtime_controls_tests.rs     |  55 ++
@@ -78,7 +78,7 @@ Subject: [PATCH] feat(custom): add release-aware TUI controls for 0.149
  codex-rs/tui/src/chatwidget/user_messages.rs  | 107 ++-
  codex-rs/tui/src/goal_display.rs              |   2 +
  codex-rs/tui/src/slash_command.rs             |   3 +
- 74 files changed, 7079 insertions(+), 581 deletions(-)
+ 74 files changed, 7175 insertions(+), 581 deletions(-)
  create mode 100644 codex-rs/tui/src/app/account_controls.rs
  create mode 100644 codex-rs/tui/src/app/account_login.rs
  create mode 100644 codex-rs/tui/src/app/account_picker.rs
@@ -12568,10 +12568,10 @@ index 000000000..3a68f7917
 +    );
 +}
 diff --git a/codex-rs/tui/src/app/app_server_events.rs b/codex-rs/tui/src/app/app_server_events.rs
-index 19104451b..6c6bdc1da 100644
+index 19104451b..39a9613c1 100644
 --- a/codex-rs/tui/src/app/app_server_events.rs
 +++ b/codex-rs/tui/src/app/app_server_events.rs
-@@ -88,6 +88,43 @@ impl App {
+@@ -88,6 +88,46 @@ impl App {
          app_server_client: &AppServerSession,
          notification: ServerNotification,
      ) {
@@ -12610,12 +12610,15 @@ index 19104451b..6c6bdc1da 100644
 +            ServerNotification::ItemCompleted(update) => {
 +                self.handle_dynamic_thread_control_completed(update);
 +            }
++            ServerNotification::TurnCompleted(update) => {
++                self.handle_dynamic_thread_control_turn_completed(update);
++            }
 +            _ => {}
 +        }
          if let ServerNotification::ThreadStarted(started) = &notification
              && let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                  parent_thread_id, ..
-@@ -312,6 +349,12 @@ impl App {
+@@ -312,6 +352,12 @@ impl App {
              }
              return;
          }
@@ -12712,10 +12715,10 @@ index d44257564..dec261d9b 100644
          .wrap_err("account/rateLimits/read failed in TUI")
 diff --git a/codex-rs/tui/src/app/dynamic_thread_controls.rs b/codex-rs/tui/src/app/dynamic_thread_controls.rs
 new file mode 100644
-index 000000000..205ae1ccd
+index 000000000..3e1aad958
 --- /dev/null
 +++ b/codex-rs/tui/src/app/dynamic_thread_controls.rs
-@@ -0,0 +1,156 @@
+@@ -0,0 +1,186 @@
 +//! Typed model-requested TUI controls with deferred presentation transitions.
 +
 +use super::*;
@@ -12725,6 +12728,8 @@ index 000000000..205ae1ccd
 +use codex_app_server_protocol::ItemCompletedNotification;
 +use codex_app_server_protocol::ServerRequest;
 +use codex_app_server_protocol::ThreadItem;
++use codex_app_server_protocol::TurnCompletedNotification;
++use codex_app_server_protocol::TurnStatus;
 +
 +#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 +enum DynamicThreadControl {
@@ -12739,6 +12744,7 @@ index 000000000..205ae1ccd
 +    call_id: String,
 +    tool: String,
 +    control: DynamicThreadControl,
++    item_completed: bool,
 +}
 +
 +impl App {
@@ -12793,6 +12799,7 @@ index 000000000..205ae1ccd
 +            call_id: params.call_id.clone(),
 +            tool: params.tool.clone(),
 +            control,
++            item_completed: false,
 +        });
 +        let response = DynamicToolCallResponse {
 +            content_items: vec![DynamicToolCallOutputContentItem::InputText {
@@ -12849,23 +12856,49 @@ index 000000000..205ae1ccd
 +        {
 +            return false;
 +        }
-+        let successful = *status == DynamicToolCallStatus::Completed
-+            && *success == Some(true)
-+            && self.primary_thread_id == Some(pending.thread_id)
-+            && self.current_displayed_thread_id() == Some(pending.thread_id);
-+        let control = pending.control;
-+        self.pending_dynamic_thread_control = None;
-+        if successful {
-+            match control {
-+                DynamicThreadControl::Clear => {
-+                    self.app_event_tx.send(AppEvent::ClearUi { name: None })
-+                }
-+                DynamicThreadControl::New => {
-+                    self.app_event_tx.send(AppEvent::NewSession { name: None })
-+                }
-+            }
++        if *status != DynamicToolCallStatus::Completed || *success != Some(true) {
++            self.pending_dynamic_thread_control = None;
++            return true;
++        }
++        if let Some(pending) = self.pending_dynamic_thread_control.as_mut() {
++            pending.item_completed = true;
 +        }
 +        true
++    }
++
++    pub(super) fn handle_dynamic_thread_control_turn_completed(
++        &mut self,
++        notification: &TurnCompletedNotification,
++    ) -> bool {
++        let Some(pending) = self.pending_dynamic_thread_control.as_ref() else {
++            return false;
++        };
++        if notification.thread_id != pending.thread_id.to_string()
++            || notification.turn.id != pending.turn_id
++        {
++            return false;
++        }
++        let Some(pending) = self.pending_dynamic_thread_control.take() else {
++            return false;
++        };
++        if notification.turn.status == TurnStatus::Completed && pending.item_completed {
++            self.dispatch_dynamic_thread_control(pending);
++        }
++        true
++    }
++
++    fn dispatch_dynamic_thread_control(&mut self, pending: PendingDynamicThreadControl) {
++        if self.primary_thread_id != Some(pending.thread_id)
++            || self.current_displayed_thread_id() != Some(pending.thread_id)
++        {
++            return;
++        }
++        match pending.control {
++            DynamicThreadControl::Clear => self.app_event_tx.send(AppEvent::ClearUi { name: None }),
++            DynamicThreadControl::New => {
++                self.app_event_tx.send(AppEvent::NewSession { name: None })
++            }
++        }
 +    }
 +}
 +
@@ -12874,13 +12907,17 @@ index 000000000..205ae1ccd
 +mod tests;
 diff --git a/codex-rs/tui/src/app/dynamic_thread_controls_tests.rs b/codex-rs/tui/src/app/dynamic_thread_controls_tests.rs
 new file mode 100644
-index 000000000..c2752f999
+index 000000000..813429a61
 --- /dev/null
 +++ b/codex-rs/tui/src/app/dynamic_thread_controls_tests.rs
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,129 @@
 +use super::*;
 +use crate::app::test_support::make_test_app;
 +use crate::app_event_sender::AppEventSender;
++use codex_app_server_protocol::Turn;
++use codex_app_server_protocol::TurnCompletedNotification;
++use codex_app_server_protocol::TurnStatus;
++use tokio::sync::mpsc::UnboundedReceiver;
 +use tokio::sync::mpsc::unbounded_channel;
 +
 +fn completed(thread_id: ThreadId, success: bool) -> ItemCompletedNotification {
@@ -12901,8 +12938,28 @@ index 000000000..c2752f999
 +    }
 +}
 +
++fn turn_completed(thread_id: ThreadId, status: TurnStatus) -> TurnCompletedNotification {
++    TurnCompletedNotification {
++        thread_id: thread_id.to_string(),
++        turn: Turn {
++            id: "turn".to_string(),
++            items: Vec::new(),
++            items_view: Default::default(),
++            status,
++            error: None,
++            started_at: None,
++            completed_at: None,
++            duration_ms: None,
++        },
++    }
++}
++
++fn assert_no_transition(rx: &mut UnboundedReceiver<AppEvent>) {
++    assert!(rx.try_recv().is_err());
++}
++
 +#[tokio::test]
-+async fn successful_exact_item_completion_defers_clear_until_completion() {
++async fn successful_item_waits_for_completed_turn() {
 +    let mut app = make_test_app().await;
 +    let (tx, mut rx) = unbounded_channel();
 +    app.app_event_tx = AppEventSender::new(tx);
@@ -12915,9 +12972,17 @@ index 000000000..c2752f999
 +        call_id: "call".to_string(),
 +        tool: "threadClear".to_string(),
 +        control: DynamicThreadControl::Clear,
++        item_completed: false,
 +    });
 +
 +    assert!(app.handle_dynamic_thread_control_completed(&completed(thread_id, true)));
++    assert_no_transition(&mut rx);
++    assert!(
++        app.handle_dynamic_thread_control_turn_completed(&turn_completed(
++            thread_id,
++            TurnStatus::Completed,
++        ))
++    );
 +    assert!(matches!(
 +        rx.try_recv(),
 +        Ok(AppEvent::ClearUi { name: None })
@@ -12938,11 +13003,42 @@ index 000000000..c2752f999
 +        call_id: "call".to_string(),
 +        tool: "threadClear".to_string(),
 +        control: DynamicThreadControl::Clear,
++        item_completed: false,
 +    });
 +
 +    assert!(app.handle_dynamic_thread_control_completed(&completed(thread_id, false)));
-+    assert!(rx.try_recv().is_err());
++    assert_no_transition(&mut rx);
 +    assert!(app.pending_dynamic_thread_control.is_none());
++}
++
++#[tokio::test]
++async fn terminal_without_successful_item_cancels_pending_control() {
++    for status in [
++        TurnStatus::Completed,
++        TurnStatus::Failed,
++        TurnStatus::Interrupted,
++    ] {
++        let mut app = make_test_app().await;
++        let (tx, mut rx) = unbounded_channel();
++        app.app_event_tx = AppEventSender::new(tx);
++        let thread_id = ThreadId::new();
++        app.primary_thread_id = Some(thread_id);
++        app.active_thread_id = Some(thread_id);
++        app.pending_dynamic_thread_control = Some(PendingDynamicThreadControl {
++            thread_id,
++            turn_id: "turn".to_string(),
++            call_id: "call".to_string(),
++            tool: "threadClear".to_string(),
++            control: DynamicThreadControl::Clear,
++            item_completed: status != TurnStatus::Completed,
++        });
++
++        assert!(
++            app.handle_dynamic_thread_control_turn_completed(&turn_completed(thread_id, status,))
++        );
++        assert_no_transition(&mut rx);
++        assert!(app.pending_dynamic_thread_control.is_none());
++    }
 +}
 diff --git a/codex-rs/tui/src/app/event_dispatch.rs b/codex-rs/tui/src/app/event_dispatch.rs
 index e967543b8..2c32b900e 100644

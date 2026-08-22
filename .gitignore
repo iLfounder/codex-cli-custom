@@ -1,0 +1,8 @@
+/docs/handoff.md
+/docs/codex-rs-build-guide.md
+
+/upstream-codex/
+/.cargo-target/
+/dist/
+/codex-custom-*.tar.gz
+/codex-custom-*.tar.gz.sha256

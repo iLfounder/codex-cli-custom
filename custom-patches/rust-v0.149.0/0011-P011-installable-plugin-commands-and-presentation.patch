@@ -1,4 +1,4 @@
-From 3e6130b30115d4291412988f4d9f6c6b844c4e27 Mon Sep 17 00:00:00 2001
+From 2fbf9bdd2e602b7ebb6fe29e0bfea261f3b894e0 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 20:14:51 +0900
 Subject: [PATCH] feat(custom): add structured plugin commands and TUI
@@ -20096,7 +20096,7 @@ index 2589f626b..49129c6ca 100644
  
      match thread_id {
 diff --git a/codex-rs/tui/src/app/app_server_events.rs b/codex-rs/tui/src/app/app_server_events.rs
-index 6c6bdc1da..4c6a3abdc 100644
+index 39a9613c1..b6370a4ce 100644
 --- a/codex-rs/tui/src/app/app_server_events.rs
 +++ b/codex-rs/tui/src/app/app_server_events.rs
 @@ -106,10 +106,26 @@ impl App {
@@ -20126,9 +20126,9 @@ index 6c6bdc1da..4c6a3abdc 100644
              }
              ServerNotification::AccountSlotChanged(update) => {
                  self.handle_account_slot_changed(update.registry_revision, update.slot.clone());
-@@ -123,6 +139,17 @@ impl App {
-             ServerNotification::ItemCompleted(update) => {
-                 self.handle_dynamic_thread_control_completed(update);
+@@ -126,6 +142,17 @@ impl App {
+             ServerNotification::TurnCompleted(update) => {
+                 self.handle_dynamic_thread_control_turn_completed(update);
              }
 +            ServerNotification::ThreadPresentationAppended(update) => {
 +                if let Ok(thread_id) = ThreadId::from_string(&update.thread_id)
@@ -20144,7 +20144,7 @@ index 6c6bdc1da..4c6a3abdc 100644
              _ => {}
          }
          if let ServerNotification::ThreadStarted(started) = &notification
-@@ -182,6 +209,21 @@ impl App {
+@@ -185,6 +212,21 @@ impl App {
                  self.refresh_mcp_startup_expected_servers_from_config();
              }
              ServerNotification::AccountRateLimitsUpdated(notification) => {

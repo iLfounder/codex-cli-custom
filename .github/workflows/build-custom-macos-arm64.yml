@@ -23,7 +23,7 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
       CARGO_TERM_COLOR: always
       SOURCE_COMMIT: 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
-      PATCH_TREE: b5dd645e42e146aba3d1a0f87177c063cc73390c
+      PATCH_TREE: 70d5992eaee56f500fd1d09479d8ee30876ffdf1
 
     steps:
       - name: Check out patch repository
@@ -82,6 +82,7 @@ jobs:
           mkdir -p dist
           cp "$CARGO_TARGET_DIR/release/codex" dist/codex
           cp "$CARGO_TARGET_DIR/release/codex-app-server" dist/codex-app-server
+          cp LICENSE NOTICE dist/
           strip -x dist/codex dist/codex-app-server
           chmod 0755 dist/codex dist/codex-app-server
           (cd dist && shasum -a 256 codex codex-app-server > SHA256SUMS)
