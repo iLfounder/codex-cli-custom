@@ -29,9 +29,9 @@ The target is upstream [`rust-v0.149.0`](https://github.com/openai/codex/release
 |---|---|
 | P001–P011 implementation and focused checks | Complete |
 | Ordered 0.149 patch export and clean-apply verification | Complete; 11 patches reproduce tree `4d993b8b5960de01c6d2bafb4c1a7749c51280db` |
-| macOS arm64 release build and artifacts | Final review corrections pending rebuild; [run 32528035039](https://github.com/iLfounder/codex-cli-custom/actions/runs/32528035039) proves the immediately preceding tree |
+| macOS arm64 release build and artifacts | Complete; [run 32537192127](https://github.com/iLfounder/codex-cli-custom/actions/runs/32537192127), artifact `9467506046` |
 | Final independent reviews | One internal Codex and one external Opus fresh-context review completed; confirmed findings were source-checked and corrected |
-| 0.149 publication | Pending |
+| 0.149 publication | Complete |
 
 The current candidate is [`custom-patches/rust-v0.149.0`](custom-patches/rust-v0.149.0/). The files under [`custom-patches/rust-v0.148.0`](custom-patches/rust-v0.148.0/) are retained only as the previous release series.
 
@@ -138,12 +138,9 @@ The older custom series used migration numbers that official 0.149 later claimed
 
 ## Build, review, and publication
 
-The following remains before 0.149 can be called fully built and published:
+[Actions run 32537192127](https://github.com/iLfounder/codex-cli-custom/actions/runs/32537192127) clean-applied P001–P011 and built both release binaries on macOS arm64. Artifact `9467506046` records patched tree `4d993b8b5960de01c6d2bafb4c1a7749c51280db`; deterministic Cargo.lock normalization produced compiled tree `c7033f3d9b42fd45391232ef7a266872bb233e20` and lock SHA-256 `598546764c876b93c6a59edcd5879b8c1b17cdf7c8df023fb051bcfb755a81f4`. The GitHub artifact digest is `sha256:3ec9679a8a81bb868993080a33dd51c4be11734806dcb2a46127877e8bd9733e`.
 
-1. rebuild both release binaries from the review-corrected tree; and
-2. publish and verify the matching artifact provenance.
-
-[Actions run 32528035039](https://github.com/iLfounder/codex-cli-custom/actions/runs/32528035039) built the immediately preceding review candidate. The final review corrections require a new artifact before publication is complete.
+The internal Codex and external Opus reviewers inspected the same frozen predecessor candidate independently. The lead verified each finding against source and call chains, applied only the confirmed defects, regenerated the exact eleven-patch series, and rebuilt the corrected tree above.
 
 ## Historical working notes
 

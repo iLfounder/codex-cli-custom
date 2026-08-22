@@ -29,9 +29,9 @@ Stock Codex는 인증과 runtime 소유권의 많은 부분을 process 단위로
 |---|---|
 | P001–P011 구현과 focused check | 완료 |
 | 순서형 0.149 patch export와 clean-apply 검증 | 완료; 11개 patch가 tree `4d993b8b5960de01c6d2bafb4c1a7749c51280db`를 재현함 |
-| macOS arm64 release build와 artifact | final review 수정 후 rebuild 대기; [run 32528035039](https://github.com/iLfounder/codex-cli-custom/actions/runs/32528035039)은 바로 직전 tree의 증거임 |
+| macOS arm64 release build와 artifact | 완료; [run 32537192127](https://github.com/iLfounder/codex-cli-custom/actions/runs/32537192127), artifact `9467506046` |
 | 최종 독립 review | 내부 Codex 1회와 외부 Opus fresh-context review 1회 완료; 확인된 지적만 소스 실검 후 수정함 |
-| 0.149 publication | Pending |
+| 0.149 publication | 완료 |
 
 현재 candidate는 [`custom-patches/rust-v0.149.0`](custom-patches/rust-v0.149.0/)이다. [`custom-patches/rust-v0.148.0`](custom-patches/rust-v0.148.0/)은 이전 release series로만 보존한다.
 
@@ -138,12 +138,9 @@ Applier는 dirty 또는 잘못된 base worktree를 거절하고, 각 patch diges
 
 ## Build, review, publication
 
-0.149를 최종 build·공개 완료라고 부르기 전에 다음 작업이 남아 있다.
+[Actions run 32537192127](https://github.com/iLfounder/codex-cli-custom/actions/runs/32537192127)은 P001–P011을 clean-apply하고 macOS arm64에서 두 release binary를 build했다. Artifact `9467506046`에는 patched tree `4d993b8b5960de01c6d2bafb4c1a7749c51280db`가 기록되어 있다. 결정론적 Cargo.lock normalization 뒤 compiled tree는 `c7033f3d9b42fd45391232ef7a266872bb233e20`, lock SHA-256은 `598546764c876b93c6a59edcd5879b8c1b17cdf7c8df023fb051bcfb755a81f4`다. GitHub artifact digest는 `sha256:3ec9679a8a81bb868993080a33dd51c4be11734806dcb2a46127877e8bd9733e`다.
 
-1. review 수정이 반영된 tree에서 두 release binary 재build
-2. 일치하는 artifact provenance 발행·확인
-
-[Actions run 32528035039](https://github.com/iLfounder/codex-cli-custom/actions/runs/32528035039)은 바로 직전 review candidate를 build했다. final review 수정본은 새 artifact가 필요하다.
+내부 Codex와 외부 Opus reviewer는 동일한 고정 predecessor candidate를 서로 독립적으로 검토했다. Lead는 각 지적을 소스와 call chain으로 다시 확인해 실제 결함만 반영했고, 정확히 11개 patch series를 재생성한 뒤 위 corrected tree를 다시 build했다.
 
 ## 과거 작업 참고자료
 
