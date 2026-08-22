@@ -1,4 +1,4 @@
-From 5a16683ccf6e5bb52e72e4cab7349673c4c4a32c Mon Sep 17 00:00:00 2001
+From d93c50915777e049722683d8414022833cc9d7b4 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 19:13:43 +0900
 Subject: [PATCH] feat(custom): switch thread accounts without restart for
@@ -453,10 +453,10 @@ index 8a93006cc..a7bd2208c 100644
  
  #[derive(Default)]
 diff --git a/codex-rs/app-server/src/session_runtime/relinquish.rs b/codex-rs/app-server/src/session_runtime/relinquish.rs
-index 9ee43c056..c5ecd43b5 100644
+index f0b05d0d6..b8059ac83 100644
 --- a/codex-rs/app-server/src/session_runtime/relinquish.rs
 +++ b/codex-rs/app-server/src/session_runtime/relinquish.rs
-@@ -228,7 +228,7 @@ impl SessionRuntimeEngine {
+@@ -233,7 +233,7 @@ impl SessionRuntimeEngine {
          Ok(ThreadRelinquishResponse { operation })
      }
  
@@ -465,7 +465,7 @@ index 9ee43c056..c5ecd43b5 100644
          &self,
          thread_id: ThreadId,
      ) -> Result<codex_app_server_protocol::SessionRuntimeSnapshot, JSONRPCErrorError> {
-@@ -277,6 +277,7 @@ impl SessionRuntimeEngine {
+@@ -282,6 +282,7 @@ impl SessionRuntimeEngine {
              .await
              .map_err(|_| internal_error("session runtime publisher is unavailable"))?;
          let store_runtime = self.thread_store.runtime_snapshot(thread_id).await;
@@ -473,7 +473,7 @@ index 9ee43c056..c5ecd43b5 100644
          let (runtime_notification, operation_notification, operation) = {
              let mut state = self.state.lock().await;
              let mut snapshot = state
-@@ -305,7 +306,12 @@ impl SessionRuntimeEngine {
+@@ -310,7 +311,12 @@ impl SessionRuntimeEngine {
                          Some("released_persistence_snapshot_unavailable".to_string());
                  }
              }

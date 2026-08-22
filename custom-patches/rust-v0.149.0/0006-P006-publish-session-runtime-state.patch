@@ -1,4 +1,4 @@
-From f5c232cbb5c26e946ca98fbfb7a4ef9844f0621e Mon Sep 17 00:00:00 2001
+From 6e376f3f9e56db2765dcd5e9bfd87eaff026ba16 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 16:46:40 +0900
 Subject: [PATCH] feat(custom): publish session runtime state for 0.149
@@ -6,31 +6,57 @@ Subject: [PATCH] feat(custom): publish session runtime state for 0.149
 ---
  codex-rs/app-server/src/lib.rs                |   1 +
  codex-rs/app-server/src/message_processor.rs  |  23 +-
- .../request_processors/thread_lifecycle.rs    | 159 ++++--
+ .../src/message_processor_tracing_tests.rs    |   1 +
+ .../src/request_processors/thread_delete.rs   |  16 +
+ .../request_processors/thread_lifecycle.rs    | 194 +++++--
  .../thread_lifecycle_tests.rs                 |  19 +
+ .../src/request_processors/turn_processor.rs  | 110 ++--
+ .../src/session_runtime/continuity.rs         |  60 +++
  .../app-server/src/session_runtime/mod.rs     | 275 ++++++++++
  .../src/session_runtime/operations.rs         | 235 ++++++++
- .../src/session_runtime/pagination.rs         | 160 ++++++
+ .../src/session_runtime/pagination.rs         | 253 +++++++++
  .../src/session_runtime/snapshot.rs           | 509 ++++++++++++++++++
- .../app-server/src/session_runtime/tests.rs   | 228 ++++++++
+ .../app-server/src/session_runtime/tests.rs   | 272 ++++++++++
  codex-rs/app-server/src/thread_state.rs       | 283 +++++++++-
  codex-rs/app-server/src/thread_status.rs      |  36 ++
+ .../tests/suite/v2/client_metadata.rs         |   1 +
  codex-rs/rollout/src/lib.rs                   |   1 +
  codex-rs/rollout/src/recorder.rs              |  79 ++-
  codex-rs/rollout/src/recorder_tests.rs        |  36 ++
+ codex-rs/state/src/extract.rs                 |   2 +
+ codex-rs/state/src/lib.rs                     |  17 +
+ codex-rs/state/src/migrations.rs              |  93 +++-
+ codex-rs/state/src/migrations_tests.rs        |  20 +-
+ codex-rs/state/src/runtime.rs                 |  19 +
+ .../state/src/runtime/thread_transition.rs    | 299 ++++++++++
+ .../src/runtime/thread_transition/types.rs    | 310 +++++++++++
+ .../src/runtime/thread_transition_tests.rs    | 215 ++++++++
+ codex-rs/state/src/runtime/threads.rs         |   2 +-
  codex-rs/thread-store/src/in_memory.rs        |  42 ++
- codex-rs/thread-store/src/lib.rs              |   4 +
+ .../src/in_memory/thread_transition.rs        | 337 ++++++++++++
+ .../src/in_memory_thread_transition_tests.rs  |  92 ++++
+ codex-rs/thread-store/src/lib.rs              |  17 +
  codex-rs/thread-store/src/local/mod.rs        | 122 +++++
+ .../thread-store/src/local/read_thread.rs     |  48 +-
  .../src/local/runtime_snapshot_tests.rs       | 107 ++++
+ .../src/local/thread_transition_tests.rs      |  71 +++
  codex-rs/thread-store/src/store.rs            |  81 +++
- 19 files changed, 2321 insertions(+), 79 deletions(-)
+ .../thread-store/src/thread_metadata_sync.rs  |   2 +
+ 38 files changed, 4153 insertions(+), 147 deletions(-)
  create mode 100644 codex-rs/app-server/src/request_processors/thread_lifecycle_tests.rs
+ create mode 100644 codex-rs/app-server/src/session_runtime/continuity.rs
  create mode 100644 codex-rs/app-server/src/session_runtime/mod.rs
  create mode 100644 codex-rs/app-server/src/session_runtime/operations.rs
  create mode 100644 codex-rs/app-server/src/session_runtime/pagination.rs
  create mode 100644 codex-rs/app-server/src/session_runtime/snapshot.rs
  create mode 100644 codex-rs/app-server/src/session_runtime/tests.rs
+ create mode 100644 codex-rs/state/src/runtime/thread_transition.rs
+ create mode 100644 codex-rs/state/src/runtime/thread_transition/types.rs
+ create mode 100644 codex-rs/state/src/runtime/thread_transition_tests.rs
+ create mode 100644 codex-rs/thread-store/src/in_memory/thread_transition.rs
+ create mode 100644 codex-rs/thread-store/src/in_memory_thread_transition_tests.rs
  create mode 100644 codex-rs/thread-store/src/local/runtime_snapshot_tests.rs
+ create mode 100644 codex-rs/thread-store/src/local/thread_transition_tests.rs
 
 diff --git a/codex-rs/app-server/src/lib.rs b/codex-rs/app-server/src/lib.rs
 index 0c67d18e0..77b0bea65 100644
@@ -106,8 +132,47 @@ index e49547d5d..f5101a991 100644
              ClientRequest::AccountSlotList { params, .. } => self
                  .account_processor
                  .list_account_slots(params)
+diff --git a/codex-rs/app-server/src/message_processor_tracing_tests.rs b/codex-rs/app-server/src/message_processor_tracing_tests.rs
+index cd9d22d42..6fcc9e2f5 100644
+--- a/codex-rs/app-server/src/message_processor_tracing_tests.rs
++++ b/codex-rs/app-server/src/message_processor_tracing_tests.rs
+@@ -658,6 +658,7 @@ async fn turn_start_jsonrpc_span_parents_core_turn_spans() -> Result<()> {
+                 params: TurnStartParams {
+                     environments: None,
+                     thread_id,
++                    expected_execution_account: None,
+                     client_user_message_id: None,
+                     input: vec![UserInput::Text {
+                         text: "hello".to_string(),
+diff --git a/codex-rs/app-server/src/request_processors/thread_delete.rs b/codex-rs/app-server/src/request_processors/thread_delete.rs
+index c83140d7a..c9147c214 100644
+--- a/codex-rs/app-server/src/request_processors/thread_delete.rs
++++ b/codex-rs/app-server/src/request_processors/thread_delete.rs
+@@ -40,6 +40,22 @@ impl ThreadRequestProcessor {
+ 
+         self.validate_root_thread_delete(thread_id, thread_ids.len() > 1)
+             .await?;
++        let mut _transition_admission_permits = Vec::new();
++        for thread_id_to_delete in thread_ids.iter().copied() {
++            match self
++                .thread_state_manager
++                .acquire_thread_mutation_permit(thread_id_to_delete)
++                .await
++            {
++                Ok(permit) => _transition_admission_permits.push(permit),
++                Err("transition_thread_unavailable") => {}
++                Err(reason) => {
++                    return Err(super::thread_processor::thread_transition_invalid_request(
++                        reason,
++                    ));
++                }
++            }
++        }
+         for thread_id_to_delete in thread_ids.iter().copied() {
+             self.prepare_thread_for_delete(thread_id_to_delete).await;
+         }
 diff --git a/codex-rs/app-server/src/request_processors/thread_lifecycle.rs b/codex-rs/app-server/src/request_processors/thread_lifecycle.rs
-index 86fedbe94..c892f6c39 100644
+index 86fedbe94..bcd8e2bd8 100644
 --- a/codex-rs/app-server/src/request_processors/thread_lifecycle.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_lifecycle.rs
 @@ -1,5 +1,6 @@
@@ -117,7 +182,15 @@ index 86fedbe94..c892f6c39 100644
  use codex_app_server_protocol::ThreadQueueChangedNotification;
  use codex_extension_api::ThreadIdleCause;
  use codex_protocol::config_types::MultiAgentMode;
-@@ -21,6 +22,8 @@ pub(super) struct ListenerTaskContext {
+@@ -9,6 +10,7 @@ pub(super) const THREAD_UNLOADING_DELAY: Duration = Duration::from_secs(30 * 60)
+ #[derive(Clone)]
+ pub(super) struct ListenerTaskContext {
+     pub(super) thread_manager: Arc<ThreadManager>,
++    pub(super) thread_store: Arc<dyn ThreadStore>,
+     pub(super) thread_state_manager: ThreadStateManager,
+     pub(super) outgoing: Arc<OutgoingMessageSender>,
+     pub(super) pending_thread_unloads: Arc<Mutex<HashSet<ThreadId>>>,
+@@ -21,6 +23,8 @@ pub(super) struct ListenerTaskContext {
  }
  
  struct UnloadingState {
@@ -126,7 +199,7 @@ index 86fedbe94..c892f6c39 100644
      delay: Duration,
      has_subscribers_rx: watch::Receiver<bool>,
      has_subscribers: (bool, Instant),
-@@ -48,6 +51,8 @@ impl UnloadingState {
+@@ -48,6 +52,8 @@ impl UnloadingState {
              Instant::now(),
          );
          Some(Self {
@@ -135,7 +208,7 @@ index 86fedbe94..c892f6c39 100644
              delay,
              has_subscribers_rx,
              has_subscribers,
-@@ -65,7 +70,8 @@ impl UnloadingState {
+@@ -65,7 +71,8 @@ impl UnloadingState {
          }
      }
  
@@ -145,7 +218,7 @@ index 86fedbe94..c892f6c39 100644
          let has_subscribers = *self.has_subscribers_rx.borrow();
          if self.has_subscribers.0 != has_subscribers {
              self.has_subscribers = (has_subscribers, Instant::now());
-@@ -75,23 +81,45 @@ impl UnloadingState {
+@@ -75,23 +82,45 @@ impl UnloadingState {
          if self.is_active.0 != is_active {
              self.is_active = (is_active, Instant::now());
          }
@@ -195,7 +268,7 @@ index 86fedbe94..c892f6c39 100644
              let unloading_target = self.unloading_target();
              if let Some(target) = unloading_target
                  && target <= Instant::now()
-@@ -111,19 +139,32 @@ impl UnloadingState {
+@@ -111,19 +140,32 @@ impl UnloadingState {
                      if changed.is_err() {
                          return false;
                      }
@@ -230,7 +303,7 @@ index 86fedbe94..c892f6c39 100644
  pub(super) enum ThreadShutdownResult {
      Complete,
      SubmitFailed,
-@@ -135,10 +176,6 @@ pub(super) enum EnsureConversationListenerResult {
+@@ -135,10 +177,6 @@ pub(super) enum EnsureConversationListenerResult {
      ConnectionClosed,
  }
  
@@ -241,7 +314,7 @@ index 86fedbe94..c892f6c39 100644
  pub(super) async fn ensure_conversation_listener(
      listener_task_context: ListenerTaskContext,
      conversation_id: ThreadId,
-@@ -157,21 +194,25 @@ pub(super) async fn ensure_conversation_listener(
+@@ -157,21 +195,25 @@ pub(super) async fn ensure_conversation_listener(
              )));
          }
      };
@@ -277,7 +350,22 @@ index 86fedbe94..c892f6c39 100644
      };
      if let Err(error) = ensure_listener_task_running(
          listener_task_context.clone(),
-@@ -271,6 +312,7 @@ pub(super) async fn ensure_listener_task_running(
+@@ -220,6 +262,14 @@ pub(super) async fn ensure_listener_task_running(
+     conversation: Arc<CodexThread>,
+     thread_state: Arc<Mutex<ThreadState>>,
+ ) -> Result<(), JSONRPCErrorError> {
++    if thread_state.lock().await.listener_matches(&conversation) {
++        return Ok(());
++    }
++    let _transition_admission_permit = listener_task_context
++        .thread_state_manager
++        .acquire_thread_mutation_permit(conversation_id)
++        .await
++        .map_err(|reason| invalid_request(reason.replace('_', " ")))?;
+     let (cancel_tx, mut cancel_rx) = oneshot::channel();
+     let Some(mut unloading_state) = UnloadingState::new(
+         &listener_task_context,
+@@ -271,9 +321,11 @@ pub(super) async fn ensure_listener_task_running(
              .register_listener_command_tx(conversation_id, listener_command_tx);
          (listener_command_rx, listener_generation)
      };
@@ -285,7 +373,19 @@ index 86fedbe94..c892f6c39 100644
      let ListenerTaskContext {
          outgoing,
          thread_manager,
-@@ -363,6 +405,7 @@ pub(super) async fn ensure_listener_task_running(
++        thread_store,
+         thread_state_manager,
+         pending_thread_unloads,
+         thread_watch_manager,
+@@ -356,6 +408,7 @@ pub(super) async fn ensure_listener_task_running(
+                         conversation_id,
+                         conversation.clone(),
+                         thread_manager.clone(),
++                        Arc::clone(&thread_store),
+                         thread_outgoing,
+                         thread_state.clone(),
+                         thread_watch_manager.clone(),
+@@ -363,6 +416,7 @@ pub(super) async fn ensure_listener_task_running(
                          fallback_model_provider.clone(),
                      )
                      .await;
@@ -293,7 +393,7 @@ index 86fedbe94..c892f6c39 100644
                      if matches!(event.msg, EventMsg::ShutdownComplete)
                          && let Some(completion_tx) = thread_state
                              .lock()
-@@ -376,23 +419,34 @@ pub(super) async fn ensure_listener_task_running(
+@@ -376,23 +430,41 @@ pub(super) async fn ensure_listener_task_running(
                      if !unloading_watchers_open {
                          break;
                      }
@@ -307,10 +407,20 @@ index 86fedbe94..c892f6c39 100644
                          continue;
                      }
 -                    {
++                    let Ok(_transition_admission_permit) = thread_state_manager
++                        .acquire_thread_mutation_permit(conversation_id)
++                        .await
++                    else {
++                        unloading_state.note_thread_activity_observed().await;
++                        continue;
++                    };
 +                    thread_state_manager.mark_runtime_dirty();
 +                    let (start_unload, target_changed) = {
                          let mut pending_thread_unloads = pending_thread_unloads.lock().await;
                          if pending_thread_unloads.contains(&conversation_id) {
+-                            continue;
+-                        }
+-                        if !unloading_state.should_unload_now() {
 -                            continue;
 +                            (false, false)
 +                        } else {
@@ -321,22 +431,19 @@ index 86fedbe94..c892f6c39 100644
 +                            }
 +                            (start_unload, target_changed)
                          }
--                        if !unloading_state.should_unload_now() {
--                            continue;
--                        }
 -                        pending_thread_unloads.insert(conversation_id);
 +                    };
 +                    if target_changed {
 +                        unloading_state.publish_unloading_target().await;
-                     }
++                    }
 +                    if !start_unload {
 +                        continue;
-+                    }
+                     }
 +                    thread_state_manager.set_unload_at(conversation_id, None).await;
                      unload_thread_without_subscribers(
                          thread_manager.clone(),
                          outgoing_for_task.clone(),
-@@ -408,15 +462,29 @@ pub(super) async fn ensure_listener_task_running(
+@@ -408,15 +480,29 @@ pub(super) async fn ensure_listener_task_running(
              }
          }
  
@@ -370,7 +477,7 @@ index 86fedbe94..c892f6c39 100644
  pub(super) async fn wait_for_thread_shutdown(thread: &Arc<CodexThread>) -> ThreadShutdownResult {
      match tokio::time::timeout(Duration::from_secs(10), thread.shutdown_and_wait()).await {
          Ok(Ok(())) => ThreadShutdownResult::Complete,
-@@ -455,6 +523,7 @@ pub(super) async fn unload_thread_without_subscribers(
+@@ -455,6 +541,7 @@ pub(super) async fn unload_thread_without_subscribers(
                  {
                      info!("thread {thread_id} was replaced or removed before teardown finalized");
                      pending_thread_unloads.lock().await.remove(&thread_id);
@@ -378,7 +485,7 @@ index 86fedbe94..c892f6c39 100644
                      return;
                  }
                  thread_watch_manager
-@@ -467,13 +536,16 @@ pub(super) async fn unload_thread_without_subscribers(
+@@ -467,13 +554,16 @@ pub(super) async fn unload_thread_without_subscribers(
                      .send_server_notification(ServerNotification::ThreadClosed(notification))
                      .await;
                  pending_thread_unloads.lock().await.remove(&thread_id);
@@ -395,7 +502,27 @@ index 86fedbe94..c892f6c39 100644
                  warn!("thread {thread_id} shutdown timed out; leaving thread loaded");
              }
          }
-@@ -567,10 +639,6 @@ pub(super) async fn handle_thread_listener_command(
+@@ -538,11 +628,18 @@ pub(super) async fn handle_thread_listener_command(
+         ThreadListenerCommand::EmitWarning { message } => {
+             send_thread_warning(outgoing, thread_state_manager, conversation_id, message).await;
+         }
+-        ThreadListenerCommand::EmitThreadGoalCleared => {
++        ThreadListenerCommand::EmitThreadGoalCleared {
++            turn_id,
++            previous_goal,
++            revision,
++        } => {
+             outgoing
+                 .send_server_notification(ServerNotification::ThreadGoalCleared(
+                     ThreadGoalClearedNotification {
+                         thread_id: conversation_id.to_string(),
++                        turn_id,
++                        previous_goal,
++                        revision,
+                     },
+                 ))
+                 .await;
+@@ -567,10 +664,6 @@ pub(super) async fn handle_thread_listener_command(
  }
  
  #[allow(clippy::too_many_arguments)]
@@ -406,7 +533,7 @@ index 86fedbe94..c892f6c39 100644
  pub(super) async fn handle_pending_thread_resume_request(
      conversation_id: ThreadId,
      conversation: &Arc<CodexThread>,
-@@ -679,10 +747,15 @@ pub(super) async fn handle_pending_thread_resume_request(
+@@ -679,10 +772,15 @@ pub(super) async fn handle_pending_thread_resume_request(
          }
      }
  
@@ -425,7 +552,7 @@ index 86fedbe94..c892f6c39 100644
              outgoing
                  .send_error(
                      request_id,
-@@ -693,10 +766,7 @@ pub(super) async fn handle_pending_thread_resume_request(
+@@ -693,10 +791,7 @@ pub(super) async fn handle_pending_thread_resume_request(
                  .await;
              return;
          }
@@ -437,7 +564,7 @@ index 86fedbe94..c892f6c39 100644
              tracing::debug!(
                  thread_id = %conversation_id,
                  connection_id = ?connection_id,
-@@ -704,6 +774,7 @@ pub(super) async fn handle_pending_thread_resume_request(
+@@ -704,6 +799,7 @@ pub(super) async fn handle_pending_thread_resume_request(
              );
              return;
          }
@@ -445,6 +572,25 @@ index 86fedbe94..c892f6c39 100644
      }
  
      let (turns_backwards_cursor, items_backwards_cursor) = if let Some(thread_store) =
+@@ -819,10 +915,18 @@ pub(super) async fn send_thread_goal_snapshot_notification(
+                 .await;
+         }
+         Ok(None) => {
++            let revision = state_db
++                .thread_goals()
++                .get_thread_goal_revision(thread_id)
++                .await
++                .unwrap_or_default();
+             outgoing
+                 .send_server_notification(ServerNotification::ThreadGoalCleared(
+                     ThreadGoalClearedNotification {
+                         thread_id: thread_id.to_string(),
++                        turn_id: None,
++                        previous_goal: None,
++                        revision,
+                     },
+                 ))
+                 .await;
 diff --git a/codex-rs/app-server/src/request_processors/thread_lifecycle_tests.rs b/codex-rs/app-server/src/request_processors/thread_lifecycle_tests.rs
 new file mode 100644
 index 000000000..efb9a2590
@@ -469,6 +615,271 @@ index 000000000..efb9a2590
 +        .as_secs();
 +    assert!(converted >= i64::try_from(before.saturating_add(59)).unwrap_or(i64::MAX));
 +    assert!(converted <= i64::try_from(after.saturating_add(60)).unwrap_or(i64::MAX));
++}
+diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
+index 9126cc4bc..e1c5a3f9d 100644
+--- a/codex-rs/app-server/src/request_processors/turn_processor.rs
++++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
+@@ -7,6 +7,7 @@ use codex_protocol::models::ContentItem;
+ use codex_protocol::models::FunctionCallOutputContentItem;
+ use codex_protocol::protocol::AdditionalContextEntry as CoreAdditionalContextEntry;
+ use codex_protocol::protocol::AdditionalContextKind as CoreAdditionalContextKind;
++use codex_protocol::protocol::ExecutionAccountBinding;
+ use codex_protocol::protocol::MultiAgentVersion;
+ use codex_protocol::protocol::SessionSource;
+ use codex_protocol::protocol::SubAgentSource;
+@@ -88,6 +89,7 @@ fn validate_response_item_image_urls(items: &[ResponseItem]) -> Result<(), JSONR
+ pub(crate) struct TurnRequestProcessor {
+     agent_runner: AgentRunner,
+     thread_manager: Arc<ThreadManager>,
++    thread_store: Arc<dyn ThreadStore>,
+     outgoing: Arc<OutgoingMessageSender>,
+     analytics_events_client: AnalyticsEventsClient,
+     arg0_paths: Arg0DispatchPaths,
+@@ -124,6 +126,19 @@ fn map_additional_context(
+         .collect()
+ }
+ 
++fn with_expected_execution_account(
++    request: TurnInputRequest,
++    account: Option<SessionRuntimeAccountRef>,
++) -> TurnInputRequest {
++    match account {
++        Some(account) => request.with_expected_execution_account(ExecutionAccountBinding {
++            slot_id: account.account_slot_id,
++            generation: account.execution_generation,
++        }),
++        None => request,
++    }
++}
++
+ struct ThreadSettingsBuildParams {
+     method: &'static str,
+     environments: Option<TurnEnvironmentSelections>,
+@@ -143,6 +158,7 @@ impl TurnRequestProcessor {
+     #[allow(clippy::too_many_arguments)]
+     pub(crate) fn new(
+         thread_manager: Arc<ThreadManager>,
++        thread_store: Arc<dyn ThreadStore>,
+         outgoing: Arc<OutgoingMessageSender>,
+         analytics_events_client: AnalyticsEventsClient,
+         arg0_paths: Arg0DispatchPaths,
+@@ -159,6 +175,7 @@ impl TurnRequestProcessor {
+         Self {
+             agent_runner,
+             thread_manager,
++            thread_store,
+             outgoing,
+             analytics_events_client,
+             arg0_paths,
+@@ -509,6 +526,7 @@ impl TurnRequestProcessor {
+             .map(resolve_runtime_workspace_roots);
+         let environment_selections =
+             resolve_turn_environment_selections(self.thread_manager.as_ref(), params.environments)?;
++        let expected_execution_account = params.expected_execution_account;
+ 
+         // Map v2 input items to core input items.
+         let mapped_items: Vec<CoreInputItem> = params
+@@ -547,30 +565,41 @@ impl TurnRequestProcessor {
+                 },
+             )
+             .await?;
+-        let submission = thread
+-            .start_or_steer_turn(
+-                TurnInputRequest::new(TurnInput::UserInput {
+-                    content: mapped_items,
+-                    client_id: client_user_message_id,
+-                })
+-                .with_thread_settings(thread_settings)
+-                .on_start(TurnStartOptions {
+-                    final_output_json_schema: params.output_schema,
+-                    ..Default::default()
+-                })
+-                .with_additional_context(additional_context)
+-                .with_responses_metadata(params.responsesapi_client_metadata)
+-                .with_trace(self.request_trace_context(&request_id).await),
+-            )
++        let request = with_expected_execution_account(
++            TurnInputRequest::new(TurnInput::UserInput {
++                content: mapped_items,
++                client_id: client_user_message_id,
++            })
++            .with_thread_settings(thread_settings)
++            .on_start(TurnStartOptions {
++                final_output_json_schema: params.output_schema,
++                ..Default::default()
++            })
++            .with_additional_context(additional_context)
++            .with_responses_metadata(params.responsesapi_client_metadata)
++            .with_trace(self.request_trace_context(&request_id).await),
++            expected_execution_account,
++        );
++        let _transition_admission_permit = self
++            .thread_state_manager
++            .acquire_thread_mutation_permit(thread_id)
+             .await
+-            .map_err(|err| {
+-                let error = internal_error(format!("failed to submit turn input: {err}"));
+-                self.track_error_response(&request_id, &error, /*error_type*/ None);
+-                error
+-            })?;
++            .map_err(|reason| invalid_request(reason.replace('_', " ")))?;
++        let submission = thread.start_or_steer_turn(request).await.map_err(|err| {
++            let error = internal_error(format!("failed to submit turn input: {err}"));
++            self.track_error_response(&request_id, &error, /*error_type*/ None);
++            error
++        })?;
+         let (turn_id, started) = match submission {
+             TurnInputSubmission::Started { turn_id } => (turn_id, true),
+             TurnInputSubmission::Steered { turn_id } => (turn_id, false),
++            TurnInputSubmission::NotSubmitted {
++                reason: NotSubmittedReason::ExpectedExecutionAccountMismatch { .. },
++            } => {
++                let error = invalid_request("thread execution account changed");
++                self.track_error_response(&request_id, &error, /*error_type*/ None);
++                return Err(error);
++            }
+             TurnInputSubmission::NotSubmitted { reason } => {
+                 let error = internal_error(format!("failed to submit turn input: {reason:?}"));
+                 self.track_error_response(&request_id, &error, /*error_type*/ None);
+@@ -916,14 +945,19 @@ impl TurnRequestProcessor {
+         request_id: &ConnectionRequestId,
+         params: TurnSteerParams,
+     ) -> Result<TurnSteerResponse, JSONRPCErrorError> {
+-        let (_, thread) = self
+-            .load_thread(&params.thread_id)
+-            .await
+-            .inspect_err(|error| {
+-                self.track_error_response(request_id, error, /*error_type*/ None);
+-            })?;
++        let (thread_id, thread) =
++            self.load_thread(&params.thread_id)
++                .await
++                .inspect_err(|error| {
++                    self.track_error_response(request_id, error, /*error_type*/ None);
++                })?;
+         self.ensure_direct_input_allowed(request_id, thread.as_ref())
+             .await?;
++        let _transition_admission_permit = self
++            .thread_state_manager
++            .acquire_thread_mutation_permit(thread_id)
++            .await
++            .map_err(|reason| invalid_request(reason.replace('_', " ")))?;
+ 
+         if params.expected_turn_id.is_empty() {
+             return Err(invalid_request("expectedTurnId must not be empty"));
+@@ -946,17 +980,19 @@ impl TurnRequestProcessor {
+             .map(V2UserInput::into_core)
+             .collect();
+         let additional_context = map_additional_context(params.additional_context);
++        let expected_execution_account = params.expected_execution_account;
+ 
++        let request = with_expected_execution_account(
++            TurnInputRequest::new(TurnInput::UserInput {
++                content: mapped_items,
++                client_id: params.client_user_message_id,
++            })
++            .with_additional_context(additional_context)
++            .with_responses_metadata(params.responsesapi_client_metadata),
++            expected_execution_account,
++        );
+         let submission = thread
+-            .steer_turn(
+-                TurnInputRequest::new(TurnInput::UserInput {
+-                    content: mapped_items,
+-                    client_id: params.client_user_message_id,
+-                })
+-                .with_additional_context(additional_context)
+-                .with_responses_metadata(params.responsesapi_client_metadata),
+-                params.expected_turn_id,
+-            )
++            .steer_turn(request, params.expected_turn_id)
+             .await
+             .map_err(|err| {
+                 let error = internal_error(format!("failed to steer turn: {err}"));
+@@ -981,6 +1017,9 @@ impl TurnRequestProcessor {
+                             TurnSteerRequestError::ExpectedTurnMismatch,
+                         )),
+                     ),
++                    NotSubmittedReason::ExpectedExecutionAccountMismatch { .. } => {
++                        ("thread execution account changed".to_string(), None, None)
++                    }
+                     NotSubmittedReason::ActiveTurnNotSteerable { turn_kind } => {
+                         let (message, turn_steer_error) = match turn_kind {
+                             codex_protocol::protocol::NonSteerableTurnKind::Review => (
+@@ -1500,6 +1539,7 @@ impl TurnRequestProcessor {
+     fn listener_task_context(&self) -> ListenerTaskContext {
+         ListenerTaskContext {
+             thread_manager: Arc::clone(&self.thread_manager),
++            thread_store: Arc::clone(&self.thread_store),
+             thread_state_manager: self.thread_state_manager.clone(),
+             outgoing: Arc::clone(&self.outgoing),
+             pending_thread_unloads: Arc::clone(&self.pending_thread_unloads),
+diff --git a/codex-rs/app-server/src/session_runtime/continuity.rs b/codex-rs/app-server/src/session_runtime/continuity.rs
+new file mode 100644
+index 000000000..b4b39e519
+--- /dev/null
++++ b/codex-rs/app-server/src/session_runtime/continuity.rs
+@@ -0,0 +1,60 @@
++use codex_app_server_protocol::SessionRuntimeContinuity;
++use codex_app_server_protocol::ThreadTransitionEndpointEvidence;
++use codex_app_server_protocol::ThreadTransitionReason;
++use codex_app_server_protocol::ThreadTransitionReceipt;
++use codex_app_server_protocol::ThreadTransitionStatus;
++use codex_app_server_protocol::ThreadWriterEvidence;
++use codex_protocol::ThreadId;
++
++use super::SessionRuntimeEngine;
++
++impl SessionRuntimeEngine {
++    pub(super) async fn continuity_snapshot(
++        &self,
++        thread_id: ThreadId,
++    ) -> SessionRuntimeContinuity {
++        let transitions = self
++            .thread_store
++            .committed_thread_transitions_for_threads(vec![thread_id])
++            .await
++            .ok()
++            .and_then(|mut transitions| transitions.remove(&thread_id))
++            .unwrap_or_default();
++        SessionRuntimeContinuity {
++            last_incoming: transitions.last_incoming.map(api_receipt),
++            last_outgoing: transitions.last_outgoing.map(api_receipt),
++        }
++    }
++}
++
++pub(crate) fn api_receipt(
++    value: codex_thread_store::ThreadTransitionReceipt,
++) -> ThreadTransitionReceipt {
++    ThreadTransitionReceipt {
++        transition_id: value.transition_id,
++        reason: match value.reason {
++            codex_thread_store::ThreadTransitionReason::Clear => ThreadTransitionReason::Clear,
++            codex_thread_store::ThreadTransitionReason::New => ThreadTransitionReason::New,
++        },
++        previous: api_endpoint(value.previous),
++        current: api_endpoint(value.current),
++        origin_instance_epoch: value.origin_instance_epoch,
++        initiator_client_incarnation: value.initiator_client_incarnation,
++        transition_revision: value.transition_revision,
++        committed_at: value.committed_at,
++        status: ThreadTransitionStatus::Committed,
++    }
++}
++
++fn api_endpoint(
++    value: codex_thread_store::ThreadTransitionEndpointEvidence,
++) -> ThreadTransitionEndpointEvidence {
++    ThreadTransitionEndpointEvidence {
++        thread_id: value.thread_id.to_string(),
++        state_revision: value.state_revision,
++        writer: ThreadWriterEvidence {
++            store_id: value.writer.store_id,
++            writer_generation: value.writer.writer_generation,
++        },
++    }
 +}
 diff --git a/codex-rs/app-server/src/session_runtime/mod.rs b/codex-rs/app-server/src/session_runtime/mod.rs
 new file mode 100644
@@ -994,24 +1405,32 @@ index 000000000..ddf861d02
 +}
 diff --git a/codex-rs/app-server/src/session_runtime/pagination.rs b/codex-rs/app-server/src/session_runtime/pagination.rs
 new file mode 100644
-index 000000000..fd3fd6e46
+index 000000000..f93f18593
 --- /dev/null
 +++ b/codex-rs/app-server/src/session_runtime/pagination.rs
-@@ -0,0 +1,160 @@
+@@ -0,0 +1,253 @@
++use std::collections::HashMap;
++use std::collections::HashSet;
++
 +use base64::Engine;
 +use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 +use codex_app_server_protocol::JSONRPCErrorError;
 +use codex_app_server_protocol::SessionRuntimeCapability;
 +use codex_app_server_protocol::SessionRuntimeListResponse;
 +use codex_app_server_protocol::SessionRuntimeSnapshot;
++use codex_protocol::ThreadId;
 +use serde::Deserialize;
 +use serde::Serialize;
 +
++use super::snapshot::RuntimeInventory;
++use super::snapshot::RuntimeOverlay;
++use super::snapshot::RuntimeRecord;
 +use crate::error_code::internal_error;
 +use crate::error_code::invalid_params;
 +
 +const DEFAULT_LIMIT: usize = 50;
 +const MAX_LIMIT: usize = 100;
++
 +#[derive(Default)]
 +pub(super) struct SnapshotCache {
 +    snapshot: Option<CachedSnapshot>,
@@ -1020,7 +1439,19 @@ index 000000000..fd3fd6e46
 +pub(super) struct CachedSnapshot {
 +    id: String,
 +    sequence: u64,
-+    snapshots: Vec<SessionRuntimeSnapshot>,
++    source_generation: u64,
++    records: Vec<RuntimeRecord>,
++    overlay: RuntimeOverlay,
++    snapshots: HashMap<ThreadId, SessionRuntimeSnapshot>,
++}
++
++pub(super) struct PagePlan {
++    snapshot_id: String,
++    sequence: u64,
++    source_generation: u64,
++    start: usize,
++    pub(super) records: Vec<RuntimeRecord>,
++    pub(super) overlay: RuntimeOverlay,
 +}
 +
 +#[derive(Debug, Deserialize, Serialize)]
@@ -1033,103 +1464,176 @@ index 000000000..fd3fd6e46
 +}
 +
 +impl SnapshotCache {
-+    pub(super) fn insert(&mut self, snapshot: CachedSnapshot) {
-+        self.snapshot = Some(snapshot);
++    pub(super) fn matches(&self, source_generation: u64, inventory: &RuntimeInventory) -> bool {
++        self.snapshot.as_ref().is_some_and(|snapshot| {
++            snapshot.source_generation == source_generation
++                && snapshot.overlay == inventory.overlay
++                && snapshot.records.len() == inventory.records.len()
++                && snapshot
++                    .records
++                    .iter()
++                    .zip(&inventory.records)
++                    .all(|(left, right)| left.same_inventory(right))
++        })
++    }
++
++    pub(super) fn replace(
++        &mut self,
++        sequence: u64,
++        source_generation: u64,
++        inventory: RuntimeInventory,
++    ) {
++        self.snapshot = Some(CachedSnapshot {
++            id: uuid::Uuid::new_v4().to_string(),
++            sequence,
++            source_generation,
++            records: inventory.records,
++            overlay: inventory.overlay,
++            snapshots: HashMap::new(),
++        });
 +    }
 +
 +    pub(super) fn clear(&mut self) {
 +        self.snapshot = None;
 +    }
 +
-+    pub(super) fn first_page(
++    pub(super) fn plan(
 +        &self,
++        encoded_cursor: Option<&str>,
 +        instance_epoch: &str,
 +        current_sequence: u64,
++        current_source_generation: u64,
 +        limit: usize,
-+        capabilities: Vec<SessionRuntimeCapability>,
-+    ) -> Result<Option<SessionRuntimeListResponse>, JSONRPCErrorError> {
-+        let Some(snapshot) = self
-+            .snapshot
-+            .as_ref()
-+            .filter(|snapshot| snapshot.sequence == current_sequence)
-+        else {
-+            return Ok(None);
-+        };
-+        snapshot
-+            .first_page(instance_epoch, limit, capabilities)
-+            .map(Some)
-+    }
-+
-+    pub(super) fn page(
-+        &self,
-+        encoded_cursor: &str,
-+        instance_epoch: &str,
-+        current_sequence: u64,
-+        limit: usize,
-+        capabilities: Vec<SessionRuntimeCapability>,
-+    ) -> Result<SessionRuntimeListResponse, JSONRPCErrorError> {
-+        let cursor = decode_cursor(encoded_cursor)?;
-+        if cursor.instance_epoch != instance_epoch || cursor.snapshot_sequence != current_sequence {
-+            return Err(stale_cursor());
-+        }
++    ) -> Result<PagePlan, JSONRPCErrorError> {
 +        let snapshot = self.snapshot.as_ref().ok_or_else(stale_cursor)?;
-+        if snapshot.id != cursor.snapshot_id || snapshot.sequence != cursor.snapshot_sequence {
++        if snapshot.sequence != current_sequence
++            || snapshot.source_generation != current_source_generation
++        {
 +            return Err(stale_cursor());
 +        }
-+        let start = snapshot
-+            .snapshots
++        let start = if let Some(encoded_cursor) = encoded_cursor {
++            let cursor = decode_cursor(encoded_cursor)?;
++            if cursor.instance_epoch != instance_epoch
++                || cursor.snapshot_sequence != current_sequence
++                || cursor.snapshot_id != snapshot.id
++            {
++                return Err(stale_cursor());
++            }
++            snapshot
++                .records
++                .iter()
++                .position(|record| record.thread_id().to_string() == cursor.after_thread_id)
++                .map(|index| index + 1)
++                .ok_or_else(|| invalid_params("sessionRuntime/list cursor is invalid"))?
++        } else {
++            0
++        };
++        let materialize_end = start
++            .saturating_add(limit)
++            .saturating_add(1)
++            .min(snapshot.records.len());
++        let records = snapshot.records[start..materialize_end]
 +            .iter()
-+            .position(|item| item.thread_id == cursor.after_thread_id)
-+            .map(|index| index + 1)
-+            .ok_or_else(|| invalid_params("sessionRuntime/list cursor is invalid"))?;
-+        snapshot.page(instance_epoch, start, limit, capabilities)
++            .filter(|record| !snapshot.snapshots.contains_key(&record.thread_id()))
++            .cloned()
++            .collect();
++        Ok(PagePlan {
++            snapshot_id: snapshot.id.clone(),
++            sequence: snapshot.sequence,
++            source_generation: snapshot.source_generation,
++            start,
++            records,
++            overlay: snapshot.overlay.clone(),
++        })
 +    }
-+}
 +
-+impl CachedSnapshot {
-+    pub(super) fn new(sequence: u64, snapshots: Vec<SessionRuntimeSnapshot>) -> Self {
-+        Self {
-+            id: uuid::Uuid::new_v4().to_string(),
-+            sequence,
-+            snapshots,
++    pub(super) fn commit(
++        &mut self,
++        plan: &PagePlan,
++        snapshots: Vec<SessionRuntimeSnapshot>,
++    ) -> Result<(), JSONRPCErrorError> {
++        let snapshot = self.snapshot.as_mut().ok_or_else(stale_cursor)?;
++        if snapshot.id != plan.snapshot_id
++            || snapshot.sequence != plan.sequence
++            || snapshot.source_generation != plan.source_generation
++        {
++            return Err(stale_cursor());
 +        }
++        for snapshot_item in snapshots {
++            let thread_id = ThreadId::from_string(&snapshot_item.thread_id)
++                .map_err(|_| internal_error("session runtime snapshot thread id is invalid"))?;
++            snapshot.snapshots.insert(thread_id, snapshot_item);
++        }
++        Ok(())
 +    }
 +
-+    pub(super) fn first_page(
++    pub(super) fn response(
 +        &self,
++        plan: &PagePlan,
 +        instance_epoch: &str,
 +        limit: usize,
 +        capabilities: Vec<SessionRuntimeCapability>,
 +    ) -> Result<SessionRuntimeListResponse, JSONRPCErrorError> {
-+        self.page(instance_epoch, /*start*/ 0, limit, capabilities)
-+    }
-+
-+    fn page(
-+        &self,
-+        instance_epoch: &str,
-+        start: usize,
-+        limit: usize,
-+        capabilities: Vec<SessionRuntimeCapability>,
-+    ) -> Result<SessionRuntimeListResponse, JSONRPCErrorError> {
-+        let end = start.saturating_add(limit).min(self.snapshots.len());
-+        let data = self.snapshots[start..end].to_vec();
-+        let next_cursor = if end == 0 || end >= self.snapshots.len() {
++        let snapshot = self.snapshot.as_ref().ok_or_else(stale_cursor)?;
++        if snapshot.id != plan.snapshot_id
++            || snapshot.sequence != plan.sequence
++            || snapshot.source_generation != plan.source_generation
++        {
++            return Err(stale_cursor());
++        }
++        let end = plan.start.saturating_add(limit).min(snapshot.records.len());
++        let data = snapshot.records[plan.start..end]
++            .iter()
++            .map(|record| {
++                snapshot
++                    .snapshots
++                    .get(&record.thread_id())
++                    .cloned()
++                    .ok_or_else(|| internal_error("session runtime page was not materialized"))
++            })
++            .collect::<Result<Vec<_>, _>>()?;
++        let next_cursor = if end == 0 || end >= snapshot.records.len() {
 +            None
 +        } else {
 +            Some(encode_cursor(&RuntimeCursor {
 +                instance_epoch: instance_epoch.to_string(),
-+                snapshot_sequence: self.sequence,
-+                snapshot_id: self.id.clone(),
-+                after_thread_id: self.snapshots[end - 1].thread_id.clone(),
++                snapshot_sequence: snapshot.sequence,
++                snapshot_id: snapshot.id.clone(),
++                after_thread_id: snapshot.records[end - 1].thread_id().to_string(),
 +            })?)
 +        };
 +        Ok(SessionRuntimeListResponse {
 +            data,
 +            next_cursor,
 +            instance_epoch: instance_epoch.to_string(),
-+            snapshot_sequence: self.sequence,
++            snapshot_sequence: snapshot.sequence,
 +            capabilities,
 +        })
++    }
++
++    pub(super) fn retained_thread_ids(&self) -> HashSet<ThreadId> {
++        let Some(snapshot) = self.snapshot.as_ref() else {
++            return HashSet::new();
++        };
++        snapshot
++            .snapshots
++            .keys()
++            .chain(snapshot.overlay.loaded_thread_ids.iter())
++            .copied()
++            .collect()
++    }
++
++    pub(super) fn inventory_thread_ids(&self) -> HashSet<ThreadId> {
++        self.snapshot
++            .as_ref()
++            .map(|snapshot| {
++                snapshot
++                    .records
++                    .iter()
++                    .map(RuntimeRecord::thread_id)
++                    .collect()
++            })
++            .unwrap_or_default()
 +    }
 +}
 +
@@ -1155,7 +1659,7 @@ index 000000000..fd3fd6e46
 +        .map_err(|_| invalid_params("sessionRuntime/list cursor is invalid"))
 +}
 +
-+fn stale_cursor() -> JSONRPCErrorError {
++pub(super) fn stale_cursor() -> JSONRPCErrorError {
 +    invalid_params("sessionRuntime/list cursor is stale; restart pagination")
 +}
 diff --git a/codex-rs/app-server/src/session_runtime/snapshot.rs b/codex-rs/app-server/src/session_runtime/snapshot.rs
@@ -1675,10 +2179,12 @@ index 000000000..96be01563
 +}
 diff --git a/codex-rs/app-server/src/session_runtime/tests.rs b/codex-rs/app-server/src/session_runtime/tests.rs
 new file mode 100644
-index 000000000..838ae77f7
+index 000000000..48c84a3f7
 --- /dev/null
 +++ b/codex-rs/app-server/src/session_runtime/tests.rs
-@@ -0,0 +1,228 @@
+@@ -0,0 +1,272 @@
++use std::collections::HashMap;
++use std::collections::HashSet;
 +use std::collections::VecDeque;
 +
 +use codex_app_server_protocol::SessionRuntimeAccountBinding;
@@ -1705,13 +2211,16 @@ index 000000000..838ae77f7
 +use super::operations::retained_counts;
 +use super::operations::valid_initial_status;
 +use super::operations::valid_transition;
-+use super::pagination::CachedSnapshot;
 +use super::pagination::SnapshotCache;
++use super::snapshot::RuntimeInventory;
++use super::snapshot::RuntimeOverlay;
++use super::snapshot::RuntimeRecord;
 +
 +fn snapshot(thread_id: ThreadId) -> SessionRuntimeSnapshot {
 +    SessionRuntimeSnapshot {
 +        thread_id: thread_id.to_string(),
 +        state_revision: 0,
++        continuity: Default::default(),
 +        identity: SessionRuntimeIdentity {
 +            session_id: thread_id.to_string(),
 +            forked_from_id: None,
@@ -1774,63 +2283,102 @@ index 000000000..838ae77f7
 +    }
 +}
 +
++fn inventory(thread_ids: &[ThreadId]) -> RuntimeInventory {
++    RuntimeInventory {
++        records: thread_ids
++            .iter()
++            .map(|thread_id| RuntimeRecord::LoadedOnly {
++                thread_id: *thread_id,
++                session_id: thread_id.to_string(),
++                source: codex_protocol::protocol::SessionSource::Exec,
++                cwd: "/sanitized/project".to_string(),
++                forked_from_id: None,
++                parent_thread_id: None,
++            })
++            .collect(),
++        overlay: RuntimeOverlay {
++            loaded_thread_ids: thread_ids.iter().copied().collect::<HashSet<_>>(),
++            account_capability: None,
++            switching_accounts: HashMap::new(),
++        },
++    }
++}
++
++fn materialize_plan(plan: &super::pagination::PagePlan) -> Vec<SessionRuntimeSnapshot> {
++    plan.records
++        .iter()
++        .map(|record| snapshot(record.thread_id()))
++        .collect()
++}
++
 +#[test]
 +fn pagination_cursor_is_stable_and_restarts_after_sequence_change() {
-+    let snapshots = (0..3)
-+        .map(|_index| snapshot(ThreadId::new()))
-+        .collect::<Vec<_>>();
-+    let cached = CachedSnapshot::new(7, snapshots);
-+    let first = cached
-+        .first_page("epoch-a", 1, Vec::new())
++    let thread_ids = (0..3).map(|_index| ThreadId::new()).collect::<Vec<_>>();
++    let mut cache = SnapshotCache::default();
++    cache.replace(7, 11, inventory(&thread_ids));
++    let first_plan = cache
++        .plan(None, "epoch-a", 7, 11, 1)
++        .expect("first page plan");
++    assert_eq!(first_plan.records.len(), 2);
++    cache
++        .commit(&first_plan, materialize_plan(&first_plan))
++        .expect("commit first page");
++    let first = cache
++        .response(&first_plan, "epoch-a", 1, Vec::new())
 +        .expect("first page");
 +    let cursor = first.next_cursor.expect("next cursor");
-+    let mut cache = SnapshotCache::default();
-+    cache.insert(cached);
-+
++    let second_plan = cache
++        .plan(Some(&cursor), "epoch-a", 7, 11, 1)
++        .expect("second page plan");
++    assert_eq!(second_plan.records.len(), 1);
++    cache
++        .commit(&second_plan, materialize_plan(&second_plan))
++        .expect("commit second page");
 +    let second = cache
-+        .page(&cursor, "epoch-a", 7, 1, Vec::new())
++        .response(&second_plan, "epoch-a", 1, Vec::new())
 +        .expect("stable second page");
 +
 +    assert_eq!(first.data.len(), 1);
 +    assert_eq!(second.data.len(), 1);
-+    assert!(cache.page(&cursor, "epoch-a", 8, 1, Vec::new()).is_err());
-+    assert!(cache.page(&cursor, "epoch-b", 7, 1, Vec::new()).is_err());
-+
-+    let replacement = CachedSnapshot::new(7, vec![snapshot(ThreadId::new())]);
-+    cache.insert(replacement);
-+    assert!(cache.page(&cursor, "epoch-a", 7, 1, Vec::new()).is_err());
++    assert!(cache.plan(Some(&cursor), "epoch-a", 8, 11, 1).is_err());
++    assert!(cache.plan(Some(&cursor), "epoch-b", 7, 11, 1).is_err());
++    cache.replace(7, 11, inventory(&[ThreadId::new()]));
++    assert!(cache.plan(Some(&cursor), "epoch-a", 7, 11, 1).is_err());
 +}
 +
 +#[test]
 +fn cursorless_clients_reuse_the_same_snapshot_at_the_same_sequence() {
-+    let snapshots = (0..3)
-+        .map(|_index| snapshot(ThreadId::new()))
-+        .collect::<Vec<_>>();
-+    let cached = CachedSnapshot::new(7, snapshots);
++    let thread_ids = (0..3).map(|_index| ThreadId::new()).collect::<Vec<_>>();
 +    let mut cache = SnapshotCache::default();
-+    cache.insert(cached);
-+
++    cache.replace(7, 11, inventory(&thread_ids));
++    let first_plan = cache
++        .plan(None, "epoch-a", 7, 11, 1)
++        .expect("first client plan");
++    cache
++        .commit(&first_plan, materialize_plan(&first_plan))
++        .expect("commit first client page");
 +    let first = cache
-+        .first_page("epoch-a", 7, 1, Vec::new())
-+        .expect("first client page")
-+        .expect("cached snapshot");
++        .response(&first_plan, "epoch-a", 1, Vec::new())
++        .expect("first client page");
++    let second_plan = cache
++        .plan(None, "epoch-a", 7, 11, 2)
++        .expect("second client plan");
++    cache
++        .commit(&second_plan, materialize_plan(&second_plan))
++        .expect("commit second client page");
 +    let second = cache
-+        .first_page("epoch-a", 7, 2, Vec::new())
-+        .expect("second client page")
-+        .expect("cached snapshot");
++        .response(&second_plan, "epoch-a", 2, Vec::new())
++        .expect("second client page");
 +    let first_cursor = first.next_cursor.expect("first client cursor");
 +    let second_cursor = second.next_cursor.expect("second client cursor");
 +
 +    assert_eq!(first.data.len(), 1);
 +    assert_eq!(second.data.len(), 2);
++    assert_eq!(first.data[0], second.data[0]);
++    assert!(cache.plan(Some(&first_cursor), "epoch-a", 7, 11, 1).is_ok());
 +    assert!(
 +        cache
-+            .page(&first_cursor, "epoch-a", 7, 1, Vec::new())
-+            .is_ok()
-+    );
-+    assert!(
-+        cache
-+            .page(&second_cursor, "epoch-a", 7, 1, Vec::new())
++            .plan(Some(&second_cursor), "epoch-a", 7, 11, 1)
 +            .is_ok()
 +    );
 +}
@@ -2452,6 +3000,18 @@ index 4f0a83e70..01f993704 100644
      }
  
      pub(crate) async fn subscribe(
+diff --git a/codex-rs/app-server/tests/suite/v2/client_metadata.rs b/codex-rs/app-server/tests/suite/v2/client_metadata.rs
+index b6d7090e3..93378427e 100644
+--- a/codex-rs/app-server/tests/suite/v2/client_metadata.rs
++++ b/codex-rs/app-server/tests/suite/v2/client_metadata.rs
+@@ -450,6 +450,7 @@ async fn turn_steer_updates_client_metadata_on_follow_up_responses_request_v2()
+     let steer_req = mcp
+         .send_turn_steer_request(TurnSteerParams {
+             thread_id: thread.id.clone(),
++            expected_execution_account: None,
+             client_user_message_id: None,
+             input: vec![V2UserInput::Text {
+                 text: "Focus on the failure".to_string(),
 diff --git a/codex-rs/rollout/src/lib.rs b/codex-rs/rollout/src/lib.rs
 index 9f38cd569..70bae262f 100644
 --- a/codex-rs/rollout/src/lib.rs
@@ -2653,6 +3213,1138 @@ index 8bb8d54e4..89ba3b2c9 100644
  #[tokio::test]
  async fn referenced_paginated_rollout_starts_at_history_cutoff_and_resumes() -> std::io::Result<()>
  {
+diff --git a/codex-rs/state/src/extract.rs b/codex-rs/state/src/extract.rs
+index 366d81c05..d5ddd9af5 100644
+--- a/codex-rs/state/src/extract.rs
++++ b/codex-rs/state/src/extract.rs
+@@ -342,6 +342,8 @@ mod tests {
+                 turn_id: None,
+                 goal: ThreadGoal {
+                     thread_id: metadata.id,
++                    goal_id: "goal-1".to_string(),
++                    revision: 1,
+                     objective: "optimize the benchmark".to_string(),
+                     status: ThreadGoalStatus::Active,
+                     token_budget: None,
+diff --git a/codex-rs/state/src/lib.rs b/codex-rs/state/src/lib.rs
+index 64bda434b..37a4f8e60 100644
+--- a/codex-rs/state/src/lib.rs
++++ b/codex-rs/state/src/lib.rs
+@@ -63,19 +63,36 @@ pub use model::ThreadSection;
+ pub use model::ThreadSectionAppearance;
+ pub use model::ThreadSectionsPage;
+ pub use model::ThreadsPage;
++pub use runtime::CommitThreadTransition;
++pub use runtime::CommittedThreadTransitions;
+ pub use runtime::ExternalAgentConfigImportDetailsRecord;
+ pub use runtime::ExternalAgentConfigImportFailureRecord;
+ pub use runtime::ExternalAgentConfigImportHistoryRecord;
+ pub use runtime::ExternalAgentConfigImportSuccessRecord;
+ pub use runtime::GoalAccountingMode;
+ pub use runtime::GoalAccountingOutcome;
++pub use runtime::GoalClearOutcome;
++pub use runtime::GoalReplaceOutcome;
+ pub use runtime::GoalStore;
+ pub use runtime::GoalUpdate;
++pub use runtime::GoalVersion;
++pub use runtime::MarkThreadTransitionPrepared;
+ pub use runtime::MemoryStore;
+ pub use runtime::RemoteControlEnrollmentRecord;
+ pub use runtime::RuntimeDbBackup;
+ pub use runtime::SqliteQueueStore;
+ pub use runtime::ThreadFilterOptions;
++pub use runtime::ThreadTransitionClaimOutcome;
++pub use runtime::ThreadTransitionCommitOutcome;
++pub use runtime::ThreadTransitionConflict;
++pub use runtime::ThreadTransitionEndpointEvidence;
++pub use runtime::ThreadTransitionIntent;
++pub use runtime::ThreadTransitionPreparation;
++pub use runtime::ThreadTransitionPreparing;
++pub use runtime::ThreadTransitionReason;
++pub use runtime::ThreadTransitionReceipt;
++pub use runtime::ThreadTransitionRecord;
++pub use runtime::ThreadWriterEvidence;
+ pub use runtime::WriterGeneration;
+ pub use runtime::backup_runtime_db_for_fresh_start;
+ pub use runtime::is_sqlite_corruption_error;
+diff --git a/codex-rs/state/src/migrations.rs b/codex-rs/state/src/migrations.rs
+index ba26e455c..d2ac23ae7 100644
+--- a/codex-rs/state/src/migrations.rs
++++ b/codex-rs/state/src/migrations.rs
+@@ -71,6 +71,30 @@ const THREAD_TURN_EXECUTION_ACCOUNTS_DEFINITION: &str = r#"CREATE TABLE thread_t
+     generation INTEGER NOT NULL CHECK (generation >= 1),
+     PRIMARY KEY (thread_id, turn_id)
+ )"#;
++const ACCOUNT_SLOT_RUNTIME_VERSIONS_DEFINITION: &str = r#"CREATE TABLE account_slot_runtime_versions (
++    slot_id TEXT PRIMARY KEY NOT NULL,
++    runtime_version INTEGER NOT NULL CHECK (runtime_version >= 1)
++) WITHOUT ROWID"#;
++const THREAD_TRANSITIONS_DEFINITION: &str = r#"CREATE TABLE thread_transitions (
++    revision INTEGER PRIMARY KEY AUTOINCREMENT,
++    transition_id TEXT NOT NULL UNIQUE,
++    request_fingerprint TEXT NOT NULL,
++    reason TEXT NOT NULL CHECK(reason IN ('clear','new')),
++    previous_thread_id TEXT NOT NULL,
++    current_thread_id TEXT NOT NULL UNIQUE,
++    origin_instance_epoch TEXT NOT NULL,
++    initiator_client_incarnation TEXT NOT NULL,
++    previous_precondition_state_revision INTEGER NOT NULL CHECK(previous_precondition_state_revision >= 1),
++    previous_committed_state_revision INTEGER CHECK(previous_committed_state_revision >= 1),
++    previous_writer_store_id TEXT NOT NULL,
++    previous_writer_generation INTEGER NOT NULL CHECK(previous_writer_generation >= 1),
++    current_writer_store_id TEXT,
++    current_writer_generation INTEGER CHECK(current_writer_generation >= 1),
++    current_committed_state_revision INTEGER CHECK(current_committed_state_revision >= 1),
++    status TEXT NOT NULL CHECK(status IN ('preparing','prepared','committed')),
++    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
++    committed_at INTEGER
++)"#;
+ 
+ const CUSTOM_SCHEMA_V1: CustomSchemaMigration = CustomSchemaMigration {
+     version: 1,
+@@ -132,9 +156,74 @@ CREATE TABLE thread_turn_execution_accounts (
+         },
+     ],
+ };
++const CUSTOM_SCHEMA_V3: CustomSchemaMigration = CustomSchemaMigration {
++    version: 3,
++    name: "account_slot_runtime_versions",
++    definition: r#"
++CREATE TABLE account_slot_runtime_versions (
++    slot_id TEXT PRIMARY KEY NOT NULL,
++    runtime_version INTEGER NOT NULL CHECK (runtime_version >= 1)
++) WITHOUT ROWID;
++"#,
++    // V3 was never written into the upstream migration registry and is intentionally absent from
++    // `LEGACY_CUSTOM_SCHEMA_MIGRATIONS`; these legacy-only fields are therefore unused sentinels.
++    legacy_upstream_version: 0,
++    legacy_description: "",
++    legacy_checksum: "",
++    required_tables: &[RequiredCustomTable {
++        name: "account_slot_runtime_versions",
++        definition: ACCOUNT_SLOT_RUNTIME_VERSIONS_DEFINITION,
++    }],
++};
++const CUSTOM_SCHEMA_V4: CustomSchemaMigration = CustomSchemaMigration {
++    version: 4,
++    name: "thread_transitions",
++    definition: r#"
++CREATE TABLE thread_transitions (
++    revision INTEGER PRIMARY KEY AUTOINCREMENT,
++    transition_id TEXT NOT NULL UNIQUE,
++    request_fingerprint TEXT NOT NULL,
++    reason TEXT NOT NULL CHECK(reason IN ('clear','new')),
++    previous_thread_id TEXT NOT NULL,
++    current_thread_id TEXT NOT NULL UNIQUE,
++    origin_instance_epoch TEXT NOT NULL,
++    initiator_client_incarnation TEXT NOT NULL,
++    previous_precondition_state_revision INTEGER NOT NULL CHECK(previous_precondition_state_revision >= 1),
++    previous_committed_state_revision INTEGER CHECK(previous_committed_state_revision >= 1),
++    previous_writer_store_id TEXT NOT NULL,
++    previous_writer_generation INTEGER NOT NULL CHECK(previous_writer_generation >= 1),
++    current_writer_store_id TEXT,
++    current_writer_generation INTEGER CHECK(current_writer_generation >= 1),
++    current_committed_state_revision INTEGER CHECK(current_committed_state_revision >= 1),
++    status TEXT NOT NULL CHECK(status IN ('preparing','prepared','committed')),
++    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
++    committed_at INTEGER
++);
++CREATE UNIQUE INDEX thread_transitions_one_committed_outgoing_authority
++ON thread_transitions(
++    previous_thread_id,
++    previous_precondition_state_revision,
++    previous_writer_store_id,
++    previous_writer_generation
++) WHERE status = 'committed';
++CREATE INDEX thread_transitions_current_status
++ON thread_transitions(current_thread_id, status);
++"#,
++    legacy_upstream_version: 0,
++    legacy_description: "",
++    legacy_checksum: "",
++    required_tables: &[RequiredCustomTable {
++        name: "thread_transitions",
++        definition: THREAD_TRANSITIONS_DEFINITION,
++    }],
++};
+ 
+-const ACTIVE_CUSTOM_SCHEMA_MIGRATIONS: &[&CustomSchemaMigration] =
+-    &[&CUSTOM_SCHEMA_V1, &CUSTOM_SCHEMA_V2];
++const ACTIVE_CUSTOM_SCHEMA_MIGRATIONS: &[&CustomSchemaMigration] = &[
++    &CUSTOM_SCHEMA_V1,
++    &CUSTOM_SCHEMA_V2,
++    &CUSTOM_SCHEMA_V3,
++    &CUSTOM_SCHEMA_V4,
++];
+ const LEGACY_CUSTOM_SCHEMA_MIGRATIONS: &[&CustomSchemaMigration] =
+     &[&CUSTOM_SCHEMA_V1, &CUSTOM_SCHEMA_V2];
+ 
+diff --git a/codex-rs/state/src/migrations_tests.rs b/codex-rs/state/src/migrations_tests.rs
+index 3e2202656..a886bac69 100644
+--- a/codex-rs/state/src/migrations_tests.rs
++++ b/codex-rs/state/src/migrations_tests.rs
+@@ -8,6 +8,8 @@ use std::borrow::Cow;
+ 
+ use super::CUSTOM_SCHEMA_V1;
+ use super::CUSTOM_SCHEMA_V2;
++use super::CUSTOM_SCHEMA_V3;
++use super::CUSTOM_SCHEMA_V4;
+ use super::LegacyMigrationCutover;
+ use super::STATE_MIGRATOR;
+ use super::THREAD_HISTORY_MIGRATOR;
+@@ -67,7 +69,8 @@ async fn insert_legacy_custom_migration(
+ }
+ 
+ #[tokio::test]
+-async fn custom_schema_bootstrap_serializes_concurrent_callers() {
++async fn custom_schema_bootstrap_with_account_slot_runtime_versions_serializes_concurrent_callers()
++{
+     let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+     tokio::fs::create_dir_all(&sqlite_home)
+         .await
+@@ -107,12 +110,23 @@ async fn custom_schema_bootstrap_serializes_concurrent_callers() {
+                 "execution_account_bindings".to_string(),
+                 CUSTOM_SCHEMA_V2.definition.to_string(),
+             ),
++            (
++                3,
++                "account_slot_runtime_versions".to_string(),
++                CUSTOM_SCHEMA_V3.definition.to_string(),
++            ),
++            (
++                4,
++                "thread_transitions".to_string(),
++                CUSTOM_SCHEMA_V4.definition.to_string(),
++            ),
+         ]
+     );
+     let custom_tables = sqlx::query_scalar::<_, String>(
+         "SELECT name FROM sqlite_master WHERE type = 'table' \
+          AND name IN ('writer_authority_store', 'thread_writer_generations', \
+-         'thread_execution_account_bindings', 'thread_turn_execution_accounts') ORDER BY name",
++         'thread_execution_account_bindings', 'thread_turn_execution_accounts', \
++         'account_slot_runtime_versions', 'thread_transitions') ORDER BY name",
+     )
+     .fetch_all(&pool)
+     .await
+@@ -120,7 +134,9 @@ async fn custom_schema_bootstrap_serializes_concurrent_callers() {
+     assert_eq!(
+         custom_tables,
+         vec![
++            "account_slot_runtime_versions".to_string(),
+             "thread_execution_account_bindings".to_string(),
++            "thread_transitions".to_string(),
+             "thread_turn_execution_accounts".to_string(),
+             "thread_writer_generations".to_string(),
+             "writer_authority_store".to_string(),
+diff --git a/codex-rs/state/src/runtime.rs b/codex-rs/state/src/runtime.rs
+index 9782c7139..4c07f0e48 100644
+--- a/codex-rs/state/src/runtime.rs
++++ b/codex-rs/state/src/runtime.rs
+@@ -43,6 +43,7 @@ use tracing::warn;
+ mod backfill;
+ mod execution_account;
+ mod external_agent_config_imports;
++mod goal_mutations;
+ mod goals;
+ mod logs;
+ mod memories;
+@@ -55,6 +56,7 @@ mod rollout_migration;
+ pub(crate) mod test_support;
+ mod thread_section_order;
+ mod thread_sections;
++mod thread_transition;
+ mod threads;
+ mod writer_authority;
+ 
+@@ -64,8 +66,11 @@ pub use external_agent_config_imports::ExternalAgentConfigImportHistoryRecord;
+ pub use external_agent_config_imports::ExternalAgentConfigImportSuccessRecord;
+ pub use goals::GoalAccountingMode;
+ pub use goals::GoalAccountingOutcome;
++pub use goals::GoalClearOutcome;
++pub use goals::GoalReplaceOutcome;
+ pub use goals::GoalStore;
+ pub use goals::GoalUpdate;
++pub use goals::GoalVersion;
+ pub use memories::MemoryStore;
+ pub use queued_items::SqliteQueueStore;
+ pub use recovery::RuntimeDbBackup;
+@@ -76,6 +81,20 @@ pub use recovery::runtime_db_path_for_corruption_error;
+ pub use recovery::sqlite_error_detail_is_corruption;
+ pub use recovery::sqlite_error_detail_is_lock;
+ pub use remote_control::RemoteControlEnrollmentRecord;
++pub use thread_transition::CommitThreadTransition;
++pub use thread_transition::CommittedThreadTransitions;
++pub use thread_transition::MarkThreadTransitionPrepared;
++pub use thread_transition::ThreadTransitionClaimOutcome;
++pub use thread_transition::ThreadTransitionCommitOutcome;
++pub use thread_transition::ThreadTransitionConflict;
++pub use thread_transition::ThreadTransitionEndpointEvidence;
++pub use thread_transition::ThreadTransitionIntent;
++pub use thread_transition::ThreadTransitionPreparation;
++pub use thread_transition::ThreadTransitionPreparing;
++pub use thread_transition::ThreadTransitionReason;
++pub use thread_transition::ThreadTransitionReceipt;
++pub use thread_transition::ThreadTransitionRecord;
++pub use thread_transition::ThreadWriterEvidence;
+ pub use threads::ThreadFilterOptions;
+ pub use writer_authority::WriterGeneration;
+ 
+diff --git a/codex-rs/state/src/runtime/thread_transition.rs b/codex-rs/state/src/runtime/thread_transition.rs
+new file mode 100644
+index 000000000..44c8b09c9
+--- /dev/null
++++ b/codex-rs/state/src/runtime/thread_transition.rs
+@@ -0,0 +1,299 @@
++use anyhow::Context;
++use codex_protocol::ThreadId;
++use sqlx::QueryBuilder;
++use sqlx::Sqlite;
++use std::collections::HashMap;
++
++use super::StateRuntime;
++mod types;
++pub use types::*;
++
++impl StateRuntime {
++    pub async fn claim_thread_transition(
++        &self,
++        intent: &ThreadTransitionIntent,
++        reserved_current_thread_id: ThreadId,
++        origin_instance_epoch: &str,
++        initiator_client_incarnation: &str,
++        previous_writer: &ThreadWriterEvidence,
++    ) -> anyhow::Result<ThreadTransitionClaimOutcome> {
++        validate_positive(
++            intent.previous_precondition_state_revision,
++            "state revision",
++        )?;
++        validate_writer(previous_writer)?;
++        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
++        if let Some(row) = transition_row_by_id(&mut *transaction, &intent.transition_id).await? {
++            let record = transition_record(&row)?;
++            if row.request_fingerprint != intent.request_fingerprint
++                || row.reason != intent.reason
++                || row.previous_thread_id != intent.previous_thread_id
++                || row.previous_precondition_state_revision
++                    != intent.previous_precondition_state_revision
++                || row.previous_writer != *previous_writer
++            {
++                transaction.rollback().await?;
++                return Err(conflict("transition_id_conflict"));
++            }
++            if !matches!(record, ThreadTransitionRecord::Committed(_))
++                && (row.origin_instance_epoch != origin_instance_epoch
++                    || row.initiator_client_incarnation != initiator_client_incarnation)
++            {
++                transaction.rollback().await?;
++                return Err(conflict("transition_initiator_mismatch"));
++            }
++            transaction.commit().await?;
++            return Ok(match record {
++                ThreadTransitionRecord::Preparing(value) => {
++                    ThreadTransitionClaimOutcome::ExistingPreparing(value)
++                }
++                ThreadTransitionRecord::Prepared(value) => {
++                    ThreadTransitionClaimOutcome::ExistingPrepared(value)
++                }
++                ThreadTransitionRecord::Committed(value) => {
++                    ThreadTransitionClaimOutcome::ExistingCommitted(value)
++                }
++            });
++        }
++
++        let insert = sqlx::query(
++            "INSERT INTO thread_transitions (transition_id, request_fingerprint, reason, \
++             previous_thread_id, current_thread_id, origin_instance_epoch, \
++             initiator_client_incarnation, previous_precondition_state_revision, \
++             previous_writer_store_id, previous_writer_generation, status) \
++             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'preparing')",
++        )
++        .bind(&intent.transition_id)
++        .bind(&intent.request_fingerprint)
++        .bind(intent.reason.as_str())
++        .bind(intent.previous_thread_id.to_string())
++        .bind(reserved_current_thread_id.to_string())
++        .bind(origin_instance_epoch)
++        .bind(initiator_client_incarnation)
++        .bind(i64::try_from(intent.previous_precondition_state_revision)?)
++        .bind(&previous_writer.store_id)
++        .bind(i64::try_from(previous_writer.writer_generation)?)
++        .execute(&mut *transaction)
++        .await;
++        if let Err(error) = insert {
++            transaction.rollback().await?;
++            if error
++                .as_database_error()
++                .is_some_and(|error| error.is_unique_violation())
++            {
++                return Err(conflict("transition_thread_mismatch"));
++            }
++            return Err(error.into());
++        }
++        let row = transition_row_by_id(&mut *transaction, &intent.transition_id)
++            .await?
++            .context("inserted thread transition disappeared")?;
++        transaction.commit().await?;
++        let ThreadTransitionRecord::Preparing(preparing) = transition_record(&row)? else {
++            anyhow::bail!("new thread transition did not persist as preparing");
++        };
++        Ok(ThreadTransitionClaimOutcome::NewPreparing(preparing))
++    }
++
++    pub async fn mark_thread_transition_prepared(
++        &self,
++        request: &MarkThreadTransitionPrepared,
++    ) -> anyhow::Result<ThreadTransitionPreparation> {
++        validate_writer(&request.current_writer)?;
++        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
++        let row = transition_row_by_id(&mut *transaction, &request.transition_id)
++            .await?
++            .ok_or_else(|| conflict("transition_not_prepared"))?;
++        if row.request_fingerprint != request.expected_request_fingerprint {
++            transaction.rollback().await?;
++            return Err(conflict("transition_id_conflict"));
++        }
++        if row.origin_instance_epoch != request.expected_origin_instance_epoch
++            || row.initiator_client_incarnation != request.expected_initiator_client_incarnation
++        {
++            transaction.rollback().await?;
++            return Err(conflict("transition_initiator_mismatch"));
++        }
++        match transition_record(&row)? {
++            ThreadTransitionRecord::Preparing(_) => {}
++            ThreadTransitionRecord::Prepared(preparation)
++                if preparation.current_writer == request.current_writer =>
++            {
++                transaction.commit().await?;
++                return Ok(preparation);
++            }
++            ThreadTransitionRecord::Prepared(_) => {
++                transaction.rollback().await?;
++                return Err(conflict("stale_writer_fence"));
++            }
++            ThreadTransitionRecord::Committed(_) => {
++                transaction.rollback().await?;
++                return Err(conflict("transition_not_prepared"));
++            }
++        }
++        let updated = sqlx::query(
++            "UPDATE thread_transitions SET current_writer_store_id = ?, \
++             current_writer_generation = ?, status = 'prepared' \
++             WHERE transition_id = ? AND status = 'preparing' \
++             AND request_fingerprint = ? AND origin_instance_epoch = ? \
++             AND initiator_client_incarnation = ?",
++        )
++        .bind(&request.current_writer.store_id)
++        .bind(i64::try_from(request.current_writer.writer_generation)?)
++        .bind(&request.transition_id)
++        .bind(&request.expected_request_fingerprint)
++        .bind(&request.expected_origin_instance_epoch)
++        .bind(&request.expected_initiator_client_incarnation)
++        .execute(&mut *transaction)
++        .await?;
++        if updated.rows_affected() != 1 {
++            transaction.rollback().await?;
++            return Err(conflict("transition_not_prepared"));
++        }
++        let row = transition_row_by_id(&mut *transaction, &request.transition_id)
++            .await?
++            .context("prepared thread transition disappeared")?;
++        transaction.commit().await?;
++        let ThreadTransitionRecord::Prepared(preparation) = transition_record(&row)? else {
++            anyhow::bail!("thread transition did not persist as prepared");
++        };
++        Ok(preparation)
++    }
++
++    pub async fn commit_thread_transition(
++        &self,
++        request: &CommitThreadTransition,
++    ) -> anyhow::Result<ThreadTransitionCommitOutcome> {
++        validate_positive(request.previous_committed_state_revision, "state revision")?;
++        validate_positive(request.current_committed_state_revision, "state revision")?;
++        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
++        let row = transition_row_by_id(&mut *transaction, &request.transition_id)
++            .await?
++            .ok_or_else(|| conflict("transition_not_prepared"))?;
++        if row.previous_thread_id != request.expected_previous_thread_id
++            || row.current_thread_id != request.expected_current_thread_id
++        {
++            transaction.rollback().await?;
++            return Err(conflict("transition_thread_mismatch"));
++        }
++        if row.origin_instance_epoch != request.expected_origin_instance_epoch
++            || row.initiator_client_incarnation != request.expected_initiator_client_incarnation
++        {
++            transaction.rollback().await?;
++            return Err(conflict("transition_initiator_mismatch"));
++        }
++        match transition_record(&row)? {
++            ThreadTransitionRecord::Committed(receipt) => {
++                transaction.commit().await?;
++                return Ok(ThreadTransitionCommitOutcome::ExistingCommitted(receipt));
++            }
++            ThreadTransitionRecord::Preparing(_) => {
++                transaction.rollback().await?;
++                return Err(conflict("transition_not_prepared"));
++            }
++            ThreadTransitionRecord::Prepared(_) => {}
++        }
++        let outgoing_exists = sqlx::query_scalar::<_, bool>(
++            "SELECT EXISTS(SELECT 1 FROM thread_transitions WHERE status = 'committed' \
++             AND previous_thread_id = ? AND previous_precondition_state_revision = ? \
++             AND previous_writer_store_id = ? AND previous_writer_generation = ? \
++             AND transition_id <> ?)",
++        )
++        .bind(row.previous_thread_id.to_string())
++        .bind(i64::try_from(row.previous_precondition_state_revision)?)
++        .bind(&row.previous_writer.store_id)
++        .bind(i64::try_from(row.previous_writer.writer_generation)?)
++        .bind(&request.transition_id)
++        .fetch_one(&mut *transaction)
++        .await?;
++        if outgoing_exists {
++            transaction.rollback().await?;
++            return Err(conflict("outgoing_transition_conflict"));
++        }
++        let updated = sqlx::query(
++            "UPDATE thread_transitions SET previous_committed_state_revision = ?, \
++             current_committed_state_revision = ?, status = 'committed', committed_at = unixepoch() \
++             WHERE transition_id = ? AND status = 'prepared' AND previous_thread_id = ? \
++             AND current_thread_id = ? AND origin_instance_epoch = ? \
++             AND initiator_client_incarnation = ?",
++        )
++        .bind(i64::try_from(request.previous_committed_state_revision)?)
++        .bind(i64::try_from(request.current_committed_state_revision)?)
++        .bind(&request.transition_id)
++        .bind(request.expected_previous_thread_id.to_string())
++        .bind(request.expected_current_thread_id.to_string())
++        .bind(&request.expected_origin_instance_epoch)
++        .bind(&request.expected_initiator_client_incarnation)
++        .execute(&mut *transaction)
++        .await?;
++        if updated.rows_affected() != 1 {
++            transaction.rollback().await?;
++            return Err(conflict("transition_not_prepared"));
++        }
++        let row = transition_row_by_id(&mut *transaction, &request.transition_id)
++            .await?
++            .context("committed thread transition disappeared")?;
++        transaction.commit().await?;
++        let ThreadTransitionRecord::Committed(receipt) = transition_record(&row)? else {
++            anyhow::bail!("thread transition did not persist as committed");
++        };
++        Ok(ThreadTransitionCommitOutcome::Committed(receipt))
++    }
++
++    pub async fn thread_transition_by_id(
++        &self,
++        transition_id: &str,
++    ) -> anyhow::Result<Option<ThreadTransitionRecord>> {
++        let mut connection = self.pool.acquire().await?;
++        transition_row_by_id(&mut *connection, transition_id)
++            .await?
++            .as_ref()
++            .map(transition_record)
++            .transpose()
++    }
++
++    pub async fn committed_thread_transitions_for_threads(
++        &self,
++        thread_ids: &[ThreadId],
++    ) -> anyhow::Result<HashMap<ThreadId, CommittedThreadTransitions>> {
++        let mut result = thread_ids
++            .iter()
++            .copied()
++            .map(|thread_id| (thread_id, CommittedThreadTransitions::default()))
++            .collect::<HashMap<_, _>>();
++        if result.is_empty() {
++            return Ok(result);
++        }
++        let mut query = QueryBuilder::<Sqlite>::new(
++            "SELECT * FROM thread_transitions WHERE status = 'committed' AND (previous_thread_id IN (",
++        );
++        let mut separated = query.separated(", ");
++        for thread_id in result.keys() {
++            separated.push_bind(thread_id.to_string());
++        }
++        separated.push_unseparated(") OR current_thread_id IN (");
++        let mut separated = query.separated(", ");
++        for thread_id in result.keys() {
++            separated.push_bind(thread_id.to_string());
++        }
++        separated.push_unseparated(")) ORDER BY revision DESC");
++        for row in query.build().fetch_all(self.pool.as_ref()).await? {
++            let receipt = receipt_from_row(&transition_row(row)?)?;
++            if let Some(continuity) = result.get_mut(&receipt.previous.thread_id)
++                && continuity.last_outgoing.is_none()
++            {
++                continuity.last_outgoing = Some(receipt.clone());
++            }
++            if let Some(continuity) = result.get_mut(&receipt.current.thread_id)
++                && continuity.last_incoming.is_none()
++            {
++                continuity.last_incoming = Some(receipt);
++            }
++        }
++        Ok(result)
++    }
++}
++
++#[cfg(test)]
++#[path = "thread_transition_tests.rs"]
++mod tests;
+diff --git a/codex-rs/state/src/runtime/thread_transition/types.rs b/codex-rs/state/src/runtime/thread_transition/types.rs
+new file mode 100644
+index 000000000..46f3b65c9
+--- /dev/null
++++ b/codex-rs/state/src/runtime/thread_transition/types.rs
+@@ -0,0 +1,310 @@
++use anyhow::Context;
++use codex_protocol::ThreadId;
++use sqlx::Row;
++use sqlx::Sqlite;
++use sqlx::sqlite::SqliteRow;
++use std::error::Error;
++use std::fmt;
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub enum ThreadTransitionReason {
++    Clear,
++    New,
++}
++
++impl ThreadTransitionReason {
++    pub(super) fn as_str(self) -> &'static str {
++        match self {
++            Self::Clear => "clear",
++            Self::New => "new",
++        }
++    }
++
++    fn from_str(value: &str) -> anyhow::Result<Self> {
++        match value {
++            "clear" => Ok(Self::Clear),
++            "new" => Ok(Self::New),
++            value => anyhow::bail!("invalid persisted thread transition reason {value}"),
++        }
++    }
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct ThreadWriterEvidence {
++    pub store_id: String,
++    pub writer_generation: u64,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct ThreadTransitionIntent {
++    pub transition_id: String,
++    pub request_fingerprint: String,
++    pub reason: ThreadTransitionReason,
++    pub previous_thread_id: ThreadId,
++    pub previous_precondition_state_revision: u64,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct ThreadTransitionPreparing {
++    pub transition_id: String,
++    pub request_fingerprint: String,
++    pub reason: ThreadTransitionReason,
++    pub previous_thread_id: ThreadId,
++    pub current_thread_id: ThreadId,
++    pub origin_instance_epoch: String,
++    pub initiator_client_incarnation: String,
++    pub previous_precondition_state_revision: u64,
++    pub previous_writer: ThreadWriterEvidence,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct ThreadTransitionPreparation {
++    pub preparing: ThreadTransitionPreparing,
++    pub current_writer: ThreadWriterEvidence,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct ThreadTransitionEndpointEvidence {
++    pub thread_id: ThreadId,
++    pub state_revision: u64,
++    pub writer: ThreadWriterEvidence,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct ThreadTransitionReceipt {
++    pub transition_id: String,
++    pub reason: ThreadTransitionReason,
++    pub previous: ThreadTransitionEndpointEvidence,
++    pub current: ThreadTransitionEndpointEvidence,
++    pub origin_instance_epoch: String,
++    pub initiator_client_incarnation: String,
++    pub transition_revision: u64,
++    pub committed_at: i64,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub enum ThreadTransitionRecord {
++    Preparing(ThreadTransitionPreparing),
++    Prepared(ThreadTransitionPreparation),
++    Committed(ThreadTransitionReceipt),
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub enum ThreadTransitionClaimOutcome {
++    NewPreparing(ThreadTransitionPreparing),
++    ExistingPreparing(ThreadTransitionPreparing),
++    ExistingPrepared(ThreadTransitionPreparation),
++    ExistingCommitted(ThreadTransitionReceipt),
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct MarkThreadTransitionPrepared {
++    pub transition_id: String,
++    pub expected_request_fingerprint: String,
++    pub expected_origin_instance_epoch: String,
++    pub expected_initiator_client_incarnation: String,
++    pub current_writer: ThreadWriterEvidence,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct CommitThreadTransition {
++    pub transition_id: String,
++    pub expected_previous_thread_id: ThreadId,
++    pub expected_current_thread_id: ThreadId,
++    pub expected_origin_instance_epoch: String,
++    pub expected_initiator_client_incarnation: String,
++    pub previous_committed_state_revision: u64,
++    pub current_committed_state_revision: u64,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub enum ThreadTransitionCommitOutcome {
++    Committed(ThreadTransitionReceipt),
++    ExistingCommitted(ThreadTransitionReceipt),
++}
++
++#[derive(Clone, Debug, Default, Eq, PartialEq)]
++pub struct CommittedThreadTransitions {
++    pub last_incoming: Option<ThreadTransitionReceipt>,
++    pub last_outgoing: Option<ThreadTransitionReceipt>,
++}
++
++#[derive(Debug)]
++pub struct ThreadTransitionConflict {
++    reason: &'static str,
++}
++
++impl ThreadTransitionConflict {
++    pub fn reason(&self) -> &'static str {
++        self.reason
++    }
++}
++
++impl fmt::Display for ThreadTransitionConflict {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        formatter.write_str(self.reason)
++    }
++}
++
++impl Error for ThreadTransitionConflict {}
++
++pub(super) fn conflict(reason: &'static str) -> anyhow::Error {
++    ThreadTransitionConflict { reason }.into()
++}
++
++#[derive(Clone)]
++pub(super) struct TransitionRow {
++    pub revision: u64,
++    pub transition_id: String,
++    pub request_fingerprint: String,
++    pub reason: ThreadTransitionReason,
++    pub previous_thread_id: ThreadId,
++    pub current_thread_id: ThreadId,
++    pub origin_instance_epoch: String,
++    pub initiator_client_incarnation: String,
++    pub previous_precondition_state_revision: u64,
++    pub previous_committed_state_revision: Option<u64>,
++    pub previous_writer: ThreadWriterEvidence,
++    pub current_writer: Option<ThreadWriterEvidence>,
++    pub current_committed_state_revision: Option<u64>,
++    pub status: String,
++    pub committed_at: Option<i64>,
++}
++
++pub(super) async fn transition_row_by_id<'e, E>(
++    executor: E,
++    transition_id: &str,
++) -> anyhow::Result<Option<TransitionRow>>
++where
++    E: sqlx::Executor<'e, Database = Sqlite>,
++{
++    sqlx::query("SELECT * FROM thread_transitions WHERE transition_id = ?")
++        .bind(transition_id)
++        .fetch_optional(executor)
++        .await?
++        .map(transition_row)
++        .transpose()
++}
++
++pub(super) fn transition_row(row: SqliteRow) -> anyhow::Result<TransitionRow> {
++    let previous_thread_id = row.try_get::<String, _>("previous_thread_id")?;
++    let current_thread_id = row.try_get::<String, _>("current_thread_id")?;
++    let current_writer_store_id = row.try_get::<Option<String>, _>("current_writer_store_id")?;
++    let current_writer_generation = row.try_get::<Option<i64>, _>("current_writer_generation")?;
++    let current_writer = match (current_writer_store_id, current_writer_generation) {
++        (Some(store_id), Some(generation)) => Some(ThreadWriterEvidence {
++            store_id,
++            writer_generation: u64::try_from(generation)?,
++        }),
++        (None, None) => None,
++        _ => anyhow::bail!("persisted thread transition has partial current writer evidence"),
++    };
++    Ok(TransitionRow {
++        revision: u64::try_from(row.try_get::<i64, _>("revision")?)?,
++        transition_id: row.try_get("transition_id")?,
++        request_fingerprint: row.try_get("request_fingerprint")?,
++        reason: ThreadTransitionReason::from_str(row.try_get("reason")?)?,
++        previous_thread_id: ThreadId::from_string(&previous_thread_id)
++            .with_context(|| format!("invalid previous thread id {previous_thread_id}"))?,
++        current_thread_id: ThreadId::from_string(&current_thread_id)
++            .with_context(|| format!("invalid current thread id {current_thread_id}"))?,
++        origin_instance_epoch: row.try_get("origin_instance_epoch")?,
++        initiator_client_incarnation: row.try_get("initiator_client_incarnation")?,
++        previous_precondition_state_revision: u64::try_from(
++            row.try_get::<i64, _>("previous_precondition_state_revision")?,
++        )?,
++        previous_committed_state_revision: row
++            .try_get::<Option<i64>, _>("previous_committed_state_revision")?
++            .map(u64::try_from)
++            .transpose()?,
++        previous_writer: ThreadWriterEvidence {
++            store_id: row.try_get("previous_writer_store_id")?,
++            writer_generation: u64::try_from(row.try_get::<i64, _>("previous_writer_generation")?)?,
++        },
++        current_writer,
++        current_committed_state_revision: row
++            .try_get::<Option<i64>, _>("current_committed_state_revision")?
++            .map(u64::try_from)
++            .transpose()?,
++        status: row.try_get("status")?,
++        committed_at: row.try_get("committed_at")?,
++    })
++}
++
++pub(super) fn transition_record(row: &TransitionRow) -> anyhow::Result<ThreadTransitionRecord> {
++    match row.status.as_str() {
++        "preparing" => Ok(ThreadTransitionRecord::Preparing(preparing_from_row(row))),
++        "prepared" => Ok(ThreadTransitionRecord::Prepared(preparation_from_row(row)?)),
++        "committed" => Ok(ThreadTransitionRecord::Committed(receipt_from_row(row)?)),
++        status => anyhow::bail!("invalid persisted thread transition status {status}"),
++    }
++}
++
++fn preparing_from_row(row: &TransitionRow) -> ThreadTransitionPreparing {
++    ThreadTransitionPreparing {
++        transition_id: row.transition_id.clone(),
++        request_fingerprint: row.request_fingerprint.clone(),
++        reason: row.reason,
++        previous_thread_id: row.previous_thread_id,
++        current_thread_id: row.current_thread_id,
++        origin_instance_epoch: row.origin_instance_epoch.clone(),
++        initiator_client_incarnation: row.initiator_client_incarnation.clone(),
++        previous_precondition_state_revision: row.previous_precondition_state_revision,
++        previous_writer: row.previous_writer.clone(),
++    }
++}
++
++fn preparation_from_row(row: &TransitionRow) -> anyhow::Result<ThreadTransitionPreparation> {
++    Ok(ThreadTransitionPreparation {
++        preparing: preparing_from_row(row),
++        current_writer: row
++            .current_writer
++            .clone()
++            .context("prepared thread transition has no current writer")?,
++    })
++}
++
++pub(super) fn receipt_from_row(row: &TransitionRow) -> anyhow::Result<ThreadTransitionReceipt> {
++    Ok(ThreadTransitionReceipt {
++        transition_id: row.transition_id.clone(),
++        reason: row.reason,
++        previous: ThreadTransitionEndpointEvidence {
++            thread_id: row.previous_thread_id,
++            state_revision: row
++                .previous_committed_state_revision
++                .context("committed thread transition has no previous revision")?,
++            writer: row.previous_writer.clone(),
++        },
++        current: ThreadTransitionEndpointEvidence {
++            thread_id: row.current_thread_id,
++            state_revision: row
++                .current_committed_state_revision
++                .context("committed thread transition has no current revision")?,
++            writer: row
++                .current_writer
++                .clone()
++                .context("committed thread transition has no current writer")?,
++        },
++        origin_instance_epoch: row.origin_instance_epoch.clone(),
++        initiator_client_incarnation: row.initiator_client_incarnation.clone(),
++        transition_revision: row.revision,
++        committed_at: row
++            .committed_at
++            .context("committed thread transition has no commit timestamp")?,
++    })
++}
++
++pub(super) fn validate_positive(value: u64, name: &str) -> anyhow::Result<()> {
++    if value == 0 {
++        anyhow::bail!("thread transition {name} must be positive");
++    }
++    let _ = i64::try_from(value)?;
++    Ok(())
++}
++
++pub(super) fn validate_writer(writer: &ThreadWriterEvidence) -> anyhow::Result<()> {
++    if writer.store_id.is_empty() {
++        anyhow::bail!("thread transition writer store id must not be empty");
++    }
++    validate_positive(writer.writer_generation, "writer generation")
++}
+diff --git a/codex-rs/state/src/runtime/thread_transition_tests.rs b/codex-rs/state/src/runtime/thread_transition_tests.rs
+new file mode 100644
+index 000000000..37173608d
+--- /dev/null
++++ b/codex-rs/state/src/runtime/thread_transition_tests.rs
+@@ -0,0 +1,215 @@
++use codex_protocol::ThreadId;
++use codex_utils_absolute_path::test_support::PathExt;
++use pretty_assertions::assert_eq;
++use std::path::PathBuf;
++use std::sync::Arc;
++
++use super::*;
++
++fn thread_id(suffix: u128) -> ThreadId {
++    ThreadId::from_string(&format!("00000000-0000-0000-0000-{suffix:012x}"))
++        .expect("valid thread id")
++}
++
++fn intent(transition_id: &str, previous_thread_id: ThreadId) -> ThreadTransitionIntent {
++    ThreadTransitionIntent {
++        transition_id: transition_id.to_string(),
++        request_fingerprint: format!("fingerprint-{transition_id}"),
++        reason: ThreadTransitionReason::Clear,
++        previous_thread_id,
++        previous_precondition_state_revision: 7,
++    }
++}
++
++fn writer(generation: u64) -> ThreadWriterEvidence {
++    ThreadWriterEvidence {
++        store_id: "store-1".to_string(),
++        writer_generation: generation,
++    }
++}
++
++async fn runtime() -> (
++    Arc<StateRuntime>,
++    crate::SqliteConfig,
++    scopeguard::ScopeGuard<PathBuf, impl FnOnce(PathBuf)>,
++) {
++    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
++    tokio::fs::create_dir_all(&sqlite_home)
++        .await
++        .expect("sqlite home should be created");
++    let cleanup = scopeguard::guard(sqlite_home.clone(), |path| {
++        let _ = std::fs::remove_dir_all(path);
++    });
++    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
++    let runtime = StateRuntime::init(sqlite.clone(), "test-provider".to_string())
++        .await
++        .expect("state runtime should initialize");
++    (runtime, sqlite, cleanup)
++}
++
++#[tokio::test]
++async fn transition_retry_is_status_specific_and_commit_is_immutable() {
++    let (runtime, sqlite, _cleanup) = runtime().await;
++    let previous = thread_id(1);
++    let current = thread_id(2);
++    let intent = intent("transition-1", previous);
++    let preparing = match runtime
++        .claim_thread_transition(&intent, current, "epoch-1", "client-1", &writer(4))
++        .await
++        .expect("claim should succeed")
++    {
++        ThreadTransitionClaimOutcome::NewPreparing(value) => value,
++        outcome => panic!("unexpected claim outcome {outcome:?}"),
++    };
++    assert_eq!(preparing.current_thread_id, current);
++    assert_eq!(
++        runtime
++            .claim_thread_transition(&intent, thread_id(99), "epoch-1", "client-1", &writer(4))
++            .await
++            .expect("same claim should retry"),
++        ThreadTransitionClaimOutcome::ExistingPreparing(preparing.clone())
++    );
++    let foreign = runtime
++        .claim_thread_transition(&intent, current, "epoch-2", "client-2", &writer(4))
++        .await
++        .expect_err("foreign preparing row must not resume");
++    assert_eq!(
++        foreign
++            .downcast_ref::<ThreadTransitionConflict>()
++            .expect("typed conflict")
++            .reason(),
++        "transition_initiator_mismatch"
++    );
++
++    let prepared_request = MarkThreadTransitionPrepared {
++        transition_id: intent.transition_id.clone(),
++        expected_request_fingerprint: intent.request_fingerprint.clone(),
++        expected_origin_instance_epoch: "epoch-1".to_string(),
++        expected_initiator_client_incarnation: "client-1".to_string(),
++        current_writer: writer(1),
++    };
++    let preparation = runtime
++        .mark_thread_transition_prepared(&prepared_request)
++        .await
++        .expect("prepare should succeed");
++    assert_eq!(
++        runtime
++            .mark_thread_transition_prepared(&prepared_request)
++            .await
++            .expect("prepare retry should succeed"),
++        preparation
++    );
++    assert_eq!(
++        runtime
++            .claim_thread_transition(&intent, current, "epoch-1", "client-1", &writer(4))
++            .await
++            .expect("prepared claim should retry"),
++        ThreadTransitionClaimOutcome::ExistingPrepared(preparation)
++    );
++
++    let commit = CommitThreadTransition {
++        transition_id: intent.transition_id.clone(),
++        expected_previous_thread_id: previous,
++        expected_current_thread_id: current,
++        expected_origin_instance_epoch: "epoch-1".to_string(),
++        expected_initiator_client_incarnation: "client-1".to_string(),
++        previous_committed_state_revision: 11,
++        current_committed_state_revision: 3,
++    };
++    let receipt = match runtime
++        .commit_thread_transition(&commit)
++        .await
++        .expect("commit should succeed")
++    {
++        ThreadTransitionCommitOutcome::Committed(receipt) => receipt,
++        outcome => panic!("unexpected commit outcome {outcome:?}"),
++    };
++    assert_eq!(receipt.previous.state_revision, 11);
++    assert_eq!(receipt.current.state_revision, 3);
++    let mut later_retry = commit;
++    later_retry.previous_committed_state_revision = 20;
++    later_retry.current_committed_state_revision = 30;
++    assert_eq!(
++        runtime
++            .commit_thread_transition(&later_retry)
++            .await
++            .expect("commit retry should succeed"),
++        ThreadTransitionCommitOutcome::ExistingCommitted(receipt.clone())
++    );
++    drop(runtime);
++    let runtime = StateRuntime::init(sqlite, "test-provider".to_string())
++        .await
++        .expect("state runtime should reopen");
++    assert_eq!(
++        runtime
++            .thread_transition_by_id(&intent.transition_id)
++            .await
++            .expect("exact read should succeed"),
++        Some(ThreadTransitionRecord::Committed(receipt.clone()))
++    );
++    let projected = runtime
++        .committed_thread_transitions_for_threads(&[previous, current, thread_id(3)])
++        .await
++        .expect("batch projection should succeed");
++    assert_eq!(projected[&previous].last_outgoing, Some(receipt.clone()));
++    assert_eq!(projected[&current].last_incoming, Some(receipt));
++    assert_eq!(
++        projected[&thread_id(3)],
++        CommittedThreadTransitions::default()
++    );
++}
++
++#[tokio::test]
++async fn only_one_prepared_edge_can_commit_for_an_outgoing_authority() {
++    let (runtime, _sqlite, _cleanup) = runtime().await;
++    let previous = thread_id(10);
++    let first = intent("transition-a", previous);
++    let second = intent("transition-b", previous);
++    for (intent, current) in [(&first, thread_id(11)), (&second, thread_id(12))] {
++        runtime
++            .claim_thread_transition(intent, current, "epoch-1", "client-1", &writer(9))
++            .await
++            .expect("parallel preparation should claim");
++        runtime
++            .mark_thread_transition_prepared(&MarkThreadTransitionPrepared {
++                transition_id: intent.transition_id.clone(),
++                expected_request_fingerprint: intent.request_fingerprint.clone(),
++                expected_origin_instance_epoch: "epoch-1".to_string(),
++                expected_initiator_client_incarnation: "client-1".to_string(),
++                current_writer: writer(1),
++            })
++            .await
++            .expect("parallel preparation should prepare");
++    }
++    runtime
++        .commit_thread_transition(&CommitThreadTransition {
++            transition_id: first.transition_id,
++            expected_previous_thread_id: previous,
++            expected_current_thread_id: thread_id(11),
++            expected_origin_instance_epoch: "epoch-1".to_string(),
++            expected_initiator_client_incarnation: "client-1".to_string(),
++            previous_committed_state_revision: 7,
++            current_committed_state_revision: 2,
++        })
++        .await
++        .expect("first edge should commit");
++    let losing_commit = runtime
++        .commit_thread_transition(&CommitThreadTransition {
++            transition_id: second.transition_id,
++            expected_previous_thread_id: previous,
++            expected_current_thread_id: thread_id(12),
++            expected_origin_instance_epoch: "epoch-1".to_string(),
++            expected_initiator_client_incarnation: "client-1".to_string(),
++            previous_committed_state_revision: 7,
++            current_committed_state_revision: 2,
++        })
++        .await
++        .expect_err("second edge must lose the outgoing authority");
++    assert_eq!(
++        losing_commit
++            .downcast_ref::<ThreadTransitionConflict>()
++            .expect("typed conflict")
++            .reason(),
++        "outgoing_transition_conflict"
++    );
++}
+diff --git a/codex-rs/state/src/runtime/threads.rs b/codex-rs/state/src/runtime/threads.rs
+index ee37610b4..a1592be41 100644
+--- a/codex-rs/state/src/runtime/threads.rs
++++ b/codex-rs/state/src/runtime/threads.rs
+@@ -1140,7 +1140,7 @@ ON CONFLICT(id) DO UPDATE SET
+                 .await?;
+             self.thread_queue.delete_thread_queue(*thread_id).await?;
+             self.memories.delete_thread_memory(*thread_id).await?;
+-            self.thread_goals.delete_thread_goal(*thread_id).await?;
++            self.thread_goals.purge_thread_goal(*thread_id).await?;
+         }
+ 
+         let mut tx = self.pool.begin().await?;
 diff --git a/codex-rs/thread-store/src/in_memory.rs b/codex-rs/thread-store/src/in_memory.rs
 index 0724a4655..4529e319e 100644
 --- a/codex-rs/thread-store/src/in_memory.rs
@@ -2720,11 +4412,474 @@ index 0724a4655..4529e319e 100644
      fn execution_account_binding(
          &self,
          thread_id: ThreadId,
+diff --git a/codex-rs/thread-store/src/in_memory/thread_transition.rs b/codex-rs/thread-store/src/in_memory/thread_transition.rs
+new file mode 100644
+index 000000000..bd098f35f
+--- /dev/null
++++ b/codex-rs/thread-store/src/in_memory/thread_transition.rs
+@@ -0,0 +1,337 @@
++use chrono::Utc;
++use codex_protocol::ThreadId;
++use std::collections::HashMap;
++
++use super::InMemoryThreadStore;
++use super::InMemoryThreadTransition;
++use crate::CommitThreadTransition;
++use crate::CommittedThreadTransitions;
++use crate::MarkThreadTransitionPrepared;
++use crate::ThreadStoreError;
++use crate::ThreadStoreResult;
++use crate::ThreadTransitionClaimOutcome;
++use crate::ThreadTransitionCommitOutcome;
++use crate::ThreadTransitionEndpointEvidence;
++use crate::ThreadTransitionIntent;
++use crate::ThreadTransitionPreparation;
++use crate::ThreadTransitionPreparing;
++use crate::ThreadTransitionReceipt;
++use crate::ThreadTransitionRecord;
++use crate::ThreadWriterEvidence;
++
++pub(super) async fn claim(
++    store: &InMemoryThreadStore,
++    intent: ThreadTransitionIntent,
++    reserved_current_thread_id: ThreadId,
++    origin_instance_epoch: String,
++    initiator_client_incarnation: String,
++    previous_writer: ThreadWriterEvidence,
++) -> ThreadStoreResult<ThreadTransitionClaimOutcome> {
++    if intent.previous_precondition_state_revision == 0
++        || previous_writer.writer_generation == 0
++        || previous_writer.store_id.is_empty()
++    {
++        return Err(ThreadStoreError::InvalidRequest {
++            message: "thread transition revisions and writer evidence must be valid".to_string(),
++        });
++    }
++    let mut state = store.state.lock().await;
++    if let Some(existing) = state.thread_transitions.get(&intent.transition_id) {
++        let (reason, previous_thread_id, stored_origin, stored_initiator, stored_writer) =
++            match &existing.record {
++                ThreadTransitionRecord::Preparing(value) => (
++                    value.reason,
++                    value.previous_thread_id,
++                    &value.origin_instance_epoch,
++                    &value.initiator_client_incarnation,
++                    &value.previous_writer,
++                ),
++                ThreadTransitionRecord::Prepared(value) => (
++                    value.preparing.reason,
++                    value.preparing.previous_thread_id,
++                    &value.preparing.origin_instance_epoch,
++                    &value.preparing.initiator_client_incarnation,
++                    &value.preparing.previous_writer,
++                ),
++                ThreadTransitionRecord::Committed(value) => (
++                    value.reason,
++                    value.previous.thread_id,
++                    &value.origin_instance_epoch,
++                    &value.initiator_client_incarnation,
++                    &value.previous.writer,
++                ),
++            };
++        if existing.request_fingerprint != intent.request_fingerprint
++            || existing.previous_precondition_state_revision
++                != intent.previous_precondition_state_revision
++            || reason != intent.reason
++            || previous_thread_id != intent.previous_thread_id
++            || stored_writer != &previous_writer
++        {
++            return Err(conflict("transition_id_conflict"));
++        }
++        if !matches!(existing.record, ThreadTransitionRecord::Committed(_))
++            && (stored_origin != &origin_instance_epoch
++                || stored_initiator != &initiator_client_incarnation)
++        {
++            return Err(conflict("transition_initiator_mismatch"));
++        }
++        return Ok(match &existing.record {
++            ThreadTransitionRecord::Preparing(value) => {
++                ThreadTransitionClaimOutcome::ExistingPreparing(value.clone())
++            }
++            ThreadTransitionRecord::Prepared(value) => {
++                ThreadTransitionClaimOutcome::ExistingPrepared(value.clone())
++            }
++            ThreadTransitionRecord::Committed(value) => {
++                ThreadTransitionClaimOutcome::ExistingCommitted(value.clone())
++            }
++        });
++    }
++    if state
++        .thread_transitions
++        .values()
++        .any(|value| match &value.record {
++            ThreadTransitionRecord::Preparing(value) => {
++                value.current_thread_id == reserved_current_thread_id
++            }
++            ThreadTransitionRecord::Prepared(value) => {
++                value.preparing.current_thread_id == reserved_current_thread_id
++            }
++            ThreadTransitionRecord::Committed(value) => {
++                value.current.thread_id == reserved_current_thread_id
++            }
++        })
++    {
++        return Err(conflict("transition_thread_mismatch"));
++    }
++    let preparing = ThreadTransitionPreparing {
++        transition_id: intent.transition_id.clone(),
++        request_fingerprint: intent.request_fingerprint.clone(),
++        reason: intent.reason,
++        previous_thread_id: intent.previous_thread_id,
++        current_thread_id: reserved_current_thread_id,
++        origin_instance_epoch,
++        initiator_client_incarnation,
++        previous_precondition_state_revision: intent.previous_precondition_state_revision,
++        previous_writer,
++    };
++    state.next_thread_transition_revision = state
++        .next_thread_transition_revision
++        .checked_add(1)
++        .ok_or_else(|| ThreadStoreError::Internal {
++            message: "thread transition revision overflow".to_string(),
++        })?;
++    let revision = state.next_thread_transition_revision;
++    state.thread_transitions.insert(
++        intent.transition_id,
++        InMemoryThreadTransition {
++            revision,
++            request_fingerprint: intent.request_fingerprint,
++            previous_precondition_state_revision: intent.previous_precondition_state_revision,
++            record: ThreadTransitionRecord::Preparing(preparing.clone()),
++        },
++    );
++    Ok(ThreadTransitionClaimOutcome::NewPreparing(preparing))
++}
++
++pub(super) async fn mark_prepared(
++    store: &InMemoryThreadStore,
++    request: MarkThreadTransitionPrepared,
++) -> ThreadStoreResult<ThreadTransitionPreparation> {
++    if request.current_writer.writer_generation == 0 || request.current_writer.store_id.is_empty() {
++        return Err(ThreadStoreError::InvalidRequest {
++            message: "thread transition writer evidence must be valid".to_string(),
++        });
++    }
++    let mut state = store.state.lock().await;
++    let existing = state
++        .thread_transitions
++        .get(&request.transition_id)
++        .cloned()
++        .ok_or_else(|| conflict("transition_not_prepared"))?;
++    if existing.request_fingerprint != request.expected_request_fingerprint {
++        return Err(conflict("transition_id_conflict"));
++    }
++    let (origin_instance_epoch, initiator_client_incarnation) = match &existing.record {
++        ThreadTransitionRecord::Preparing(value) => (
++            &value.origin_instance_epoch,
++            &value.initiator_client_incarnation,
++        ),
++        ThreadTransitionRecord::Prepared(value) => (
++            &value.preparing.origin_instance_epoch,
++            &value.preparing.initiator_client_incarnation,
++        ),
++        ThreadTransitionRecord::Committed(value) => (
++            &value.origin_instance_epoch,
++            &value.initiator_client_incarnation,
++        ),
++    };
++    if origin_instance_epoch != &request.expected_origin_instance_epoch
++        || initiator_client_incarnation != &request.expected_initiator_client_incarnation
++    {
++        return Err(conflict("transition_initiator_mismatch"));
++    }
++    let preparing = match existing.record {
++        ThreadTransitionRecord::Preparing(value) => value,
++        ThreadTransitionRecord::Prepared(value)
++            if value.current_writer == request.current_writer =>
++        {
++            return Ok(value);
++        }
++        ThreadTransitionRecord::Prepared(_) => return Err(conflict("stale_writer_fence")),
++        ThreadTransitionRecord::Committed(_) => {
++            return Err(conflict("transition_not_prepared"));
++        }
++    };
++    let preparation = ThreadTransitionPreparation {
++        preparing,
++        current_writer: request.current_writer,
++    };
++    state
++        .thread_transitions
++        .get_mut(&request.transition_id)
++        .expect("transition exists while state lock is held")
++        .record = ThreadTransitionRecord::Prepared(preparation.clone());
++    Ok(preparation)
++}
++
++pub(super) async fn commit(
++    store: &InMemoryThreadStore,
++    request: CommitThreadTransition,
++) -> ThreadStoreResult<ThreadTransitionCommitOutcome> {
++    if request.previous_committed_state_revision == 0
++        || request.current_committed_state_revision == 0
++    {
++        return Err(ThreadStoreError::InvalidRequest {
++            message: "thread transition state revisions must be positive".to_string(),
++        });
++    }
++    let mut state = store.state.lock().await;
++    let existing = state
++        .thread_transitions
++        .get(&request.transition_id)
++        .cloned()
++        .ok_or_else(|| conflict("transition_not_prepared"))?;
++    let preparation = match existing.record {
++        ThreadTransitionRecord::Preparing(_) => {
++            return Err(conflict("transition_not_prepared"));
++        }
++        ThreadTransitionRecord::Prepared(value) => value,
++        ThreadTransitionRecord::Committed(value) => {
++            if value.previous.thread_id != request.expected_previous_thread_id
++                || value.current.thread_id != request.expected_current_thread_id
++            {
++                return Err(conflict("transition_thread_mismatch"));
++            }
++            if value.origin_instance_epoch != request.expected_origin_instance_epoch
++                || value.initiator_client_incarnation
++                    != request.expected_initiator_client_incarnation
++            {
++                return Err(conflict("transition_initiator_mismatch"));
++            }
++            return Ok(ThreadTransitionCommitOutcome::ExistingCommitted(value));
++        }
++    };
++    if preparation.preparing.previous_thread_id != request.expected_previous_thread_id
++        || preparation.preparing.current_thread_id != request.expected_current_thread_id
++    {
++        return Err(conflict("transition_thread_mismatch"));
++    }
++    if preparation.preparing.origin_instance_epoch != request.expected_origin_instance_epoch
++        || preparation.preparing.initiator_client_incarnation
++            != request.expected_initiator_client_incarnation
++    {
++        return Err(conflict("transition_initiator_mismatch"));
++    }
++    let outgoing_conflict = state.thread_transitions.iter().any(|(id, value)| {
++        id != &request.transition_id
++            && matches!(
++                &value.record,
++                ThreadTransitionRecord::Committed(receipt)
++                    if receipt.previous.thread_id == preparation.preparing.previous_thread_id
++                        && value.previous_precondition_state_revision
++                            == preparation.preparing.previous_precondition_state_revision
++                        && receipt.previous.writer == preparation.preparing.previous_writer
++            )
++    });
++    if outgoing_conflict {
++        return Err(conflict("outgoing_transition_conflict"));
++    }
++    let receipt = ThreadTransitionReceipt {
++        transition_id: request.transition_id.clone(),
++        reason: preparation.preparing.reason,
++        previous: ThreadTransitionEndpointEvidence {
++            thread_id: preparation.preparing.previous_thread_id,
++            state_revision: request.previous_committed_state_revision,
++            writer: preparation.preparing.previous_writer,
++        },
++        current: ThreadTransitionEndpointEvidence {
++            thread_id: preparation.preparing.current_thread_id,
++            state_revision: request.current_committed_state_revision,
++            writer: preparation.current_writer,
++        },
++        origin_instance_epoch: preparation.preparing.origin_instance_epoch,
++        initiator_client_incarnation: preparation.preparing.initiator_client_incarnation,
++        transition_revision: existing.revision,
++        committed_at: Utc::now().timestamp(),
++    };
++    state
++        .thread_transitions
++        .get_mut(&request.transition_id)
++        .expect("transition exists while state lock is held")
++        .record = ThreadTransitionRecord::Committed(receipt.clone());
++    Ok(ThreadTransitionCommitOutcome::Committed(receipt))
++}
++
++pub(super) async fn by_id(
++    store: &InMemoryThreadStore,
++    transition_id: String,
++) -> ThreadStoreResult<Option<ThreadTransitionRecord>> {
++    Ok(store
++        .state
++        .lock()
++        .await
++        .thread_transitions
++        .get(&transition_id)
++        .map(|value| value.record.clone()))
++}
++
++pub(super) async fn committed_for_threads(
++    store: &InMemoryThreadStore,
++    thread_ids: Vec<ThreadId>,
++) -> ThreadStoreResult<HashMap<ThreadId, CommittedThreadTransitions>> {
++    let state = store.state.lock().await;
++    let mut result = thread_ids
++        .into_iter()
++        .map(|thread_id| (thread_id, CommittedThreadTransitions::default()))
++        .collect::<HashMap<_, _>>();
++    let mut receipts = state
++        .thread_transitions
++        .values()
++        .filter_map(|value| match &value.record {
++            ThreadTransitionRecord::Committed(receipt) => Some(receipt.clone()),
++            ThreadTransitionRecord::Preparing(_) | ThreadTransitionRecord::Prepared(_) => None,
++        })
++        .collect::<Vec<_>>();
++    receipts.sort_by_key(|receipt| std::cmp::Reverse(receipt.transition_revision));
++    for receipt in receipts {
++        if let Some(continuity) = result.get_mut(&receipt.previous.thread_id)
++            && continuity.last_outgoing.is_none()
++        {
++            continuity.last_outgoing = Some(receipt.clone());
++        }
++        if let Some(continuity) = result.get_mut(&receipt.current.thread_id)
++            && continuity.last_incoming.is_none()
++        {
++            continuity.last_incoming = Some(receipt);
++        }
++    }
++    Ok(result)
++}
++
++fn conflict(reason: &'static str) -> ThreadStoreError {
++    ThreadStoreError::Conflict {
++        message: reason.to_string(),
++    }
++}
+diff --git a/codex-rs/thread-store/src/in_memory_thread_transition_tests.rs b/codex-rs/thread-store/src/in_memory_thread_transition_tests.rs
+new file mode 100644
+index 000000000..aad58bd5a
+--- /dev/null
++++ b/codex-rs/thread-store/src/in_memory_thread_transition_tests.rs
+@@ -0,0 +1,92 @@
++use pretty_assertions::assert_eq;
++
++use super::*;
++
++fn thread_id(suffix: u128) -> ThreadId {
++    ThreadId::from_string(&format!("00000000-0000-0000-0000-{suffix:012x}"))
++        .expect("valid thread id")
++}
++
++#[tokio::test]
++async fn in_memory_transition_matches_claim_prepare_commit_contract() {
++    let store = InMemoryThreadStore::default();
++    let previous = thread_id(1);
++    let current = thread_id(2);
++    let intent = ThreadTransitionIntent {
++        transition_id: "transition-1".to_string(),
++        request_fingerprint: "fingerprint-1".to_string(),
++        reason: crate::ThreadTransitionReason::New,
++        previous_thread_id: previous,
++        previous_precondition_state_revision: 5,
++    };
++    let previous_writer = ThreadWriterEvidence {
++        store_id: "store-1".to_string(),
++        writer_generation: 2,
++    };
++    assert!(matches!(
++        store
++            .claim_thread_transition(
++                intent.clone(),
++                current,
++                "epoch-1".to_string(),
++                "client-1".to_string(),
++                previous_writer,
++            )
++            .await
++            .expect("claim should succeed"),
++        ThreadTransitionClaimOutcome::NewPreparing(_)
++    ));
++    let preparation = store
++        .mark_thread_transition_prepared(MarkThreadTransitionPrepared {
++            transition_id: intent.transition_id.clone(),
++            expected_request_fingerprint: intent.request_fingerprint,
++            expected_origin_instance_epoch: "epoch-1".to_string(),
++            expected_initiator_client_incarnation: "client-1".to_string(),
++            current_writer: ThreadWriterEvidence {
++                store_id: "store-1".to_string(),
++                writer_generation: 1,
++            },
++        })
++        .await
++        .expect("prepare should succeed");
++    assert_eq!(preparation.preparing.current_thread_id, current);
++    let receipt = match store
++        .commit_thread_transition(CommitThreadTransition {
++            transition_id: intent.transition_id,
++            expected_previous_thread_id: previous,
++            expected_current_thread_id: current,
++            expected_origin_instance_epoch: "epoch-1".to_string(),
++            expected_initiator_client_incarnation: "client-1".to_string(),
++            previous_committed_state_revision: 8,
++            current_committed_state_revision: 3,
++        })
++        .await
++        .expect("commit should succeed")
++    {
++        ThreadTransitionCommitOutcome::Committed(receipt) => receipt,
++        outcome => panic!("unexpected commit outcome {outcome:?}"),
++    };
++    assert_eq!(receipt.transition_revision, 1);
++    assert_eq!(
++        store
++            .committed_thread_transitions_for_threads(vec![previous, current])
++            .await
++            .expect("projection should succeed"),
++        HashMap::from([
++            (
++                previous,
++                CommittedThreadTransitions {
++                    last_incoming: None,
++                    last_outgoing: Some(receipt.clone()),
++                },
++            ),
++            (
++                current,
++                CommittedThreadTransitions {
++                    last_incoming: Some(receipt),
++                    last_outgoing: None,
++                },
++            ),
++        ])
++    );
++}
 diff --git a/codex-rs/thread-store/src/lib.rs b/codex-rs/thread-store/src/lib.rs
-index f63f60b99..09abeb2cb 100644
+index f63f60b99..2b9ab227f 100644
 --- a/codex-rs/thread-store/src/lib.rs
 +++ b/codex-rs/thread-store/src/lib.rs
-@@ -48,8 +48,12 @@ pub use projects::UpdatedProject;
+@@ -15,8 +15,21 @@ mod thread_metadata_sync;
+ mod thread_sections;
+ mod types;
+ 
++pub use codex_state::CommitThreadTransition;
++pub use codex_state::CommittedThreadTransitions;
+ pub use codex_state::MAX_QUEUE_ITEMS;
++pub use codex_state::MarkThreadTransitionPrepared;
+ pub use codex_state::QueuedUserSubmissionRecord;
++pub use codex_state::ThreadTransitionClaimOutcome;
++pub use codex_state::ThreadTransitionCommitOutcome;
++pub use codex_state::ThreadTransitionEndpointEvidence;
++pub use codex_state::ThreadTransitionIntent;
++pub use codex_state::ThreadTransitionPreparation;
++pub use codex_state::ThreadTransitionPreparing;
++pub use codex_state::ThreadTransitionReason;
++pub use codex_state::ThreadTransitionReceipt;
++pub use codex_state::ThreadTransitionRecord;
++pub use codex_state::ThreadWriterEvidence;
+ pub use error::ThreadStoreError;
+ pub use error::ThreadStoreResult;
+ pub use in_memory::InMemoryThreadStore;
+@@ -48,8 +61,12 @@ pub use projects::UpdatedProject;
  pub use queue_store::LocalQueueStore;
  pub use queue_store::QueueStore;
  pub use store::PersistContext;
@@ -2898,6 +5053,85 @@ index 97b04a0b0..c89d30761 100644
      fn execution_account_binding(
          &self,
          thread_id: ThreadId,
+diff --git a/codex-rs/thread-store/src/local/read_thread.rs b/codex-rs/thread-store/src/local/read_thread.rs
+index a28269d7f..9fbe1a6ae 100644
+--- a/codex-rs/thread-store/src/local/read_thread.rs
++++ b/codex-rs/thread-store/src/local/read_thread.rs
+@@ -83,12 +83,9 @@ pub(super) async fn read_thread(
+     } else {
+         thread_rollout_resolver::resolve_current(store, thread_id).await?
+     };
+-    let path =
+-        resolved
+-            .map(|resolved| resolved.path)
+-            .ok_or_else(|| ThreadStoreError::InvalidRequest {
+-                message: format!("no rollout found for thread id {thread_id}"),
+-            })?;
++    let path = resolved
++        .map(|resolved| resolved.path)
++        .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
+ 
+     let mut thread = read_thread_from_rollout_path(store, path).await?;
+     if !params.include_archived && thread.archived_at.is_some() {
+@@ -698,13 +695,12 @@ mod tests {
+             })
+             .await
+             .expect_err("active-only read should fail for archived rollout");
+-        let ThreadStoreError::InvalidRequest { message } = active_only_err else {
+-            panic!("expected invalid request error");
+-        };
+-        assert_eq!(
+-            message,
+-            format!("no rollout found for thread id {thread_id}")
+-        );
++        assert!(matches!(
++            active_only_err,
++            ThreadStoreError::ThreadNotFound {
++                thread_id: missing_thread_id
++            } if missing_thread_id == thread_id
++        ));
+ 
+         let thread = store
+             .read_thread(ReadThreadParams {
+@@ -1487,13 +1483,12 @@ mod tests {
+             })
+             .await
+             .expect_err("active-only read should fail for archived metadata");
+-        let ThreadStoreError::InvalidRequest { message } = active_only_err else {
+-            panic!("expected invalid request error");
+-        };
+-        assert_eq!(
+-            message,
+-            format!("no rollout found for thread id {thread_id}")
+-        );
++        assert!(matches!(
++            active_only_err,
++            ThreadStoreError::ThreadNotFound {
++                thread_id: missing_thread_id
++            } if missing_thread_id == thread_id
++        ));
+ 
+         let thread = store
+             .read_thread(ReadThreadParams {
+@@ -1572,12 +1567,11 @@ mod tests {
+             .await
+             .expect_err("read should fail without rollout");
+ 
+-        let ThreadStoreError::InvalidRequest { message } = err else {
+-            panic!("expected invalid request error");
+-        };
+-        assert_eq!(
+-            message,
+-            format!("no rollout found for thread id {thread_id}")
+-        );
++        assert!(matches!(
++            err,
++            ThreadStoreError::ThreadNotFound {
++                thread_id: missing_thread_id
++            } if missing_thread_id == thread_id
++        ));
+     }
+ }
 diff --git a/codex-rs/thread-store/src/local/runtime_snapshot_tests.rs b/codex-rs/thread-store/src/local/runtime_snapshot_tests.rs
 new file mode 100644
 index 000000000..8f79753cb
@@ -3011,6 +5245,83 @@ index 000000000..8f79753cb
 +        .into(),
 +    )
 +}
+diff --git a/codex-rs/thread-store/src/local/thread_transition_tests.rs b/codex-rs/thread-store/src/local/thread_transition_tests.rs
+new file mode 100644
+index 000000000..88e8d37b4
+--- /dev/null
++++ b/codex-rs/thread-store/src/local/thread_transition_tests.rs
+@@ -0,0 +1,71 @@
++use codex_protocol::ThreadId;
++use tempfile::TempDir;
++
++use super::test_support::test_config;
++use super::*;
++
++#[tokio::test]
++async fn local_transition_uses_state_authority_and_requires_it() {
++    let home = TempDir::new().expect("temp dir");
++    let config = test_config(home.path());
++    let previous =
++        ThreadId::from_string("00000000-0000-0000-0000-000000000001").expect("previous thread id");
++    let current =
++        ThreadId::from_string("00000000-0000-0000-0000-000000000002").expect("current thread id");
++    let intent = ThreadTransitionIntent {
++        transition_id: "transition-1".to_string(),
++        request_fingerprint: "fingerprint-1".to_string(),
++        reason: crate::ThreadTransitionReason::Clear,
++        previous_thread_id: previous,
++        previous_precondition_state_revision: 4,
++    };
++    let no_state = LocalThreadStore::new(config.clone(), /*state_db*/ None);
++    assert!(matches!(
++        no_state
++            .claim_thread_transition(
++                intent.clone(),
++                current,
++                "epoch-1".to_string(),
++                "client-1".to_string(),
++                ThreadWriterEvidence {
++                    store_id: "store-1".to_string(),
++                    writer_generation: 2,
++                },
++            )
++            .await,
++        Err(ThreadStoreError::Unsupported {
++            operation: "claim_thread_transition"
++        })
++    ));
++
++    let runtime = codex_state::StateRuntime::init(
++        config.sqlite.clone(),
++        config.default_model_provider_id.clone(),
++    )
++    .await
++    .expect("state db should initialize");
++    let store = LocalThreadStore::new(config, Some(runtime));
++    assert!(matches!(
++        store
++            .claim_thread_transition(
++                intent,
++                current,
++                "epoch-1".to_string(),
++                "client-1".to_string(),
++                ThreadWriterEvidence {
++                    store_id: "store-1".to_string(),
++                    writer_generation: 2,
++                },
++            )
++            .await
++            .expect("durable claim should succeed"),
++        ThreadTransitionClaimOutcome::NewPreparing(_)
++    ));
++    assert!(matches!(
++        store
++            .thread_transition_by_id("transition-1".to_string())
++            .await
++            .expect("durable read should succeed"),
++        Some(ThreadTransitionRecord::Preparing(_))
++    ));
++}
 diff --git a/codex-rs/thread-store/src/store.rs b/codex-rs/thread-store/src/store.rs
 index f8f00b991..e4510eabd 100644
 --- a/codex-rs/thread-store/src/store.rs
@@ -3117,6 +5428,19 @@ index f8f00b991..e4510eabd 100644
      fn execution_account_binding(
          &self,
          _thread_id: ThreadId,
+diff --git a/codex-rs/thread-store/src/thread_metadata_sync.rs b/codex-rs/thread-store/src/thread_metadata_sync.rs
+index 9a4a67916..e142aca7b 100644
+--- a/codex-rs/thread-store/src/thread_metadata_sync.rs
++++ b/codex-rs/thread-store/src/thread_metadata_sync.rs
+@@ -821,6 +821,8 @@ mod tests {
+             turn_id: None,
+             goal: ThreadGoal {
+                 thread_id,
++                goal_id: "goal-1".to_string(),
++                revision: 1,
+                 objective: objective.to_string(),
+                 status: ThreadGoalStatus::Active,
+                 token_budget: None,
 -- 
 2.50.1 (Apple Git-155)
 

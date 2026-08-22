@@ -1,10 +1,10 @@
-From 1a15149a3f713fc01364dd26b19fa5e1ee1d443a Mon Sep 17 00:00:00 2001
+From 6d2145071614aeb68eb3d9ab4c5474f33065be3b Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 15:13:34 +0900
 Subject: [PATCH] feat(custom): add execution account binding for 0.149
 
 ---
- codex-rs/app-server/src/account_registry.rs   |  54 +++++
+ codex-rs/app-server/src/account_registry.rs   |  54 +++
  codex-rs/app-server/src/message_processor.rs  |   4 +
  .../request_processors/feedback_processor.rs  |   1 +
  .../persisted_resume_settings_tests.rs        |   1 +
@@ -12,36 +12,42 @@ Subject: [PATCH] feat(custom): add execution account binding for 0.149
  codex-rs/core/src/codex_delegate.rs           |   9 +-
  codex-rs/core/src/codex_thread.rs             |   4 +
  .../core/src/context_manager/history_tests.rs |   1 +
- codex-rs/core/src/execution_account.rs        |  67 ++++++
+ codex-rs/core/src/execution_account.rs        |  67 ++++
  codex-rs/core/src/lib.rs                      |   4 +
  codex-rs/core/src/session/mod.rs              |   3 +
  codex-rs/core/src/session/review.rs           |   1 +
  .../session/rollout_reconstruction_tests.rs   |   8 +
  codex-rs/core/src/session/session.rs          |  22 ++
- codex-rs/core/src/session/tests.rs            |  56 ++++-
+ codex-rs/core/src/session/tests.rs            |  56 +++-
  .../core/src/session/tests/guardian_tests.rs  |  12 +-
  codex-rs/core/src/session/turn_context.rs     |   6 +
- codex-rs/core/src/thread_manager.rs           | 182 ++++++++++++++-
+ codex-rs/core/src/thread_manager.rs           | 182 ++++++++++-
  codex-rs/core/tests/suite/resume_warning.rs   |   1 +
- codex-rs/protocol/src/protocol.rs             |  43 ++++
+ codex-rs/protocol/src/protocol.rs             |  43 +++
  codex-rs/rollout/src/recorder_tests.rs        |   1 +
+ .../0003_thread_goal_revisions.sql            |   7 +
  codex-rs/state/src/extract.rs                 |   4 +
  codex-rs/state/src/migrations.rs              |   3 +-
  codex-rs/state/src/migrations_tests.rs        |  22 +-
+ codex-rs/state/src/model/thread_goal.rs       |   4 +
  codex-rs/state/src/runtime.rs                 |   1 +
- .../state/src/runtime/execution_account.rs    | 134 +++++++++++
- .../src/runtime/execution_account_tests.rs    |  76 +++++++
+ .../state/src/runtime/execution_account.rs    | 276 ++++++++++++++++
+ .../src/runtime/execution_account_tests.rs    | 233 +++++++++++++
+ codex-rs/state/src/runtime/goals.rs           | 309 ++++++++++--------
+ .../state/src/runtime/goals_revision_tests.rs | 145 ++++++++
  codex-rs/state/src/runtime/threads.rs         |  21 ++
- codex-rs/thread-store/src/in_memory.rs        | 143 +++++++++++-
+ codex-rs/thread-store/src/in_memory.rs        | 143 +++++++-
  .../thread-store/src/local/live_writer.rs     |  24 ++
- codex-rs/thread-store/src/local/mod.rs        | 208 ++++++++++++++++++
+ codex-rs/thread-store/src/local/mod.rs        | 208 ++++++++++++
  .../src/local/model_context_tests.rs          |   1 +
  .../src/local/rollout_migration_tests.rs      |   1 +
- codex-rs/thread-store/src/store.rs            |  49 +++++
- 34 files changed, 1148 insertions(+), 26 deletions(-)
+ codex-rs/thread-store/src/store.rs            |  49 +++
+ 38 files changed, 1779 insertions(+), 159 deletions(-)
  create mode 100644 codex-rs/core/src/execution_account.rs
+ create mode 100644 codex-rs/state/goals_migrations/0003_thread_goal_revisions.sql
  create mode 100644 codex-rs/state/src/runtime/execution_account.rs
  create mode 100644 codex-rs/state/src/runtime/execution_account_tests.rs
+ create mode 100644 codex-rs/state/src/runtime/goals_revision_tests.rs
 
 diff --git a/codex-rs/app-server/src/account_registry.rs b/codex-rs/app-server/src/account_registry.rs
 index d77295e1a..49e71a17a 100644
@@ -1126,6 +1132,19 @@ index 0c4e663aa..8bb8d54e4 100644
              cwd: serde_json::from_value(serde_json::json!(&latest_cwd))
                  .expect("absolute latest cwd"),
              workspace_roots: None,
+diff --git a/codex-rs/state/goals_migrations/0003_thread_goal_revisions.sql b/codex-rs/state/goals_migrations/0003_thread_goal_revisions.sql
+new file mode 100644
+index 000000000..5c3042693
+--- /dev/null
++++ b/codex-rs/state/goals_migrations/0003_thread_goal_revisions.sql
+@@ -0,0 +1,7 @@
++ALTER TABLE thread_goals
++ADD COLUMN revision INTEGER NOT NULL DEFAULT 1 CHECK(revision >= 1);
++
++CREATE TABLE thread_goal_revision_tombstones (
++    thread_id TEXT PRIMARY KEY NOT NULL,
++    revision INTEGER NOT NULL CHECK(revision >= 1)
++);
 diff --git a/codex-rs/state/src/extract.rs b/codex-rs/state/src/extract.rs
 index 989075a23..366d81c05 100644
 --- a/codex-rs/state/src/extract.rs
@@ -1219,6 +1238,42 @@ index 4b667dd57..3e2202656 100644
              "thread_writer_generations".to_string(),
              "writer_authority_store".to_string(),
          ]
+diff --git a/codex-rs/state/src/model/thread_goal.rs b/codex-rs/state/src/model/thread_goal.rs
+index 12d2a78da..48c821362 100644
+--- a/codex-rs/state/src/model/thread_goal.rs
++++ b/codex-rs/state/src/model/thread_goal.rs
+@@ -61,6 +61,7 @@ impl TryFrom<&str> for ThreadGoalStatus {
+ pub struct ThreadGoal {
+     pub thread_id: ThreadId,
+     pub goal_id: String,
++    pub revision: i64,
+     pub objective: String,
+     pub status: ThreadGoalStatus,
+     pub token_budget: Option<i64>,
+@@ -73,6 +74,7 @@ pub struct ThreadGoal {
+ pub(crate) struct ThreadGoalRow {
+     pub thread_id: String,
+     pub goal_id: String,
++    pub revision: i64,
+     pub objective: String,
+     pub status: String,
+     pub token_budget: Option<i64>,
+@@ -87,6 +89,7 @@ impl ThreadGoalRow {
+         Ok(Self {
+             thread_id: row.try_get("thread_id")?,
+             goal_id: row.try_get("goal_id")?,
++            revision: row.try_get("revision")?,
+             objective: row.try_get("objective")?,
+             status: row.try_get("status")?,
+             token_budget: row.try_get("token_budget")?,
+@@ -105,6 +108,7 @@ impl TryFrom<ThreadGoalRow> for ThreadGoal {
+         Ok(Self {
+             thread_id: ThreadId::try_from(row.thread_id)?,
+             goal_id: row.goal_id,
++            revision: row.revision,
+             objective: row.objective,
+             status: ThreadGoalStatus::try_from(row.status.as_str())?,
+             token_budget: row.token_budget,
 diff --git a/codex-rs/state/src/runtime.rs b/codex-rs/state/src/runtime.rs
 index ca80e9b3f..9782c7139 100644
 --- a/codex-rs/state/src/runtime.rs
@@ -1233,10 +1288,10 @@ index ca80e9b3f..9782c7139 100644
  mod logs;
 diff --git a/codex-rs/state/src/runtime/execution_account.rs b/codex-rs/state/src/runtime/execution_account.rs
 new file mode 100644
-index 000000000..d0a235c6c
+index 000000000..fc15a2d32
 --- /dev/null
 +++ b/codex-rs/state/src/runtime/execution_account.rs
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,276 @@
 +use anyhow::Context;
 +use codex_protocol::ThreadId;
 +use codex_protocol::protocol::ExecutionAccountBinding;
@@ -1245,6 +1300,109 @@ index 000000000..d0a235c6c
 +use super::StateRuntime;
 +
 +impl StateRuntime {
++    /// Returns one transactionally consistent runtime version and complete durable binding set.
++    ///
++    /// Slots created before runtime versioning have no row and therefore read as version zero.
++    pub async fn execution_account_slot_runtime_state(
++        &self,
++        slot_id: &str,
++    ) -> anyhow::Result<(u64, Vec<(ThreadId, ExecutionAccountBinding)>)> {
++        let mut transaction = self.pool.begin().await?;
++        let runtime_version = slot_runtime_version(&mut transaction, slot_id).await?;
++        let bindings = slot_bindings(&mut transaction, slot_id).await?;
++        transaction.commit().await?;
++        Ok((runtime_version, bindings))
++    }
++
++    /// Advances one slot runtime and every exact expected binding in one transaction.
++    ///
++    /// Returns `None` without mutation when either the version or the complete binding set changed.
++    /// A successful commit increments the runtime version and every binding generation exactly once.
++    pub async fn compare_and_swap_execution_account_slot_runtime(
++        &self,
++        slot_id: &str,
++        expected_runtime_version: u64,
++        expected_bindings: &[(ThreadId, ExecutionAccountBinding)],
++    ) -> anyhow::Result<Option<(u64, Vec<(ThreadId, ExecutionAccountBinding)>)>> {
++        let next_runtime_version = expected_runtime_version
++            .checked_add(1)
++            .context("execution account runtime version overflow")?;
++        let next_runtime_version_i64 = i64::try_from(next_runtime_version)?;
++        let expected_runtime_version_i64 = i64::try_from(expected_runtime_version)?;
++        let mut expected_bindings = expected_bindings.to_vec();
++        expected_bindings.sort_by_key(|(thread_id, _)| thread_id.to_string());
++        let mut next_bindings = Vec::with_capacity(expected_bindings.len());
++        for (thread_id, binding) in &expected_bindings {
++            if binding.slot_id != slot_id {
++                anyhow::bail!(
++                    "thread {thread_id} belongs to slot {}, not {slot_id}",
++                    binding.slot_id
++                );
++            }
++            let generation = binding
++                .generation
++                .checked_add(1)
++                .context("execution account generation overflow")?;
++            let _ = i64::try_from(generation)?;
++            next_bindings.push((
++                *thread_id,
++                ExecutionAccountBinding {
++                    slot_id: slot_id.to_string(),
++                    generation,
++                },
++            ));
++        }
++        if expected_bindings
++            .windows(2)
++            .any(|bindings| bindings[0].0 == bindings[1].0)
++        {
++            anyhow::bail!("expected execution account binding set contains duplicate threads");
++        }
++
++        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
++        let current_runtime_version = slot_runtime_version(&mut transaction, slot_id).await?;
++        let current_bindings = slot_bindings(&mut transaction, slot_id).await?;
++        if current_runtime_version != expected_runtime_version
++            || current_bindings != expected_bindings
++        {
++            transaction.rollback().await?;
++            return Ok(None);
++        }
++
++        let runtime_version_updated = sqlx::query(
++            "INSERT INTO account_slot_runtime_versions (slot_id, runtime_version) VALUES (?, ?) \
++             ON CONFLICT(slot_id) DO UPDATE SET runtime_version = excluded.runtime_version \
++             WHERE account_slot_runtime_versions.runtime_version = ?",
++        )
++        .bind(slot_id)
++        .bind(next_runtime_version_i64)
++        .bind(expected_runtime_version_i64)
++        .execute(&mut *transaction)
++        .await?;
++        if runtime_version_updated.rows_affected() != 1 {
++            transaction.rollback().await?;
++            return Ok(None);
++        }
++        for ((thread_id, expected), (_, next)) in expected_bindings.iter().zip(&next_bindings) {
++            let binding_updated = sqlx::query(
++                "UPDATE thread_execution_account_bindings SET generation = ? \
++                 WHERE thread_id = ? AND slot_id = ? AND generation = ?",
++            )
++            .bind(i64::try_from(next.generation)?)
++            .bind(thread_id.to_string())
++            .bind(slot_id)
++            .bind(i64::try_from(expected.generation)?)
++            .execute(&mut *transaction)
++            .await?;
++            if binding_updated.rows_affected() != 1 {
++                transaction.rollback().await?;
++                return Ok(None);
++            }
++        }
++        transaction.commit().await?;
++        Ok(Some((next_runtime_version, next_bindings)))
++    }
++
 +    pub async fn execution_account_binding(
 +        &self,
 +        thread_id: ThreadId,
@@ -1361,6 +1519,45 @@ index 000000000..d0a235c6c
 +    }
 +}
 +
++async fn slot_runtime_version(
++    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
++    slot_id: &str,
++) -> anyhow::Result<u64> {
++    let runtime_version = sqlx::query_scalar::<_, i64>(
++        "SELECT runtime_version FROM account_slot_runtime_versions WHERE slot_id = ?",
++    )
++    .bind(slot_id)
++    .fetch_optional(&mut **transaction)
++    .await?;
++    Ok(runtime_version
++        .map(u64::try_from)
++        .transpose()?
++        .unwrap_or_default())
++}
++
++async fn slot_bindings(
++    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
++    slot_id: &str,
++) -> anyhow::Result<Vec<(ThreadId, ExecutionAccountBinding)>> {
++    sqlx::query(
++        "SELECT thread_id, slot_id, generation FROM thread_execution_account_bindings \
++         WHERE slot_id = ? ORDER BY thread_id",
++    )
++    .bind(slot_id)
++    .fetch_all(&mut **transaction)
++    .await?
++    .into_iter()
++    .map(|row| -> anyhow::Result<_> {
++        let thread_id = row.try_get::<String, _>("thread_id")?;
++        Ok((
++            ThreadId::from_string(&thread_id)
++                .with_context(|| format!("invalid execution account thread id {thread_id}"))?,
++            binding_from_row(row)?,
++        ))
++    })
++    .collect()
++}
++
 +fn binding_from_row(row: sqlx::sqlite::SqliteRow) -> anyhow::Result<ExecutionAccountBinding> {
 +    Ok(ExecutionAccountBinding {
 +        slot_id: row.try_get("slot_id")?,
@@ -1373,10 +1570,10 @@ index 000000000..d0a235c6c
 +mod tests;
 diff --git a/codex-rs/state/src/runtime/execution_account_tests.rs b/codex-rs/state/src/runtime/execution_account_tests.rs
 new file mode 100644
-index 000000000..8e268ed65
+index 000000000..f88a0983a
 --- /dev/null
 +++ b/codex-rs/state/src/runtime/execution_account_tests.rs
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,233 @@
 +use codex_protocol::ThreadId;
 +use codex_protocol::protocol::ExecutionAccountBinding;
 +use codex_utils_absolute_path::test_support::PathExt;
@@ -1452,6 +1649,844 @@ index 000000000..8e268ed65
 +        .expect_err("different provenance must not overwrite");
 +    assert!(err.to_string().contains("different execution account"));
 +    runtime.close().await;
++}
++
++#[tokio::test]
++async fn account_slot_runtime_batch_cas_is_exact_atomic_and_legacy_versioned() {
++    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
++    tokio::fs::create_dir_all(&sqlite_home)
++        .await
++        .expect("create sqlite home");
++    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
++        let _ = std::fs::remove_dir_all(sqlite_home);
++    });
++    let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
++    let runtime = StateRuntime::init(sqlite, "test-provider".to_string())
++        .await
++        .expect("initialize runtime");
++    let first_thread =
++        ThreadId::from_string("00000000-0000-0000-0000-000000000001").expect("thread id");
++    let second_thread =
++        ThreadId::from_string("00000000-0000-0000-0000-000000000002").expect("thread id");
++    let phantom_thread =
++        ThreadId::from_string("00000000-0000-0000-0000-000000000003").expect("thread id");
++    let other_thread =
++        ThreadId::from_string("00000000-0000-0000-0000-000000000004").expect("thread id");
++    for (thread_id, slot_id, generation) in [
++        (first_thread, "secondary", 1),
++        (second_thread, "secondary", 3),
++        (other_thread, "other", 7),
++    ] {
++        runtime
++            .initialize_execution_account_binding(
++                thread_id,
++                &ExecutionAccountBinding {
++                    slot_id: slot_id.to_string(),
++                    generation,
++                },
++            )
++            .await
++            .expect("initialize binding");
++    }
++
++    let legacy = runtime
++        .execution_account_slot_runtime_state("secondary")
++        .await
++        .expect("read legacy slot runtime");
++    assert_eq!(
++        legacy,
++        (
++            0,
++            vec![
++                (
++                    first_thread,
++                    ExecutionAccountBinding {
++                        slot_id: "secondary".to_string(),
++                        generation: 1,
++                    },
++                ),
++                (
++                    second_thread,
++                    ExecutionAccountBinding {
++                        slot_id: "secondary".to_string(),
++                        generation: 3,
++                    },
++                ),
++            ],
++        )
++    );
++    let committed = runtime
++        .compare_and_swap_execution_account_slot_runtime("secondary", legacy.0, &legacy.1)
++        .await
++        .expect("commit slot runtime")
++        .expect("exact snapshot should commit");
++    assert_eq!(
++        committed,
++        (
++            1,
++            vec![
++                (
++                    first_thread,
++                    ExecutionAccountBinding {
++                        slot_id: "secondary".to_string(),
++                        generation: 2,
++                    },
++                ),
++                (
++                    second_thread,
++                    ExecutionAccountBinding {
++                        slot_id: "secondary".to_string(),
++                        generation: 4,
++                    },
++                ),
++            ],
++        )
++    );
++    assert_eq!(
++        runtime
++            .compare_and_swap_execution_account_slot_runtime("secondary", legacy.0, &legacy.1)
++            .await
++            .expect("stale commit should not fail"),
++        None
++    );
++
++    let before_phantom = runtime
++        .execution_account_slot_runtime_state("secondary")
++        .await
++        .expect("read current runtime");
++    runtime
++        .initialize_execution_account_binding(
++            phantom_thread,
++            &ExecutionAccountBinding {
++                slot_id: "secondary".to_string(),
++                generation: 1,
++            },
++        )
++        .await
++        .expect("insert phantom binding");
++    assert_eq!(
++        runtime
++            .compare_and_swap_execution_account_slot_runtime(
++                "secondary",
++                before_phantom.0,
++                &before_phantom.1,
++            )
++            .await
++            .expect("phantom commit should not fail"),
++        None
++    );
++    let before_overflow = runtime
++        .execution_account_slot_runtime_state("secondary")
++        .await
++        .expect("read runtime after phantom");
++    sqlx::query("UPDATE thread_execution_account_bindings SET generation = ? WHERE thread_id = ?")
++        .bind(i64::MAX)
++        .bind(phantom_thread.to_string())
++        .execute(runtime.pool.as_ref())
++        .await
++        .expect("set overflow generation");
++    let overflow_state = runtime
++        .execution_account_slot_runtime_state("secondary")
++        .await
++        .expect("read overflow state");
++    runtime
++        .compare_and_swap_execution_account_slot_runtime(
++            "secondary",
++            overflow_state.0,
++            &overflow_state.1,
++        )
++        .await
++        .expect_err("generation overflow should reject the whole batch");
++    assert_eq!(
++        runtime
++            .execution_account_slot_runtime_state("secondary")
++            .await
++            .expect("read state after overflow"),
++        overflow_state
++    );
++    assert_eq!(overflow_state.0, before_overflow.0);
++    runtime.close().await;
++}
+diff --git a/codex-rs/state/src/runtime/goals.rs b/codex-rs/state/src/runtime/goals.rs
+index ed616e16b..d2e08a32d 100644
+--- a/codex-rs/state/src/runtime/goals.rs
++++ b/codex-rs/state/src/runtime/goals.rs
+@@ -1,10 +1,9 @@
+ use super::*;
+ use crate::model::ThreadGoalRow;
+-use uuid::Uuid;
+ 
+ #[derive(Clone)]
+ pub struct GoalStore {
+-    pool: Arc<SqlitePool>,
++    pub(super) pool: Arc<SqlitePool>,
+ }
+ 
+ impl GoalStore {
+@@ -24,6 +23,33 @@ pub struct GoalUpdate {
+     pub expected_goal_id: Option<String>,
+ }
+ 
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct GoalVersion {
++    pub goal_id: String,
++    pub revision: i64,
++}
++
++impl From<&crate::ThreadGoal> for GoalVersion {
++    fn from(goal: &crate::ThreadGoal) -> Self {
++        Self {
++            goal_id: goal.goal_id.clone(),
++            revision: goal.revision,
++        }
++    }
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct GoalClearOutcome {
++    pub previous_goal: crate::ThreadGoal,
++    pub revision: i64,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct GoalReplaceOutcome {
++    pub previous_goal: crate::ThreadGoal,
++    pub goal: crate::ThreadGoal,
++}
++
+ pub enum GoalAccountingOutcome {
+     Unchanged(Option<crate::ThreadGoal>),
+     Updated(crate::ThreadGoal),
+@@ -47,6 +73,7 @@ impl GoalStore {
+ SELECT
+     thread_id,
+     goal_id,
++    revision,
+     objective,
+     status,
+     token_budget,
+@@ -65,16 +92,54 @@ WHERE thread_id = ?
+         row.map(|row| thread_goal_from_row(&row)).transpose()
+     }
+ 
++    pub async fn get_thread_goal_revision(&self, thread_id: ThreadId) -> anyhow::Result<i64> {
++        sqlx::query_scalar(
++            r#"
++SELECT COALESCE(
++    (SELECT revision FROM thread_goals WHERE thread_id = ?),
++    (SELECT revision FROM thread_goal_revision_tombstones WHERE thread_id = ?),
++    0
++)
++            "#,
++        )
++        .bind(thread_id.to_string())
++        .bind(thread_id.to_string())
++        .fetch_one(self.pool.as_ref())
++        .await
++        .map_err(Into::into)
++    }
++
+     pub async fn replace_thread_goal_snapshot(
+         &self,
+         goal: &crate::ThreadGoal,
+     ) -> anyhow::Result<()> {
+-        let mut transaction = self.pool.begin().await?;
++        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
++        let (current_revision, has_goal): (i64, bool) = sqlx::query_as(
++            r#"
++SELECT COALESCE(
++    (SELECT revision FROM thread_goals WHERE thread_id = ?),
++    (SELECT revision FROM thread_goal_revision_tombstones WHERE thread_id = ?),
++    0
++), EXISTS(SELECT 1 FROM thread_goals WHERE thread_id = ?)
++            "#,
++        )
++        .bind(goal.thread_id.to_string())
++        .bind(goal.thread_id.to_string())
++        .bind(goal.thread_id.to_string())
++        .fetch_one(&mut *transaction)
++        .await?;
++        if has_goal {
++            anyhow::bail!("target thread already has a goal snapshot");
++        }
++        let revision = current_revision
++            .checked_add(1)
++            .ok_or_else(|| anyhow::anyhow!("goal revision overflow"))?;
+         sqlx::query(
+             r#"
+ INSERT INTO thread_goals (
+     thread_id,
+     goal_id,
++    revision,
+     objective,
+     status,
+     token_budget,
+@@ -82,20 +147,12 @@ INSERT INTO thread_goals (
+     time_used_seconds,
+     created_at_ms,
+     updated_at_ms
+-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+-ON CONFLICT(thread_id) DO UPDATE SET
+-    goal_id = excluded.goal_id,
+-    objective = excluded.objective,
+-    status = excluded.status,
+-    token_budget = excluded.token_budget,
+-    tokens_used = excluded.tokens_used,
+-    time_used_seconds = excluded.time_used_seconds,
+-    created_at_ms = excluded.created_at_ms,
+-    updated_at_ms = excluded.updated_at_ms
++) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             "#,
+         )
+         .bind(goal.thread_id.to_string())
+         .bind(&goal.goal_id)
++        .bind(revision)
+         .bind(&goal.objective)
+         .bind(goal.status.as_str())
+         .bind(goal.token_budget)
+@@ -106,6 +163,11 @@ ON CONFLICT(thread_id) DO UPDATE SET
+         .execute(&mut *transaction)
+         .await?;
+ 
++        sqlx::query("DELETE FROM thread_goal_revision_tombstones WHERE thread_id = ?")
++            .bind(goal.thread_id.to_string())
++            .execute(&mut *transaction)
++            .await?;
++
+         sqlx::query(
+             r#"
+ INSERT INTO thread_goal_continuation_deferrals (thread_id)
+@@ -160,54 +222,23 @@ SELECT EXISTS(
+         status: crate::ThreadGoalStatus,
+         token_budget: Option<i64>,
+     ) -> anyhow::Result<crate::ThreadGoal> {
+-        let goal_id = Uuid::new_v4().to_string();
+-        let now_ms = datetime_to_epoch_millis(Utc::now());
+-        let status = status_after_budget_limit(status, /*tokens_used*/ 0, token_budget);
+-        let row = sqlx::query(
+-            r#"
+-INSERT INTO thread_goals (
+-    thread_id,
+-    goal_id,
+-    objective,
+-    status,
+-    token_budget,
+-    tokens_used,
+-    time_used_seconds,
+-    created_at_ms,
+-    updated_at_ms
+-) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?)
+-ON CONFLICT(thread_id) DO UPDATE SET
+-    goal_id = excluded.goal_id,
+-    objective = excluded.objective,
+-    status = excluded.status,
+-    token_budget = excluded.token_budget,
+-    tokens_used = 0,
+-    time_used_seconds = 0,
+-    created_at_ms = excluded.created_at_ms,
+-    updated_at_ms = excluded.updated_at_ms
+-RETURNING
+-    thread_id,
+-    goal_id,
+-    objective,
+-    status,
+-    token_budget,
+-    tokens_used,
+-    time_used_seconds,
+-    created_at_ms,
+-    updated_at_ms
+-            "#,
+-        )
+-        .bind(thread_id.to_string())
+-        .bind(goal_id)
+-        .bind(objective)
+-        .bind(status.as_str())
+-        .bind(token_budget)
+-        .bind(now_ms)
+-        .bind(now_ms)
+-        .fetch_one(self.pool.as_ref())
+-        .await?;
+-
+-        thread_goal_from_row(&row)
++        if let Some(goal) = self.get_thread_goal(thread_id).await? {
++            return self
++                .replace_thread_goal_exact(
++                    thread_id,
++                    &GoalVersion::from(&goal),
++                    objective,
++                    status,
++                    token_budget,
++                )
++                .await?
++                .map(|outcome| outcome.goal)
++                .ok_or_else(|| anyhow::anyhow!("goal changed during replacement"));
++        }
++        let revision = self.get_thread_goal_revision(thread_id).await?;
++        self.create_thread_goal_exact(thread_id, revision, objective, status, token_budget)
++            .await?
++            .ok_or_else(|| anyhow::anyhow!("goal changed during creation"))
+     }
+ 
+     pub async fn insert_thread_goal(
+@@ -217,55 +248,24 @@ RETURNING
+         status: crate::ThreadGoalStatus,
+         token_budget: Option<i64>,
+     ) -> anyhow::Result<Option<crate::ThreadGoal>> {
+-        let goal_id = Uuid::new_v4().to_string();
+-        let now_ms = datetime_to_epoch_millis(Utc::now());
+-        let status = status_after_budget_limit(status, /*tokens_used*/ 0, token_budget);
+-        let row = sqlx::query(
+-            r#"
+-INSERT INTO thread_goals (
+-    thread_id,
+-    goal_id,
+-    objective,
+-    status,
+-    token_budget,
+-    tokens_used,
+-    time_used_seconds,
+-    created_at_ms,
+-    updated_at_ms
+-) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?)
+-ON CONFLICT(thread_id) DO UPDATE SET
+-    goal_id = excluded.goal_id,
+-    objective = excluded.objective,
+-    status = excluded.status,
+-    token_budget = excluded.token_budget,
+-    tokens_used = 0,
+-    time_used_seconds = 0,
+-    created_at_ms = excluded.created_at_ms,
+-    updated_at_ms = excluded.updated_at_ms
+-WHERE thread_goals.status = 'complete'
+-RETURNING
+-    thread_id,
+-    goal_id,
+-    objective,
+-    status,
+-    token_budget,
+-    tokens_used,
+-    time_used_seconds,
+-    created_at_ms,
+-    updated_at_ms
+-            "#,
+-        )
+-        .bind(thread_id.to_string())
+-        .bind(goal_id)
+-        .bind(objective)
+-        .bind(status.as_str())
+-        .bind(token_budget)
+-        .bind(now_ms)
+-        .bind(now_ms)
+-        .fetch_optional(self.pool.as_ref())
+-        .await?;
+-
+-        row.map(|row| thread_goal_from_row(&row)).transpose()
++        match self.get_thread_goal(thread_id).await? {
++            Some(goal) if goal.status == crate::ThreadGoalStatus::Complete => self
++                .replace_thread_goal_exact(
++                    thread_id,
++                    &GoalVersion::from(&goal),
++                    objective,
++                    status,
++                    token_budget,
++                )
++                .await
++                .map(|outcome| outcome.map(|outcome| outcome.goal)),
++            Some(_) => Ok(None),
++            None => {
++                let revision = self.get_thread_goal_revision(thread_id).await?;
++                self.create_thread_goal_exact(thread_id, revision, objective, status, token_budget)
++                    .await
++            }
++        }
+     }
+ 
+     pub async fn update_thread_goal(
+@@ -295,8 +295,10 @@ SET
+         ELSE ?
+     END,
+     token_budget = ?,
++    revision = revision + 1,
+     updated_at_ms = ?
+ WHERE thread_id = ?
++  AND revision < 9223372036854775807
+   AND (? IS NULL OR goal_id = ?)
+             "#,
+                 )
+@@ -329,8 +331,10 @@ SET
+         WHEN ? = 'active' AND token_budget IS NOT NULL AND tokens_used >= token_budget THEN ?
+         ELSE ?
+     END,
++    revision = revision + 1,
+     updated_at_ms = ?
+ WHERE thread_id = ?
++  AND revision < 9223372036854775807
+   AND (? IS NULL OR goal_id = ?)
+             "#,
+                 )
+@@ -360,8 +364,10 @@ SET
+         WHEN status = 'active' AND ? IS NOT NULL AND tokens_used >= ? THEN ?
+         ELSE status
+     END,
++    revision = revision + 1,
+     updated_at_ms = ?
+ WHERE thread_id = ?
++  AND revision < 9223372036854775807
+   AND (? IS NULL OR goal_id = ?)
+             "#,
+                 )
+@@ -384,8 +390,10 @@ WHERE thread_id = ?
+ UPDATE thread_goals
+ SET
+     objective = ?,
++    revision = revision + 1,
+     updated_at_ms = ?
+ WHERE thread_id = ?
++  AND revision < 9223372036854775807
+   AND (? IS NULL OR goal_id = ?)
+             "#,
+                     )
+@@ -444,8 +452,10 @@ WHERE thread_id = ?
+ UPDATE thread_goals
+ SET
+     status = ?,
++    revision = revision + 1,
+     updated_at_ms = ?
+ WHERE thread_id = ?
++  AND revision < 9223372036854775807
+   AND (
+       status = 'active'
+       OR (
+@@ -473,27 +483,12 @@ WHERE thread_id = ?
+         &self,
+         thread_id: ThreadId,
+     ) -> anyhow::Result<Option<crate::ThreadGoal>> {
+-        let row = sqlx::query(
+-            r#"
+-DELETE FROM thread_goals
+-WHERE thread_id = ?
+-RETURNING
+-    thread_id,
+-    goal_id,
+-    objective,
+-    status,
+-    token_budget,
+-    tokens_used,
+-    time_used_seconds,
+-    created_at_ms,
+-    updated_at_ms
+-            "#,
+-        )
+-        .bind(thread_id.to_string())
+-        .fetch_optional(self.pool.as_ref())
+-        .await?;
+-
+-        row.map(|row| thread_goal_from_row(&row)).transpose()
++        let Some(goal) = self.get_thread_goal(thread_id).await? else {
++            return Ok(None);
++        };
++        self.clear_thread_goal_exact(thread_id, &GoalVersion::from(&goal))
++            .await
++            .map(|outcome| outcome.map(|outcome| outcome.previous_goal))
+     }
+ 
+     pub async fn account_thread_goal_usage(
+@@ -503,6 +498,26 @@ RETURNING
+         token_delta: i64,
+         mode: GoalAccountingMode,
+         expected_goal_id: Option<&str>,
++    ) -> anyhow::Result<GoalAccountingOutcome> {
++        self.account_thread_goal_usage_inner(
++            thread_id,
++            time_delta_seconds,
++            token_delta,
++            mode,
++            expected_goal_id,
++            /*expected_revision*/ None,
++        )
++        .await
++    }
++
++    pub(super) async fn account_thread_goal_usage_inner(
++        &self,
++        thread_id: ThreadId,
++        time_delta_seconds: i64,
++        token_delta: i64,
++        mode: GoalAccountingMode,
++        expected_goal_id: Option<&str>,
++        expected_revision: Option<i64>,
+     ) -> anyhow::Result<GoalAccountingOutcome> {
+         let time_delta_seconds = time_delta_seconds.max(0);
+         let token_delta = token_delta.max(0);
+@@ -568,6 +583,7 @@ SET
+             r#"
+         ELSE status
+     END,
++    revision = revision + 1,
+     updated_at_ms =
+             "#,
+         );
+@@ -580,14 +596,21 @@ WHERE thread_id =
+         builder.push_bind(thread_id.to_string());
+         builder.push(" AND ");
+         builder.push(status_filter);
++        builder.push(" AND revision < 9223372036854775807");
+         if let Some(expected_goal_id) = expected_goal_id {
+             builder.push(" AND goal_id = ").push_bind(expected_goal_id);
+         }
++        if let Some(expected_revision) = expected_revision {
++            builder
++                .push(" AND revision = ")
++                .push_bind(expected_revision);
++        }
+         builder.push(
+             r#"
+ RETURNING
+     thread_id,
+     goal_id,
++    revision,
+     objective,
+     status,
+     token_budget,
+@@ -611,11 +634,13 @@ RETURNING
+     }
+ }
+ 
+-fn thread_goal_from_row(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<crate::ThreadGoal> {
++pub(super) fn thread_goal_from_row(
++    row: &sqlx::sqlite::SqliteRow,
++) -> anyhow::Result<crate::ThreadGoal> {
+     ThreadGoalRow::try_from_row(row).and_then(crate::ThreadGoal::try_from)
+ }
+ 
+-fn status_after_budget_limit(
++pub(super) fn status_after_budget_limit(
+     status: crate::ThreadGoalStatus,
+     tokens_used: i64,
+     token_budget: Option<i64>,
+@@ -629,6 +654,10 @@ fn status_after_budget_limit(
+     }
+ }
+ 
++#[cfg(test)]
++#[path = "goals_revision_tests.rs"]
++mod revision_tests;
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -707,6 +736,7 @@ mod tests {
+         let expected = crate::ThreadGoal {
+             status: crate::ThreadGoalStatus::Paused,
+             token_budget: Some(200_000),
++            revision: updated.revision,
+             updated_at: updated.updated_at,
+             ..goal.clone()
+         };
+@@ -1007,6 +1037,7 @@ mod tests {
+             objective: "draft the report clearly".to_string(),
+             status: crate::ThreadGoalStatus::Paused,
+             token_budget: Some(200),
++            revision: updated.revision,
+             updated_at: updated.updated_at,
+             ..accounted
+         };
+@@ -1085,6 +1116,7 @@ mod tests {
+             .expect("active goal should be paused");
+         let expected = crate::ThreadGoal {
+             status: crate::ThreadGoalStatus::Paused,
++            revision: paused.revision,
+             updated_at: paused.updated_at,
+             ..goal
+         };
+@@ -1144,6 +1176,7 @@ mod tests {
+             .expect("active goal should become usage limited");
+         let expected = crate::ThreadGoal {
+             status: crate::ThreadGoalStatus::UsageLimited,
++            revision: usage_limited.revision,
+             updated_at: usage_limited.updated_at,
+             ..goal
+         };
+@@ -1174,6 +1207,7 @@ mod tests {
+             .expect("budget-limited goal should become usage limited");
+         let expected = crate::ThreadGoal {
+             status: crate::ThreadGoalStatus::UsageLimited,
++            revision: usage_limited.revision,
+             updated_at: usage_limited.updated_at,
+             ..budget_limited
+         };
+@@ -1525,6 +1559,7 @@ mod tests {
+             .expect("goal should exist");
+ 
+         let expected = crate::ThreadGoal {
++            revision: blocked.revision,
+             updated_at: blocked.updated_at,
+             ..budget_limited
+         };
+@@ -1724,5 +1759,13 @@ mod tests {
+                 .await
+                 .expect("goal read should succeed")
+         );
++        assert_eq!(
++            0,
++            runtime
++                .thread_goals()
++                .get_thread_goal_revision(thread_id)
++                .await
++                .expect("goal revision read should succeed")
++        );
+     }
+ }
+diff --git a/codex-rs/state/src/runtime/goals_revision_tests.rs b/codex-rs/state/src/runtime/goals_revision_tests.rs
+new file mode 100644
+index 000000000..bffb0eeef
+--- /dev/null
++++ b/codex-rs/state/src/runtime/goals_revision_tests.rs
+@@ -0,0 +1,145 @@
++use super::*;
++use crate::runtime::test_support::unique_temp_dir;
++use codex_utils_absolute_path::test_support::PathExt;
++use pretty_assertions::assert_eq;
++
++async fn test_runtime() -> Arc<StateRuntime> {
++    StateRuntime::init(
++        crate::SqliteConfig::new_for_testing(unique_temp_dir().as_path().abs()),
++        "test-provider".to_string(),
++    )
++    .await
++    .expect("state db should initialize")
++}
++
++fn test_thread_id() -> ThreadId {
++    ThreadId::from_string("00000000-0000-0000-0000-000000000321").expect("valid thread id")
++}
++
++#[tokio::test]
++async fn exact_goal_mutations_advance_revision_and_preserve_clear_tombstone() {
++    let runtime = test_runtime().await;
++    let thread_id = test_thread_id();
++    let first = runtime
++        .thread_goals()
++        .create_thread_goal_exact(
++            thread_id,
++            /*expected_revision*/ 0,
++            "first objective",
++            crate::ThreadGoalStatus::Active,
++            /*token_budget*/ None,
++        )
++        .await
++        .expect("create should succeed")
++        .expect("revision zero should match empty state");
++    assert_eq!(1, first.revision);
++
++    let updated = runtime
++        .thread_goals()
++        .update_thread_goal_exact(
++            thread_id,
++            &GoalVersion::from(&first),
++            GoalUpdate {
++                objective: None,
++                status: Some(crate::ThreadGoalStatus::Blocked),
++                token_budget: None,
++                expected_goal_id: Some(first.goal_id.clone()),
++            },
++        )
++        .await
++        .expect("update should succeed")
++        .expect("exact version should match");
++    assert_eq!(2, updated.revision);
++
++    let cleared = runtime
++        .thread_goals()
++        .clear_thread_goal_exact(thread_id, &GoalVersion::from(&updated))
++        .await
++        .expect("clear should succeed")
++        .expect("exact version should clear");
++    assert_eq!(3, cleared.revision);
++    assert_eq!(
++        3,
++        runtime
++            .thread_goals()
++            .get_thread_goal_revision(thread_id)
++            .await
++            .unwrap()
++    );
++
++    let second = runtime
++        .thread_goals()
++        .create_thread_goal_exact(
++            thread_id,
++            /*expected_revision*/ 3,
++            "second objective",
++            crate::ThreadGoalStatus::Active,
++            /*token_budget*/ Some(100),
++        )
++        .await
++        .expect("recreate should succeed")
++        .expect("tombstone revision should match");
++    assert_eq!(4, second.revision);
++    assert_ne!(first.goal_id, second.goal_id);
++
++    assert_eq!(
++        None,
++        runtime
++            .thread_goals()
++            .update_thread_goal_exact(
++                thread_id,
++                &GoalVersion::from(&first),
++                GoalUpdate {
++                    objective: None,
++                    status: Some(crate::ThreadGoalStatus::Complete),
++                    token_budget: None,
++                    expected_goal_id: Some(first.goal_id),
++                },
++            )
++            .await
++            .expect("stale update should not fail")
++    );
++    assert_eq!(
++        Some(second),
++        runtime
++            .thread_goals()
++            .get_thread_goal(thread_id)
++            .await
++            .unwrap()
++    );
++}
++
++#[tokio::test]
++async fn exact_accounting_returns_the_promoted_version() {
++    let runtime = test_runtime().await;
++    let thread_id = test_thread_id();
++    let goal = runtime
++        .thread_goals()
++        .create_thread_goal_exact(
++            thread_id,
++            /*expected_revision*/ 0,
++            "account usage",
++            crate::ThreadGoalStatus::Active,
++            /*token_budget*/ Some(100),
++        )
++        .await
++        .unwrap()
++        .unwrap();
++    let outcome = runtime
++        .thread_goals()
++        .account_thread_goal_usage_exact(
++            thread_id,
++            /*time_delta_seconds*/ 2,
++            /*token_delta*/ 3,
++            GoalAccountingMode::ActiveOnly,
++            &GoalVersion::from(&goal),
++        )
++        .await
++        .unwrap();
++    let GoalAccountingOutcome::Updated(updated) = outcome else {
++        panic!("exact accounting should update the goal");
++    };
++    assert_eq!(2, updated.revision);
++    assert_eq!(3, updated.tokens_used);
++    assert_eq!(2, updated.time_used_seconds);
 +}
 diff --git a/codex-rs/state/src/runtime/threads.rs b/codex-rs/state/src/runtime/threads.rs
 index 4bb83cd16..ee37610b4 100644

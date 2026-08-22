@@ -1,4 +1,4 @@
-From 21a9706704a2475810e3fc953338e2ed2c4aea99 Mon Sep 17 00:00:00 2001
+From e4195d4e6bffaeff5a9214b68a7e6e0399e55d6a Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 17:31:24 +0900
 Subject: [PATCH] feat(custom): add live account registration for 0.149
@@ -21,28 +21,28 @@ Subject: [PATCH] feat(custom): add live account registration for 0.149
  .../v2/AccountSlotLogoutResponse.ts           |   6 +
  .../schema/typescript/v2/index.ts             |   2 +
  .../src/protocol/common.rs                    |   6 +
- .../src/protocol/v2/account.rs                |  20 +
+ .../src/protocol/v2/account.rs                |  45 +-
  codex-rs/app-server/README.md                 |  19 +
  codex-rs/app-server/src/account_registry.rs   | 110 ++-
- .../src/account_registry/live_registration.rs | 679 ++++++++++++++++++
+ .../src/account_registry/live_registration.rs | 679 +++++++++++++++++
  .../app-server/src/account_registry_tests.rs  | 346 +++++++++
  codex-rs/app-server/src/external_auth.rs      |  50 +-
  codex-rs/app-server/src/in_process.rs         |   6 +-
  codex-rs/app-server/src/lib.rs                |   4 +-
  codex-rs/app-server/src/message_processor.rs  |  40 +-
- codex-rs/app-server/src/outgoing_message.rs   | 121 +++-
+ codex-rs/app-server/src/outgoing_message.rs   | 127 +++-
  codex-rs/app-server/src/request_processors.rs |   2 +-
- .../request_processors/account_processor.rs   |  51 +-
- .../account_processor/slot_login.rs           | 618 ++++++++++++++++
+ .../request_processors/account_processor.rs   |  84 ++-
+ .../account_processor/slot_login.rs           | 683 ++++++++++++++++++
  .../account_processor/slot_login/transport.rs | 210 ++++++
  .../account_processor/slot_logout.rs          |  67 ++
  .../app-server/src/session_runtime/mod.rs     |  37 +
- .../app-server/tests/suite/v2/account_slot.rs |  82 +++
+ .../app-server/tests/suite/v2/account_slot.rs | 455 ++++++++++++
  codex-rs/app-server/tests/suite/v2/mod.rs     |   1 +
  codex-rs/core/src/thread_manager.rs           |  15 +
  codex-rs/login/src/lib.rs                     |   1 +
  codex-rs/login/src/server.rs                  |  70 +-
- 38 files changed, 2910 insertions(+), 62 deletions(-)
+ 38 files changed, 3406 insertions(+), 68 deletions(-)
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/AccountSlotLogoutParams.json
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/AccountSlotLogoutResponse.json
  create mode 100644 codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotLogoutParams.ts
@@ -11879,7 +11879,7 @@ index 89f686bda..d32eb838d 100644
          params: v2::LoginAccountParams,
          inspect_params: true,
 diff --git a/codex-rs/app-server-protocol/src/protocol/v2/account.rs b/codex-rs/app-server-protocol/src/protocol/v2/account.rs
-index ca2d5a085..045daad47 100644
+index ca2d5a085..aef2f5f86 100644
 --- a/codex-rs/app-server-protocol/src/protocol/v2/account.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/v2/account.rs
 @@ -325,6 +325,7 @@ pub enum AccountSlotAction {
@@ -11916,6 +11916,50 @@ index ca2d5a085..045daad47 100644
  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
  #[serde(rename_all = "camelCase")]
  #[ts(export_to = "v2/")]
+@@ -466,10 +486,24 @@ impl fmt::Debug for ChatgptAuthTokensRefreshResponse {
+     }
+ }
+ 
++#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
++#[serde(rename_all = "camelCase")]
++#[ts(export_to = "v2/")]
++pub struct GetAccountRateLimitsParams {
++    #[ts(optional = nullable)]
++    pub thread_id: Option<String>,
++}
++
++pub type NullableGetAccountRateLimitsParams = Option<GetAccountRateLimitsParams>;
++
+ #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+ #[serde(rename_all = "camelCase")]
+ #[ts(export_to = "v2/")]
+ pub struct GetAccountRateLimitsResponse {
++    /// The exact thread subject used for this read, or `null` for legacy process-default reads.
++    pub thread_id: Option<String>,
++    /// The account runtime captured for `thread_id`, or `null` for process-default reads.
++    pub execution_account: Option<super::SessionRuntimeAccountRef>,
+     /// Backward-compatible single-bucket view; mirrors the historical payload.
+     pub rate_limits: RateLimitSnapshot,
+     /// Multi-bucket view keyed by metered `limit_id` (for example, `codex`).
+@@ -705,10 +739,15 @@ pub struct AccountUpdatedNotification {
+ #[ts(export_to = "v2/")]
+ /// Sparse rolling rate-limit update.
+ ///
+-/// Clients should merge available values into the most recent `account/rateLimits/read` response
+-/// or refetch that snapshot. Nullable account metadata may be unavailable in a rolling update and
+-/// does not clear a previously observed value.
++/// Clients should merge available values into the most recent matching
++/// `account/rateLimits/read` response or refetch that snapshot. New producers omit the
++/// notification when persisted account provenance is unavailable; nullable fields preserve wire
++/// compatibility with older producers.
+ pub struct AccountRateLimitsUpdatedNotification {
++    /// Thread whose persisted turn binding produced this update.
++    pub thread_id: Option<String>,
++    /// Persisted account binding for that turn. Older producers may leave this `null`.
++    pub execution_account: Option<super::SessionRuntimeAccountRef>,
+     pub rate_limits: RateLimitSnapshot,
+ }
+ 
 diff --git a/codex-rs/app-server/README.md b/codex-rs/app-server/README.md
 index 5ec11f3ad..a7fa71360 100644
 --- a/codex-rs/app-server/README.md
@@ -13462,7 +13506,7 @@ index f5101a991..e58c9df42 100644
                  "thread/account/switch is not implemented yet",
              )),
 diff --git a/codex-rs/app-server/src/outgoing_message.rs b/codex-rs/app-server/src/outgoing_message.rs
-index 262c674ae..f7876a61f 100644
+index 262c674ae..bc3b1cd93 100644
 --- a/codex-rs/app-server/src/outgoing_message.rs
 +++ b/codex-rs/app-server/src/outgoing_message.rs
 @@ -122,6 +122,7 @@ pub(crate) struct ThreadScopedOutgoingMessageSender {
@@ -13571,7 +13615,27 @@ index 262c674ae..f7876a61f 100644
          request_id_to_callback.remove_entry(id)
      }
  
-@@ -1312,7 +1353,7 @@ mod tests {
+@@ -832,6 +873,8 @@ mod tests {
+     fn verify_account_rate_limits_notification_serialization() {
+         let notification =
+             ServerNotification::AccountRateLimitsUpdated(AccountRateLimitsUpdatedNotification {
++                thread_id: None,
++                execution_account: None,
+                 rate_limits: RateLimitSnapshot {
+                     limit_id: Some("codex".to_string()),
+                     limit_name: None,
+@@ -853,7 +896,9 @@ mod tests {
+             json!({
+                 "method": "account/rateLimits/updated",
+                 "params": {
+-                        "rateLimits": {
++                    "threadId": null,
++                    "executionAccount": null,
++                    "rateLimits": {
+                         "limitId": "codex",
+                         "limitName": null,
+                         "primary": {
+@@ -1312,7 +1357,7 @@ mod tests {
          let error = internal_error("refresh failed");
  
          outgoing
@@ -13580,7 +13644,7 @@ index 262c674ae..f7876a61f 100644
              .await;
  
          let result = timeout(Duration::from_secs(1), wait_for_result)
-@@ -1322,6 +1363,70 @@ mod tests {
+@@ -1322,6 +1367,70 @@ mod tests {
          assert_eq!(result, Err(error));
      }
  
@@ -13665,7 +13729,7 @@ index 756f1d994..7775e0b97 100644
  use codex_mcp::McpServerStatusSnapshot;
  use codex_mcp::McpSnapshotDetail;
 diff --git a/codex-rs/app-server/src/request_processors/account_processor.rs b/codex-rs/app-server/src/request_processors/account_processor.rs
-index 94685ca71..bc285b9e6 100644
+index 94685ca71..ef1554cb2 100644
 --- a/codex-rs/app-server/src/request_processors/account_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/account_processor.rs
 @@ -2,14 +2,20 @@ use super::bedrock_auth::clear_user_model_provider_if_bedrock;
@@ -13730,7 +13794,41 @@ index 94685ca71..bc285b9e6 100644
          self.cancel_login_response(params)
              .await
              .map(|response| Some(response.into()))
-@@ -185,6 +204,7 @@ impl AccountRequestProcessor {
+@@ -152,8 +171,32 @@ impl AccountRequestProcessor {
+ 
+     pub(crate) async fn get_account_rate_limits(
+         &self,
++        params: Option<GetAccountRateLimitsParams>,
+     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+-        self.get_account_rate_limits_response()
++        let thread_id = params.and_then(|params| params.thread_id);
++        let (auth_manager, thread_id, execution_account) = match thread_id {
++            Some(thread_id) => {
++                let parsed_thread_id = ThreadId::from_string(&thread_id)
++                    .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
++                let thread = self
++                    .thread_manager
++                    .get_thread(parsed_thread_id)
++                    .await
++                    .map_err(|_| invalid_request(format!("thread {thread_id} is not loaded")))?;
++                let execution_account = thread.execution_account();
++                let execution_account_ref = SessionRuntimeAccountRef {
++                    account_slot_id: execution_account.binding.slot_id.clone(),
++                    execution_generation: execution_account.binding.generation,
++                };
++                (
++                    Arc::clone(&execution_account.auth_manager),
++                    Some(thread_id),
++                    Some(execution_account_ref),
++                )
++            }
++            None => (Arc::clone(&self.auth_manager), None, None),
++        };
++        self.get_account_rate_limits_response(auth_manager, thread_id, execution_account)
+             .await
+             .map(|response| Some(response.into()))
+     }
+@@ -185,6 +228,7 @@ impl AccountRequestProcessor {
      }
  
      pub(crate) async fn cancel_active_login(&self) {
@@ -13738,7 +13836,7 @@ index 94685ca71..bc285b9e6 100644
          let mut guard = self.active_login.lock().await;
          if let Some(active_login) = guard.take() {
              drop(active_login);
-@@ -554,9 +574,26 @@ impl AccountRequestProcessor {
+@@ -554,9 +598,26 @@ impl AccountRequestProcessor {
          let opts = self
              .login_chatgpt_common(codex_streamlined_login, login_success_page)
              .await?;
@@ -13767,7 +13865,7 @@ index 94685ca71..bc285b9e6 100644
          let shutdown_handle = server.cancel_handle();
  
          // Replace active login if present.
-@@ -576,6 +613,7 @@ impl AccountRequestProcessor {
+@@ -576,6 +637,7 @@ impl AccountRequestProcessor {
          let thread_manager = Arc::clone(&self.thread_manager);
          let config = Arc::clone(&self.config);
          let active_login = self.active_login.clone();
@@ -13775,7 +13873,7 @@ index 94685ca71..bc285b9e6 100644
          let auth_url = server.auth_url.clone();
          tokio::spawn(async move {
              let (success, error_msg, onboarding_entrypoint) = match tokio::time::timeout(
-@@ -615,10 +653,13 @@ impl AccountRequestProcessor {
+@@ -615,10 +677,13 @@ impl AccountRequestProcessor {
              .await;
  
              // Clear the active login if it matches this attempt. It may have been replaced or cancelled.
@@ -13792,15 +13890,38 @@ index 94685ca71..bc285b9e6 100644
          });
  
          Ok(LoginAccountResponse::Chatgpt {
+@@ -1070,8 +1135,11 @@ impl AccountRequestProcessor {
+ 
+     async fn get_account_rate_limits_response(
+         &self,
++        auth_manager: Arc<AuthManager>,
++        thread_id: Option<String>,
++        execution_account: Option<SessionRuntimeAccountRef>,
+     ) -> Result<GetAccountRateLimitsResponse, JSONRPCErrorError> {
+-        let Some(auth) = self.auth_manager.auth().await else {
++        let Some(auth) = auth_manager.auth().await else {
+             return Err(invalid_request(
+                 "codex account authentication required to read rate limits",
+             ));
+@@ -1130,6 +1198,8 @@ impl AccountRequestProcessor {
+         });
+ 
+         Ok(GetAccountRateLimitsResponse {
++            thread_id,
++            execution_account,
+             rate_limits: rate_limits.into(),
+             rate_limits_by_limit_id: Some(
+                 rate_limits_by_limit_id
 diff --git a/codex-rs/app-server/src/request_processors/account_processor/slot_login.rs b/codex-rs/app-server/src/request_processors/account_processor/slot_login.rs
 new file mode 100644
-index 000000000..639faf939
+index 000000000..a2173bfa5
 --- /dev/null
 +++ b/codex-rs/app-server/src/request_processors/account_processor/slot_login.rs
-@@ -0,0 +1,618 @@
+@@ -0,0 +1,683 @@
 +use std::collections::HashMap;
 +use std::sync::Arc;
 +use std::sync::atomic::AtomicBool;
++use std::sync::atomic::Ordering as AtomicOrdering;
 +use std::sync::atomic::Ordering;
 +
 +use codex_app_server_protocol::AccountSlotLoginChallenge;
@@ -13843,7 +13964,6 @@ index 000000000..639faf939
 +use crate::external_auth::ExternalAuthBridge;
 +
 +const SLOT_RETRY_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
-+const ERROR_SLOT_BOUND: &str = "accountSlotBound";
 +
 +mod transport;
 +
@@ -13943,12 +14063,6 @@ index 000000000..639faf939
 +                .account_registry
 +                .lock_slot_binding_transition(slot_id)
 +                .await?;
-+            if self.session_runtime.account_slot_in_use(slot_id).await? {
-+                return Err(structured_invalid_request(
-+                    ERROR_SLOT_BOUND,
-+                    "account slot is bound to a thread",
-+                ));
-+            }
 +            Some(binding_transition)
 +        } else {
 +            None
@@ -13960,9 +14074,19 @@ index 000000000..639faf939
 +        );
 +
 +        let operation_id = Uuid::new_v4().to_string();
++        let candidate_runtime_version = match requested_slot.as_ref() {
++            Some(slot_id) => self
++                .thread_manager
++                .execution_account_slot_runtime_version(slot_id.clone())
++                .await
++                .map_err(|error| internal_error(error.to_string()))?
++                .checked_add(1)
++                .ok_or_else(|| internal_error("account slot runtime version overflow"))?,
++            None => 1,
++        };
 +        let prepared = self
 +            .account_registry
-+            .prepare_slot_login(requested_slot, operation_id)
++            .prepare_slot_login(requested_slot, operation_id, candidate_runtime_version)
 +            .await?;
 +        drop(binding_transition);
 +        if let Err(error) = self
@@ -14120,6 +14244,17 @@ index 000000000..639faf939
 +        &self,
 +        prepared: &PreparedSlotLogin,
 +    ) -> Result<bool, JSONRPCErrorError> {
++        let processor = self.clone();
++        let prepared = prepared.clone();
++        tokio::spawn(async move { processor.finish_slot_success_owned(&prepared).await })
++            .await
++            .map_err(|_| internal_error("account slot commit task failed"))?
++    }
++
++    async fn finish_slot_success_owned(
++        &self,
++        prepared: &PreparedSlotLogin,
++    ) -> Result<bool, JSONRPCErrorError> {
 +        prepared.runtime.auth_manager.reload().await;
 +        if prepared.runtime.auth_manager.auth().await.is_none() {
 +            self.finish_slot_failure(prepared, ERROR_AUTH_UNAVAILABLE)
@@ -14137,33 +14272,83 @@ index 000000000..639faf939
 +                .list_models(RefreshStrategy::Online, self.config.http_client_factory()),
 +        )
 +        .await;
++        if !prepared.try_claim_success() {
++            return Ok(false);
++        }
++        let manager = Arc::clone(&self.thread_manager);
++        let slot_id = prepared.account_slot_id.clone();
++        let auth_manager = Arc::clone(&prepared.runtime.auth_manager);
++        let models_manager = Arc::clone(&prepared.runtime.models_manager);
++        let replacement = tokio::spawn(async move {
++            manager
++                .replace_slot_execution_account_runtime(slot_id, auth_manager, models_manager)
++                .await
++        })
++        .await
++        .map_err(|_| internal_error("account slot runtime replacement task failed"));
++        let (runtime_version, affected) = match replacement {
++            Ok(Ok(replacement)) => replacement,
++            Ok(Err(error)) => {
++                self.finish_claimed_slot_failure(prepared, ERROR_LOGIN_FAILED)
++                    .await;
++                return Err(structured_invalid_request(
++                    ERROR_LOGIN_FAILED,
++                    &error.to_string(),
++                ));
++            }
++            Err(error) => {
++                self.finish_claimed_slot_failure(prepared, ERROR_LOGIN_FAILED)
++                    .await;
++                return Err(error);
++            }
++        };
++        prepared
++            .runtime
++            .runtime_version
++            .store(runtime_version, AtomicOrdering::Release);
 +        let notification = match self
 +            .account_registry
 +            .finish_slot_login(prepared, ManifestSlotStatus::Ready, None)
 +            .await
 +        {
 +            Ok(Some(notification)) => notification,
-+            Ok(None) => {
-+                self.finish_slot_failure(prepared, ERROR_LOGIN_CANCELED)
-+                    .await;
-+                return Ok(false);
-+            }
-+            Err(error) => {
-+                self.finish_slot_failure(prepared, ERROR_LOGIN_FAILED).await;
-+                return Err(error);
-+            }
++            Ok(None) => return Ok(false),
++            Err(error) => return Err(error),
 +        };
 +        self.thread_manager
 +            .clear_account_plugin_cache(&prepared.account_slot_id, &prepared.runtime.auth_manager);
 +        self.outgoing
 +            .send_server_notification(ServerNotification::AccountSlotChanged(notification))
 +            .await;
++        for (thread_id, _) in affected {
++            self.session_runtime.publish_thread(thread_id).await;
++        }
 +        self.publish_slot_operation(prepared, SessionRuntimeOperationStatus::Ready, None)
 +            .await;
 +        Ok(true)
 +    }
 +
 +    async fn finish_slot_failure(&self, prepared: &PreparedSlotLogin, error_code: &'static str) {
++        if !prepared.try_claim_failure() {
++            return;
++        }
++        self.finish_claimed_slot_failure(prepared, error_code).await;
++    }
++
++    async fn finish_claimed_slot_failure(
++        &self,
++        prepared: &PreparedSlotLogin,
++        error_code: &'static str,
++    ) {
++        let _ = prepared.runtime.auth_manager.logout().await;
++        if let Err(error) = tokio::fs::remove_dir_all(&prepared.auth_home).await
++            && error.kind() != std::io::ErrorKind::NotFound
++        {
++            tracing::warn!(
++                auth_home = %prepared.auth_home.display(),
++                "failed to remove candidate account credential home: {error}"
++            );
++        }
 +        let pending_failure = self
 +            .account_registry
 +            .finish_slot_login(prepared, ManifestSlotStatus::Failed, Some(error_code))
@@ -14762,20 +14947,43 @@ index 9459d21c6..b5533ded9 100644
          thread_id: Option<&str>,
 diff --git a/codex-rs/app-server/tests/suite/v2/account_slot.rs b/codex-rs/app-server/tests/suite/v2/account_slot.rs
 new file mode 100644
-index 000000000..d490533c2
+index 000000000..857cf67d9
 --- /dev/null
 +++ b/codex-rs/app-server/tests/suite/v2/account_slot.rs
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,455 @@
 +use std::time::Duration;
 +
 +use anyhow::Result;
++use app_test_support::MockResponsesConfig;
 +use app_test_support::TestAppServer;
++use app_test_support::create_mock_responses_server_repeating_assistant;
++use codex_app_server_protocol::AccountSlotAction;
++use codex_app_server_protocol::AccountSlotActionAvailability;
 +use codex_app_server_protocol::AccountSlotChangedNotification;
++use codex_app_server_protocol::AccountSlotListParams;
++use codex_app_server_protocol::AccountSlotListResponse;
 +use codex_app_server_protocol::AccountSlotLoginStartParams;
 +use codex_app_server_protocol::AccountSlotLoginStartResponse;
 +use codex_app_server_protocol::AccountSlotStatus;
++use codex_app_server_protocol::ClientRequest;
++use codex_app_server_protocol::SessionRuntimeChangedNotification;
++use codex_app_server_protocol::SessionRuntimeLifecycleState;
++use codex_app_server_protocol::SessionRuntimeListParams;
++use codex_app_server_protocol::SessionRuntimeListResponse;
 +use codex_app_server_protocol::SessionRuntimeOperationStatus;
 +use codex_app_server_protocol::SessionRuntimeOperationUpdatedNotification;
++use codex_app_server_protocol::ThreadAccountSwitchParams;
++use codex_app_server_protocol::ThreadAccountSwitchResponse;
++use codex_app_server_protocol::ThreadStartParams;
++use codex_app_server_protocol::ThreadStartResponse;
++use codex_app_server_protocol::TurnStartParams;
++use codex_app_server_protocol::UserInput;
++use codex_config::types::AuthCredentialsStoreMode;
++use codex_features::Feature;
++use codex_login::AuthKeyringBackendKind;
++use codex_login::login_with_api_key;
++use codex_login::logout;
++use codex_utils_absolute_path::test_support::PathExt;
 +use pretty_assertions::assert_eq;
 +use tempfile::TempDir;
 +use tokio::time::timeout;
@@ -14796,6 +15004,12 @@ index 000000000..d490533c2
 +[features]
 +shell_snapshot = false
 +"#,
++    )?;
++    login_with_api_key(
++        codex_home.path(),
++        "default-test-secret",
++        AuthCredentialsStoreMode::File,
++        AuthKeyringBackendKind::default(),
 +    )?;
 +    let mut app_server = TestAppServer::builder()
 +        .with_codex_home(codex_home.path())
@@ -14846,6 +15060,350 @@ index 000000000..d490533c2
 +    let response_json = serde_json::to_string(&response)?;
 +    assert!(!response_json.contains("test-slot-secret"));
 +    assert!(!response_json.contains(codex_home.path().to_string_lossy().as_ref()));
++
++    let request_id = app_server
++        .send_raw_request(
++            "accountSlot/list",
++            Some(serde_json::to_value(AccountSlotListParams {
++                cursor: None,
++                limit: None,
++            })?),
++        )
++        .await?;
++    let listed: AccountSlotListResponse =
++        timeout(DEFAULT_TIMEOUT, app_server.read_response(request_id)).await??;
++    assert_eq!(
++        listed.registry_revision,
++        response.slot.registry_revision.saturating_add(1)
++    );
++    let mut switch_actions = listed
++        .data
++        .iter()
++        .map(|slot| {
++            (
++                slot.is_default,
++                slot.status,
++                slot.actions
++                    .iter()
++                    .find(|action| action.action == AccountSlotAction::SwitchTo)
++                    .cloned(),
++            )
++        })
++        .collect::<Vec<_>>();
++    switch_actions.sort_by_key(|(is_default, _, _)| *is_default);
++    assert_eq!(
++        switch_actions,
++        vec![
++            (
++                false,
++                AccountSlotStatus::Ready,
++                Some(AccountSlotActionAvailability {
++                    action: AccountSlotAction::SwitchTo,
++                    allowed: true,
++                    deny_reason: None,
++                }),
++            ),
++            (
++                true,
++                AccountSlotStatus::Ready,
++                Some(AccountSlotActionAvailability {
++                    action: AccountSlotAction::SwitchTo,
++                    allowed: true,
++                    deny_reason: None,
++                }),
++            ),
++        ]
++    );
++
++    let secondary_home = codex_home
++        .path()
++        .join("accounts")
++        .join(&response.slot.account_slot_id);
++    assert!(logout(
++        &secondary_home,
++        AuthCredentialsStoreMode::File,
++        AuthKeyringBackendKind::default(),
++    )?);
++    let request_id = app_server
++        .send_raw_request(
++            "accountSlot/list",
++            Some(serde_json::to_value(AccountSlotListParams {
++                cursor: None,
++                limit: None,
++            })?),
++        )
++        .await?;
++    let missing: AccountSlotListResponse =
++        timeout(DEFAULT_TIMEOUT, app_server.read_response(request_id)).await??;
++    let missing_secondary = missing
++        .data
++        .iter()
++        .find(|slot| slot.account_slot_id == response.slot.account_slot_id)
++        .expect("secondary slot after auth removal");
++    assert_eq!(
++        (
++            missing_secondary.status,
++            missing_secondary.error_code.as_deref(),
++            missing.registry_revision,
++        ),
++        (
++            AccountSlotStatus::Failed,
++            Some("authUnavailable"),
++            listed.registry_revision.saturating_add(1),
++        )
++    );
++
++    let request_id = app_server
++        .send_raw_request(
++            "accountSlot/list",
++            Some(serde_json::to_value(AccountSlotListParams {
++                cursor: None,
++                limit: None,
++            })?),
++        )
++        .await?;
++    let unchanged: AccountSlotListResponse =
++        timeout(DEFAULT_TIMEOUT, app_server.read_response(request_id)).await??;
++    assert_eq!(unchanged, missing);
++    Ok(())
++}
++
++#[tokio::test]
++async fn ready_secondary_slot_reauth_rebinds_loaded_idle_thread_for_next_turn() -> Result<()> {
++    let codex_home = TempDir::new()?;
++    let server = create_mock_responses_server_repeating_assistant("reauthenticated account").await;
++    MockResponsesConfig::new(&server.uri())
++        .enable_feature(Feature::Sqlite)
++        .with_provider_config("requires_openai_auth = true")
++        .write(codex_home.path())?;
++    let sqlite_home = codex_home.path().to_string_lossy();
++    let mut app = TestAppServer::builder()
++        .with_codex_home(codex_home.path())
++        .with_env_overrides(&[
++            ("CODEX_API_KEY", Some("default-test-key")),
++            ("CODEX_ACCESS_TOKEN", None),
++            ("OPENAI_API_KEY", None),
++            ("CODEX_SQLITE_HOME", Some(sqlite_home.as_ref())),
++        ])
++        .build_initialized()
++        .await?;
++
++    let login_request = app
++        .send_raw_request(
++            "accountSlot/login/start",
++            Some(serde_json::to_value(AccountSlotLoginStartParams::ApiKey {
++                slot_id: None,
++                api_key: "original-secondary-key".to_string(),
++            })?),
++        )
++        .await?;
++    let login: AccountSlotLoginStartResponse = app.read_response(login_request).await?;
++    let secondary_slot_id = login.slot.account_slot_id;
++
++    let ThreadStartResponse { thread, .. } = app
++        .start_thread(ThreadStartParams {
++            model: Some("mock-model".to_string()),
++            ..Default::default()
++        })
++        .await?;
++    app.start_turn_and_wait_for_completion(TurnStartParams {
++        thread_id: thread.id.clone(),
++        input: vec![UserInput::Text {
++            text: "materialize the default account binding".to_string(),
++            text_elements: Vec::new(),
++        }],
++        model: Some("mock-model".to_string()),
++        ..Default::default()
++    })
++    .await?;
++    let before_switch: SessionRuntimeListResponse = app
++        .request(|request_id| ClientRequest::SessionRuntimeList {
++            request_id,
++            params: SessionRuntimeListParams {
++                thread_id: Some(thread.id.clone()),
++                cursor: None,
++                limit: None,
++            },
++        })
++        .await?;
++    let before_switch_snapshot = before_switch
++        .data
++        .into_iter()
++        .next()
++        .expect("runtime snapshot before account switch");
++    let default_binding = before_switch_snapshot
++        .account
++        .current
++        .as_ref()
++        .expect("default account binding");
++    let switched: ThreadAccountSwitchResponse = app
++        .request(|request_id| ClientRequest::ThreadAccountSwitch {
++            request_id,
++            params: ThreadAccountSwitchParams {
++                operation_id: "bind-thread-to-secondary-before-reauth".to_string(),
++                thread_id: thread.id.clone(),
++                target_account_slot_id: secondary_slot_id.clone(),
++                expected_instance_epoch: before_switch.instance_epoch,
++                expected_state_revision: before_switch_snapshot.state_revision,
++                expected_execution_generation: default_binding.execution_generation,
++            },
++        })
++        .await?;
++    assert_eq!(
++        switched.operation.status,
++        SessionRuntimeOperationStatus::Ready
++    );
++
++    let before_reauth: SessionRuntimeListResponse = app
++        .request(|request_id| ClientRequest::SessionRuntimeList {
++            request_id,
++            params: SessionRuntimeListParams {
++                thread_id: Some(thread.id.clone()),
++                cursor: None,
++                limit: None,
++            },
++        })
++        .await?;
++    let before_reauth_snapshot = before_reauth
++        .data
++        .into_iter()
++        .next()
++        .expect("runtime snapshot before reauthentication");
++    let before_reauth_binding = before_reauth_snapshot
++        .account
++        .current
++        .clone()
++        .expect("secondary account binding before reauthentication");
++    assert_eq!(
++        before_reauth_binding.account_slot_id.as_str(),
++        secondary_slot_id
++    );
++    assert_eq!(
++        before_reauth_snapshot.lifecycle.state,
++        SessionRuntimeLifecycleState::Idle
++    );
++
++    let thread_id = codex_protocol::ThreadId::from_string(&thread.id)?;
++    let state_db = codex_state::StateRuntime::init(
++        codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
++        "mock_provider".to_string(),
++    )
++    .await?;
++    let durable_before = state_db
++        .execution_account_slot_runtime_state(&secondary_slot_id)
++        .await?;
++    assert_eq!(
++        durable_before.1,
++        vec![(
++            thread_id,
++            codex_protocol::protocol::ExecutionAccountBinding {
++                slot_id: secondary_slot_id.clone(),
++                generation: before_reauth_binding.execution_generation,
++            },
++        )]
++    );
++
++    let reauth_request = app
++        .send_raw_request(
++            "accountSlot/login/start",
++            Some(serde_json::to_value(AccountSlotLoginStartParams::ApiKey {
++                slot_id: Some(secondary_slot_id.clone()),
++                api_key: "replacement-secondary-key".to_string(),
++            })?),
++        )
++        .await?;
++    let reauth: AccountSlotLoginStartResponse = app.read_response(reauth_request).await?;
++    assert_eq!(
++        (
++            reauth.slot.account_slot_id.as_str(),
++            reauth.slot.status,
++            reauth.operation.status,
++        ),
++        (
++            secondary_slot_id.as_str(),
++            AccountSlotStatus::Ready,
++            SessionRuntimeOperationStatus::Ready,
++        )
++    );
++
++    let expected_generation = before_reauth_binding.execution_generation + 1;
++    let published = loop {
++        let changed: SessionRuntimeChangedNotification = timeout(
++            DEFAULT_TIMEOUT,
++            app.read_notification("sessionRuntime/changed"),
++        )
++        .await??;
++        if changed.snapshot.thread_id == thread.id
++            && changed
++                .snapshot
++                .account
++                .current
++                .as_ref()
++                .is_some_and(|binding| {
++                    binding.account_slot_id == secondary_slot_id
++                        && binding.execution_generation == expected_generation
++                })
++        {
++            break changed;
++        }
++    };
++    assert_eq!(
++        published.snapshot.lifecycle.state,
++        SessionRuntimeLifecycleState::Idle
++    );
++
++    let after_reauth: SessionRuntimeListResponse = app
++        .request(|request_id| ClientRequest::SessionRuntimeList {
++            request_id,
++            params: SessionRuntimeListParams {
++                thread_id: Some(thread.id.clone()),
++                cursor: None,
++                limit: None,
++            },
++        })
++        .await?;
++    let after_reauth_snapshot = after_reauth
++        .data
++        .into_iter()
++        .next()
++        .expect("runtime snapshot after reauthentication");
++    assert_eq!(
++        after_reauth_snapshot.account.current,
++        published.snapshot.account.current
++    );
++    assert_eq!(after_reauth_snapshot.writer, before_reauth_snapshot.writer);
++
++    let durable_after = state_db
++        .execution_account_slot_runtime_state(&secondary_slot_id)
++        .await?;
++    assert_eq!(durable_after.0, durable_before.0 + 1);
++    assert_eq!(
++        durable_after.1,
++        vec![(
++            thread_id,
++            codex_protocol::protocol::ExecutionAccountBinding {
++                slot_id: secondary_slot_id,
++                generation: expected_generation,
++            },
++        )]
++    );
++
++    app.start_turn_and_wait_for_completion(TurnStartParams {
++        thread_id: thread.id,
++        input: vec![UserInput::Text {
++            text: "use the replacement credential".to_string(),
++            text_elements: Vec::new(),
++        }],
++        model: Some("mock-model".to_string()),
++        ..Default::default()
++    })
++    .await?;
++    let requests = server.received_requests().await.expect("received requests");
++    let authorization = requests
++        .last()
++        .and_then(|request| request.headers.get("authorization"))
++        .and_then(|value| value.to_str().ok());
++    assert_eq!(authorization, Some("Bearer replacement-secondary-key"));
 +    Ok(())
 +}
 diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs

@@ -1,7 +1,7 @@
 schema_version = 1
 applies_to = "rust-v0.149.0"
 base_commit = "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0"
-final_tree = "4d993b8b5960de01c6d2bafb4c1a7749c51280db"
+final_tree = "b5dd645e42e146aba3d1a0f87177c063cc73390c"
 
 [[patches]]
 number = "P001"
@@ -11,49 +11,49 @@ sha256 = "50bc0985e1b4cb45b12d69a65fea52c84471cf28e933fbeb817647ae7096a100"
 [[patches]]
 number = "P002"
 file = "0002-P002-session-runtime-protocol.patch"
-sha256 = "6bca9aa063b32be7f8596001bd86ac773734773453adc0978752a6cf0a4c3484"
+sha256 = "92dbc1f7ccb854a4c79481f0493d4ee374aae8e27693c3460b1497cad263927c"
 
 [[patches]]
 number = "P003"
 file = "0003-P003-multi-account-registry.patch"
-sha256 = "d85618b9a23c0974013e5b46925caa647c826c95a26b4255a03876dc96eac7cb"
+sha256 = "2940edc9c081e2fb71bbc37b8dfde8ad29c2bb9d3a517aafa4df81474b0bf7e7"
 
 [[patches]]
 number = "P004"
 file = "0004-P004-durable-execution-binding-and-history.patch"
-sha256 = "8c64b40a8c212c510d9db735435c529f59ce7edab1cf4a1605d73ff2b0dbb89a"
+sha256 = "dfd2a831f74bbf82af9b396b6b13ad045d8c1500c795ea6f0fe180109a0815f3"
 
 [[patches]]
 number = "P005"
 file = "0005-P005-propagate-execution-account-to-auth-consumers.patch"
-sha256 = "e31564d3fc79f54f6bd08af5676f6745fc95974b9b0bc4ed9dc4307c9f57bac0"
+sha256 = "810f4444c58beba3313559545dce20b03b90702c565f2b2dc9232393336bd59f"
 
 [[patches]]
 number = "P006"
 file = "0006-P006-publish-session-runtime-state.patch"
-sha256 = "0127db1ba7b3ea948da34d13b8279486b3f60556044db67e6ddc8f2a09b725a7"
+sha256 = "3f21b870084c262b39eb1680872f3dc202b6900f61dc0152f03466a688bcd3a1"
 
 [[patches]]
 number = "P007"
 file = "0007-P007-add-live-account-registration.patch"
-sha256 = "9a0f167d8b91ba08f22d58ac6ec5573216d9983d8dcb73a2b8932f8a49ab77a6"
+sha256 = "8bb6e53c74f43951d38170b3cdcab38fc035954bcfb3dd8d905fb50a5bd6a74e"
 
 [[patches]]
 number = "P008"
 file = "0008-P008-relinquish-thread-writers-strictly.patch"
-sha256 = "978e7aafe37dac060e23af4225c0a4a27e5f8cc8a03e8146752c1a2bd3ec3563"
+sha256 = "4285de7949743ea5b653ad5b5d9f60316549de4465f48383be34f2c460ee752b"
 
 [[patches]]
 number = "P009"
 file = "0009-P009-switch-thread-execution-accounts.patch"
-sha256 = "3beaa63ca329dcd054cb31e00bafbed56642d0a254479b75a9e59fbce3c46444"
+sha256 = "a68b92a0adbe6e93499c7b212cf100f851e7511272cf282ffddede109d8a295c"
 
 [[patches]]
 number = "P010"
 file = "0010-P010-add-TUI-session-and-account-controls.patch"
-sha256 = "622d892a32672954ecfae67091913a711988bc52ae0a95073af5a990294447db"
+sha256 = "f7d1fced319951d031eb92b2b1fb6e94d51a73e321987d1ffe1154b047ea2eb5"
 
 [[patches]]
 number = "P011"
 file = "0011-P011-installable-plugin-commands-and-presentation.patch"
-sha256 = "ad921d2fbdff340c4efb093162ecb95249eb38b3e53e90a14d9258f38abb04b6"
+sha256 = "ae8b864911ef67e193cddea0a6d029e431cfd1ff58d155cd1909e0e17eb48b93"

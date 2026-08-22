@@ -14,6 +14,8 @@ Stock Codex는 인증과 runtime 소유권의 많은 부분을 process 단위로
 - 각 turn은 불변의 execution account를 사용하고, account 전환은 보호된 next-turn 동작으로 수행한다.
 - single-writer authority와 strict handoff를 영속적으로 관리한다.
 - 외부 consumer가 사용할 수 있도록 sanitize된 session identity, lifecycle, persistence, allowed-control state를 제공한다.
+- workflow role이나 handle을 저장하지 않고도 exact old→new thread 전이를 증명하는 committed `/clear`·`/new` lineage receipt를 제공한다.
+- TUI와 agent tool이 공유하는 canonical typed Goal create·replace·clear action과 goal revision 검사를 제공한다.
 - account별 앱을 빠져나와 다른 앱에 붙지 않고도 TUI에서 account와 session을 제어한다.
 - 설치 가능한 structured plugin command와 bounded UI-only presentation component를 제공한다.
 
@@ -28,10 +30,11 @@ Stock Codex는 인증과 runtime 소유권의 많은 부분을 process 단위로
 | 영역 | 현재 상태 |
 |---|---|
 | P001–P011 구현과 focused check | 완료 |
-| 순서형 0.149 patch export와 clean-apply 검증 | 완료; 11개 patch가 tree `4d993b8b5960de01c6d2bafb4c1a7749c51280db`를 재현함 |
-| macOS arm64 release build와 artifact | 완료; [run 32537192127](https://github.com/iLfounder/codex-cli-custom/actions/runs/32537192127), artifact `9467506046` |
-| 최종 독립 review | 내부 Codex 1회와 외부 Opus fresh-context review 1회 완료; 확인된 지적만 소스 실검 후 수정함 |
-| 0.149 publication | 완료 |
+| 순서형 0.149 patch export와 clean-apply 검증 | 완료; 11개 patch가 tree `b5dd645e42e146aba3d1a0f87177c063cc73390c`를 재현함 |
+| focused check와 격리 실세션 smoke | 완료; continuity 24/24, Goal 15/15 PASS, product failure·skip 0 |
+| 최종 독립 review | 내부 Codex reviewer 2명이 동일 범위를 서로 다른 fresh context에서 독립 검토; 확인된 지적만 소스 실검 후 수정함 |
+| macOS arm64 release build와 artifact | corrected tree 대상 GitHub Actions build 대기; local full build는 release 근거로 사용하지 않음 |
+| 0.149 publication | GitHub build 준비가 끝난 candidate이며 아직 release하지 않음 |
 
 현재 candidate는 [`custom-patches/rust-v0.149.0`](custom-patches/rust-v0.149.0/)이다. [`custom-patches/rust-v0.148.0`](custom-patches/rust-v0.148.0/)은 이전 release series로만 보존한다.
 
@@ -49,7 +52,7 @@ Stock Codex는 인증과 runtime 소유권의 많은 부분을 process 단위로
 
 **이유:** TUI, relay adapter, 외부 orchestrator가 control 구현보다 먼저 의존할 안정적인 app-server v2 contract가 필요하다.
 
-**경계:** bounded `sessionRuntime`, account-slot, login, relinquish, switch DTO·method·notification·pagination과 compile-safe stub을 정의한다. 실제 control 동작은 구현하지 않는다.
+**경계:** bounded `sessionRuntime`, account-slot, login, relinquish, switch, Goal mutation, clear/new continuity DTO·method·notification·pagination과 compile-safe stub을 정의한다. 실제 control 동작은 구현하지 않는다.
 
 ### P003 — Multi-account registry
 
@@ -61,19 +64,19 @@ Stock Codex는 인증과 runtime 소유권의 많은 부분을 process 단위로
 
 **이유:** resume·fork·child·review thread는 작업을 소유한 account로 계속 실행돼야 한다.
 
-**경계:** thread-slot binding을 generation CAS와 함께 영속화하고 thread 생성 경로에 상속하며, 각 turn에 불변 provenance를 기록한다. slot ID만으로 credential identity가 최신이라고 판단하지 않는다.
+**경계:** thread-slot binding을 generation CAS와 함께 영속화하고 thread 생성 경로에 상속하며, 각 turn에 불변 provenance를 기록하고 명시적 tombstone을 갖는 revisioned Goal state를 추가한다. slot ID만으로 credential identity가 최신이라고 판단하지 않는다.
 
 ### P005 — 모든 consumer에 account 전파
 
 **이유:** model client만 바꿔도 connector, app, plugin, MCP, telemetry, memory, review, cost polling이 default 또는 stale credential을 사용하면 격리가 깨진다.
 
-**경계:** turn마다 하나의 account runtime을 capture하고 account별 service·cache를 포함한 모든 credential-sensitive consumer에 전파한다. mid-turn credential mixing은 허용하지 않는다.
+**경계:** turn마다 하나의 account runtime을 capture하고 account별 service·cache를 포함한 모든 credential-sensitive consumer에 전파한다. Goal create·replace·clear는 typed agent action과 TUI slash command가 하나의 canonical mutation path를 공유한다. mid-turn credential mixing은 허용하지 않는다.
 
 ### P006 — 외부에 보이는 session runtime
 
 **이유:** 외부 관리자는 session이 무엇을 하고 있고 다음에 어떤 동작이 안전한지 추측 없이 알아야 한다.
 
-**경계:** stable identity, lifecycle·waiting state, subscriber, writer authority, persistence health·position, account binding, 현재 허용된 action을 sanitize된 revisioned snapshot과 sequenced notification으로 제공한다. operation replay는 bounded하며 credential path나 secret을 노출하지 않는다.
+**경계:** stable identity, lifecycle·waiting state, subscriber, writer authority, persistence health·position, account binding, 현재 허용된 action을 sanitize된 revisioned snapshot과 sequenced notification으로 제공한다. committed clear/new receipt는 transition ID, reason, previous/current thread evidence, writer evidence, instance epoch, monotonic sequence를 담고, snapshot readback은 resync용 마지막 committed continuity edge를 보존한다. operation replay는 bounded하며 credential path나 secret을 노출하지 않는다.
 
 ### P007 — 무중단 account 등록
 
@@ -99,7 +102,7 @@ Stock Codex는 인증과 runtime 소유권의 많은 부분을 process 단위로
 
 **이유:** timeout이나 disconnect를 성공으로 오인하지 않으면서 terminal에서 직접 safety contract를 사용할 수 있어야 한다.
 
-**경계:** account picker와 account/logout control을 추가하고, explicit exit는 strict terminal release를 기다린다. typed `threadClear`/`threadNew` agent control을 신규 thread와 legacy-resumed thread 모두에 제공한다. clear/new는 먼저 응답하고 exact successful completion event 뒤에만 UI를 전환한다.
+**경계:** account picker와 account/logout control을 추가하고, explicit exit는 strict terminal release를 기다린다. typed `threadClear`/`threadNew` agent control을 신규 thread와 legacy-resumed thread 모두에 제공한다. clear/new는 exact committed transition 뒤에만 UI를 바꾸며, 응답 유실로 결과가 모호하면 같은 transition ID를 유지하고 authoritative retry/readback이 끝날 때까지 stale old-thread submission을 막는다.
 
 **상태:** P010에서 구현 완료.
 
@@ -115,7 +118,7 @@ Plugin은 exact thread의 현재 subscriber와 TUI에 bounded card, notice, prog
 
 ## Runtime과 Relay의 경계
 
-Custom app-server는 account execution, thread writer ownership, persistence state, safe control admission의 authority다. 외부 system은 이 값을 소비하고 session을 workflow role과 연결할 수 있지만, 이 fork가 relay job을 workflow state나 responsibility assignment와 동일한 entity로 만들지는 않는다.
+Custom app-server는 account execution, thread writer ownership, persistence state, safe control admission, exact committed old→new thread transition의 authority다. 외부 system은 이 값을 소비하고 session을 workflow role과 연결할 수 있지만, Group·RoleSlot·handle과 그 승계 정책은 외부 정본으로 남고 app-server에는 저장하지 않는다.
 
 `llc-relay`는 Codex와 Claude session 사이의 message transport를 계속 담당한다. Plugin card/notice/progress는 현재 subscriber를 위한 typed presentation surface일 뿐, transport·acknowledgement ledger·Agent 작업 완료 증명이 아니다.
 
@@ -128,7 +131,7 @@ git checkout 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
 /path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD"
 ```
 
-Applier는 dirty 또는 잘못된 base worktree를 거절하고, 각 patch digest를 검증하며, P001–P011을 순서대로 적용한 뒤 final tree `4d993b8b5960de01c6d2bafb4c1a7749c51280db`를 요구한다.
+Applier는 dirty 또는 잘못된 base worktree를 거절하고, 각 patch digest를 검증하며, P001–P011을 순서대로 적용한 뒤 final tree `b5dd645e42e146aba3d1a0f87177c063cc73390c`를 요구한다.
 
 이 분리가 유지보수 방식이다. upstream이 갱신되면 각 P번호를 자기 기능 경계 안에서 inspect·adapt·verify할 수 있다.
 
@@ -138,9 +141,9 @@ Applier는 dirty 또는 잘못된 base worktree를 거절하고, 각 patch diges
 
 ## Build, review, publication
 
-[Actions run 32537192127](https://github.com/iLfounder/codex-cli-custom/actions/runs/32537192127)은 P001–P011을 clean-apply하고 macOS arm64에서 두 release binary를 build했다. Artifact `9467506046`에는 patched tree `4d993b8b5960de01c6d2bafb4c1a7749c51280db`가 기록되어 있다. 결정론적 Cargo.lock normalization 뒤 compiled tree는 `c7033f3d9b42fd45391232ef7a266872bb233e20`, lock SHA-256은 `598546764c876b93c6a59edcd5879b8c1b17cdf7c8df023fb051bcfb755a81f4`다. GitHub artifact digest는 `sha256:3ec9679a8a81bb868993080a33dd51c4be11734806dcb2a46127877e8bd9733e`다.
+Corrected candidate는 정확히 P001–P011로 clean-apply되어 tree `b5dd645e42e146aba3d1a0f87177c063cc73390c`를 만든다. Focused source check와 격리된 live TUI/app-server smoke는 완료했다. 내부 Codex reviewer 2명이 동일한 고정 predecessor 범위를 서로 다른 fresh context에서 독립 검토했고, lead는 finding을 source와 call chain으로 실검해 확인된 결함만 통합했다.
 
-내부 Codex와 외부 Opus reviewer는 동일한 고정 predecessor candidate를 서로 독립적으로 검토했다. Lead는 각 지적을 소스와 call chain으로 다시 확인해 실제 결함만 반영했고, 정확히 11개 patch series를 재생성한 뒤 위 corrected tree를 다시 build했다.
+Full clean-applied macOS arm64 release build는 의도적으로 GitHub Actions에서만 수행한다. 이 exact tree의 workflow가 성공하고 matching artifact를 발행하기 전에는 과거 run과 artifact를 이 candidate의 release 근거로 취급하지 않는다.
 
 ## 과거 작업 참고자료
 

@@ -1,4 +1,4 @@
-From b1ddc10c4b78e4d2fccce58e0388ec2c30f42c73 Mon Sep 17 00:00:00 2001
+From 81bdd2b15346281c3df5bcd84cd8109aa34716e7 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 18:06:29 +0900
 Subject: [PATCH] feat(custom): relinquish thread writers strictly for 0.149
@@ -6,7 +6,7 @@ Subject: [PATCH] feat(custom): relinquish thread writers strictly for 0.149
 ---
  codex-rs/app-server/src/message_processor.rs  |  11 +-
  .../app-server/src/session_runtime/mod.rs     |   4 +
- .../src/session_runtime/relinquish.rs         | 387 ++++++++++++++++++
+ .../src/session_runtime/relinquish.rs         | 392 ++++++++++++++++++
  .../src/session_runtime/snapshot.rs           |  47 ++-
  codex-rs/app-server/src/thread_state.rs       |  36 ++
  codex-rs/app-server/tests/suite/v2/mod.rs     |   1 +
@@ -27,8 +27,8 @@ Subject: [PATCH] feat(custom): relinquish thread writers strictly for 0.149
  codex-rs/thread-store/src/local/mod.rs        |  35 ++
  .../src/local/tests/relinquish_tests.rs       | 127 ++++++
  .../thread-store/src/local/writer_lock.rs     |  12 +-
- codex-rs/thread-store/src/store.rs            |  23 ++
- 24 files changed, 1123 insertions(+), 25 deletions(-)
+ codex-rs/thread-store/src/store.rs            |  23 +
+ 24 files changed, 1128 insertions(+), 25 deletions(-)
  create mode 100644 codex-rs/app-server/src/session_runtime/relinquish.rs
  create mode 100644 codex-rs/app-server/tests/suite/v2/thread_relinquish.rs
  create mode 100644 codex-rs/thread-store/src/local/tests/relinquish_tests.rs
@@ -112,10 +112,10 @@ index b5533ded9..8a93006cc 100644
          }
 diff --git a/codex-rs/app-server/src/session_runtime/relinquish.rs b/codex-rs/app-server/src/session_runtime/relinquish.rs
 new file mode 100644
-index 000000000..9ee43c056
+index 000000000..f0b05d0d6
 --- /dev/null
 +++ b/codex-rs/app-server/src/session_runtime/relinquish.rs
-@@ -0,0 +1,387 @@
+@@ -0,0 +1,392 @@
 +use codex_app_server_protocol::JSONRPCErrorError;
 +use codex_app_server_protocol::ServerNotification;
 +use codex_app_server_protocol::SessionRuntimeChangedNotification;
@@ -159,6 +159,11 @@ index 000000000..9ee43c056
 +            .acquire()
 +            .await
 +            .map_err(|_| internal_error("thread lifecycle coordinator is unavailable"))?;
++        let _transition_admission_permit = self
++            .thread_state_manager
++            .acquire_thread_mutation_permit(thread_id)
++            .await
++            .map_err(|reason| invalid_params(reason.replace('_', " ")))?;
 +        let operation = self.begin_operation(relinquish_operation(&params)).await?;
 +        if operation.status != SessionRuntimeOperationStatus::Accepted {
 +            return Ok(ThreadRelinquishResponse { operation });

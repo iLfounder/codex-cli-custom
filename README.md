@@ -14,6 +14,8 @@ This fork turns those implicit boundaries into explicit contracts:
 - an immutable execution account for each turn, with a guarded next-turn switch;
 - durable single-writer authority and strict handoff;
 - sanitized session identity, lifecycle, persistence, and allowed-control state for external consumers;
+- committed `/clear` and `/new` lineage receipts that prove the exact old-to-new thread transition without storing workflow roles or handles;
+- canonical typed Goal create, replace, and clear actions shared by the TUI and agent tools, with goal revision checks;
 - TUI controls that do not require leaving one account-specific app and attaching to another; and
 - installable, structured plugin commands plus bounded UI-only presentation components.
 
@@ -28,10 +30,11 @@ The target is upstream [`rust-v0.149.0`](https://github.com/openai/codex/release
 | Area | Current status |
 |---|---|
 | P001–P011 implementation and focused checks | Complete |
-| Ordered 0.149 patch export and clean-apply verification | Complete; 11 patches reproduce tree `4d993b8b5960de01c6d2bafb4c1a7749c51280db` |
-| macOS arm64 release build and artifacts | Complete; [run 32537192127](https://github.com/iLfounder/codex-cli-custom/actions/runs/32537192127), artifact `9467506046` |
-| Final independent reviews | One internal Codex and one external Opus fresh-context review completed; confirmed findings were source-checked and corrected |
-| 0.149 publication | Complete |
+| Ordered 0.149 patch export and clean-apply verification | Complete; 11 patches reproduce tree `b5dd645e42e146aba3d1a0f87177c063cc73390c` |
+| Focused checks and isolated live smoke | Complete; continuity 24/24 and Goal 15/15 passed with no product failures or skips |
+| Final independent reviews | Two internal Codex reviewers inspected the same frozen scope in separate fresh contexts; confirmed findings were source-checked and corrected |
+| macOS arm64 release build and artifacts | Pending GitHub Actions build for the corrected tree; no local full build is used as release evidence |
+| 0.149 publication | Candidate ready for GitHub build; not yet released |
 
 The current candidate is [`custom-patches/rust-v0.149.0`](custom-patches/rust-v0.149.0/). The files under [`custom-patches/rust-v0.148.0`](custom-patches/rust-v0.148.0/) are retained only as the previous release series.
 
@@ -49,7 +52,7 @@ Each number is a reviewable feature patch. The series is ordered because later p
 
 **Why:** TUI, relay adapters, and external orchestrators need one stable app-server v2 contract before control behavior is added.
 
-**Boundary:** Define bounded `sessionRuntime`, account-slot, login, relinquish, and switch DTOs, methods, notifications, pagination, and compile-safe stubs. It does not implement the controls themselves.
+**Boundary:** Define bounded `sessionRuntime`, account-slot, login, relinquish, switch, Goal mutation, and clear/new continuity DTOs, methods, notifications, pagination, and compile-safe stubs. It does not implement the controls themselves.
 
 ### P003 — Multi-account registry
 
@@ -61,19 +64,19 @@ Each number is a reviewable feature patch. The series is ordered because later p
 
 **Why:** Resume, fork, child, and review threads must continue under the account that owns their work.
 
-**Boundary:** Persist thread-to-slot binding with generation CAS, inherit it across thread creation paths, and record immutable turn provenance. A slot ID alone is never accepted as fresh credential identity.
+**Boundary:** Persist thread-to-slot binding with generation CAS, inherit it across thread creation paths, record immutable turn provenance, and add revisioned Goal state with explicit tombstones. A slot ID alone is never accepted as fresh credential identity.
 
 ### P005 — Account propagation to every consumer
 
 **Why:** Switching the model client is insufficient if connectors, apps, plugins, MCP, telemetry, memory, review, or cost polling still use default or stale credentials.
 
-**Boundary:** Capture one account runtime per turn and propagate it through every credential-sensitive consumer, including account-scoped services and caches. Mid-turn credential mixing remains forbidden.
+**Boundary:** Capture one account runtime per turn and propagate it through every credential-sensitive consumer, including account-scoped services and caches. Goal create, replace, and clear use one canonical state mutation path for both typed agent actions and TUI slash commands. Mid-turn credential mixing remains forbidden.
 
 ### P006 — Externally visible session runtime
 
 **Why:** External management should know what a session is doing and what it may safely do next without guessing.
 
-**Boundary:** Publish sanitized, revisioned snapshots and sequenced notifications for stable identity, lifecycle and waiting state, subscribers, writer authority, persistence health/position, account binding, and currently allowed actions. Operation replay is bounded and no credential paths or secrets are exposed.
+**Boundary:** Publish sanitized, revisioned snapshots and sequenced notifications for stable identity, lifecycle and waiting state, subscribers, writer authority, persistence health/position, account binding, and currently allowed actions. A committed clear/new receipt carries the transition ID, reason, previous/current thread evidence, writer evidence, instance epoch, and monotonic sequence; snapshot readback preserves the latest committed continuity edge for resync. Operation replay is bounded and no credential paths or secrets are exposed.
 
 ### P007 — Zero-restart account registration
 
@@ -99,7 +102,7 @@ Each number is a reviewable feature patch. The series is ordered because later p
 
 **Why:** The safety contracts are useful only if the terminal client exposes them without pretending a timeout or disconnect was success.
 
-**Boundary:** Add an account picker and account/logout controls, make explicit exit wait for strict terminal release, and expose typed `threadClear`/`threadNew` agent controls to both new and legacy-resumed threads. Clear/new replies first and changes the UI only after the exact successful completion event.
+**Boundary:** Add an account picker and account/logout controls, make explicit exit wait for strict terminal release, and expose typed `threadClear`/`threadNew` agent controls to both new and legacy-resumed threads. Clear/new changes the UI only after the exact committed transition; an ambiguous lost response retains the transition ID and blocks stale old-thread submission until authoritative retry/readback resolves it.
 
 **Status:** Implemented in P010.
 
@@ -115,7 +118,7 @@ Plugins may append bounded card, notice, or progress items to the exact thread's
 
 ## Runtime and relay boundary
 
-The custom app-server is the authority for account execution, thread writer ownership, persistence state, and safe control admission. External systems can consume those values and associate sessions with workflow roles, but this fork does not make a relay job equivalent to workflow state or responsibility assignment.
+The custom app-server is the authority for account execution, thread writer ownership, persistence state, safe control admission, and the exact committed old-to-new thread transition. External systems can consume those values and associate sessions with workflow roles, but Group, RoleSlot, handle, and their inheritance policy remain external authority; they are never stored in the app-server.
 
 `llc-relay` continues to move messages among Codex and Claude sessions. Plugin cards/notices/progress are a typed presentation surface for current subscribers, not a replacement transport, acknowledgement ledger, or proof that an agent completed a relayed request.
 
@@ -128,7 +131,7 @@ git checkout 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
 /path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD"
 ```
 
-The applier rejects a dirty or wrong-base worktree, verifies every patch digest, applies P001–P011 in order, and requires final tree `4d993b8b5960de01c6d2bafb4c1a7749c51280db`.
+The applier rejects a dirty or wrong-base worktree, verifies every patch digest, applies P001–P011 in order, and requires final tree `b5dd645e42e146aba3d1a0f87177c063cc73390c`.
 
 This separation is the maintenance strategy: when upstream advances, each P-number can be inspected, adapted, and verified against its own feature boundary.
 
@@ -138,9 +141,9 @@ The older custom series used migration numbers that official 0.149 later claimed
 
 ## Build, review, and publication
 
-[Actions run 32537192127](https://github.com/iLfounder/codex-cli-custom/actions/runs/32537192127) clean-applied P001–P011 and built both release binaries on macOS arm64. Artifact `9467506046` records patched tree `4d993b8b5960de01c6d2bafb4c1a7749c51280db`; deterministic Cargo.lock normalization produced compiled tree `c7033f3d9b42fd45391232ef7a266872bb233e20` and lock SHA-256 `598546764c876b93c6a59edcd5879b8c1b17cdf7c8df023fb051bcfb755a81f4`. The GitHub artifact digest is `sha256:3ec9679a8a81bb868993080a33dd51c4be11734806dcb2a46127877e8bd9733e`.
+The corrected candidate clean-applies as exactly P001–P011 to tree `b5dd645e42e146aba3d1a0f87177c063cc73390c`. Focused source checks and isolated live TUI/app-server smoke are complete. Two internal Codex reviewers independently inspected the same frozen predecessor scope in fresh contexts; the lead verified findings against source and call chains and integrated only confirmed defects.
 
-The internal Codex and external Opus reviewers inspected the same frozen predecessor candidate independently. The lead verified each finding against source and call chains, applied only the confirmed defects, regenerated the exact eleven-patch series, and rebuilt the corrected tree above.
+The full clean-applied macOS arm64 release build intentionally runs only in GitHub Actions. Until that workflow succeeds for this exact tree and publishes a matching artifact, earlier runs and artifacts are historical evidence for earlier trees, not release proof for this candidate.
 
 ## Historical working notes
 

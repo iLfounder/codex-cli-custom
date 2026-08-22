@@ -1,4 +1,4 @@
-From e140276b10f23e7c2f88dcaa50d8866a6418e474 Mon Sep 17 00:00:00 2001
+From 43431199f9b34bbe1fa0458420fece2f4b124ea9 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 16:05:16 +0900
 Subject: [PATCH] feat(custom): isolate account-sensitive consumers for 0.149
@@ -6,49 +6,60 @@ Subject: [PATCH] feat(custom): isolate account-sensitive consumers for 0.149
 ---
  .../schema/json/ClientRequest.json            |   7 +
  .../schema/json/ServerNotification.json       |   6 +
- .../codex_app_server_protocol.schemas.json    |  13 ++
- .../codex_app_server_protocol.v2.schemas.json |  13 ++
+ .../codex_app_server_protocol.schemas.json    |  13 +
+ .../codex_app_server_protocol.v2.schemas.json |  13 +
+ .../AccountRateLimitsUpdatedNotification.json |  37 +-
  .../json/v2/AppListUpdatedNotification.json   |   6 +
+ .../json/v2/GetAccountRateLimitsResponse.json |  35 ++
+ .../NullableGetAccountRateLimitsParams.json   |  25 +
  .../schema/json/v2/SkillsListParams.json      |   7 +
+ .../schema/json/v2/TurnStartParams.json       |  28 ++
+ .../schema/json/v2/TurnSteerParams.json       |  28 ++
  .../app-server-exports-experimental.json.zst  | Bin 140463 -> 148222 bytes
  .../app-server-exports-stable.json.zst        | Bin 142567 -> 142730 bytes
+ .../AccountRateLimitsUpdatedNotification.ts   |  18 +-
  .../v2/AppListUpdatedNotification.ts          |   2 +-
+ .../v2/GetAccountRateLimitsParams.ts          |   5 +
+ .../v2/GetAccountRateLimitsResponse.ts        |   9 +
  .../schema/typescript/v2/SkillsListParams.ts  |   4 +
  .../src/protocol/common.rs                    |   1 +
  .../src/protocol/v2/apps.rs                   |   1 +
  .../src/protocol/v2/plugin.rs                 |   4 +
  .../src/protocol/v2/tests.rs                  |   5 +-
+ .../src/protocol/v2/turn.rs                   |   7 +
  codex-rs/app-server/README.md                 |   8 +-
+ .../app-server/src/bespoke_event_handling.rs  |  98 +++-
  .../app-server/src/effective_plugin_change.rs |   2 +-
- codex-rs/app-server/src/extensions.rs         |  21 +-
+ codex-rs/app-server/src/extensions.rs         |  64 ++-
  codex-rs/app-server/src/mcp_refresh.rs        |   1 -
  codex-rs/app-server/src/message_processor.rs  |   8 +-
  codex-rs/app-server/src/request_processors.rs |   1 +
- .../src/request_processors/apps_processor.rs  | 101 +++++++---
+ .../src/request_processors/apps_processor.rs  | 101 ++--
  .../apps_processor/installed.rs               |   9 +-
  .../request_processors/apps_processor/read.rs |  10 +-
- .../request_processors/catalog_processor.rs   |  44 ++++-
+ .../request_processors/catalog_processor.rs   |  44 +-
  .../request_processors/config_processor.rs    |   2 +-
- .../request_processors/feedback_processor.rs  |  60 ++++--
+ .../request_processors/feedback_processor.rs  |  60 ++-
  .../marketplace_processor.rs                  |   2 +-
- .../src/request_processors/mcp_processor.rs   |  36 +++-
+ .../src/request_processors/mcp_processor.rs   |  36 +-
  .../src/request_processors/plugins.rs         |   2 +-
  .../request_processors/thread_lifecycle.rs    |  14 +-
  .../src/request_processors/turn_processor.rs  |   6 +-
  codex-rs/app-server/src/skills_watcher.rs     |   2 +-
- codex-rs/app-server/src/turn_cost_worker.rs   | 179 ++++--------------
- .../app-server/src/turn_cost_worker_tests.rs  | 138 +++++---------
- .../app-server/tests/suite/v2/skills_list.rs  |  25 +++
+ codex-rs/app-server/src/turn_cost_worker.rs   | 179 ++-----
+ .../app-server/src/turn_cost_worker_tests.rs  | 138 ++----
+ .../app-server/tests/suite/v2/rate_limits.rs  |   2 +
+ .../app-server/tests/suite/v2/skills_list.rs  |  25 +
  codex-rs/chatgpt/src/chatgpt_client.rs        |  13 +-
- codex-rs/chatgpt/src/connectors.rs            |  25 ++-
+ codex-rs/chatgpt/src/connectors.rs            |  25 +-
  codex-rs/chatgpt/src/get_task.rs              |   9 +-
  codex-rs/cli/src/main.rs                      |   3 -
  codex-rs/core/src/codex_delegate.rs           |   8 +-
  codex-rs/core/src/compact.rs                  |   2 +-
  codex-rs/core/src/compact_remote_request.rs   |   7 +-
  .../core/src/compact_remote_v2_attempt.rs     |   2 +-
- codex-rs/core/src/connectors.rs               |  42 ++--
- codex-rs/core/src/execution_account.rs        |  16 ++
+ codex-rs/core/src/connectors.rs               |  42 +-
+ codex-rs/core/src/execution_account.rs        |  16 +
  codex-rs/core/src/guardian/review_session.rs  |   4 +-
  codex-rs/core/src/lib.rs                      |   1 +
  codex-rs/core/src/mcp_openai_file.rs          |   7 +-
@@ -59,11 +70,11 @@ Subject: [PATCH] feat(custom): isolate account-sensitive consumers for 0.149
  codex-rs/core/src/session/review.rs           |   4 +
  codex-rs/core/src/session/session.rs          |   2 +
  codex-rs/core/src/session/tests.rs            |   8 +
- codex-rs/core/src/session/turn.rs             |  34 ++--
- codex-rs/core/src/session/turn_context.rs     |  34 +++-
+ codex-rs/core/src/session/turn.rs             |  34 +-
+ codex-rs/core/src/session/turn_context.rs     |  34 +-
  codex-rs/core/src/tasks/review.rs             |   4 +-
- codex-rs/core/src/thread_manager.rs           | 132 ++++++++++++-
- codex-rs/core/src/thread_manager_tests.rs     |  53 ++++++
+ codex-rs/core/src/thread_manager.rs           | 132 +++++-
+ codex-rs/core/src/thread_manager_tests.rs     |  53 +++
  .../src/tools/code_mode/execute_handler.rs    |   2 +-
  .../core/src/tools/code_mode/wait_handler.rs  |   2 +-
  .../tools/handlers/request_plugin_install.rs  |  10 +-
@@ -72,23 +83,47 @@ Subject: [PATCH] feat(custom): isolate account-sensitive consumers for 0.149
  codex-rs/core/tests/suite/responses_lite.rs   |  17 +-
  codex-rs/core/tests/suite/sqlite_state.rs     |   3 +-
  codex-rs/ext/git-attribution/src/lib.rs       |  15 +-
+ codex-rs/ext/goal/src/accounting.rs           |  80 ++--
+ codex-rs/ext/goal/src/api.rs                  | 137 +++++-
+ codex-rs/ext/goal/src/events.rs               |  12 +
  codex-rs/ext/goal/src/extension.rs            |  19 +-
- .../guardian-v2/src/async_scorer/extension.rs |  35 ++--
- .../src/async_scorer/extension_tests.rs       |  27 ++-
+ codex-rs/ext/goal/src/lib.rs                  |   7 +
+ codex-rs/ext/goal/src/mutations.rs            | 440 ++++++++++++++++++
+ codex-rs/ext/goal/src/spec.rs                 | 111 ++++-
+ codex-rs/ext/goal/src/steering.rs             |  35 ++
+ codex-rs/ext/goal/src/tool.rs                 | 407 +++++++++-------
+ codex-rs/ext/goal/templates/goals/cleared.md  |   3 +
+ codex-rs/ext/goal/templates/goals/replaced.md |   4 +
+ .../ext/goal/tests/goal_extension_backend.rs  | 174 +++++++
+ .../guardian-v2/src/async_scorer/extension.rs |  35 +-
+ .../src/async_scorer/extension_tests.rs       |  27 +-
  codex-rs/ext/guardian-v2/src/lib.rs           |   4 +-
  .../ext/image-generation/src/extension.rs     |  15 +-
- codex-rs/ext/web-search/src/extension.rs      |  33 ++--
+ codex-rs/ext/web-search/src/extension.rs      |  33 +-
+ codex-rs/mcp-server/src/codex_tool_runner.rs  |   4 +-
  codex-rs/mcp-server/src/message_processor.rs  |   9 +-
- codex-rs/memories/write/src/runtime.rs        |  64 +++++--
+ codex-rs/memories/write/src/runtime.rs        |  64 ++-
  codex-rs/memories/write/src/start.rs          |  10 +-
  codex-rs/memories/write/src/startup_tests.rs  |   2 +-
+ codex-rs/prompts/src/goals_tests.rs           |  12 +
+ codex-rs/protocol/src/turn_input.rs           |  18 +
+ codex-rs/rollout-trace/src/protocol_event.rs  |   2 +
+ codex-rs/rollout/src/policy.rs                |   1 +
+ codex-rs/rollout/src/tests.rs                 |   2 +
+ codex-rs/state/src/runtime/goal_mutations.rs  | 257 ++++++++++
  codex-rs/thread-manager-sample/src/main.rs    |   2 +-
  .../tui/src/app/app_server_event_targets.rs   |   7 +-
  codex-rs/tui/src/app/app_server_events.rs     |   9 +-
  codex-rs/tui/src/app/background_requests.rs   |   1 +
- .../tui/src/app/tests/connector_policy.rs     |  18 ++
+ .../tui/src/app/tests/connector_policy.rs     |  18 +
  codex-rs/tui/src/app/thread_routing.rs        |   1 +
- 84 files changed, 960 insertions(+), 520 deletions(-)
+ 113 files changed, 2756 insertions(+), 765 deletions(-)
+ create mode 100644 codex-rs/app-server-protocol/schema/json/v2/NullableGetAccountRateLimitsParams.json
+ create mode 100644 codex-rs/app-server-protocol/schema/typescript/v2/GetAccountRateLimitsParams.ts
+ create mode 100644 codex-rs/ext/goal/src/mutations.rs
+ create mode 100644 codex-rs/ext/goal/templates/goals/cleared.md
+ create mode 100644 codex-rs/ext/goal/templates/goals/replaced.md
+ create mode 100644 codex-rs/state/src/runtime/goal_mutations.rs
 
 diff --git a/codex-rs/app-server-protocol/schema/json/ClientRequest.json b/codex-rs/app-server-protocol/schema/json/ClientRequest.json
 index 94fc9e553..65431508e 100644
@@ -187,6 +222,64 @@ index 5b5560bd4..8a46af9f1 100644
          }
        },
        "title": "SkillsListParams",
+diff --git a/codex-rs/app-server-protocol/schema/json/v2/AccountRateLimitsUpdatedNotification.json b/codex-rs/app-server-protocol/schema/json/v2/AccountRateLimitsUpdatedNotification.json
+index 89466118d..64d433f2b 100644
+--- a/codex-rs/app-server-protocol/schema/json/v2/AccountRateLimitsUpdatedNotification.json
++++ b/codex-rs/app-server-protocol/schema/json/v2/AccountRateLimitsUpdatedNotification.json
+@@ -164,6 +164,23 @@
+       ],
+       "type": "object"
+     },
++    "SessionRuntimeAccountRef": {
++      "properties": {
++        "accountSlotId": {
++          "type": "string"
++        },
++        "executionGeneration": {
++          "format": "uint64",
++          "minimum": 0.0,
++          "type": "integer"
++        }
++      },
++      "required": [
++        "accountSlotId",
++        "executionGeneration"
++      ],
++      "type": "object"
++    },
+     "SpendControlLimitSnapshot": {
+       "properties": {
+         "limit": {
+@@ -190,10 +207,28 @@
+       "type": "object"
+     }
+   },
+-  "description": "Sparse rolling rate-limit update.\n\nClients should merge available values into the most recent `account/rateLimits/read` response or refetch that snapshot. Nullable account metadata may be unavailable in a rolling update and does not clear a previously observed value.",
++  "description": "Sparse rolling rate-limit update.\n\nClients should merge available values into the most recent matching `account/rateLimits/read` response or refetch that snapshot. New producers omit the notification when persisted account provenance is unavailable; nullable fields preserve wire compatibility with older producers.",
+   "properties": {
++    "executionAccount": {
++      "anyOf": [
++        {
++          "$ref": "#/definitions/SessionRuntimeAccountRef"
++        },
++        {
++          "type": "null"
++        }
++      ],
++      "description": "Persisted account binding for that turn. Older producers may leave this `null`."
++    },
+     "rateLimits": {
+       "$ref": "#/definitions/RateLimitSnapshot"
++    },
++    "threadId": {
++      "description": "Thread whose persisted turn binding produced this update.",
++      "type": [
++        "string",
++        "null"
++      ]
+     }
+   },
+   "required": [
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/AppListUpdatedNotification.json b/codex-rs/app-server-protocol/schema/json/v2/AppListUpdatedNotification.json
 index 46ca0f64d..4b31a6adb 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/AppListUpdatedNotification.json
@@ -204,6 +297,98 @@ index 46ca0f64d..4b31a6adb 100644
      }
    },
    "required": [
+diff --git a/codex-rs/app-server-protocol/schema/json/v2/GetAccountRateLimitsResponse.json b/codex-rs/app-server-protocol/schema/json/v2/GetAccountRateLimitsResponse.json
+index fac45c36a..8932451dc 100644
+--- a/codex-rs/app-server-protocol/schema/json/v2/GetAccountRateLimitsResponse.json
++++ b/codex-rs/app-server-protocol/schema/json/v2/GetAccountRateLimitsResponse.json
+@@ -250,6 +250,23 @@
+       ],
+       "type": "object"
+     },
++    "SessionRuntimeAccountRef": {
++      "properties": {
++        "accountSlotId": {
++          "type": "string"
++        },
++        "executionGeneration": {
++          "format": "uint64",
++          "minimum": 0.0,
++          "type": "integer"
++        }
++      },
++      "required": [
++        "accountSlotId",
++        "executionGeneration"
++      ],
++      "type": "object"
++    },
+     "SpendControlLimitSnapshot": {
+       "properties": {
+         "limit": {
+@@ -277,6 +294,17 @@
+     }
+   },
+   "properties": {
++    "executionAccount": {
++      "anyOf": [
++        {
++          "$ref": "#/definitions/SessionRuntimeAccountRef"
++        },
++        {
++          "type": "null"
++        }
++      ],
++      "description": "The account runtime captured for `thread_id`, or `null` for process-default reads."
++    },
+     "rateLimitResetCredits": {
+       "anyOf": [
+         {
+@@ -304,6 +332,13 @@
+         "object",
+         "null"
+       ]
++    },
++    "threadId": {
++      "description": "The exact thread subject used for this read, or `null` for legacy process-default reads.",
++      "type": [
++        "string",
++        "null"
++      ]
+     }
+   },
+   "required": [
+diff --git a/codex-rs/app-server-protocol/schema/json/v2/NullableGetAccountRateLimitsParams.json b/codex-rs/app-server-protocol/schema/json/v2/NullableGetAccountRateLimitsParams.json
+new file mode 100644
+index 000000000..7114f6876
+--- /dev/null
++++ b/codex-rs/app-server-protocol/schema/json/v2/NullableGetAccountRateLimitsParams.json
+@@ -0,0 +1,25 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "anyOf": [
++    {
++      "$ref": "#/definitions/GetAccountRateLimitsParams"
++    },
++    {
++      "type": "null"
++    }
++  ],
++  "definitions": {
++    "GetAccountRateLimitsParams": {
++      "properties": {
++        "threadId": {
++          "type": [
++            "string",
++            "null"
++          ]
++        }
++      },
++      "type": "object"
++    }
++  },
++  "title": "Nullable_GetAccountRateLimitsParams"
++}
+\ No newline at end of file
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/SkillsListParams.json b/codex-rs/app-server-protocol/schema/json/v2/SkillsListParams.json
 index a9a8a9ef8..e11088428 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/SkillsListParams.json
@@ -222,6 +407,98 @@ index a9a8a9ef8..e11088428 100644
      }
    },
    "title": "SkillsListParams",
+diff --git a/codex-rs/app-server-protocol/schema/json/v2/TurnStartParams.json b/codex-rs/app-server-protocol/schema/json/v2/TurnStartParams.json
+index 477e57e43..ea854ebc1 100644
+--- a/codex-rs/app-server-protocol/schema/json/v2/TurnStartParams.json
++++ b/codex-rs/app-server-protocol/schema/json/v2/TurnStartParams.json
+@@ -304,6 +304,23 @@
+         }
+       ]
+     },
++    "SessionRuntimeAccountRef": {
++      "properties": {
++        "accountSlotId": {
++          "type": "string"
++        },
++        "executionGeneration": {
++          "format": "uint64",
++          "minimum": 0.0,
++          "type": "integer"
++        }
++      },
++      "required": [
++        "accountSlotId",
++        "executionGeneration"
++      ],
++      "type": "object"
++    },
+     "Settings": {
+       "description": "Settings for a collaboration mode.",
+       "properties": {
+@@ -610,6 +627,17 @@
+       ],
+       "description": "Override the reasoning effort for this turn and subsequent turns."
+     },
++    "expectedExecutionAccount": {
++      "anyOf": [
++        {
++          "$ref": "#/definitions/SessionRuntimeAccountRef"
++        },
++        {
++          "type": "null"
++        }
++      ],
++      "description": "Exact execution account expected by the client that produced this input."
++    },
+     "input": {
+       "items": {
+         "$ref": "#/definitions/UserInput"
+diff --git a/codex-rs/app-server-protocol/schema/json/v2/TurnSteerParams.json b/codex-rs/app-server-protocol/schema/json/v2/TurnSteerParams.json
+index 2a3627cbd..3659e0f6a 100644
+--- a/codex-rs/app-server-protocol/schema/json/v2/TurnSteerParams.json
++++ b/codex-rs/app-server-protocol/schema/json/v2/TurnSteerParams.json
+@@ -51,6 +51,23 @@
+       ],
+       "type": "string"
+     },
++    "SessionRuntimeAccountRef": {
++      "properties": {
++        "accountSlotId": {
++          "type": "string"
++        },
++        "executionGeneration": {
++          "format": "uint64",
++          "minimum": 0.0,
++          "type": "integer"
++        }
++      },
++      "required": [
++        "accountSlotId",
++        "executionGeneration"
++      ],
++      "type": "object"
++    },
+     "TextElement": {
+       "properties": {
+         "byteRange": {
+@@ -264,6 +281,17 @@
+         "null"
+       ]
+     },
++    "expectedExecutionAccount": {
++      "anyOf": [
++        {
++          "$ref": "#/definitions/SessionRuntimeAccountRef"
++        },
++        {
++          "type": "null"
++        }
++      ],
++      "description": "Exact execution account expected by the client that produced this input."
++    },
+     "expectedTurnId": {
+       "description": "Required active turn id precondition. The request fails when it does not match the currently active turn.",
+       "type": "string"
 diff --git a/codex-rs/app-server-protocol/schema/precomputed/app-server-exports-experimental.json.zst b/codex-rs/app-server-protocol/schema/precomputed/app-server-exports-experimental.json.zst
 index 1abd9d55cdd9e5f363b897a09d7762db7efd6903..c76c037be202c49f21c8736c6c62113fcc9c73de 100644
 GIT binary patch
@@ -11280,6 +11557,37 @@ z4lvq?i!5Z?ez5tzDBN?JG2jrDsxr0Ey}zT=o)I@F0C{3%9M$UkLOLBStw^ehI<rjz
 zk%xfN%44Qe9f1n~YjG-Cfiw(GYZz<3$Cghs6snf6sf^=M!+ces^hPWcLn@tLYuhn`
 hxS@l!_=B}0@3(|eHeM@bu3!Jx-)!CFm@#h?0B$i%t1$oo
 
+diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/AccountRateLimitsUpdatedNotification.ts b/codex-rs/app-server-protocol/schema/typescript/v2/AccountRateLimitsUpdatedNotification.ts
+index a6d6a33f4..c5bb7f924 100644
+--- a/codex-rs/app-server-protocol/schema/typescript/v2/AccountRateLimitsUpdatedNotification.ts
++++ b/codex-rs/app-server-protocol/schema/typescript/v2/AccountRateLimitsUpdatedNotification.ts
+@@ -2,12 +2,22 @@
+ 
+ // This file was generated by [ts-rs](https://github.com/Aleph-Alpha/ts-rs). Do not edit this file manually.
+ import type { RateLimitSnapshot } from "./RateLimitSnapshot";
++import type { SessionRuntimeAccountRef } from "./SessionRuntimeAccountRef";
+ 
+ /**
+  * Sparse rolling rate-limit update.
+  *
+- * Clients should merge available values into the most recent `account/rateLimits/read` response
+- * or refetch that snapshot. Nullable account metadata may be unavailable in a rolling update and
+- * does not clear a previously observed value.
++ * Clients should merge available values into the most recent matching
++ * `account/rateLimits/read` response or refetch that snapshot. New producers omit the
++ * notification when persisted account provenance is unavailable; nullable fields preserve wire
++ * compatibility with older producers.
+  */
+-export type AccountRateLimitsUpdatedNotification = { rateLimits: RateLimitSnapshot, };
++export type AccountRateLimitsUpdatedNotification = {
++/**
++ * Thread whose persisted turn binding produced this update.
++ */
++threadId: string | null,
++/**
++ * Persisted account binding for that turn. Older producers may leave this `null`.
++ */
++executionAccount: SessionRuntimeAccountRef | null, rateLimits: RateLimitSnapshot, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/AppListUpdatedNotification.ts b/codex-rs/app-server-protocol/schema/typescript/v2/AppListUpdatedNotification.ts
 index c6ad87f2c..568d9f987 100644
 --- a/codex-rs/app-server-protocol/schema/typescript/v2/AppListUpdatedNotification.ts
@@ -11290,6 +11598,39 @@ index c6ad87f2c..568d9f987 100644
   */
 -export type AppListUpdatedNotification = { data: Array<AppInfo>, };
 +export type AppListUpdatedNotification = { threadId: string | null, data: Array<AppInfo>, };
+diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/GetAccountRateLimitsParams.ts b/codex-rs/app-server-protocol/schema/typescript/v2/GetAccountRateLimitsParams.ts
+new file mode 100644
+index 000000000..0820aec52
+--- /dev/null
++++ b/codex-rs/app-server-protocol/schema/typescript/v2/GetAccountRateLimitsParams.ts
+@@ -0,0 +1,5 @@
++// GENERATED CODE! DO NOT MODIFY BY HAND!
++
++// This file was generated by [ts-rs](https://github.com/Aleph-Alpha/ts-rs). Do not edit this file manually.
++
++export type GetAccountRateLimitsParams = { threadId?: string | null, };
+diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/GetAccountRateLimitsResponse.ts b/codex-rs/app-server-protocol/schema/typescript/v2/GetAccountRateLimitsResponse.ts
+index af400634e..75cff46be 100644
+--- a/codex-rs/app-server-protocol/schema/typescript/v2/GetAccountRateLimitsResponse.ts
++++ b/codex-rs/app-server-protocol/schema/typescript/v2/GetAccountRateLimitsResponse.ts
+@@ -3,8 +3,17 @@
+ // This file was generated by [ts-rs](https://github.com/Aleph-Alpha/ts-rs). Do not edit this file manually.
+ import type { RateLimitResetCreditsSummary } from "./RateLimitResetCreditsSummary";
+ import type { RateLimitSnapshot } from "./RateLimitSnapshot";
++import type { SessionRuntimeAccountRef } from "./SessionRuntimeAccountRef";
+ 
+ export type GetAccountRateLimitsResponse = {
++/**
++ * The exact thread subject used for this read, or `null` for legacy process-default reads.
++ */
++threadId: string | null,
++/**
++ * The account runtime captured for `thread_id`, or `null` for process-default reads.
++ */
++executionAccount: SessionRuntimeAccountRef | null,
+ /**
+  * Backward-compatible single-bucket view; mirrors the historical payload.
+  */
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/SkillsListParams.ts b/codex-rs/app-server-protocol/schema/typescript/v2/SkillsListParams.ts
 index 4adeb38b3..e2742c0aa 100644
 --- a/codex-rs/app-server-protocol/schema/typescript/v2/SkillsListParams.ts
@@ -11372,6 +11713,38 @@ index a4d867cf9..1ca960b5b 100644
              "cwds": ["/repo"],
              "forceReload": true,
          }),
+diff --git a/codex-rs/app-server-protocol/src/protocol/v2/turn.rs b/codex-rs/app-server-protocol/src/protocol/v2/turn.rs
+index 0b2c092ec..fc69845f8 100644
+--- a/codex-rs/app-server-protocol/src/protocol/v2/turn.rs
++++ b/codex-rs/app-server-protocol/src/protocol/v2/turn.rs
+@@ -1,6 +1,7 @@
+ use super::ApprovalsReviewer;
+ use super::AskForApproval;
+ use super::SandboxPolicy;
++use super::SessionRuntimeAccountRef;
+ use super::Turn;
+ use crate::JsonSchema;
+ use crate::TS;
+@@ -70,6 +71,9 @@ pub struct AdditionalContextEntry {
+ #[ts(export_to = "v2/")]
+ pub struct TurnStartParams {
+     pub thread_id: String,
++    /// Exact execution account expected by the client that produced this input.
++    #[ts(optional = nullable)]
++    pub expected_execution_account: Option<SessionRuntimeAccountRef>,
+     #[ts(optional = nullable)]
+     pub client_user_message_id: Option<String>,
+     pub input: Vec<UserInput>,
+@@ -174,6 +178,9 @@ pub struct TurnStartResponse {
+ #[ts(export_to = "v2/")]
+ pub struct TurnSteerParams {
+     pub thread_id: String,
++    /// Exact execution account expected by the client that produced this input.
++    #[ts(optional = nullable)]
++    pub expected_execution_account: Option<SessionRuntimeAccountRef>,
+     #[ts(optional = nullable)]
+     pub client_user_message_id: Option<String>,
+     pub input: Vec<UserInput>,
 diff --git a/codex-rs/app-server/README.md b/codex-rs/app-server/README.md
 index 787e6a48e..5ec11f3ad 100644
 --- a/codex-rs/app-server/README.md
@@ -11409,6 +11782,241 @@ index 787e6a48e..5ec11f3ad 100644
      "data": [
        {
          "id": "demo-app",
+diff --git a/codex-rs/app-server/src/bespoke_event_handling.rs b/codex-rs/app-server/src/bespoke_event_handling.rs
+index 08a0bb001..983fd5c38 100644
+--- a/codex-rs/app-server/src/bespoke_event_handling.rs
++++ b/codex-rs/app-server/src/bespoke_event_handling.rs
+@@ -53,6 +53,7 @@ use codex_app_server_protocol::RawResponseItemCompletedNotification;
+ use codex_app_server_protocol::RequestId;
+ use codex_app_server_protocol::ServerNotification;
+ use codex_app_server_protocol::ServerRequestPayload;
++use codex_app_server_protocol::SessionRuntimeAccountRef;
+ use codex_app_server_protocol::StrictReviewRequiredNotification;
+ use codex_app_server_protocol::ThreadGoalUpdatedNotification;
+ use codex_app_server_protocol::ThreadItem;
+@@ -115,6 +116,7 @@ use codex_protocol::request_user_input::RequestUserInputAnswer as CoreRequestUse
+ use codex_protocol::request_user_input::RequestUserInputResponse as CoreRequestUserInputResponse;
+ use codex_sandboxing::policy_transforms::intersect_permission_profiles;
+ use codex_shell_command::parse_command::shlex_join;
++use codex_thread_store::ThreadStore;
+ use codex_utils_absolute_path::AbsolutePathBuf;
+ use codex_utils_path_uri::LegacyAppPathString;
+ use std::collections::HashMap;
+@@ -145,6 +147,7 @@ pub(crate) async fn apply_bespoke_event_handling(
+     conversation_id: ThreadId,
+     conversation: Arc<CodexThread>,
+     thread_manager: Arc<ThreadManager>,
++    thread_store: Arc<dyn ThreadStore>,
+     outgoing: ThreadScopedOutgoingMessageSender,
+     thread_state: Arc<tokio::sync::Mutex<ThreadState>>,
+     thread_watch_manager: ThreadWatchManager,
+@@ -931,8 +934,14 @@ pub(crate) async fn apply_bespoke_event_handling(
+                 .await;
+         }
+         EventMsg::TokenCount(token_count_event) => {
+-            handle_token_count_event(conversation_id, event_turn_id, token_count_event, &outgoing)
+-                .await;
++            handle_token_count_event(
++                conversation_id,
++                event_turn_id,
++                token_count_event,
++                thread_store.as_ref(),
++                &outgoing,
++            )
++            .await;
+         }
+         EventMsg::Error(ev) => {
+             thread_watch_manager
+@@ -1596,9 +1605,32 @@ async fn handle_token_count_event(
+     conversation_id: ThreadId,
+     turn_id: String,
+     token_count_event: TokenCountEvent,
++    thread_store: &dyn ThreadStore,
+     outgoing: &ThreadScopedOutgoingMessageSender,
+ ) {
+     let TokenCountEvent { info, rate_limits } = token_count_event;
++    let execution_account = if rate_limits.is_some() {
++        match thread_store
++            .turn_execution_account(conversation_id, turn_id.clone())
++            .await
++        {
++            Ok(Some(binding)) => Some(SessionRuntimeAccountRef {
++                account_slot_id: binding.slot_id,
++                execution_generation: binding.generation,
++            }),
++            Ok(None) => None,
++            Err(err) => {
++                tracing::warn!(
++                    thread_id = %conversation_id,
++                    turn_id,
++                    "failed to read persisted execution account for rate-limit update: {err}"
++                );
++                None
++            }
++        }
++    } else {
++        None
++    };
+     if let Some(token_usage) = info.map(ThreadTokenUsage::from) {
+         let notification = ThreadTokenUsageUpdatedNotification {
+             thread_id: conversation_id.to_string(),
+@@ -1609,10 +1641,12 @@ async fn handle_token_count_event(
+             .send_server_notification(ServerNotification::ThreadTokenUsageUpdated(notification))
+             .await;
+     }
+-    if let Some(rate_limits) = rate_limits {
++    if let (Some(rate_limits), Some(execution_account)) = (rate_limits, execution_account) {
+         outgoing
+             .send_server_notification(ServerNotification::AccountRateLimitsUpdated(
+                 AccountRateLimitsUpdatedNotification {
++                    thread_id: Some(conversation_id.to_string()),
++                    execution_account: Some(execution_account),
+                     rate_limits: rate_limits.into(),
+                 },
+             ))
+@@ -2166,6 +2200,8 @@ mod tests {
+     use codex_protocol::protocol::TokenUsageInfo;
+     use codex_protocol::protocol::UserMessageEvent;
+     use codex_rollout::RolloutItem;
++    use codex_thread_store::AppendThreadItemsParams;
++    use codex_thread_store::InMemoryThreadStore;
+     use codex_thread_store::StoredThread;
+     use codex_thread_store::StoredThreadHistory;
+     use codex_utils_absolute_path::AbsolutePathBuf;
+@@ -2182,6 +2218,10 @@ mod tests {
+         Arc::new(Mutex::new(ThreadState::default()))
+     }
+ 
++    fn test_thread_store() -> Arc<dyn ThreadStore> {
++        Arc::new(InMemoryThreadStore::default())
++    }
++
+     const TEST_TURN_COMPLETED_AT: i64 = 1_716_000_456;
+     const TEST_TURN_DURATION_MS: i64 = 1_234;
+ 
+@@ -2390,6 +2430,7 @@ mod tests {
+                 self.conversation_id,
+                 self.conversation.clone(),
+                 self.thread_manager.clone(),
++                test_thread_store(),
+                 self.outgoing.clone(),
+                 self.thread_state.clone(),
+                 self.thread_watch_manager.clone(),
+@@ -3391,6 +3432,7 @@ mod tests {
+             conversation_id,
+             conversation,
+             thread_manager,
++            test_thread_store(),
+             outgoing,
+             thread_state,
+             thread_watch_manager,
+@@ -3468,6 +3510,7 @@ mod tests {
+             conversation_id,
+             conversation,
+             thread_manager,
++            test_thread_store(),
+             outgoing,
+             new_thread_state(),
+             thread_watch_manager.clone(),
+@@ -3557,6 +3600,7 @@ mod tests {
+             conversation_id,
+             conversation,
+             thread_manager,
++            test_thread_store(),
+             outgoing,
+             new_thread_state(),
+             ThreadWatchManager::new(),
+@@ -3852,6 +3896,26 @@ mod tests {
+     async fn test_handle_token_count_event_emits_usage_and_rate_limits() -> Result<()> {
+         let conversation_id = ThreadId::new();
+         let turn_id = "turn-123".to_string();
++        let thread_store = Arc::new(InMemoryThreadStore::default());
++        let execution_account = codex_protocol::protocol::ExecutionAccountBinding {
++            slot_id: "secondary".to_string(),
++            generation: 7,
++        };
++        let turn_context = serde_json::from_value(json!({
++            "turn_id": turn_id,
++            "execution_account": execution_account,
++            "cwd": std::env::current_dir()?,
++            "approval_policy": "never",
++            "sandbox_policy": {"type": "danger-full-access"},
++            "model": "test-model",
++            "summary": "auto"
++        }))?;
++        thread_store
++            .append_items(AppendThreadItemsParams {
++                thread_id: conversation_id,
++                items: vec![RolloutItem::TurnContext(turn_context)],
++            })
++            .await?;
+         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
+         let outgoing = Arc::new(OutgoingMessageSender::new(
+             tx,
+@@ -3909,8 +3973,9 @@ mod tests {
+             turn_id.clone(),
+             TokenCountEvent {
+                 info: Some(info),
+-                rate_limits: Some(rate_limits),
++                rate_limits: Some(rate_limits.clone()),
+             },
++            thread_store.as_ref(),
+             &outgoing,
+         )
+         .await;
+@@ -3932,6 +3997,14 @@ mod tests {
+         let second = recv_broadcast_notification(&mut rx).await?;
+         match second {
+             ServerNotification::AccountRateLimitsUpdated(payload) => {
++                assert_eq!(payload.thread_id, Some(conversation_id.to_string()));
++                assert_eq!(
++                    payload.execution_account,
++                    Some(SessionRuntimeAccountRef {
++                        account_slot_id: "secondary".to_string(),
++                        execution_generation: 7,
++                    })
++                );
+                 assert_eq!(payload.rate_limits.limit_id.as_deref(), Some("codex"));
+                 assert_eq!(payload.rate_limits.limit_name, None);
+                 assert!(payload.rate_limits.primary.is_some());
+@@ -3939,6 +4012,21 @@ mod tests {
+             }
+             other => bail!("unexpected notification: {other:?}"),
+         }
++        handle_token_count_event(
++            conversation_id,
++            "turn-without-persisted-binding".to_string(),
++            TokenCountEvent {
++                info: None,
++                rate_limits: Some(rate_limits),
++            },
++            thread_store.as_ref(),
++            &outgoing,
++        )
++        .await;
++        assert!(
++            rx.try_recv().is_err(),
++            "missing persisted turn binding must omit the rate-limit notification"
++        );
+         Ok(())
+     }
+ 
+@@ -3956,6 +4044,7 @@ mod tests {
+             vec![ConnectionId(1)],
+             ThreadId::new(),
+         );
++        let thread_store = test_thread_store();
+ 
+         handle_token_count_event(
+             conversation_id,
+@@ -3964,6 +4053,7 @@ mod tests {
+                 info: None,
+                 rate_limits: None,
+             },
++            thread_store.as_ref(),
+             &outgoing,
+         )
+         .await;
 diff --git a/codex-rs/app-server/src/effective_plugin_change.rs b/codex-rs/app-server/src/effective_plugin_change.rs
 index 2a64377e2..63b451b81 100644
 --- a/codex-rs/app-server/src/effective_plugin_change.rs
@@ -11423,10 +12031,18 @@ index 2a64377e2..63b451b81 100644
  
          let refresh_thread_manager = Arc::clone(&thread_manager);
 diff --git a/codex-rs/app-server/src/extensions.rs b/codex-rs/app-server/src/extensions.rs
-index 21855dffc..dbc3ad4ff 100644
+index 21855dffc..d99b3d9a8 100644
 --- a/codex-rs/app-server/src/extensions.rs
 +++ b/codex-rs/app-server/src/extensions.rs
-@@ -22,7 +22,6 @@ use codex_extension_api::ExtensionWarning;
+@@ -5,6 +5,7 @@ use std::time::Duration;
+ use codex_analytics::AnalyticsEventsClient;
+ use codex_app_server_protocol::ServerNotification;
+ use codex_app_server_protocol::ThreadGoal;
++use codex_app_server_protocol::ThreadGoalClearedNotification;
+ use codex_app_server_protocol::ThreadGoalUpdatedNotification;
+ use codex_app_server_protocol::ThreadQueueChangedNotification;
+ use codex_app_server_protocol::WarningNotification;
+@@ -22,7 +23,6 @@ use codex_extension_api::ExtensionWarning;
  use codex_goal_extension::GoalExtensionConfig;
  use codex_goal_extension::GoalService;
  use codex_http_client::HttpClientFactory;
@@ -11434,7 +12050,7 @@ index 21855dffc..dbc3ad4ff 100644
  use codex_protocol::ThreadId;
  use codex_protocol::error::CodexErr;
  use codex_protocol::protocol::Event;
-@@ -37,7 +36,6 @@ use crate::thread_state::ThreadStateManager;
+@@ -37,7 +37,6 @@ use crate::thread_state::ThreadStateManager;
  
  pub(crate) struct ThreadExtensionDependencies {
      pub(crate) event_sink: Arc<dyn ExtensionEventSink>,
@@ -11442,7 +12058,7 @@ index 21855dffc..dbc3ad4ff 100644
      pub(crate) state_db: Option<StateDbHandle>,
      pub(crate) analytics_events_client: AnalyticsEventsClient,
      pub(crate) thread_manager: Weak<ThreadManager>,
-@@ -59,7 +57,6 @@ where
+@@ -59,7 +58,6 @@ where
  {
      let ThreadExtensionDependencies {
          event_sink,
@@ -11450,7 +12066,7 @@ index 21855dffc..dbc3ad4ff 100644
          state_db,
          analytics_events_client,
          thread_manager,
-@@ -88,23 +85,13 @@ where
+@@ -88,23 +86,13 @@ where
              },
          );
      }
@@ -11478,6 +12094,76 @@ index 21855dffc..dbc3ad4ff 100644
          Some(config.codex_home.clone())
      });
      let skill_providers = codex_skills_extension::SkillProviders::new()
+@@ -239,6 +227,38 @@ impl ExtensionEventSink for AppServerExtensionEventSink {
+                         .await;
+                 });
+             }
++            EventMsg::ThreadGoalCleared(thread_goal_event) => {
++                let thread_id = thread_goal_event.thread_id;
++                let turn_id = thread_goal_event.turn_id;
++                let previous_goal: ThreadGoal = thread_goal_event.previous_goal.into();
++                let revision = thread_goal_event.revision;
++                if let Some(listener_command_tx) = self
++                    .thread_state_manager
++                    .current_listener_command_tx(thread_id)
++                {
++                    let command = ThreadListenerCommand::EmitThreadGoalCleared {
++                        turn_id: turn_id.clone(),
++                        previous_goal: Some(previous_goal.clone()),
++                        revision,
++                    };
++                    if listener_command_tx.send(command).is_ok() {
++                        return;
++                    }
++                }
++                let outgoing = Arc::clone(&self.outgoing);
++                tokio::spawn(async move {
++                    outgoing
++                        .send_server_notification(ServerNotification::ThreadGoalCleared(
++                            ThreadGoalClearedNotification {
++                                thread_id: thread_id.to_string(),
++                                turn_id,
++                                previous_goal: Some(previous_goal),
++                                revision,
++                            },
++                        ))
++                        .await;
++                });
++            }
+             msg => {
+                 tracing::debug!(event_id = %event.id, ?msg, "dropping unsupported extension event");
+             }
+@@ -357,7 +377,11 @@ mod tests {
+         });
+         sink.emit(thread_goal_updated_event(thread_id, "turn-2"));
+         listener_command_tx
+-            .send(ThreadListenerCommand::EmitThreadGoalCleared)
++            .send(ThreadListenerCommand::EmitThreadGoalCleared {
++                turn_id: None,
++                previous_goal: None,
++                revision: 0,
++            })
+             .expect("listener command channel should be open");
+ 
+         let mut observed = Vec::new();
+@@ -371,7 +395,7 @@ mod tests {
+                     observed.push(turn_id.expect("extension goal updates should include turn ids"));
+                 }
+                 ThreadListenerCommand::EmitWarning { message } => observed.push(message),
+-                ThreadListenerCommand::EmitThreadGoalCleared => {
++                ThreadListenerCommand::EmitThreadGoalCleared { .. } => {
+                     observed.push("cleared".to_string())
+                 }
+                 _ => panic!("unexpected listener command"),
+@@ -624,6 +648,8 @@ mod tests {
+                 turn_id: Some(turn_id.to_string()),
+                 goal: CoreThreadGoal {
+                     thread_id,
++                    goal_id: "goal-1".to_string(),
++                    revision: 1,
+                     objective: "wire extension events".to_string(),
+                     status: ThreadGoalStatus::Active,
+                     token_budget: Some(123),
 diff --git a/codex-rs/app-server/src/mcp_refresh.rs b/codex-rs/app-server/src/mcp_refresh.rs
 index 148ea6a56..f5226ba24 100644
 --- a/codex-rs/app-server/src/mcp_refresh.rs
@@ -12751,6 +13437,19 @@ index d9f7009e5..a8755a31e 100644
 -    .await
 -    .expect("timed out waiting for turn-cost request");
 -}
+diff --git a/codex-rs/app-server/tests/suite/v2/rate_limits.rs b/codex-rs/app-server/tests/suite/v2/rate_limits.rs
+index 8103f9fa3..2cc79c076 100644
+--- a/codex-rs/app-server/tests/suite/v2/rate_limits.rs
++++ b/codex-rs/app-server/tests/suite/v2/rate_limits.rs
+@@ -237,6 +237,8 @@ async fn get_account_rate_limits_returns_snapshot(
+         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
+ 
+     let expected = GetAccountRateLimitsResponse {
++        thread_id: None,
++        execution_account: None,
+         rate_limits: RateLimitSnapshot {
+             limit_id: Some("codex".to_string()),
+             limit_name: None,
 diff --git a/codex-rs/app-server/tests/suite/v2/skills_list.rs b/codex-rs/app-server/tests/suite/v2/skills_list.rs
 index 26d135af2..d266960ca 100644
 --- a/codex-rs/app-server/tests/suite/v2/skills_list.rs
@@ -14297,6 +14996,516 @@ index a0a3e4dcb..a1c93f5c9 100644
          base_url,
          http_client_factory,
      }));
+diff --git a/codex-rs/ext/goal/src/accounting.rs b/codex-rs/ext/goal/src/accounting.rs
+index ea942ea15..25b321f35 100644
+--- a/codex-rs/ext/goal/src/accounting.rs
++++ b/codex-rs/ext/goal/src/accounting.rs
+@@ -27,27 +27,27 @@ struct GoalAccountingInner {
+ struct GoalTurnAccounting {
+     current_token_usage: TokenUsage,
+     last_accounted_token_usage: TokenUsage,
+-    active_goal_id: Option<String>,
++    active_goal_version: Option<codex_state::GoalVersion>,
+     account_tokens: bool,
+ }
+ 
+ #[derive(Debug)]
+ struct GoalWallClockAccounting {
+     last_accounted_at: Instant,
+-    active_goal_id: Option<String>,
++    active_goal_version: Option<codex_state::GoalVersion>,
+ }
+ 
+ #[derive(Debug, Clone)]
+ pub(crate) struct GoalProgressSnapshot {
+     pub(crate) current_token_usage: TokenUsage,
+-    pub(crate) expected_goal_id: String,
++    pub(crate) expected_version: codex_state::GoalVersion,
+     pub(crate) time_delta_seconds: i64,
+     pub(crate) token_delta: i64,
+ }
+ 
+ #[derive(Debug, Clone)]
+ pub(crate) struct IdleGoalProgressSnapshot {
+-    pub(crate) expected_goal_id: String,
++    pub(crate) expected_version: codex_state::GoalVersion,
+     pub(crate) time_delta_seconds: i64,
+ }
+ 
+@@ -105,7 +105,7 @@ impl GoalAccountingState {
+         let Some(turn) = inner.turns.get(turn_id) else {
+             return false;
+         };
+-        turn.account_tokens && turn.active_goal_id.is_some()
++        turn.account_tokens && turn.active_goal_version.is_some()
+     }
+ 
+     pub(crate) fn record_token_usage(
+@@ -131,51 +131,52 @@ impl GoalAccountingState {
+         })
+     }
+ 
+-    pub(crate) fn mark_turn_goal_active(&self, turn_id: &str, goal_id: impl Into<String>) {
++    pub(crate) fn mark_turn_goal_active(
++        &self,
++        turn_id: &str,
++        goal_version: codex_state::GoalVersion,
++    ) {
+         let mut inner = self.inner();
+-        let goal_id = goal_id.into();
+-        if inner.budget_limit_reported_goal_id.as_deref() != Some(goal_id.as_str()) {
++        if inner.budget_limit_reported_goal_id.as_deref() != Some(goal_version.goal_id.as_str()) {
+             inner.budget_limit_reported_goal_id = None;
+         }
+         if let Some(turn) = inner.turns.get_mut(turn_id) {
+-            turn.active_goal_id = Some(goal_id.clone());
++            turn.active_goal_version = Some(goal_version.clone());
+             if inner.current_turn_id.as_deref() == Some(turn_id) {
+-                inner.wall_clock.mark_active_goal(goal_id);
++                inner.wall_clock.mark_active_goal(goal_version);
+             }
+         }
+     }
+ 
+     pub(crate) fn mark_current_turn_goal_active(
+         &self,
+-        goal_id: impl Into<String>,
++        goal_version: codex_state::GoalVersion,
+     ) -> Option<String> {
+         let mut inner = self.inner();
+         let turn_id = inner.current_turn_id.clone()?;
+-        let goal_id = goal_id.into();
+-        if inner.budget_limit_reported_goal_id.as_deref() != Some(goal_id.as_str()) {
++        if inner.budget_limit_reported_goal_id.as_deref() != Some(goal_version.goal_id.as_str()) {
+             inner.budget_limit_reported_goal_id = None;
+         }
+         let turn = inner.turns.get_mut(turn_id.as_str())?;
+-        turn.active_goal_id = Some(goal_id.clone());
++        turn.active_goal_version = Some(goal_version.clone());
+         turn.reset_baseline_to_current();
+-        inner.wall_clock.mark_active_goal(goal_id);
++        inner.wall_clock.mark_active_goal(goal_version);
+         Some(turn_id)
+     }
+ 
+-    pub(crate) fn mark_idle_goal_active(&self, goal_id: impl Into<String>) {
++    pub(crate) fn mark_idle_goal_active(&self, goal_version: codex_state::GoalVersion) {
+         let mut inner = self.inner();
+-        let goal_id = goal_id.into();
+-        if inner.budget_limit_reported_goal_id.as_deref() != Some(goal_id.as_str()) {
++        if inner.budget_limit_reported_goal_id.as_deref() != Some(goal_version.goal_id.as_str()) {
+             inner.budget_limit_reported_goal_id = None;
+         }
+-        inner.wall_clock.mark_active_goal(goal_id);
++        inner.wall_clock.mark_active_goal(goal_version);
+     }
+ 
+     pub(crate) fn clear_current_turn_goal(&self) -> Option<String> {
+         let mut inner = self.inner();
+         let turn_id = inner.current_turn_id.clone()?;
+         if let Some(turn) = inner.turns.get_mut(turn_id.as_str()) {
+-            turn.active_goal_id = None;
++            turn.active_goal_version = None;
+         }
+         inner.wall_clock.clear_active_goal();
+         inner.budget_limit_reported_goal_id = None;
+@@ -187,7 +188,7 @@ impl GoalAccountingState {
+         if let Some(turn_id) = inner.current_turn_id.clone()
+             && let Some(turn) = inner.turns.get_mut(turn_id.as_str())
+         {
+-            turn.active_goal_id = None;
++            turn.active_goal_version = None;
+         }
+         inner.wall_clock.clear_active_goal();
+         inner.budget_limit_reported_goal_id = None;
+@@ -199,10 +200,10 @@ impl GoalAccountingState {
+         if !turn.account_tokens {
+             return None;
+         }
+-        let expected_goal_id = turn.active_goal_id()?;
++        let expected_version = turn.active_goal_version()?;
+         let token_delta = turn.token_delta_since_last_accounting();
+         let time_delta_seconds =
+-            if inner.wall_clock.active_goal_id.as_deref() == Some(expected_goal_id.as_str()) {
++            if inner.wall_clock.active_goal_version.as_ref() == Some(&expected_version) {
+                 inner.wall_clock.time_delta_since_last_accounting()
+             } else {
+                 0
+@@ -212,7 +213,7 @@ impl GoalAccountingState {
+         }
+         Some(GoalProgressSnapshot {
+             current_token_usage: turn.current_token_usage.clone(),
+-            expected_goal_id,
++            expected_version,
+             time_delta_seconds,
+             token_delta,
+         })
+@@ -220,13 +221,13 @@ impl GoalAccountingState {
+ 
+     pub(crate) fn idle_progress_snapshot(&self) -> Option<IdleGoalProgressSnapshot> {
+         let inner = self.inner();
+-        let expected_goal_id = inner.wall_clock.active_goal_id.clone()?;
++        let expected_version = inner.wall_clock.active_goal_version.clone()?;
+         let time_delta_seconds = inner.wall_clock.time_delta_since_last_accounting();
+         if time_delta_seconds == 0 {
+             return None;
+         }
+         Some(IdleGoalProgressSnapshot {
+-            expected_goal_id,
++            expected_version,
+             time_delta_seconds,
+         })
+     }
+@@ -235,6 +236,7 @@ impl GoalAccountingState {
+         &self,
+         turn_id: &str,
+         snapshot: &GoalProgressSnapshot,
++        updated_version: codex_state::GoalVersion,
+         status: ThreadGoalStatus,
+         budget_limited_goal_disposition: BudgetLimitedGoalDisposition,
+     ) {
+@@ -243,12 +245,16 @@ impl GoalAccountingState {
+         if let Some(turn) = inner.turns.get_mut(turn_id) {
+             turn.last_accounted_token_usage = snapshot.current_token_usage.clone();
+             if clear_active_goal {
+-                turn.active_goal_id = None;
++                turn.active_goal_version = None;
++            } else {
++                turn.active_goal_version = Some(updated_version.clone());
+             }
+         }
+         inner.wall_clock.mark_accounted(snapshot.time_delta_seconds);
+         if clear_active_goal {
+             inner.wall_clock.clear_active_goal();
++        } else {
++            inner.wall_clock.active_goal_version = Some(updated_version);
+         }
+         if status != ThreadGoalStatus::BudgetLimited {
+             inner.budget_limit_reported_goal_id = None;
+@@ -266,6 +272,7 @@ impl GoalAccountingState {
+     pub(crate) fn mark_idle_progress_accounted_for_status(
+         &self,
+         snapshot: &IdleGoalProgressSnapshot,
++        updated_version: codex_state::GoalVersion,
+         status: ThreadGoalStatus,
+         budget_limited_goal_disposition: BudgetLimitedGoalDisposition,
+     ) {
+@@ -274,6 +281,8 @@ impl GoalAccountingState {
+         inner.wall_clock.mark_accounted(snapshot.time_delta_seconds);
+         if clear_active_goal {
+             inner.wall_clock.clear_active_goal();
++        } else {
++            inner.wall_clock.active_goal_version = Some(updated_version);
+         }
+         if status != ThreadGoalStatus::BudgetLimited {
+             inner.budget_limit_reported_goal_id = None;
+@@ -363,13 +372,13 @@ impl GoalTurnAccounting {
+         Self {
+             last_accounted_token_usage: current_token_usage.clone(),
+             current_token_usage,
+-            active_goal_id: None,
++            active_goal_version: None,
+             account_tokens,
+         }
+     }
+ 
+-    fn active_goal_id(&self) -> Option<String> {
+-        self.active_goal_id.clone()
++    fn active_goal_version(&self) -> Option<codex_state::GoalVersion> {
++        self.active_goal_version.clone()
+     }
+ 
+     fn reset_baseline_to_current(&mut self) {
+@@ -388,7 +397,7 @@ impl GoalWallClockAccounting {
+     fn new() -> Self {
+         Self {
+             last_accounted_at: Instant::now(),
+-            active_goal_id: None,
++            active_goal_version: None,
+         }
+     }
+ 
+@@ -411,16 +420,15 @@ impl GoalWallClockAccounting {
+         self.last_accounted_at = Instant::now();
+     }
+ 
+-    fn mark_active_goal(&mut self, goal_id: impl Into<String>) {
+-        let goal_id = goal_id.into();
+-        if self.active_goal_id.as_deref() != Some(goal_id.as_str()) {
++    fn mark_active_goal(&mut self, goal_version: codex_state::GoalVersion) {
++        if self.active_goal_version.as_ref() != Some(&goal_version) {
+             self.reset_baseline();
+-            self.active_goal_id = Some(goal_id);
++            self.active_goal_version = Some(goal_version);
+         }
+     }
+ 
+     fn clear_active_goal(&mut self) {
+-        self.active_goal_id = None;
++        self.active_goal_version = None;
+         self.reset_baseline();
+     }
+ }
+diff --git a/codex-rs/ext/goal/src/api.rs b/codex-rs/ext/goal/src/api.rs
+index 149c95d0a..9bdb08323 100644
+--- a/codex-rs/ext/goal/src/api.rs
++++ b/codex-rs/ext/goal/src/api.rs
+@@ -23,6 +23,10 @@ use crate::tool::validate_goal_budget;
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub enum GoalServiceError {
+     InvalidRequest(String),
++    RevisionConflict {
++        current_goal_id: Option<String>,
++        current_revision: i64,
++    },
+     Internal(String),
+ }
+ 
+@@ -30,6 +34,7 @@ impl fmt::Display for GoalServiceError {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+         match self {
+             Self::InvalidRequest(message) | Self::Internal(message) => f.write_str(message),
++            Self::RevisionConflict { .. } => f.write_str("goal revision conflict"),
+         }
+     }
+ }
+@@ -60,11 +65,61 @@ pub struct GoalSetRequest<'a> {
+ #[derive(Clone, Debug)]
+ pub struct GoalSetOutcome {
+     pub goal: ThreadGoal,
+-    state_goal: codex_state::ThreadGoal,
+-    previous_goal: Option<PreviousGoalSnapshot>,
++    pub(crate) state_goal: codex_state::ThreadGoal,
++    pub(crate) previous_goal: Option<PreviousGoalSnapshot>,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct ExpectedGoalVersion {
++    pub goal_id: String,
++    pub revision: i64,
++}
++
++impl From<&codex_state::ThreadGoal> for ExpectedGoalVersion {
++    fn from(goal: &codex_state::ThreadGoal) -> Self {
++        Self {
++            goal_id: goal.goal_id.clone(),
++            revision: goal.revision,
++        }
++    }
++}
++
++impl From<&ExpectedGoalVersion> for codex_state::GoalVersion {
++    fn from(version: &ExpectedGoalVersion) -> Self {
++        Self {
++            goal_id: version.goal_id.clone(),
++            revision: version.revision,
++        }
++    }
++}
++
++#[derive(Clone, Debug)]
++pub struct GoalClearOutcome {
++    pub previous_goal: ThreadGoal,
++    pub previous_goal_version: ExpectedGoalVersion,
++    pub revision: i64,
++}
++
++#[derive(Clone, Debug)]
++pub struct GoalReplaceOutcome {
++    pub previous_goal: ThreadGoal,
++    pub previous_goal_version: ExpectedGoalVersion,
++    pub goal: ThreadGoal,
++    pub goal_version: ExpectedGoalVersion,
++}
++
++#[derive(Clone, Debug)]
++pub struct GoalReadOutcome {
++    pub goal: Option<ThreadGoal>,
++    pub goal_id: Option<String>,
++    pub revision: i64,
+ }
+ 
+ impl GoalSetOutcome {
++    pub fn version(&self) -> ExpectedGoalVersion {
++        ExpectedGoalVersion::from(&self.state_goal)
++    }
++
+     pub fn thread_goal_updated_item(&self) -> RolloutItem {
+         RolloutItem::EventMsg(EventMsg::ThreadGoalUpdated(ThreadGoalUpdatedEvent {
+             thread_id: self.goal.thread_id,
+@@ -123,8 +178,9 @@ impl GoalService {
+             .await
+             .map_err(GoalServiceError::Internal)?;
+         runtime
+-            .prepare_external_goal_mutation()
++            .prepare_external_goal_mutation_while_goal_state_locked()
+             .await
++            .map(|_| ())
+             .map_err(GoalServiceError::Internal)
+     }
+ 
+@@ -141,6 +197,37 @@ impl GoalService {
+             .map_err(|err| GoalServiceError::Internal(format!("failed to read thread goal: {err}")))
+     }
+ 
++    pub async fn get_thread_goal_state(
++        &self,
++        state_db: &codex_state::StateRuntime,
++        thread_id: ThreadId,
++    ) -> Result<GoalReadOutcome, GoalServiceError> {
++        let goal = state_db
++            .thread_goals()
++            .get_thread_goal(thread_id)
++            .await
++            .map_err(|err| {
++                GoalServiceError::Internal(format!("failed to read thread goal: {err}"))
++            })?;
++        let revision = match goal.as_ref() {
++            Some(goal) => goal.revision,
++            None => state_db
++                .thread_goals()
++                .get_thread_goal_revision(thread_id)
++                .await
++                .map_err(|err| {
++                    GoalServiceError::Internal(format!(
++                        "failed to read thread goal revision: {err}"
++                    ))
++                })?,
++        };
++        Ok(GoalReadOutcome {
++            goal_id: goal.as_ref().map(|goal| goal.goal_id.clone()),
++            goal: goal.map(protocol_goal_from_state),
++            revision,
++        })
++    }
++
+     pub async fn set_thread_goal(
+         &self,
+         state_db: &codex_state::StateRuntime,
+@@ -185,10 +272,11 @@ impl GoalService {
+             ),
+             None => None,
+         };
+-        if let Some(runtime) = runtime.as_ref()
+-            && let Err(err) = runtime.prepare_external_goal_mutation().await
+-        {
+-            tracing::warn!("failed to prepare external goal mutation: {err}");
++        if let Some(runtime) = runtime.as_ref() {
++            runtime
++                .prepare_external_goal_mutation_while_goal_state_locked()
++                .await
++                .map_err(GoalServiceError::Internal)?;
+         }
+ 
+         let (goal, previous_goal) = if let Some(objective) = objective {
+@@ -203,8 +291,9 @@ impl GoalService {
+                 let previous_goal = PreviousGoalSnapshot::from(existing_goal);
+                 state_db
+                     .thread_goals()
+-                    .update_thread_goal(
++                    .update_thread_goal_exact(
+                         thread_id,
++                        &codex_state::GoalVersion::from(existing_goal),
+                         codex_state::GoalUpdate {
+                             objective: Some(objective.to_string()),
+                             status,
+@@ -225,8 +314,17 @@ impl GoalService {
+             } else {
+                 state_db
+                     .thread_goals()
+-                    .replace_thread_goal(
++                    .create_thread_goal_exact(
+                         thread_id,
++                        state_db
++                            .thread_goals()
++                            .get_thread_goal_revision(thread_id)
++                            .await
++                            .map_err(|err| {
++                                GoalServiceError::Internal(format!(
++                                    "failed to read thread goal revision: {err}"
++                                ))
++                            })?,
+                         objective,
+                         status.unwrap_or(codex_state::ThreadGoalStatus::Active),
+                         token_budget.flatten().or(max_goal_token_budget),
+@@ -235,6 +333,13 @@ impl GoalService {
+                     .map_err(|err| {
+                         GoalServiceError::Internal(format!("failed to replace thread goal: {err}"))
+                     })
++                    .and_then(|goal| {
++                        goal.ok_or_else(|| {
++                            GoalServiceError::InvalidRequest(format!(
++                                "cannot create goal for thread {thread_id}: goal state changed"
++                            ))
++                        })
++                    })
+                     .map(|goal| (goal, None))?
+             }
+         } else {
+@@ -254,8 +359,9 @@ impl GoalService {
+             let expected_goal_id = existing_goal.goal_id.clone();
+             state_db
+                 .thread_goals()
+-                .update_thread_goal(
++                .update_thread_goal_exact(
+                     thread_id,
++                    &codex_state::GoalVersion::from(&existing_goal),
+                     codex_state::GoalUpdate {
+                         objective: None,
+                         status,
+@@ -302,10 +408,11 @@ impl GoalService {
+             ),
+             None => None,
+         };
+-        if let Some(runtime) = runtime.as_ref()
+-            && let Err(err) = runtime.prepare_external_goal_mutation().await
+-        {
+-            tracing::warn!("failed to prepare external goal mutation: {err}");
++        if let Some(runtime) = runtime.as_ref() {
++            runtime
++                .prepare_external_goal_mutation_while_goal_state_locked()
++                .await
++                .map_err(GoalServiceError::Internal)?;
+         }
+ 
+         let cleared_goal = state_db
+@@ -345,7 +452,7 @@ impl GoalService {
+         }
+     }
+ 
+-    fn runtime_for_thread(&self, thread_id: ThreadId) -> Option<Arc<GoalRuntimeHandle>> {
++    pub(crate) fn runtime_for_thread(&self, thread_id: ThreadId) -> Option<Arc<GoalRuntimeHandle>> {
+         let key = thread_id.to_string();
+         let mut runtimes = self.runtimes();
+         let runtime = runtimes.get(&key).and_then(Weak::upgrade);
+diff --git a/codex-rs/ext/goal/src/events.rs b/codex-rs/ext/goal/src/events.rs
+index ab9eda405..0af21b536 100644
+--- a/codex-rs/ext/goal/src/events.rs
++++ b/codex-rs/ext/goal/src/events.rs
+@@ -4,6 +4,7 @@ use codex_extension_api::ExtensionEventSink;
+ use codex_protocol::protocol::Event;
+ use codex_protocol::protocol::EventMsg;
+ use codex_protocol::protocol::ThreadGoal;
++use codex_protocol::protocol::ThreadGoalClearedEvent;
+ use codex_protocol::protocol::ThreadGoalUpdatedEvent;
+ 
+ #[derive(Clone)]
+@@ -31,4 +32,15 @@ impl GoalEventEmitter {
+             }),
+         });
+     }
++
++    pub(crate) fn thread_goal_cleared(
++        &self,
++        event_id: impl Into<String>,
++        event: ThreadGoalClearedEvent,
++    ) {
++        self.sink.emit(Event {
++            id: event_id.into(),
++            msg: EventMsg::ThreadGoalCleared(event),
++        });
++    }
+ }
 diff --git a/codex-rs/ext/goal/src/extension.rs b/codex-rs/ext/goal/src/extension.rs
 index 923f43658..649f12f21 100644
 --- a/codex-rs/ext/goal/src/extension.rs
@@ -14368,6 +15577,1536 @@ index 923f43658..649f12f21 100644
                  self.event_emitter.clone(),
                  self.metrics.clone(),
              )),
+diff --git a/codex-rs/ext/goal/src/lib.rs b/codex-rs/ext/goal/src/lib.rs
+index ccd091aff..11b7b5a8c 100644
+--- a/codex-rs/ext/goal/src/lib.rs
++++ b/codex-rs/ext/goal/src/lib.rs
+@@ -6,12 +6,17 @@ mod api;
+ mod events;
+ mod extension;
+ mod metrics;
++mod mutations;
+ mod runtime;
+ mod spec;
+ mod steering;
+ mod tool;
+ 
++pub use api::ExpectedGoalVersion;
++pub use api::GoalClearOutcome;
+ pub use api::GoalObjectiveUpdate;
++pub use api::GoalReadOutcome;
++pub use api::GoalReplaceOutcome;
+ pub use api::GoalService;
+ pub use api::GoalServiceError;
+ pub use api::GoalSetOutcome;
+@@ -22,7 +27,9 @@ pub use extension::GoalExtensionConfig;
+ pub use extension::install_with_backend;
+ pub use runtime::GoalRuntimeHandle;
+ pub use runtime::PreviousGoalSnapshot;
++pub use spec::CLEAR_GOAL_TOOL_NAME;
+ pub use spec::CREATE_GOAL_TOOL_NAME;
+ pub use spec::GET_GOAL_TOOL_NAME;
++pub use spec::REPLACE_GOAL_TOOL_NAME;
+ pub use spec::UPDATE_GOAL_TOOL_NAME;
+ pub use tool::CreateGoalRequest;
+diff --git a/codex-rs/ext/goal/src/mutations.rs b/codex-rs/ext/goal/src/mutations.rs
+new file mode 100644
+index 000000000..70fe8bcfb
+--- /dev/null
++++ b/codex-rs/ext/goal/src/mutations.rs
+@@ -0,0 +1,440 @@
++use codex_protocol::ThreadId;
++use codex_protocol::protocol::ThreadGoalStatus;
++use codex_protocol::protocol::validate_thread_goal_objective;
++
++use crate::api::ExpectedGoalVersion;
++use crate::api::GoalClearOutcome;
++use crate::api::GoalReplaceOutcome;
++use crate::api::GoalService;
++use crate::api::GoalServiceError;
++use crate::api::GoalSetOutcome;
++use crate::runtime::PreviousGoalSnapshot;
++use crate::tool::fill_empty_thread_preview_if_possible;
++use crate::tool::protocol_goal_from_state;
++use crate::tool::state_status_from_protocol;
++use crate::tool::validate_goal_budget;
++
++impl GoalService {
++    pub async fn set_thread_goal_exact(
++        &self,
++        state_db: &codex_state::StateRuntime,
++        request: crate::api::GoalSetRequest<'_>,
++        expected: &ExpectedGoalVersion,
++    ) -> Result<GoalSetOutcome, GoalServiceError> {
++        let crate::api::GoalSetRequest {
++            thread_id,
++            objective,
++            status,
++            token_budget,
++            max_goal_token_budget,
++        } = request;
++        let objective = match objective {
++            crate::api::GoalObjectiveUpdate::Keep => None,
++            crate::api::GoalObjectiveUpdate::Set(objective) => {
++                let objective = objective.trim();
++                validate_thread_goal_objective(objective)
++                    .map_err(GoalServiceError::InvalidRequest)?;
++                Some(objective.to_string())
++            }
++        };
++        let token_budget = match token_budget {
++            crate::api::GoalTokenBudgetUpdate::Keep => None,
++            crate::api::GoalTokenBudgetUpdate::Set(token_budget) => {
++                let token_budget = token_budget.or(max_goal_token_budget);
++                validate_goal_budget(token_budget, max_goal_token_budget)
++                    .map_err(GoalServiceError::InvalidRequest)?;
++                Some(token_budget)
++            }
++        };
++        let runtime = self.runtime_for_thread(thread_id);
++        let goal_state_permit = match runtime.as_ref() {
++            Some(runtime) => Some(
++                runtime
++                    .goal_state_permit()
++                    .await
++                    .map_err(GoalServiceError::Internal)?,
++            ),
++            None => None,
++        };
++        let current = require_expected_goal(state_db, thread_id, expected).await?;
++        let promoted = match runtime.as_ref() {
++            Some(runtime) => match runtime
++                .prepare_external_goal_mutation_while_goal_state_locked()
++                .await
++                .map_err(GoalServiceError::Internal)?
++            {
++                Some(version) => version,
++                None => return Err(current_goal_revision_conflict(state_db, thread_id).await),
++            },
++            None => codex_state::GoalVersion::from(&current),
++        };
++        let Some(goal) = state_db
++            .thread_goals()
++            .update_thread_goal_exact(
++                thread_id,
++                &promoted,
++                codex_state::GoalUpdate {
++                    objective,
++                    status: status.map(state_status_from_protocol),
++                    token_budget,
++                    expected_goal_id: Some(promoted.goal_id.clone()),
++                },
++            )
++            .await
++            .map_err(|err| GoalServiceError::Internal(err.to_string()))?
++        else {
++            return Err(current_goal_revision_conflict(state_db, thread_id).await);
++        };
++        let previous_goal = PreviousGoalSnapshot::from(&current);
++        fill_empty_thread_preview_if_possible(state_db, thread_id, &goal).await;
++        drop(goal_state_permit);
++        Ok(GoalSetOutcome {
++            goal: protocol_goal_from_state(goal.clone()),
++            state_goal: goal,
++            previous_goal: Some(previous_goal),
++        })
++    }
++
++    pub async fn create_thread_goal_exact(
++        &self,
++        state_db: &codex_state::StateRuntime,
++        thread_id: ThreadId,
++        expected_revision: i64,
++        objective: &str,
++        token_budget: Option<i64>,
++        max_goal_token_budget: Option<i64>,
++    ) -> Result<GoalSetOutcome, GoalServiceError> {
++        let objective = objective.trim();
++        validate_thread_goal_objective(objective).map_err(GoalServiceError::InvalidRequest)?;
++        let token_budget = token_budget.or(max_goal_token_budget);
++        validate_goal_budget(token_budget, max_goal_token_budget)
++            .map_err(GoalServiceError::InvalidRequest)?;
++        let runtime = self.runtime_for_thread(thread_id);
++        let goal_state_permit = match runtime.as_ref() {
++            Some(runtime) => Some(
++                runtime
++                    .goal_state_permit()
++                    .await
++                    .map_err(GoalServiceError::Internal)?,
++            ),
++            None => None,
++        };
++        let current = state_db
++            .thread_goals()
++            .get_thread_goal(thread_id)
++            .await
++            .map_err(|err| GoalServiceError::Internal(err.to_string()))?;
++        let current_revision = current.as_ref().map_or(
++            state_db
++                .thread_goals()
++                .get_thread_goal_revision(thread_id)
++                .await
++                .map_err(|err| GoalServiceError::Internal(err.to_string()))?,
++            |goal| goal.revision,
++        );
++        if current_revision != expected_revision {
++            return Err(goal_revision_conflict(current, current_revision));
++        }
++        if let Some(goal) = current.as_ref()
++            && goal.status != codex_state::ThreadGoalStatus::Complete
++        {
++            return Err(GoalServiceError::InvalidRequest(
++                "cannot create a new goal because this thread has an unfinished goal; complete the existing goal first"
++                    .to_string(),
++            ));
++        }
++        let _ = match runtime.as_ref() {
++            Some(runtime) => runtime
++                .prepare_external_goal_mutation_while_goal_state_locked()
++                .await
++                .map_err(GoalServiceError::Internal)?,
++            None => current.as_ref().map(codex_state::GoalVersion::from),
++        };
++        let (goal, previous_goal) = match current {
++            Some(previous) => {
++                let Some(promoted) = state_db
++                    .thread_goals()
++                    .get_thread_goal(thread_id)
++                    .await
++                    .map_err(|err| GoalServiceError::Internal(err.to_string()))?
++                else {
++                    return Err(current_goal_revision_conflict(state_db, thread_id).await);
++                };
++                let Some(outcome) = state_db
++                    .thread_goals()
++                    .replace_thread_goal_exact(
++                        thread_id,
++                        &codex_state::GoalVersion::from(&promoted),
++                        objective,
++                        codex_state::ThreadGoalStatus::Active,
++                        token_budget,
++                    )
++                    .await
++                    .map_err(|err| GoalServiceError::Internal(err.to_string()))?
++                else {
++                    return Err(current_goal_revision_conflict(state_db, thread_id).await);
++                };
++                (outcome.goal, Some(PreviousGoalSnapshot::from(&previous)))
++            }
++            None => {
++                let Some(goal) = state_db
++                    .thread_goals()
++                    .create_thread_goal_exact(
++                        thread_id,
++                        expected_revision,
++                        objective,
++                        codex_state::ThreadGoalStatus::Active,
++                        token_budget,
++                    )
++                    .await
++                    .map_err(|err| GoalServiceError::Internal(err.to_string()))?
++                else {
++                    return Err(current_goal_revision_conflict(state_db, thread_id).await);
++                };
++                (goal, None)
++            }
++        };
++        fill_empty_thread_preview_if_possible(state_db, thread_id, &goal).await;
++        drop(goal_state_permit);
++        Ok(GoalSetOutcome {
++            goal: protocol_goal_from_state(goal.clone()),
++            state_goal: goal,
++            previous_goal,
++        })
++    }
++
++    pub async fn replace_thread_goal_exact(
++        &self,
++        state_db: &codex_state::StateRuntime,
++        thread_id: ThreadId,
++        expected: &ExpectedGoalVersion,
++        objective: &str,
++        token_budget: Option<i64>,
++        max_goal_token_budget: Option<i64>,
++    ) -> Result<GoalReplaceOutcome, GoalServiceError> {
++        let objective = objective.trim();
++        validate_thread_goal_objective(objective).map_err(GoalServiceError::InvalidRequest)?;
++        let token_budget = token_budget.or(max_goal_token_budget);
++        validate_goal_budget(token_budget, max_goal_token_budget)
++            .map_err(GoalServiceError::InvalidRequest)?;
++        let runtime = self.runtime_for_thread(thread_id);
++        let goal_state_permit = match runtime.as_ref() {
++            Some(runtime) => Some(
++                runtime
++                    .goal_state_permit()
++                    .await
++                    .map_err(GoalServiceError::Internal)?,
++            ),
++            None => None,
++        };
++        let current = require_expected_goal(state_db, thread_id, expected).await?;
++        let promoted = match runtime.as_ref() {
++            Some(runtime) => match runtime
++                .prepare_external_goal_mutation_while_goal_state_locked()
++                .await
++                .map_err(GoalServiceError::Internal)?
++            {
++                Some(version) => version,
++                None => return Err(current_goal_revision_conflict(state_db, thread_id).await),
++            },
++            None => codex_state::GoalVersion::from(&current),
++        };
++        let Some(outcome) = state_db
++            .thread_goals()
++            .replace_thread_goal_exact(
++                thread_id,
++                &promoted,
++                objective,
++                codex_state::ThreadGoalStatus::Active,
++                token_budget,
++            )
++            .await
++            .map_err(|err| GoalServiceError::Internal(err.to_string()))?
++        else {
++            return Err(current_goal_revision_conflict(state_db, thread_id).await);
++        };
++        fill_empty_thread_preview_if_possible(state_db, thread_id, &outcome.goal).await;
++        drop(goal_state_permit);
++        let result = GoalReplaceOutcome {
++            previous_goal: protocol_goal_from_state(outcome.previous_goal.clone()),
++            previous_goal_version: ExpectedGoalVersion::from(&outcome.previous_goal),
++            goal: protocol_goal_from_state(outcome.goal.clone()),
++            goal_version: ExpectedGoalVersion::from(&outcome.goal),
++        };
++        if let Some(runtime) = runtime
++            && let Err(err) = runtime
++                .apply_external_goal_set(
++                    outcome.goal,
++                    Some(PreviousGoalSnapshot::from(&outcome.previous_goal)),
++                )
++                .await
++        {
++            tracing::warn!("failed to apply replacement goal runtime effects: {err}");
++        }
++        Ok(result)
++    }
++
++    pub async fn update_thread_goal_status_exact(
++        &self,
++        state_db: &codex_state::StateRuntime,
++        thread_id: ThreadId,
++        expected: &ExpectedGoalVersion,
++        status: ThreadGoalStatus,
++    ) -> Result<GoalSetOutcome, GoalServiceError> {
++        let runtime = self.runtime_for_thread(thread_id);
++        let goal_state_permit = match runtime.as_ref() {
++            Some(runtime) => Some(
++                runtime
++                    .goal_state_permit()
++                    .await
++                    .map_err(GoalServiceError::Internal)?,
++            ),
++            None => None,
++        };
++        let current = require_expected_goal(state_db, thread_id, expected).await?;
++        let promoted = match runtime.as_ref() {
++            Some(runtime) => match runtime
++                .prepare_external_goal_mutation_while_goal_state_locked()
++                .await
++                .map_err(GoalServiceError::Internal)?
++            {
++                Some(version) => version,
++                None => return Err(current_goal_revision_conflict(state_db, thread_id).await),
++            },
++            None => codex_state::GoalVersion::from(&current),
++        };
++        let Some(goal) = state_db
++            .thread_goals()
++            .update_thread_goal_exact(
++                thread_id,
++                &promoted,
++                codex_state::GoalUpdate {
++                    objective: None,
++                    status: Some(state_status_from_protocol(status)),
++                    token_budget: None,
++                    expected_goal_id: Some(promoted.goal_id.clone()),
++                },
++            )
++            .await
++            .map_err(|err| GoalServiceError::Internal(err.to_string()))?
++        else {
++            return Err(current_goal_revision_conflict(state_db, thread_id).await);
++        };
++        let previous_goal = PreviousGoalSnapshot::from(&current);
++        drop(goal_state_permit);
++        Ok(GoalSetOutcome {
++            goal: protocol_goal_from_state(goal.clone()),
++            state_goal: goal,
++            previous_goal: Some(previous_goal),
++        })
++    }
++
++    pub async fn clear_thread_goal_exact(
++        &self,
++        state_db: &codex_state::StateRuntime,
++        thread_id: ThreadId,
++        expected: &ExpectedGoalVersion,
++    ) -> Result<GoalClearOutcome, GoalServiceError> {
++        let runtime = self.runtime_for_thread(thread_id);
++        let goal_state_permit = match runtime.as_ref() {
++            Some(runtime) => Some(
++                runtime
++                    .goal_state_permit()
++                    .await
++                    .map_err(GoalServiceError::Internal)?,
++            ),
++            None => None,
++        };
++        let current = require_expected_goal(state_db, thread_id, expected).await?;
++        let promoted = match runtime.as_ref() {
++            Some(runtime) => match runtime
++                .prepare_external_goal_mutation_while_goal_state_locked()
++                .await
++                .map_err(GoalServiceError::Internal)?
++            {
++                Some(version) => version,
++                None => return Err(current_goal_revision_conflict(state_db, thread_id).await),
++            },
++            None => codex_state::GoalVersion::from(&current),
++        };
++        let Some(outcome) = state_db
++            .thread_goals()
++            .clear_thread_goal_exact(thread_id, &promoted)
++            .await
++            .map_err(|err| GoalServiceError::Internal(err.to_string()))?
++        else {
++            return Err(current_goal_revision_conflict(state_db, thread_id).await);
++        };
++        drop(goal_state_permit);
++        if let Some(runtime) = runtime
++            && let Err(err) = runtime
++                .apply_external_goal_clear(outcome.previous_goal.clone())
++                .await
++        {
++            tracing::warn!("failed to apply goal clear runtime effects: {err}");
++        }
++        Ok(GoalClearOutcome {
++            previous_goal_version: ExpectedGoalVersion::from(&outcome.previous_goal),
++            previous_goal: protocol_goal_from_state(outcome.previous_goal),
++            revision: outcome.revision,
++        })
++    }
++}
++
++async fn require_expected_goal(
++    state_db: &codex_state::StateRuntime,
++    thread_id: ThreadId,
++    expected: &ExpectedGoalVersion,
++) -> Result<codex_state::ThreadGoal, GoalServiceError> {
++    let goal = state_db
++        .thread_goals()
++        .get_thread_goal(thread_id)
++        .await
++        .map_err(|err| GoalServiceError::Internal(err.to_string()))?;
++    match goal {
++        Some(goal) if ExpectedGoalVersion::from(&goal) == *expected => Ok(goal),
++        goal => {
++            let revision = match goal.as_ref() {
++                Some(goal) => goal.revision,
++                None => state_db
++                    .thread_goals()
++                    .get_thread_goal_revision(thread_id)
++                    .await
++                    .map_err(|err| GoalServiceError::Internal(err.to_string()))?,
++            };
++            Err(goal_revision_conflict(goal, revision))
++        }
++    }
++}
++
++fn goal_revision_conflict(
++    goal: Option<codex_state::ThreadGoal>,
++    current_revision: i64,
++) -> GoalServiceError {
++    GoalServiceError::RevisionConflict {
++        current_goal_id: goal.map(|goal| goal.goal_id),
++        current_revision,
++    }
++}
++
++async fn current_goal_revision_conflict(
++    state_db: &codex_state::StateRuntime,
++    thread_id: ThreadId,
++) -> GoalServiceError {
++    let goal = match state_db.thread_goals().get_thread_goal(thread_id).await {
++        Ok(goal) => goal,
++        Err(err) => return GoalServiceError::Internal(err.to_string()),
++    };
++    let revision = match goal.as_ref() {
++        Some(goal) => goal.revision,
++        None => match state_db
++            .thread_goals()
++            .get_thread_goal_revision(thread_id)
++            .await
++        {
++            Ok(revision) => revision,
++            Err(err) => return GoalServiceError::Internal(err.to_string()),
++        },
++    };
++    goal_revision_conflict(goal, revision)
++}
+diff --git a/codex-rs/ext/goal/src/spec.rs b/codex-rs/ext/goal/src/spec.rs
+index 6b97a24e9..b67549b5c 100644
+--- a/codex-rs/ext/goal/src/spec.rs
++++ b/codex-rs/ext/goal/src/spec.rs
+@@ -9,11 +9,13 @@ use std::collections::BTreeMap;
+ pub const GET_GOAL_TOOL_NAME: &str = "get_goal";
+ pub const CREATE_GOAL_TOOL_NAME: &str = "create_goal";
+ pub const UPDATE_GOAL_TOOL_NAME: &str = "update_goal";
++pub const CLEAR_GOAL_TOOL_NAME: &str = "clear_goal";
++pub const REPLACE_GOAL_TOOL_NAME: &str = "replace_goal";
+ 
+ pub fn create_get_goal_tool() -> ToolSpec {
+     ToolSpec::Function(ResponsesApiTool {
+         name: GET_GOAL_TOOL_NAME.to_string(),
+-        description: "Get the current goal for this thread, including status, budgets, token and elapsed-time usage, and remaining token budget."
++        description: "Get the current goal for this thread, including its exact goal ID and revision, status, budgets, token and elapsed-time usage, and remaining token budget. When no goal exists, the returned revision is the exact tombstone revision for a stale-safe create."
+             .to_string(),
+         strict: false,
+         defer_loading: None,
+@@ -24,6 +26,12 @@ pub fn create_get_goal_tool() -> ToolSpec {
+ 
+ pub fn create_create_goal_tool() -> ToolSpec {
+     let properties = BTreeMap::from([
++        (
++            "expected_revision".to_string(),
++            JsonSchema::integer(Some(
++                "Exact no-goal or tombstone revision returned by get_goal.".to_string(),
++            )),
++        ),
+         (
+             "objective".to_string(),
+             JsonSchema::string(Some(
+@@ -50,7 +58,11 @@ Set token_budget only when an explicit token budget is requested. Fails if an un
+         defer_loading: None,
+         parameters: JsonSchema::object(
+             properties,
+-            /*required*/ Some(vec!["objective".to_string()]),
++            /*required*/
++            Some(vec![
++                "expected_revision".to_string(),
++                "objective".to_string(),
++            ]),
+             Some(false.into()),
+         ),
+         output_schema: None,
+@@ -58,16 +70,16 @@ Set token_budget only when an explicit token budget is requested. Fails if an un
+ }
+ 
+ pub fn create_update_goal_tool() -> ToolSpec {
+-    let properties = BTreeMap::from([(
+-        "status".to_string(),
+-        JsonSchema::string_enum(
+-            vec![json!("complete"), json!("blocked")],
+-            Some(
+-                "Required. Set to `complete` only when the objective is achieved and no required work remains. Set to `blocked` only after the same blocking condition has recurred for at least three consecutive goal turns and the agent is at an impasse. After a previously blocked goal is resumed, the resumed run starts a fresh blocked audit."
+-                    .to_string(),
++    let properties = version_properties().into_iter().chain([(
++            "status".to_string(),
++            JsonSchema::string_enum(
++                vec![json!("complete"), json!("blocked")],
++                Some(
++                    "Required. Set to `complete` only when the objective is achieved and no required work remains. Set to `blocked` only after the same blocking condition has recurred for at least three consecutive goal turns and the agent is at an impasse. After a previously blocked goal is resumed, the resumed run starts a fresh blocked audit."
++                        .to_string(),
++                ),
+             ),
+-        ),
+-    )]);
++        )]).collect();
+ 
+     ToolSpec::Function(ResponsesApiTool {
+         name: UPDATE_GOAL_TOOL_NAME.to_string(),
+@@ -86,9 +98,84 @@ When marking a budgeted goal achieved with status `complete`, report the final t
+         defer_loading: None,
+         parameters: JsonSchema::object(
+             properties,
+-            /*required*/ Some(vec!["status".to_string()]),
++            /*required*/ Some(vec![
++                "expected_goal_id".to_string(),
++                "expected_revision".to_string(),
++                "status".to_string(),
++            ]),
+             Some(false.into()),
+         ),
+         output_schema: None,
+     })
+ }
++
++pub fn create_clear_goal_tool() -> ToolSpec {
++    goal_mutation_tool(
++        CLEAR_GOAL_TOOL_NAME,
++        "Clear the exact current goal. The goal ID and revision must match get_goal.",
++        version_properties(),
++        vec![
++            "expected_goal_id".to_string(),
++            "expected_revision".to_string(),
++        ],
++    )
++}
++
++pub fn create_replace_goal_tool() -> ToolSpec {
++    let properties = version_properties()
++        .into_iter()
++        .chain([
++            (
++                "objective".to_string(),
++                JsonSchema::string(Some("Required replacement objective.".to_string())),
++            ),
++            (
++                "token_budget".to_string(),
++                JsonSchema::integer(Some(
++                    "Positive budget; omit to use the configured default.".to_string(),
++                )),
++            ),
++        ])
++        .collect();
++    goal_mutation_tool(
++        REPLACE_GOAL_TOOL_NAME,
++        "Replace the exact current goal atomically with a new active goal.",
++        properties,
++        vec![
++            "expected_goal_id".to_string(),
++            "expected_revision".to_string(),
++            "objective".to_string(),
++        ],
++    )
++}
++
++fn version_properties() -> BTreeMap<String, JsonSchema> {
++    BTreeMap::from([
++        (
++            "expected_goal_id".to_string(),
++            JsonSchema::string(Some("Exact goal ID returned by get_goal.".to_string())),
++        ),
++        (
++            "expected_revision".to_string(),
++            JsonSchema::integer(Some(
++                "Exact goal revision returned by get_goal.".to_string(),
++            )),
++        ),
++    ])
++}
++
++fn goal_mutation_tool(
++    name: &str,
++    description: &str,
++    properties: BTreeMap<String, JsonSchema>,
++    required: Vec<String>,
++) -> ToolSpec {
++    ToolSpec::Function(ResponsesApiTool {
++        name: name.to_string(),
++        description: description.to_string(),
++        strict: false,
++        defer_loading: None,
++        parameters: JsonSchema::object(properties, Some(required), Some(false.into())),
++        output_schema: None,
++    })
++}
+diff --git a/codex-rs/ext/goal/src/steering.rs b/codex-rs/ext/goal/src/steering.rs
+index 6615b6eda..bc2d3338c 100644
+--- a/codex-rs/ext/goal/src/steering.rs
++++ b/codex-rs/ext/goal/src/steering.rs
+@@ -27,6 +27,20 @@ static OBJECTIVE_UPDATED_PROMPT_TEMPLATE: LazyLock<Template> = LazyLock::new(||
+     )
+ });
+ 
++static GOAL_CLEARED_PROMPT_TEMPLATE: LazyLock<Template> = LazyLock::new(|| {
++    parse_embedded_template(
++        include_str!("../templates/goals/cleared.md"),
++        "goals/cleared.md",
++    )
++});
++
++static GOAL_REPLACED_PROMPT_TEMPLATE: LazyLock<Template> = LazyLock::new(|| {
++    parse_embedded_template(
++        include_str!("../templates/goals/replaced.md"),
++        "goals/replaced.md",
++    )
++});
++
+ fn parse_embedded_template(source: &'static str, template_name: &str) -> Template {
+     match Template::parse(source) {
+         Ok(template) => template,
+@@ -46,6 +60,27 @@ pub(crate) fn continuation_steering_item(goal: &ThreadGoal) -> ResponseItem {
+     goal_context_input_item(continuation_prompt(goal))
+ }
+ 
++pub(crate) fn goal_cleared_steering_item() -> ResponseItem {
++    goal_context_input_item(
++        GOAL_CLEARED_PROMPT_TEMPLATE
++            .render(std::iter::empty::<(&str, &str)>())
++            .unwrap_or_else(|err| {
++                panic!("embedded goals/cleared.md template failed to render: {err}")
++            }),
++    )
++}
++
++pub(crate) fn goal_replaced_steering_item(goal: &ThreadGoal) -> ResponseItem {
++    let objective = escape_xml_text(&goal.objective);
++    goal_context_input_item(
++        GOAL_REPLACED_PROMPT_TEMPLATE
++            .render([("objective", objective.as_str())])
++            .unwrap_or_else(|err| {
++                panic!("embedded goals/replaced.md template failed to render: {err}")
++            }),
++    )
++}
++
+ fn goal_context_input_item(prompt: String) -> ResponseItem {
+     ContextualUserFragment::into(InternalModelContextFragment::new(
+         InternalContextSource::from_static("goal"),
+diff --git a/codex-rs/ext/goal/src/tool.rs b/codex-rs/ext/goal/src/tool.rs
+index f15a5e90f..5e0abec9d 100644
+--- a/codex-rs/ext/goal/src/tool.rs
++++ b/codex-rs/ext/goal/src/tool.rs
+@@ -9,22 +9,27 @@ use codex_extension_api::ToolOutput;
+ use codex_extension_api::ToolSpec;
+ use codex_protocol::ThreadId;
+ use codex_protocol::protocol::ThreadGoal;
++use codex_protocol::protocol::ThreadGoalClearedEvent;
+ use codex_protocol::protocol::ThreadGoalStatus;
+ use codex_protocol::protocol::validate_thread_goal_objective;
+ use serde::Deserialize;
+ use serde::Serialize;
+ 
+-use crate::accounting::BudgetLimitedGoalDisposition;
+ use crate::accounting::GoalAccountingState;
+ use crate::analytics::GoalAnalytics;
+-use crate::analytics::GoalEventAttribution;
++use crate::api::ExpectedGoalVersion;
++use crate::api::GoalService;
+ use crate::events::GoalEventEmitter;
+ use crate::metrics::GoalMetrics;
++use crate::spec::CLEAR_GOAL_TOOL_NAME;
+ use crate::spec::CREATE_GOAL_TOOL_NAME;
+ use crate::spec::GET_GOAL_TOOL_NAME;
++use crate::spec::REPLACE_GOAL_TOOL_NAME;
+ use crate::spec::UPDATE_GOAL_TOOL_NAME;
++use crate::spec::create_clear_goal_tool;
+ use crate::spec::create_create_goal_tool;
+ use crate::spec::create_get_goal_tool;
++use crate::spec::create_replace_goal_tool;
+ use crate::spec::create_update_goal_tool;
+ 
+ #[derive(Clone)]
+@@ -33,10 +38,9 @@ pub(crate) struct GoalToolExecutor {
+     thread_id: ThreadId,
+     state_db: Arc<codex_state::StateRuntime>,
+     accounting_state: Arc<GoalAccountingState>,
+-    analytics: GoalAnalytics,
+     event_emitter: GoalEventEmitter,
+-    metrics: GoalMetrics,
+     max_goal_token_budget: Option<i64>,
++    goal_service: Arc<GoalService>,
+ }
+ 
+ #[derive(Clone, Copy)]
+@@ -44,11 +48,14 @@ enum GoalToolKind {
+     Get,
+     Create,
+     Update,
++    Clear,
++    Replace,
+ }
+ 
+ #[derive(Debug, Deserialize)]
+ #[serde(rename_all = "snake_case")]
+ pub struct CreateGoalRequest {
++    pub expected_revision: i64,
+     pub objective: String,
+     pub token_budget: Option<i64>,
+ }
+@@ -56,17 +63,58 @@ pub struct CreateGoalRequest {
+ #[derive(Debug, Deserialize)]
+ #[serde(rename_all = "snake_case")]
+ struct UpdateGoalArgs {
++    expected_goal_id: String,
++    expected_revision: i64,
+     status: ThreadGoalStatus,
+ }
+ 
++#[derive(Debug, Deserialize)]
++#[serde(rename_all = "snake_case")]
++struct ClearGoalArgs {
++    expected_goal_id: String,
++    expected_revision: i64,
++}
++
++#[derive(Debug, Deserialize)]
++#[serde(rename_all = "snake_case")]
++struct ReplaceGoalArgs {
++    expected_goal_id: String,
++    expected_revision: i64,
++    objective: String,
++    token_budget: Option<i64>,
++}
++
+ #[derive(Debug, PartialEq, Serialize)]
+ #[serde(rename_all = "camelCase")]
+ struct GoalToolResponse {
+     goal: Option<ThreadGoal>,
++    goal_id: Option<String>,
++    revision: i64,
+     remaining_tokens: Option<i64>,
+     completion_budget_report: Option<String>,
+ }
+ 
++#[derive(Debug, PartialEq, Serialize)]
++#[serde(rename_all = "camelCase")]
++struct ClearGoalToolResponse {
++    cleared: bool,
++    previous_goal: ThreadGoal,
++    previous_goal_id: String,
++    previous_revision: i64,
++    revision: i64,
++}
++
++#[derive(Debug, PartialEq, Serialize)]
++#[serde(rename_all = "camelCase")]
++struct ReplaceGoalToolResponse {
++    previous_goal: ThreadGoal,
++    previous_goal_id: String,
++    previous_revision: i64,
++    goal: ThreadGoal,
++    goal_id: String,
++    revision: i64,
++}
++
+ #[derive(Clone, Copy)]
+ enum CompletionBudgetReport {
+     Include,
+@@ -78,19 +126,19 @@ impl GoalToolExecutor {
+         thread_id: ThreadId,
+         state_db: Arc<codex_state::StateRuntime>,
+         accounting_state: Arc<GoalAccountingState>,
+-        analytics: GoalAnalytics,
++        _analytics: GoalAnalytics,
+         event_emitter: GoalEventEmitter,
+-        metrics: GoalMetrics,
++        _metrics: GoalMetrics,
++        goal_service: Arc<GoalService>,
+     ) -> Self {
+         Self {
+             kind: GoalToolKind::Get,
+             thread_id,
+             state_db,
+             accounting_state,
+-            analytics,
+             event_emitter,
+-            metrics,
+             max_goal_token_budget: None,
++            goal_service,
+         }
+     }
+ 
+@@ -98,20 +146,20 @@ impl GoalToolExecutor {
+         thread_id: ThreadId,
+         state_db: Arc<codex_state::StateRuntime>,
+         accounting_state: Arc<GoalAccountingState>,
+-        analytics: GoalAnalytics,
++        _analytics: GoalAnalytics,
+         event_emitter: GoalEventEmitter,
+-        metrics: GoalMetrics,
++        _metrics: GoalMetrics,
+         max_goal_token_budget: Option<i64>,
++        goal_service: Arc<GoalService>,
+     ) -> Self {
+         Self {
+             kind: GoalToolKind::Create,
+             thread_id,
+             state_db,
+             accounting_state,
+-            analytics,
+             event_emitter,
+-            metrics,
+             max_goal_token_budget,
++            goal_service,
+         }
+     }
+ 
+@@ -119,21 +167,33 @@ impl GoalToolExecutor {
+         thread_id: ThreadId,
+         state_db: Arc<codex_state::StateRuntime>,
+         accounting_state: Arc<GoalAccountingState>,
+-        analytics: GoalAnalytics,
++        _analytics: GoalAnalytics,
+         event_emitter: GoalEventEmitter,
+-        metrics: GoalMetrics,
++        _metrics: GoalMetrics,
++        goal_service: Arc<GoalService>,
+     ) -> Self {
+         Self {
+             kind: GoalToolKind::Update,
+             thread_id,
+             state_db,
+             accounting_state,
+-            analytics,
+             event_emitter,
+-            metrics,
+             max_goal_token_budget: None,
++            goal_service,
+         }
+     }
++
++    pub(crate) fn clear(&self) -> Self {
++        let mut executor = self.clone();
++        executor.kind = GoalToolKind::Clear;
++        executor
++    }
++
++    pub(crate) fn replace(&self) -> Self {
++        let mut executor = self.clone();
++        executor.kind = GoalToolKind::Replace;
++        executor
++    }
+ }
+ 
+ impl ToolExecutor<ToolCall> for GoalToolExecutor {
+@@ -142,6 +202,8 @@ impl ToolExecutor<ToolCall> for GoalToolExecutor {
+             GoalToolKind::Get => GET_GOAL_TOOL_NAME,
+             GoalToolKind::Create => CREATE_GOAL_TOOL_NAME,
+             GoalToolKind::Update => UPDATE_GOAL_TOOL_NAME,
++            GoalToolKind::Clear => CLEAR_GOAL_TOOL_NAME,
++            GoalToolKind::Replace => REPLACE_GOAL_TOOL_NAME,
+         })
+     }
+ 
+@@ -150,6 +212,8 @@ impl ToolExecutor<ToolCall> for GoalToolExecutor {
+             GoalToolKind::Get => create_get_goal_tool(),
+             GoalToolKind::Create => create_create_goal_tool(),
+             GoalToolKind::Update => create_update_goal_tool(),
++            GoalToolKind::Clear => create_clear_goal_tool(),
++            GoalToolKind::Replace => create_replace_goal_tool(),
+         }
+     }
+ 
+@@ -159,6 +223,8 @@ impl ToolExecutor<ToolCall> for GoalToolExecutor {
+                 GoalToolKind::Get => self.handle_get(invocation).await,
+                 GoalToolKind::Create => self.handle_create(invocation).await,
+                 GoalToolKind::Update => self.handle_update(invocation).await,
++                GoalToolKind::Clear => self.handle_clear(invocation).await,
++                GoalToolKind::Replace => self.handle_replace(invocation).await,
+             }
+         })
+     }
+@@ -170,16 +236,30 @@ impl GoalToolExecutor {
+         invocation: ToolCall,
+     ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+         let _ = invocation.function_arguments()?;
+-        let goal = self
++        let state_goal = self
+             .state_db
+             .thread_goals()
+             .get_thread_goal(self.thread_id)
+             .await
+-            .map(|goal| goal.map(protocol_goal_from_state))
+             .map_err(|err| {
+                 FunctionCallError::RespondToModel(format!("failed to read goal: {err}"))
+             })?;
+-        goal_response(goal, CompletionBudgetReport::Omit)
++        let revision = match state_goal.as_ref() {
++            Some(goal) => goal.revision,
++            None => self
++                .state_db
++                .thread_goals()
++                .get_thread_goal_revision(self.thread_id)
++                .await
++                .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))?,
++        };
++        let goal_id = state_goal.as_ref().map(|goal| goal.goal_id.clone());
++        goal_response(
++            state_goal.map(protocol_goal_from_state),
++            goal_id,
++            revision,
++            CompletionBudgetReport::Omit,
++        )
+     }
+ 
+     async fn handle_create(
+@@ -194,35 +274,31 @@ impl GoalToolExecutor {
+         validate_goal_budget(request.token_budget, self.max_goal_token_budget)
+             .map_err(FunctionCallError::RespondToModel)?;
+ 
+-        let goal = self
+-            .state_db
+-            .thread_goals()
+-            .insert_thread_goal(
++        let outcome = self
++            .goal_service
++            .create_thread_goal_exact(
++                self.state_db.as_ref(),
+                 self.thread_id,
++                request.expected_revision,
+                 request.objective.as_str(),
+-                codex_state::ThreadGoalStatus::Active,
+                 request.token_budget,
++                self.max_goal_token_budget,
+             )
+             .await
+-            .map_err(|err| FunctionCallError::RespondToModel(format!("failed to create goal: {err}")))?
+-            .ok_or_else(|| {
+-                FunctionCallError::RespondToModel(
+-                    "cannot create a new goal because this thread has an unfinished goal; complete the existing goal first"
+-                        .to_string(),
+-                )
+-            })?;
+-        fill_empty_thread_preview_if_possible(self.state_db.as_ref(), self.thread_id, &goal).await;
+-        let turn_id = self
+-            .accounting_state
+-            .mark_current_turn_goal_active(goal.goal_id.clone());
+-        self.metrics.record_created();
+-        self.analytics.created(
+-            &goal,
+-            GoalEventAttribution::Turn(invocation.turn_id.as_str()),
+-        );
+-        let goal = protocol_goal_from_state(goal);
++            .map_err(goal_service_tool_error)?;
++        let version = outcome.version();
++        let goal = outcome.goal.clone();
++        outcome
++            .apply_runtime_effects(self.goal_service.as_ref())
++            .await;
++        let turn_id = self.accounting_state.current_turn_id();
+         self.emit_goal_updated_from_tool_call(&invocation, turn_id, goal.clone());
+-        goal_response(Some(goal), CompletionBudgetReport::Omit)
++        goal_response(
++            Some(goal),
++            Some(version.goal_id),
++            version.revision,
++            CompletionBudgetReport::Omit,
++        )
+     }
+ 
+     async fn handle_update(
+@@ -240,55 +316,30 @@ impl GoalToolExecutor {
+             ));
+         }
+ 
+-        self.account_active_goal_progress(
+-            match args.status {
+-                ThreadGoalStatus::Complete => codex_state::GoalAccountingMode::ActiveOrComplete,
+-                ThreadGoalStatus::Blocked => codex_state::GoalAccountingMode::ActiveOrStopped,
+-                ThreadGoalStatus::Active
+-                | ThreadGoalStatus::Paused
+-                | ThreadGoalStatus::UsageLimited
+-                | ThreadGoalStatus::BudgetLimited => unreachable!("status validated above"),
+-            },
+-            invocation.call_id.as_str(),
+-            BudgetLimitedGoalDisposition::ClearActive,
+-        )
+-        .await?;
+-        let previous_status = self
+-            .current_goal_status_for_metrics(/*expected_goal_id*/ None)
+-            .await?;
+-        let goal = self
+-            .state_db
+-            .thread_goals()
+-            .update_thread_goal(
++        let outcome = self
++            .goal_service
++            .update_thread_goal_status_exact(
++                self.state_db.as_ref(),
+                 self.thread_id,
+-                codex_state::GoalUpdate {
+-                    objective: None,
+-                    status: Some(state_status_from_protocol(args.status)),
+-                    token_budget: None,
+-                    expected_goal_id: None,
++                &ExpectedGoalVersion {
++                    goal_id: args.expected_goal_id,
++                    revision: args.expected_revision,
+                 },
++                args.status,
+             )
+             .await
+-            .map_err(|err| {
+-                FunctionCallError::RespondToModel(format!("failed to update goal: {err}"))
+-            })?
+-            .ok_or_else(|| {
+-                FunctionCallError::RespondToModel(
+-                    "cannot update goal because this thread has no goal".to_string(),
+-                )
+-            })?;
+-        self.metrics
+-            .record_terminal_if_status_changed(previous_status, &goal);
+-        self.analytics.status_changed(
+-            &goal,
+-            previous_status,
+-            GoalEventAttribution::Turn(invocation.turn_id.as_str()),
+-        );
+-        let goal = protocol_goal_from_state(goal);
++            .map_err(goal_service_tool_error)?;
++        let version = outcome.version();
++        let goal = outcome.goal.clone();
++        outcome
++            .apply_runtime_effects(self.goal_service.as_ref())
++            .await;
+         let turn_id = self.accounting_state.clear_current_turn_goal();
+         self.emit_goal_updated_from_tool_call(&invocation, turn_id, goal.clone());
+         goal_response(
+             Some(goal),
++            Some(version.goal_id),
++            version.revision,
+             if args.status == ThreadGoalStatus::Complete {
+                 CompletionBudgetReport::Include
+             } else {
+@@ -297,102 +348,89 @@ impl GoalToolExecutor {
+         )
+     }
+ 
+-    fn emit_goal_updated_from_tool_call(
++    async fn handle_clear(
+         &self,
+-        invocation: &ToolCall,
+-        turn_id: Option<String>,
+-        goal: ThreadGoal,
+-    ) {
+-        self.event_emitter
+-            .thread_goal_updated(invocation.call_id.clone(), turn_id, goal);
++        invocation: ToolCall,
++    ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
++        let args: ClearGoalArgs = parse_arguments(invocation.function_arguments()?)?;
++        let outcome = self
++            .goal_service
++            .clear_thread_goal_exact(
++                self.state_db.as_ref(),
++                self.thread_id,
++                &ExpectedGoalVersion {
++                    goal_id: args.expected_goal_id,
++                    revision: args.expected_revision,
++                },
++            )
++            .await
++            .map_err(goal_service_tool_error)?;
++        let turn_id = self.accounting_state.clear_current_turn_goal();
++        self.event_emitter.thread_goal_cleared(
++            invocation.call_id,
++            ThreadGoalClearedEvent {
++                thread_id: self.thread_id,
++                turn_id,
++                previous_goal: outcome.previous_goal.clone(),
++                revision: outcome.revision,
++            },
++        );
++        let value = serde_json::to_value(ClearGoalToolResponse {
++            cleared: true,
++            previous_goal: outcome.previous_goal,
++            previous_goal_id: outcome.previous_goal_version.goal_id,
++            previous_revision: outcome.previous_goal_version.revision,
++            revision: outcome.revision,
++        })
++        .map_err(|err| FunctionCallError::Fatal(err.to_string()))?;
++        Ok(Box::new(JsonToolOutput::new(value)))
+     }
+ 
+-    async fn account_active_goal_progress(
++    async fn handle_replace(
+         &self,
+-        mode: codex_state::GoalAccountingMode,
+-        event_id: &str,
+-        budget_limited_goal_disposition: BudgetLimitedGoalDisposition,
+-    ) -> Result<Option<ThreadGoal>, FunctionCallError> {
+-        let Some(turn_id) = self.accounting_state.current_turn_id() else {
+-            return Ok(None);
+-        };
+-        let _accounting_permit = self
+-            .accounting_state
+-            .progress_accounting_permit()
+-            .await
+-            .map_err(|err| {
+-                FunctionCallError::Fatal(format!(
+-                    "goal progress accounting semaphore closed: {err}"
+-                ))
+-            })?;
+-        let Some(snapshot) = self.accounting_state.progress_snapshot(turn_id.as_str()) else {
+-            return Ok(None);
+-        };
+-        let previous_status = self
+-            .current_goal_status_for_metrics(Some(snapshot.expected_goal_id.as_str()))
+-            .await?;
++        invocation: ToolCall,
++    ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
++        let args: ReplaceGoalArgs = parse_arguments(invocation.function_arguments()?)?;
+         let outcome = self
+-            .state_db
+-            .thread_goals()
+-            .account_thread_goal_usage(
++            .goal_service
++            .replace_thread_goal_exact(
++                self.state_db.as_ref(),
+                 self.thread_id,
+-                snapshot.time_delta_seconds,
+-                snapshot.token_delta,
+-                mode,
+-                Some(snapshot.expected_goal_id.as_str()),
++                &ExpectedGoalVersion {
++                    goal_id: args.expected_goal_id,
++                    revision: args.expected_revision,
++                },
++                args.objective.as_str(),
++                args.token_budget,
++                self.max_goal_token_budget,
+             )
+             .await
+-            .map_err(|err| {
+-                FunctionCallError::RespondToModel(format!("failed to account goal progress: {err}"))
+-            })?;
+-        Ok(match outcome {
+-            codex_state::GoalAccountingOutcome::Updated(goal) => {
+-                self.metrics
+-                    .record_terminal_if_status_changed(previous_status, &goal);
+-                self.analytics
+-                    .usage_accounted(&goal, GoalEventAttribution::Turn(turn_id.as_str()));
+-                self.analytics.status_changed(
+-                    &goal,
+-                    previous_status,
+-                    GoalEventAttribution::Turn(turn_id.as_str()),
+-                );
+-                self.accounting_state.mark_progress_accounted_for_status(
+-                    turn_id.as_str(),
+-                    &snapshot,
+-                    goal.status,
+-                    budget_limited_goal_disposition,
+-                );
+-                let goal = protocol_goal_from_state(goal);
+-                self.event_emitter.thread_goal_updated(
+-                    event_id.to_string(),
+-                    Some(turn_id),
+-                    goal.clone(),
+-                );
+-                Some(goal)
+-            }
+-            codex_state::GoalAccountingOutcome::Unchanged(_) => None,
++            .map_err(goal_service_tool_error)?;
++        self.emit_goal_updated_from_tool_call(
++            &invocation,
++            self.accounting_state.current_turn_id(),
++            outcome.goal.clone(),
++        );
++        let value = serde_json::to_value(ReplaceGoalToolResponse {
++            previous_goal: outcome.previous_goal,
++            previous_goal_id: outcome.previous_goal_version.goal_id,
++            previous_revision: outcome.previous_goal_version.revision,
++            goal: outcome.goal,
++            goal_id: outcome.goal_version.goal_id,
++            revision: outcome.goal_version.revision,
+         })
++        .map_err(|err| FunctionCallError::Fatal(err.to_string()))?;
++        Ok(Box::new(JsonToolOutput::new(value)))
+     }
+ 
+-    async fn current_goal_status_for_metrics(
++    fn emit_goal_updated_from_tool_call(
+         &self,
+-        expected_goal_id: Option<&str>,
+-    ) -> Result<Option<codex_state::ThreadGoalStatus>, FunctionCallError> {
+-        let goal = self
+-            .state_db
+-            .thread_goals()
+-            .get_thread_goal(self.thread_id)
+-            .await
+-            .map_err(|err| {
+-                FunctionCallError::RespondToModel(format!(
+-                    "failed to read goal metrics status: {err}"
+-                ))
+-            })?;
+-        Ok(goal.and_then(|goal| {
+-            expected_goal_id
+-                .is_none_or(|expected_goal_id| goal.goal_id == expected_goal_id)
+-                .then_some(goal.status)
+-        }))
++        invocation: &ToolCall,
++        turn_id: Option<String>,
++        goal: ThreadGoal,
++    ) {
++        self.event_emitter
++            .thread_goal_updated(invocation.call_id.clone(), turn_id, goal);
+     }
+ }
+ 
+@@ -404,6 +442,19 @@ where
+         .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))
+ }
+ 
++fn goal_service_tool_error(error: crate::api::GoalServiceError) -> FunctionCallError {
++    let message = match error {
++        crate::api::GoalServiceError::RevisionConflict {
++            current_goal_id,
++            current_revision,
++        } => format!(
++            "goal revision conflict; call get_goal to resync (current_goal_id={current_goal_id:?}, current_revision={current_revision})"
++        ),
++        error => error.to_string(),
++    };
++    FunctionCallError::RespondToModel(message)
++}
++
+ pub(crate) fn validate_goal_budget(
+     value: Option<i64>,
+     max_goal_token_budget: Option<i64>,
+@@ -426,15 +477,27 @@ pub(crate) fn validate_goal_budget(
+ 
+ fn goal_response(
+     goal: Option<ThreadGoal>,
++    goal_id: Option<String>,
++    revision: i64,
+     completion_budget_report: CompletionBudgetReport,
+ ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+-    let value = serde_json::to_value(GoalToolResponse::new(goal, completion_budget_report))
+-        .map_err(|err| FunctionCallError::Fatal(err.to_string()))?;
++    let value = serde_json::to_value(GoalToolResponse::new(
++        goal,
++        goal_id,
++        revision,
++        completion_budget_report,
++    ))
++    .map_err(|err| FunctionCallError::Fatal(err.to_string()))?;
+     Ok(Box::new(JsonToolOutput::new(value)))
+ }
+ 
+ impl GoalToolResponse {
+-    fn new(goal: Option<ThreadGoal>, report_mode: CompletionBudgetReport) -> Self {
++    fn new(
++        goal: Option<ThreadGoal>,
++        goal_id: Option<String>,
++        revision: i64,
++        report_mode: CompletionBudgetReport,
++    ) -> Self {
+         let remaining_tokens = goal.as_ref().and_then(|goal| {
+             goal.token_budget
+                 .map(|budget| (budget - goal.tokens_used).max(0))
+@@ -448,6 +511,8 @@ impl GoalToolResponse {
+         };
+         Self {
+             goal,
++            goal_id,
++            revision,
+             remaining_tokens,
+             completion_budget_report,
+         }
+@@ -472,6 +537,8 @@ pub(crate) async fn fill_empty_thread_preview_if_possible(
+ pub(crate) fn protocol_goal_from_state(goal: codex_state::ThreadGoal) -> ThreadGoal {
+     ThreadGoal {
+         thread_id: goal.thread_id,
++        goal_id: goal.goal_id,
++        revision: goal.revision,
+         objective: goal.objective,
+         status: protocol_status_from_state(goal.status),
+         token_budget: goal.token_budget,
+diff --git a/codex-rs/ext/goal/templates/goals/cleared.md b/codex-rs/ext/goal/templates/goals/cleared.md
+new file mode 100644
+index 000000000..9320ea5d9
+--- /dev/null
++++ b/codex-rs/ext/goal/templates/goals/cleared.md
+@@ -0,0 +1,3 @@
++<goal_update>
++The goal for this thread was cleared. Stop pursuing the previous objective and follow the latest user instructions.
++</goal_update>
+diff --git a/codex-rs/ext/goal/templates/goals/replaced.md b/codex-rs/ext/goal/templates/goals/replaced.md
+new file mode 100644
+index 000000000..7966efd66
+--- /dev/null
++++ b/codex-rs/ext/goal/templates/goals/replaced.md
+@@ -0,0 +1,4 @@
++<goal_update>
++The previous goal was replaced. Pursue this new objective:
++<objective>{{ objective }}</objective>
++</goal_update>
+diff --git a/codex-rs/ext/goal/tests/goal_extension_backend.rs b/codex-rs/ext/goal/tests/goal_extension_backend.rs
+index 7ac890183..66c15f936 100644
+--- a/codex-rs/ext/goal/tests/goal_extension_backend.rs
++++ b/codex-rs/ext/goal/tests/goal_extension_backend.rs
+@@ -1019,6 +1019,180 @@ async fn goal_service_external_set_active_resets_baseline_without_live_thread()
+     Ok(())
+ }
+ 
++#[tokio::test]
++async fn stale_set_runtime_effects_do_not_replace_current_accounting_version() -> anyhow::Result<()>
++{
++    let runtime = test_runtime().await?;
++    let thread_id = test_thread_id()?;
++    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
++    let harness = GoalExtensionHarness::new(runtime.clone(), thread_id).await?;
++    harness
++        .start_turn(
++            "turn-1",
++            &token_usage(
++                /*input_tokens*/ 100, /*cached_input_tokens*/ 0,
++                /*output_tokens*/ 0, /*reasoning_output_tokens*/ 0,
++                /*total_tokens*/ 100,
++            ),
++        )
++        .await;
++    let initial_revision = runtime
++        .thread_goals()
++        .get_thread_goal_revision(thread_id)
++        .await?;
++    let initial = harness
++        .goal_service
++        .create_thread_goal_exact(
++            runtime.as_ref(),
++            thread_id,
++            initial_revision,
++            "initial objective",
++            /*token_budget*/ None,
++            /*max_goal_token_budget*/ None,
++        )
++        .await?;
++    initial.apply_runtime_effects(&harness.goal_service).await;
++
++    let stale = harness
++        .goal_service
++        .set_thread_goal(
++            runtime.as_ref(),
++            GoalSetRequest {
++                thread_id,
++                objective: GoalObjectiveUpdate::Set("stale objective"),
++                status: Some(ThreadGoalStatus::Active),
++                token_budget: GoalTokenBudgetUpdate::Keep,
++                max_goal_token_budget: None,
++            },
++        )
++        .await?;
++    let current = harness
++        .goal_service
++        .set_thread_goal(
++            runtime.as_ref(),
++            GoalSetRequest {
++                thread_id,
++                objective: GoalObjectiveUpdate::Set("current objective"),
++                status: Some(ThreadGoalStatus::Active),
++                token_budget: GoalTokenBudgetUpdate::Keep,
++                max_goal_token_budget: None,
++            },
++        )
++        .await?;
++    current.apply_runtime_effects(&harness.goal_service).await;
++    stale.apply_runtime_effects(&harness.goal_service).await;
++
++    harness
++        .record_token_usage(
++            "turn-1",
++            &token_usage(
++                /*input_tokens*/ 110, /*cached_input_tokens*/ 0,
++                /*output_tokens*/ 0, /*reasoning_output_tokens*/ 0,
++                /*total_tokens*/ 110,
++            ),
++        )
++        .await;
++    harness
++        .notify_tool_finish("turn-1", "call-shell", "shell")
++        .await;
++
++    let goal = runtime
++        .thread_goals()
++        .get_thread_goal(thread_id)
++        .await?
++        .ok_or_else(|| anyhow::anyhow!("goal should exist"))?;
++    assert_eq!("current objective", goal.objective);
++    assert_eq!(10, goal.tokens_used);
++    Ok(())
++}
++
++#[tokio::test]
++async fn stale_clear_runtime_effects_do_not_clear_replacement_accounting() -> anyhow::Result<()> {
++    let runtime = test_runtime().await?;
++    let thread_id = test_thread_id()?;
++    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
++    let harness = GoalExtensionHarness::new(runtime.clone(), thread_id).await?;
++    harness
++        .start_turn(
++            "turn-1",
++            &token_usage(
++                /*input_tokens*/ 100, /*cached_input_tokens*/ 0,
++                /*output_tokens*/ 0, /*reasoning_output_tokens*/ 0,
++                /*total_tokens*/ 100,
++            ),
++        )
++        .await;
++    let initial_revision = runtime
++        .thread_goals()
++        .get_thread_goal_revision(thread_id)
++        .await?;
++    let initial = harness
++        .goal_service
++        .create_thread_goal_exact(
++            runtime.as_ref(),
++            thread_id,
++            initial_revision,
++            "old objective",
++            /*token_budget*/ None,
++            /*max_goal_token_budget*/ None,
++        )
++        .await?;
++    initial.apply_runtime_effects(&harness.goal_service).await;
++
++    let old_goal = runtime
++        .thread_goals()
++        .get_thread_goal(thread_id)
++        .await?
++        .ok_or_else(|| anyhow::anyhow!("old goal should exist"))?;
++    let cleared = runtime
++        .thread_goals()
++        .clear_thread_goal_exact(thread_id, &codex_state::GoalVersion::from(&old_goal))
++        .await?
++        .ok_or_else(|| anyhow::anyhow!("old goal should clear"))?;
++    let replacement = harness
++        .goal_service
++        .create_thread_goal_exact(
++            runtime.as_ref(),
++            thread_id,
++            cleared.revision,
++            "replacement objective",
++            /*token_budget*/ None,
++            /*max_goal_token_budget*/ None,
++        )
++        .await?;
++    replacement
++        .apply_runtime_effects(&harness.goal_service)
++        .await;
++    harness
++        .runtime_handle()
++        .apply_external_goal_clear(cleared.previous_goal)
++        .await
++        .map_err(anyhow::Error::msg)?;
++
++    harness
++        .record_token_usage(
++            "turn-1",
++            &token_usage(
++                /*input_tokens*/ 110, /*cached_input_tokens*/ 0,
++                /*output_tokens*/ 0, /*reasoning_output_tokens*/ 0,
++                /*total_tokens*/ 110,
++            ),
++        )
++        .await;
++    harness
++        .notify_tool_finish("turn-1", "call-shell", "shell")
++        .await;
++
++    let goal = runtime
++        .thread_goals()
++        .get_thread_goal(thread_id)
++        .await?
++        .ok_or_else(|| anyhow::anyhow!("replacement goal should exist"))?;
++    assert_eq!("replacement objective", goal.objective);
++    assert_eq!(10, goal.tokens_used);
++    Ok(())
++}
++
+ #[tokio::test]
+ async fn thread_stop_unregisters_goal_runtime_from_service() -> anyhow::Result<()> {
+     let runtime = test_runtime().await?;
 diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/extension.rs b/codex-rs/ext/guardian-v2/src/async_scorer/extension.rs
 index 41de621f7..d571d38b8 100644
 --- a/codex-rs/ext/guardian-v2/src/async_scorer/extension.rs
@@ -14700,6 +17439,21 @@ index e269a18a3..26b107f28 100644
          let thread_store = ExtensionData::new("11111111-1111-4111-8111-111111111111");
          thread_store.insert(WebSearchExtensionConfig {
              available: true,
+diff --git a/codex-rs/mcp-server/src/codex_tool_runner.rs b/codex-rs/mcp-server/src/codex_tool_runner.rs
+index 7caf042b6..474f40a34 100644
+--- a/codex-rs/mcp-server/src/codex_tool_runner.rs
++++ b/codex-rs/mcp-server/src/codex_tool_runner.rs
+@@ -300,7 +300,9 @@ async fn run_codex_tool_session_inner(
+                     EventMsg::SessionConfigured(_) => {
+                         tracing::error!("unexpected SessionConfigured event");
+                     }
+-                    EventMsg::ThreadGoalUpdated(_) | EventMsg::ThreadQueueChanged(_) => {
++                    EventMsg::ThreadGoalUpdated(_)
++                    | EventMsg::ThreadGoalCleared(_)
++                    | EventMsg::ThreadQueueChanged(_) => {
+                         // Ignore thread-scoped metadata updates in MCP tool runner.
+                     }
+                     EventMsg::McpStartupUpdate(_) | EventMsg::McpStartupComplete(_) => {
 diff --git a/codex-rs/mcp-server/src/message_processor.rs b/codex-rs/mcp-server/src/message_processor.rs
 index 25c5faa36..3e064383c 100644
 --- a/codex-rs/mcp-server/src/message_processor.rs
@@ -14913,6 +17667,429 @@ index b1de7d0af..3ac656963 100644
          test.session_configured.thread_id,
          Arc::clone(&test.codex),
          Arc::new(config),
+diff --git a/codex-rs/prompts/src/goals_tests.rs b/codex-rs/prompts/src/goals_tests.rs
+index af54fe085..7650c2926 100644
+--- a/codex-rs/prompts/src/goals_tests.rs
++++ b/codex-rs/prompts/src/goals_tests.rs
+@@ -6,6 +6,8 @@ use codex_protocol::protocol::ThreadGoalStatus;
+ fn continuation_prompt_allows_complete_and_strict_blocked_updates() {
+     let prompt = continuation_prompt(&ThreadGoal {
+         thread_id: ThreadId::new(),
++        goal_id: "goal-1".to_string(),
++        revision: 1,
+         objective: "finish the stack".to_string(),
+         status: ThreadGoalStatus::Active,
+         token_budget: Some(10_000),
+@@ -33,6 +35,8 @@ fn continuation_prompt_allows_complete_and_strict_blocked_updates() {
+ fn budget_limit_prompt_steers_model_to_wrap_up_without_pausing() {
+     let prompt = budget_limit_prompt(&ThreadGoal {
+         thread_id: ThreadId::new(),
++        goal_id: "goal-1".to_string(),
++        revision: 1,
+         objective: "finish the stack".to_string(),
+         status: ThreadGoalStatus::BudgetLimited,
+         token_budget: Some(10_000),
+@@ -55,6 +59,8 @@ fn budget_limit_prompt_steers_model_to_wrap_up_without_pausing() {
+ fn objective_updated_prompt_supersedes_previous_goal_context() {
+     let prompt = objective_updated_prompt(&ThreadGoal {
+         thread_id: ThreadId::new(),
++        goal_id: "goal-1".to_string(),
++        revision: 1,
+         objective: "finish the revised stack".to_string(),
+         status: ThreadGoalStatus::Active,
+         token_budget: Some(10_000),
+@@ -84,6 +90,8 @@ fn goal_prompts_escape_objective_delimiters() {
+ 
+     let continuation = continuation_prompt(&ThreadGoal {
+         thread_id: ThreadId::new(),
++        goal_id: "goal-1".to_string(),
++        revision: 1,
+         objective: objective.to_string(),
+         status: ThreadGoalStatus::Active,
+         token_budget: None,
+@@ -94,6 +102,8 @@ fn goal_prompts_escape_objective_delimiters() {
+     });
+     let budget_limit = budget_limit_prompt(&ThreadGoal {
+         thread_id: ThreadId::new(),
++        goal_id: "goal-1".to_string(),
++        revision: 1,
+         objective: objective.to_string(),
+         status: ThreadGoalStatus::BudgetLimited,
+         token_budget: Some(10_000),
+@@ -104,6 +114,8 @@ fn goal_prompts_escape_objective_delimiters() {
+     });
+     let objective_updated = objective_updated_prompt(&ThreadGoal {
+         thread_id: ThreadId::new(),
++        goal_id: "goal-1".to_string(),
++        revision: 1,
+         objective: objective.to_string(),
+         status: ThreadGoalStatus::Active,
+         token_budget: Some(10_000),
+diff --git a/codex-rs/protocol/src/turn_input.rs b/codex-rs/protocol/src/turn_input.rs
+index bc5adbe8b..407ed46f7 100644
+--- a/codex-rs/protocol/src/turn_input.rs
++++ b/codex-rs/protocol/src/turn_input.rs
+@@ -2,6 +2,7 @@
+ 
+ use crate::models::ResponseItem;
+ use crate::protocol::AdditionalContextEntry;
++use crate::protocol::ExecutionAccountBinding;
+ use crate::protocol::InterAgentCommunication;
+ use crate::protocol::NonSteerableTurnKind;
+ use crate::protocol::ThreadSettingsOverrides;
+@@ -31,6 +32,7 @@ pub enum TurnInput {
+ #[derive(Clone, Debug)]
+ pub struct TurnInputRequest {
+     pub input: TurnInput,
++    pub expected_execution_account: Option<ExecutionAccountBinding>,
+     pub thread_settings: ThreadSettingsOverrides,
+     pub start: TurnStartOptions,
+     pub additional_context: BTreeMap<String, AdditionalContextEntry>,
+@@ -54,6 +56,7 @@ impl TurnInputRequest {
+     pub fn new(input: TurnInput) -> Self {
+         Self {
+             input,
++            expected_execution_account: None,
+             thread_settings: ThreadSettingsOverrides::default(),
+             start: TurnStartOptions::default(),
+             additional_context: BTreeMap::new(),
+@@ -62,6 +65,15 @@ impl TurnInputRequest {
+         }
+     }
+ 
++    /// Requires Core to admit this input under the exact captured execution account.
++    pub fn with_expected_execution_account(
++        mut self,
++        expected_execution_account: ExecutionAccountBinding,
++    ) -> Self {
++        self.expected_execution_account = Some(expected_execution_account);
++        self
++    }
++
+     /// Creates ordinary user input without a client-provided message id.
+     pub fn user_input(content: Vec<UserInput>) -> Self {
+         Self::new(TurnInput::UserInput {
+@@ -180,6 +192,12 @@ pub enum SteerSubmission {
+ /// Why Core did not accept submitted turn input for turn processing.
+ #[derive(Clone, Debug, Eq, PartialEq)]
+ pub enum NotSubmittedReason {
++    /// The execution account changed after the caller captured its prompt.
++    ExpectedExecutionAccountMismatch {
++        expected: ExecutionAccountBinding,
++        actual: ExecutionAccountBinding,
++    },
++
+     /// `start_turn_if_idle` found an active turn.
+     NotIdle,
+ 
+diff --git a/codex-rs/rollout-trace/src/protocol_event.rs b/codex-rs/rollout-trace/src/protocol_event.rs
+index e0a03a373..cbc372799 100644
+--- a/codex-rs/rollout-trace/src/protocol_event.rs
++++ b/codex-rs/rollout-trace/src/protocol_event.rs
+@@ -371,6 +371,7 @@ pub(crate) fn tool_runtime_trace_event(event: &EventMsg) -> Option<ToolRuntimeTr
+         | EventMsg::ContextCompacted(_)
+         | EventMsg::ThreadRolledBack(_)
+         | EventMsg::ThreadGoalUpdated(_)
++        | EventMsg::ThreadGoalCleared(_)
+         | EventMsg::ThreadQueueChanged(_)
+         | EventMsg::TurnStarted(_)
+         | EventMsg::ThreadSettingsApplied(_)
+@@ -458,6 +459,7 @@ pub(crate) fn wrapped_protocol_event_type(event: &EventMsg) -> Option<&'static s
+         | EventMsg::AgentReasoningRawContent(_)
+         | EventMsg::AgentReasoningSectionBreak(_)
+         | EventMsg::ThreadGoalUpdated(_)
++        | EventMsg::ThreadGoalCleared(_)
+         | EventMsg::ThreadQueueChanged(_)
+         | EventMsg::McpStartupUpdate(_)
+         | EventMsg::McpStartupComplete(_)
+diff --git a/codex-rs/rollout/src/policy.rs b/codex-rs/rollout/src/policy.rs
+index 372c0afaf..c1a61a521 100644
+--- a/codex-rs/rollout/src/policy.rs
++++ b/codex-rs/rollout/src/policy.rs
+@@ -98,6 +98,7 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode)
+         }
+         EventMsg::TokenCount(_)
+         | EventMsg::ThreadGoalUpdated(_)
++        | EventMsg::ThreadGoalCleared(_)
+         | EventMsg::ThreadRolledBack(_)
+         | EventMsg::TurnAborted(_)
+         | EventMsg::TurnStarted(_)
+diff --git a/codex-rs/rollout/src/tests.rs b/codex-rs/rollout/src/tests.rs
+index 0e6180a41..c84960747 100644
+--- a/codex-rs/rollout/src/tests.rs
++++ b/codex-rs/rollout/src/tests.rs
+@@ -508,6 +508,8 @@ fn write_goal_started_session_file(
+         turn_id: None,
+         goal: ThreadGoal {
+             thread_id,
++            goal_id: "goal-1".to_string(),
++            revision: 1,
+             objective: objective.to_string(),
+             status: ThreadGoalStatus::Active,
+             token_budget: None,
+diff --git a/codex-rs/state/src/runtime/goal_mutations.rs b/codex-rs/state/src/runtime/goal_mutations.rs
+new file mode 100644
+index 000000000..472c4de80
+--- /dev/null
++++ b/codex-rs/state/src/runtime/goal_mutations.rs
+@@ -0,0 +1,257 @@
++use super::goals::GoalClearOutcome;
++use super::goals::GoalReplaceOutcome;
++use super::goals::GoalStore;
++use super::goals::GoalUpdate;
++use super::goals::GoalVersion;
++use super::goals::status_after_budget_limit;
++use super::goals::thread_goal_from_row;
++use super::*;
++use uuid::Uuid;
++
++impl GoalStore {
++    pub async fn create_thread_goal_exact(
++        &self,
++        thread_id: ThreadId,
++        expected_revision: i64,
++        objective: &str,
++        status: crate::ThreadGoalStatus,
++        token_budget: Option<i64>,
++    ) -> anyhow::Result<Option<crate::ThreadGoal>> {
++        if expected_revision < 0 || expected_revision == i64::MAX {
++            return Ok(None);
++        }
++        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
++        let (current_revision, has_goal): (i64, bool) = sqlx::query_as(
++            r#"
++SELECT COALESCE(
++    (SELECT revision FROM thread_goals WHERE thread_id = ?),
++    (SELECT revision FROM thread_goal_revision_tombstones WHERE thread_id = ?),
++    0
++), EXISTS(SELECT 1 FROM thread_goals WHERE thread_id = ?)
++            "#,
++        )
++        .bind(thread_id.to_string())
++        .bind(thread_id.to_string())
++        .bind(thread_id.to_string())
++        .fetch_one(&mut *transaction)
++        .await?;
++        if has_goal || current_revision != expected_revision {
++            transaction.rollback().await?;
++            return Ok(None);
++        }
++        let revision = expected_revision + 1;
++        let now_ms = datetime_to_epoch_millis(Utc::now());
++        let status = status_after_budget_limit(status, /*tokens_used*/ 0, token_budget);
++        let row = sqlx::query(
++            r#"
++INSERT INTO thread_goals (
++    thread_id, goal_id, revision, objective, status, token_budget,
++    tokens_used, time_used_seconds, created_at_ms, updated_at_ms
++) VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
++RETURNING
++    thread_id, goal_id, revision, objective, status, token_budget,
++    tokens_used, time_used_seconds, created_at_ms, updated_at_ms
++            "#,
++        )
++        .bind(thread_id.to_string())
++        .bind(Uuid::new_v4().to_string())
++        .bind(revision)
++        .bind(objective)
++        .bind(status.as_str())
++        .bind(token_budget)
++        .bind(now_ms)
++        .bind(now_ms)
++        .fetch_optional(&mut *transaction)
++        .await?;
++        let Some(row) = row else {
++            transaction.rollback().await?;
++            return Ok(None);
++        };
++        sqlx::query("DELETE FROM thread_goal_revision_tombstones WHERE thread_id = ?")
++            .bind(thread_id.to_string())
++            .execute(&mut *transaction)
++            .await?;
++        transaction.commit().await?;
++        thread_goal_from_row(&row).map(Some)
++    }
++
++    pub async fn replace_thread_goal_exact(
++        &self,
++        thread_id: ThreadId,
++        expected: &GoalVersion,
++        objective: &str,
++        status: crate::ThreadGoalStatus,
++        token_budget: Option<i64>,
++    ) -> anyhow::Result<Option<GoalReplaceOutcome>> {
++        if expected.revision == i64::MAX {
++            return Ok(None);
++        }
++        let Some(previous_goal) = self.get_thread_goal(thread_id).await? else {
++            return Ok(None);
++        };
++        if GoalVersion::from(&previous_goal) != *expected {
++            return Ok(None);
++        }
++        let revision = expected.revision + 1;
++        let now_ms = datetime_to_epoch_millis(Utc::now());
++        let status = status_after_budget_limit(status, /*tokens_used*/ 0, token_budget);
++        let row = sqlx::query(
++            r#"
++UPDATE thread_goals
++SET goal_id = ?, revision = ?, objective = ?, status = ?, token_budget = ?,
++    tokens_used = 0, time_used_seconds = 0, created_at_ms = ?, updated_at_ms = ?
++WHERE thread_id = ? AND goal_id = ? AND revision = ?
++RETURNING
++    thread_id, goal_id, revision, objective, status, token_budget,
++    tokens_used, time_used_seconds, created_at_ms, updated_at_ms
++            "#,
++        )
++        .bind(Uuid::new_v4().to_string())
++        .bind(revision)
++        .bind(objective)
++        .bind(status.as_str())
++        .bind(token_budget)
++        .bind(now_ms)
++        .bind(now_ms)
++        .bind(thread_id.to_string())
++        .bind(&expected.goal_id)
++        .bind(expected.revision)
++        .fetch_optional(self.pool.as_ref())
++        .await?;
++        let Some(row) = row else {
++            return Ok(None);
++        };
++        Ok(Some(GoalReplaceOutcome {
++            previous_goal,
++            goal: thread_goal_from_row(&row)?,
++        }))
++    }
++
++    pub async fn clear_thread_goal_exact(
++        &self,
++        thread_id: ThreadId,
++        expected: &GoalVersion,
++    ) -> anyhow::Result<Option<GoalClearOutcome>> {
++        if expected.revision == i64::MAX {
++            return Ok(None);
++        }
++        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
++        let row = sqlx::query(
++            r#"
++DELETE FROM thread_goals
++WHERE thread_id = ? AND goal_id = ? AND revision = ?
++RETURNING
++    thread_id, goal_id, revision, objective, status, token_budget,
++    tokens_used, time_used_seconds, created_at_ms, updated_at_ms
++            "#,
++        )
++        .bind(thread_id.to_string())
++        .bind(&expected.goal_id)
++        .bind(expected.revision)
++        .fetch_optional(&mut *transaction)
++        .await?;
++        let Some(row) = row else {
++            transaction.rollback().await?;
++            return Ok(None);
++        };
++        let revision = expected.revision + 1;
++        sqlx::query(
++            r#"
++INSERT INTO thread_goal_revision_tombstones (thread_id, revision)
++VALUES (?, ?)
++ON CONFLICT(thread_id) DO UPDATE SET revision = excluded.revision
++            "#,
++        )
++        .bind(thread_id.to_string())
++        .bind(revision)
++        .execute(&mut *transaction)
++        .await?;
++        transaction.commit().await?;
++        Ok(Some(GoalClearOutcome {
++            previous_goal: thread_goal_from_row(&row)?,
++            revision,
++        }))
++    }
++
++    pub async fn update_thread_goal_exact(
++        &self,
++        thread_id: ThreadId,
++        expected: &GoalVersion,
++        update: GoalUpdate,
++    ) -> anyhow::Result<Option<crate::ThreadGoal>> {
++        let Some(current) = self.get_thread_goal(thread_id).await? else {
++            return Ok(None);
++        };
++        if GoalVersion::from(&current) != *expected || expected.revision == i64::MAX {
++            return Ok(None);
++        }
++        if update.objective.is_none() && update.status.is_none() && update.token_budget.is_none() {
++            return Ok(Some(current));
++        }
++        let objective = update.objective.unwrap_or(current.objective);
++        let token_budget = update.token_budget.unwrap_or(current.token_budget);
++        let requested_status = update.status.unwrap_or(current.status);
++        let status = if current.status == crate::ThreadGoalStatus::BudgetLimited
++            && matches!(
++                requested_status,
++                crate::ThreadGoalStatus::Paused | crate::ThreadGoalStatus::Blocked
++            ) {
++            current.status
++        } else {
++            status_after_budget_limit(requested_status, current.tokens_used, token_budget)
++        };
++        let row = sqlx::query(
++            r#"
++UPDATE thread_goals
++SET objective = ?, status = ?, token_budget = ?, revision = revision + 1, updated_at_ms = ?
++WHERE thread_id = ? AND goal_id = ? AND revision = ? AND revision < 9223372036854775807
++RETURNING
++    thread_id, goal_id, revision, objective, status, token_budget,
++    tokens_used, time_used_seconds, created_at_ms, updated_at_ms
++            "#,
++        )
++        .bind(objective)
++        .bind(status.as_str())
++        .bind(token_budget)
++        .bind(datetime_to_epoch_millis(Utc::now()))
++        .bind(thread_id.to_string())
++        .bind(&expected.goal_id)
++        .bind(expected.revision)
++        .fetch_optional(self.pool.as_ref())
++        .await?;
++        row.map(|row| thread_goal_from_row(&row)).transpose()
++    }
++
++    pub(crate) async fn purge_thread_goal(&self, thread_id: ThreadId) -> anyhow::Result<()> {
++        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
++        sqlx::query("DELETE FROM thread_goals WHERE thread_id = ?")
++            .bind(thread_id.to_string())
++            .execute(&mut *transaction)
++            .await?;
++        sqlx::query("DELETE FROM thread_goal_revision_tombstones WHERE thread_id = ?")
++            .bind(thread_id.to_string())
++            .execute(&mut *transaction)
++            .await?;
++        transaction.commit().await?;
++        Ok(())
++    }
++
++    pub async fn account_thread_goal_usage_exact(
++        &self,
++        thread_id: ThreadId,
++        time_delta_seconds: i64,
++        token_delta: i64,
++        mode: super::goals::GoalAccountingMode,
++        expected: &GoalVersion,
++    ) -> anyhow::Result<super::goals::GoalAccountingOutcome> {
++        self.account_thread_goal_usage_inner(
++            thread_id,
++            time_delta_seconds,
++            token_delta,
++            mode,
++            Some(expected.goal_id.as_str()),
++            Some(expected.revision),
++        )
++        .await
++    }
++}
 diff --git a/codex-rs/thread-manager-sample/src/main.rs b/codex-rs/thread-manager-sample/src/main.rs
 index 155e3026a..23bbb3eac 100644
 --- a/codex-rs/thread-manager-sample/src/main.rs
