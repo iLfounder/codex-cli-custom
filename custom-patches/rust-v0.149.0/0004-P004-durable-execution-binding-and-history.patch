@@ -1,0 +1,3101 @@
+From 6d2145071614aeb68eb3d9ab4c5474f33065be3b Mon Sep 17 00:00:00 2001
+From: patch-verifier <patch-verifier@localhost>
+Date: Fri, 21 Aug 2026 15:13:34 +0900
+Subject: [PATCH] feat(custom): add execution account binding for 0.149
+
+---
+ codex-rs/app-server/src/account_registry.rs   |  54 +++
+ codex-rs/app-server/src/message_processor.rs  |   4 +
+ .../request_processors/feedback_processor.rs  |   1 +
+ .../persisted_resume_settings_tests.rs        |   1 +
+ .../request_processors/thread_processor.rs    |   7 +-
+ codex-rs/core/src/codex_delegate.rs           |   9 +-
+ codex-rs/core/src/codex_thread.rs             |   4 +
+ .../core/src/context_manager/history_tests.rs |   1 +
+ codex-rs/core/src/execution_account.rs        |  67 ++++
+ codex-rs/core/src/lib.rs                      |   4 +
+ codex-rs/core/src/session/mod.rs              |   3 +
+ codex-rs/core/src/session/review.rs           |   1 +
+ .../session/rollout_reconstruction_tests.rs   |   8 +
+ codex-rs/core/src/session/session.rs          |  22 ++
+ codex-rs/core/src/session/tests.rs            |  56 +++-
+ .../core/src/session/tests/guardian_tests.rs  |  12 +-
+ codex-rs/core/src/session/turn_context.rs     |   6 +
+ codex-rs/core/src/thread_manager.rs           | 182 ++++++++++-
+ codex-rs/core/tests/suite/resume_warning.rs   |   1 +
+ codex-rs/protocol/src/protocol.rs             |  43 +++
+ codex-rs/rollout/src/recorder_tests.rs        |   1 +
+ .../0003_thread_goal_revisions.sql            |   7 +
+ codex-rs/state/src/extract.rs                 |   4 +
+ codex-rs/state/src/migrations.rs              |   3 +-
+ codex-rs/state/src/migrations_tests.rs        |  22 +-
+ codex-rs/state/src/model/thread_goal.rs       |   4 +
+ codex-rs/state/src/runtime.rs                 |   1 +
+ .../state/src/runtime/execution_account.rs    | 276 ++++++++++++++++
+ .../src/runtime/execution_account_tests.rs    | 233 +++++++++++++
+ codex-rs/state/src/runtime/goals.rs           | 309 ++++++++++--------
+ .../state/src/runtime/goals_revision_tests.rs | 145 ++++++++
+ codex-rs/state/src/runtime/threads.rs         |  21 ++
+ codex-rs/thread-store/src/in_memory.rs        | 143 +++++++-
+ .../thread-store/src/local/live_writer.rs     |  24 ++
+ codex-rs/thread-store/src/local/mod.rs        | 208 ++++++++++++
+ .../src/local/model_context_tests.rs          |   1 +
+ .../src/local/rollout_migration_tests.rs      |   1 +
+ codex-rs/thread-store/src/store.rs            |  49 +++
+ 38 files changed, 1779 insertions(+), 159 deletions(-)
+ create mode 100644 codex-rs/core/src/execution_account.rs
+ create mode 100644 codex-rs/state/goals_migrations/0003_thread_goal_revisions.sql
+ create mode 100644 codex-rs/state/src/runtime/execution_account.rs
+ create mode 100644 codex-rs/state/src/runtime/execution_account_tests.rs
+ create mode 100644 codex-rs/state/src/runtime/goals_revision_tests.rs
+
+diff --git a/codex-rs/app-server/src/account_registry.rs b/codex-rs/app-server/src/account_registry.rs
+index d77295e1a..49e71a17a 100644
+--- a/codex-rs/app-server/src/account_registry.rs
++++ b/codex-rs/app-server/src/account_registry.rs
+@@ -14,6 +14,9 @@ use codex_app_server_protocol::AccountSlotListResponse;
+ use codex_app_server_protocol::AccountSlotSnapshot;
+ use codex_app_server_protocol::AccountSlotStatus;
+ use codex_app_server_protocol::JSONRPCErrorError;
++use codex_core::ExecutionAccountContext;
++use codex_core::ExecutionAccountResolver;
++use codex_core::ExecutionAccountResolverFuture;
+ use codex_core::config::Config;
+ use codex_core::path_utils::write_atomically;
+ use codex_login::AuthConfig;
+@@ -21,6 +24,8 @@ use codex_login::AuthManager;
+ use codex_login::AuthSourceKind;
+ use codex_model_provider::create_model_provider;
+ use codex_models_manager::manager::SharedModelsManager;
++use codex_protocol::error::CodexErr;
++use codex_protocol::protocol::ExecutionAccountBinding;
+ use serde::Deserialize;
+ use serde::Serialize;
+ use tokio::sync::OnceCell;
+@@ -493,6 +498,55 @@ impl AccountRegistry {
+     }
+ }
+ 
++impl ExecutionAccountResolver for AccountRegistry {
++    fn resolve(&self, binding: ExecutionAccountBinding) -> ExecutionAccountResolverFuture<'_> {
++        Box::pin(async move {
++            let (slot, manifest_error) = {
++                let state = self.state.read().map_err(|_| {
++                    CodexErr::Fatal("account slot registry is unavailable".to_string())
++                })?;
++                (
++                    state
++                        .slots
++                        .iter()
++                        .find(|slot| slot.manifest.account_slot_id == binding.slot_id)
++                        .cloned(),
++                    state.manifest_error,
++                )
++            };
++            let slot = slot.ok_or_else(|| {
++                CodexErr::InvalidRequest(format!(
++                    "execution account slot `{}` is unavailable",
++                    binding.slot_id
++                ))
++            })?;
++            let capability = self.capability(manifest_error);
++            if !slot.manifest.is_default && !capability.available {
++                return Err(CodexErr::InvalidRequest(format!(
++                    "execution account slot `{}` is unavailable: {}",
++                    binding.slot_id,
++                    capability
++                        .deny_reason
++                        .as_deref()
++                        .unwrap_or("multi_account_unavailable")
++                )));
++            }
++            if !slot.manifest.is_default && slot.manifest.status != ManifestSlotStatus::Ready {
++                return Err(CodexErr::InvalidRequest(format!(
++                    "execution account slot `{}` is not ready",
++                    binding.slot_id
++                )));
++            }
++            let runtime = self.runtime(&slot).await;
++            Ok(Arc::new(ExecutionAccountContext {
++                binding,
++                auth_manager: Arc::clone(&runtime.auth_manager),
++                models_manager: Arc::clone(&runtime.models_manager),
++            }))
++        })
++    }
++}
++
+ fn virtual_default_manifest(process_home: &Path) -> AccountSlotsManifest {
+     AccountSlotsManifest {
+         schema_version: MANIFEST_SCHEMA_VERSION,
+diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
+index a1a473dc1..15d18af23 100644
+--- a/codex-rs/app-server/src/message_processor.rs
++++ b/codex-rs/app-server/src/message_processor.rs
+@@ -361,6 +361,10 @@ impl MessageProcessor {
+                     thread_state_manager.clone(),
+                 )),
+             );
++            let manager =
++                manager
++                    .with_execution_account_resolver(Arc::clone(&account_registry)
++                        as Arc<dyn codex_core::ExecutionAccountResolver>);
+             match code_mode_session_provider {
+                 Some(provider) => manager.with_code_mode_session_provider(provider),
+                 None => manager,
+diff --git a/codex-rs/app-server/src/request_processors/feedback_processor.rs b/codex-rs/app-server/src/request_processors/feedback_processor.rs
+index 8de82abdb..6077d213e 100644
+--- a/codex-rs/app-server/src/request_processors/feedback_processor.rs
++++ b/codex-rs/app-server/src/request_processors/feedback_processor.rs
+@@ -701,6 +701,7 @@ mod tests {
+                 ordinal: None,
+                 item: RolloutItem::TurnContext(TurnContextItem {
+                     turn_id: Some((*turn_id).to_string()),
++                    execution_account: None,
+                     cwd: AbsolutePathBuf::from_absolute_path(tempdir.path())
+                         .expect("absolute feedback rollout directory"),
+                     workspace_roots: None,
+diff --git a/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs b/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs
+index ed96867eb..85340f8ca 100644
+--- a/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs
++++ b/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs
+@@ -61,6 +61,7 @@ fn turn_context_item(
+ ) -> RolloutItem {
+     RolloutItem::TurnContext(TurnContextItem {
+         turn_id: Some(turn_id.to_string()),
++        execution_account: None,
+         cwd: cwd(),
+         workspace_roots: Some(vec![cwd()]),
+         current_date: None,
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
+index afea864af..a57e19a12 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
+@@ -84,6 +84,7 @@ struct ThreadRevertRuntimeSnapshot {
+     config: Config,
+     settings: CodexThreadSettingsOverrides,
+     client_mcp_extensions: ClientMcpExtensions,
++    execution_account: Arc<codex_core::ExecutionAccountContext>,
+ }
+ 
+ fn collect_resume_override_mismatches(
+@@ -2021,6 +2022,7 @@ impl ThreadRequestProcessor {
+             config: thread.config().await.as_ref().clone(),
+             settings: thread.restorable_thread_settings().await,
+             client_mcp_extensions: thread.client_mcp_extensions(),
++            execution_account: thread.execution_account(),
+         };
+ 
+         // Subscribe before shutdown so a pending idle unload either rejects this request or can
+@@ -2124,6 +2126,7 @@ impl ThreadRequestProcessor {
+             config,
+             settings,
+             client_mcp_extensions,
++            execution_account,
+         } = runtime_snapshot;
+         let thread_id_string = thread_id.to_string();
+         let stored_thread = self
+@@ -2144,10 +2147,10 @@ impl ThreadRequestProcessor {
+             ..
+         } = self
+             .thread_manager
+-            .resume_thread_with_history(
++            .resume_thread_with_history_and_execution_account(
+                 config,
+                 thread_history,
+-                self.auth_manager.clone(),
++                execution_account,
+                 self.request_trace_context(request_id).await,
+                 client_mcp_extensions,
+             )
+diff --git a/codex-rs/core/src/codex_delegate.rs b/codex-rs/core/src/codex_delegate.rs
+index 0b4ff1ac4..ff6df2afd 100644
+--- a/codex-rs/core/src/codex_delegate.rs
++++ b/codex-rs/core/src/codex_delegate.rs
+@@ -49,8 +49,8 @@ use crate::session::completed_session_loop_termination;
+ #[allow(clippy::too_many_arguments)]
+ pub(crate) async fn run_codex_thread_interactive(
+     mut config: Config,
+-    auth_manager: Arc<AuthManager>,
+-    models_manager: SharedModelsManager,
++    _auth_manager: Arc<AuthManager>,
++    _models_manager: SharedModelsManager,
+     parent_session: Arc<Session>,
+     parent_ctx: Arc<TurnContext>,
+     parent_environments: TurnEnvironmentSnapshot,
+@@ -90,8 +90,9 @@ pub(crate) async fn run_codex_thread_interactive(
+         allow_provider_model_fallback: false,
+         user_instructions,
+         installation_id: parent_session.installation_id.clone(),
+-        auth_manager,
+-        models_manager,
++        auth_manager: Arc::clone(&parent_ctx.execution_account.auth_manager),
++        models_manager: Arc::clone(&parent_ctx.execution_account.models_manager),
++        execution_account: Arc::clone(&parent_ctx.execution_account),
+         environment_manager: parent_session
+             .services
+             .turn_environments
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index 2f5403c60..5359c4f14 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -196,6 +196,10 @@ impl CodexThread {
+         self.session.services.session_telemetry.clone()
+     }
+ 
++    pub fn execution_account(&self) -> Arc<crate::execution_account::ExecutionAccountContext> {
++        self.session.execution_account()
++    }
++
+     /// Returns extension-owned data attached to this thread runtime.
+     pub fn thread_extension_data(&self) -> &codex_extension_api::ExtensionData {
+         &self.session.services.thread_extension_data
+diff --git a/codex-rs/core/src/context_manager/history_tests.rs b/codex-rs/core/src/context_manager/history_tests.rs
+index 666c708ef..73494edac 100644
+--- a/codex-rs/core/src/context_manager/history_tests.rs
++++ b/codex-rs/core/src/context_manager/history_tests.rs
+@@ -296,6 +296,7 @@ fn developer_msg_with_fragments(texts: &[&str]) -> ResponseItem {
+ fn reference_context_item() -> TurnContextItem {
+     TurnContextItem {
+         turn_id: Some("reference-turn".to_string()),
++        execution_account: None,
+         cwd: AbsolutePathBuf::try_from(
+             std::env::current_dir()
+                 .expect("current directory")
+diff --git a/codex-rs/core/src/execution_account.rs b/codex-rs/core/src/execution_account.rs
+new file mode 100644
+index 000000000..e9266344c
+--- /dev/null
++++ b/codex-rs/core/src/execution_account.rs
+@@ -0,0 +1,67 @@
++use std::future::Future;
++use std::pin::Pin;
++use std::sync::Arc;
++
++use codex_login::AuthManager;
++use codex_models_manager::manager::SharedModelsManager;
++use codex_protocol::error::CodexErr;
++use codex_protocol::error::Result as CodexResult;
++use codex_protocol::protocol::ExecutionAccountBinding;
++
++/// Immutable resources and durable provenance used to execute a thread or turn.
++#[derive(Clone)]
++pub struct ExecutionAccountContext {
++    pub binding: ExecutionAccountBinding,
++    pub auth_manager: Arc<AuthManager>,
++    pub models_manager: SharedModelsManager,
++}
++
++impl std::fmt::Debug for ExecutionAccountContext {
++    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        formatter
++            .debug_struct("ExecutionAccountContext")
++            .field("binding", &self.binding)
++            .finish_non_exhaustive()
++    }
++}
++
++/// Future returned by [`ExecutionAccountResolver`] without requiring async-trait machinery.
++pub type ExecutionAccountResolverFuture<'a> =
++    Pin<Box<dyn Future<Output = CodexResult<Arc<ExecutionAccountContext>>> + Send + 'a>>;
++
++/// Resolves host-managed account slots into immutable execution resources.
++pub trait ExecutionAccountResolver: Send + Sync {
++    fn resolve(&self, binding: ExecutionAccountBinding) -> ExecutionAccountResolverFuture<'_>;
++}
++
++pub(crate) struct DefaultExecutionAccountResolver {
++    auth_manager: Arc<AuthManager>,
++    models_manager: SharedModelsManager,
++}
++
++impl DefaultExecutionAccountResolver {
++    pub(crate) fn new(auth_manager: Arc<AuthManager>, models_manager: SharedModelsManager) -> Self {
++        Self {
++            auth_manager,
++            models_manager,
++        }
++    }
++}
++
++impl ExecutionAccountResolver for DefaultExecutionAccountResolver {
++    fn resolve(&self, binding: ExecutionAccountBinding) -> ExecutionAccountResolverFuture<'_> {
++        Box::pin(async move {
++            if binding.slot_id != "default" {
++                return Err(CodexErr::InvalidRequest(format!(
++                    "execution account slot `{}` is unavailable",
++                    binding.slot_id
++                )));
++            }
++            Ok(Arc::new(ExecutionAccountContext {
++                binding,
++                auth_manager: Arc::clone(&self.auth_manager),
++                models_manager: Arc::clone(&self.models_manager),
++            }))
++        })
++    }
++}
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index 1814288fc..cf76f99b5 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -59,6 +59,7 @@ mod environment_selection;
+ pub mod exec;
+ pub mod exec_env;
+ mod exec_policy;
++pub mod execution_account;
+ #[cfg(test)]
+ mod git_info_tests;
+ mod guardian;
+@@ -109,6 +110,9 @@ pub use client::X_RESPONSESAPI_INCLUDE_TIMING_METRICS_HEADER;
+ pub use codex_protocol::config_types::ModelProviderAuthInfo;
+ mod event_mapping;
+ pub use codex_prompts as review_prompts;
++pub use execution_account::ExecutionAccountContext;
++pub use execution_account::ExecutionAccountResolver;
++pub use execution_account::ExecutionAccountResolverFuture;
+ mod thread_manager;
+ pub(crate) mod web_search;
+ pub(crate) mod windows_sandbox_read_grants;
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 513e7c03e..58b90acc4 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -396,6 +396,7 @@ pub(crate) struct SessionSpawnArgs {
+     pub(crate) installation_id: String,
+     pub(crate) auth_manager: Arc<AuthManager>,
+     pub(crate) models_manager: SharedModelsManager,
++    pub(crate) execution_account: Arc<crate::execution_account::ExecutionAccountContext>,
+     pub(crate) environment_manager: Arc<EnvironmentManager>,
+     pub(crate) skills_service: Arc<HostSkillsService>,
+     pub(crate) plugins_manager: Arc<PluginsManager>,
+@@ -493,6 +494,7 @@ impl Session {
+             installation_id,
+             auth_manager,
+             models_manager,
++            execution_account,
+             environment_manager,
+             skills_service,
+             plugins_manager,
+@@ -734,6 +736,7 @@ impl Session {
+             installation_id,
+             auth_manager.clone(),
+             models_manager.clone(),
++            execution_account,
+             model_info,
+             exec_policy,
+             tx_event.clone(),
+diff --git a/codex-rs/core/src/session/review.rs b/codex-rs/core/src/session/review.rs
+index d431e602b..ae9eca28d 100644
+--- a/codex-rs/core/src/session/review.rs
++++ b/codex-rs/core/src/session/review.rs
+@@ -137,6 +137,7 @@ pub(super) async fn spawn_review_thread(
+         realtime_active: parent_turn_context.realtime_active,
+         code_mode_available: parent_turn_context.code_mode_available,
+         config: per_turn_config,
++        execution_account: Arc::clone(&parent_turn_context.execution_account),
+         auth_manager: auth_manager_for_context,
+         model_info: Arc::new(model_info.clone()),
+         session_telemetry: session_telemetry_for_context,
+diff --git a/codex-rs/core/src/session/rollout_reconstruction_tests.rs b/codex-rs/core/src/session/rollout_reconstruction_tests.rs
+index 1d9848511..6ecb4739d 100644
+--- a/codex-rs/core/src/session/rollout_reconstruction_tests.rs
++++ b/codex-rs/core/src/session/rollout_reconstruction_tests.rs
+@@ -222,6 +222,7 @@ async fn record_initial_history_resumed_bare_turn_context_does_not_hydrate_previ
+     let previous_model = "previous-rollout-model";
+     let previous_context_item = TurnContextItem {
+         turn_id: Some(turn_context.sub_id.clone()),
++        execution_account: None,
+         #[allow(deprecated)]
+         cwd: turn_context.cwd.clone(),
+         workspace_roots: None,
+@@ -270,6 +271,7 @@ async fn record_initial_history_resumed_hydrates_previous_turn_settings_from_lif
+     let previous_model = "previous-rollout-model";
+     let mut previous_context_item = TurnContextItem {
+         turn_id: Some(turn_context.sub_id.clone()),
++        execution_account: None,
+         #[allow(deprecated)]
+         cwd: turn_context.cwd.clone(),
+         workspace_roots: None,
+@@ -1341,6 +1343,7 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
+     let previous_model = "previous-rollout-model";
+     let previous_context_item = TurnContextItem {
+         turn_id: Some(turn_context.sub_id.clone()),
++        execution_account: None,
+         #[allow(deprecated)]
+         cwd: turn_context.cwd.clone(),
+         workspace_roots: None,
+@@ -1432,6 +1435,7 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
+             .expect("serialize seeded reference context item"),
+         serde_json::to_value(Some(TurnContextItem {
+             turn_id: Some(turn_context.sub_id.clone()),
++            execution_account: None,
+             #[allow(deprecated)]
+             cwd: turn_context.cwd.clone(),
+             workspace_roots: None,
+@@ -1465,6 +1469,7 @@ async fn record_initial_history_resumed_aborted_turn_without_id_clears_active_tu
+     let previous_model = "previous-rollout-model";
+     let previous_context_item = TurnContextItem {
+         turn_id: Some(turn_context.sub_id.clone()),
++        execution_account: None,
+         #[allow(deprecated)]
+         cwd: turn_context.cwd.clone(),
+         workspace_roots: None,
+@@ -1597,6 +1602,7 @@ async fn record_initial_history_resumed_unmatched_abort_preserves_active_turn_fo
+     let unmatched_abort_turn_id = "other-turn".to_string();
+     let current_context_item = TurnContextItem {
+         turn_id: Some(current_turn_id.clone()),
++        execution_account: None,
+         #[allow(deprecated)]
+         cwd: turn_context.cwd.clone(),
+         workspace_roots: None,
+@@ -1725,6 +1731,7 @@ async fn record_initial_history_resumed_trailing_incomplete_turn_compaction_clea
+     let previous_model = "previous-rollout-model";
+     let previous_context_item = TurnContextItem {
+         turn_id: Some(turn_context.sub_id.clone()),
++        execution_account: None,
+         #[allow(deprecated)]
+         cwd: turn_context.cwd.clone(),
+         workspace_roots: None,
+@@ -1897,6 +1904,7 @@ async fn record_initial_history_resumed_replaced_incomplete_compacted_turn_clear
+     let previous_model = "previous-rollout-model";
+     let previous_context_item = TurnContextItem {
+         turn_id: Some(turn_context.sub_id.clone()),
++        execution_account: None,
+         #[allow(deprecated)]
+         cwd: turn_context.cwd.clone(),
+         workspace_roots: None,
+diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
+index c0b040796..940245af4 100644
+--- a/codex-rs/core/src/session/session.rs
++++ b/codex-rs/core/src/session/session.rs
+@@ -37,6 +37,7 @@ use tokio::sync::Semaphore;
+ /// A session has at most 1 running task at a time, and can be interrupted by user input.
+ pub(crate) struct Session {
+     pub(crate) thread_id: ThreadId,
++    pub(crate) execution_account: Arc<crate::execution_account::ExecutionAccountContext>,
+     pub(crate) installation_id: String,
+     pub(super) tx_event: Sender<Event>,
+     pub(super) agent_status: watch::Sender<AgentStatus>,
+@@ -639,6 +640,12 @@ impl Session {
+         state.session_configuration.originator.clone()
+     }
+ 
++    pub(crate) fn execution_account(
++        &self,
++    ) -> Arc<crate::execution_account::ExecutionAccountContext> {
++        Arc::clone(&self.execution_account)
++    }
++
+     #[instrument(name = "session_init", level = "info", skip_all)]
+     #[allow(clippy::too_many_arguments)]
+     pub(crate) async fn new(
+@@ -649,6 +656,7 @@ impl Session {
+         installation_id: String,
+         auth_manager: Arc<AuthManager>,
+         models_manager: SharedModelsManager,
++        execution_account: Arc<crate::execution_account::ExecutionAccountContext>,
+         model_info: ModelInfo,
+         exec_policy: Arc<ExecPolicyManager>,
+         tx_event: Sender<Event>,
+@@ -1426,6 +1434,7 @@ impl Session {
+             let (mcp_prewarm_tx, mcp_prewarm_rx) = async_channel::bounded(1);
+             let sess = Arc::new(Session {
+                 thread_id,
++                execution_account: Arc::clone(&execution_account),
+                 installation_id,
+                 tx_event: tx_event.clone(),
+                 agent_status,
+@@ -1552,6 +1561,19 @@ impl Session {
+                 sess.try_ensure_rollout_materialized(PersistContext::Standard)
+                     .await?;
+             }
++            if !config.ephemeral {
++                let persisted_binding = thread_store
++                    .initialize_execution_account_binding(
++                        thread_id,
++                        execution_account.binding.clone(),
++                    )
++                    .await?;
++                if persisted_binding != execution_account.binding {
++                    anyhow::bail!(
++                        "thread {thread_id} execution account changed during session startup"
++                    );
++                }
++            }
+             {
+                 let mut state = sess.state.lock().await;
+                 state.queue_pending_session_start_source(session_start_source);
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 4233e5f94..97c33206b 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -78,6 +78,20 @@ use codex_protocol::turn_input::TurnInput as SubmittedTurnInput;
+ use codex_protocol::turn_input::TurnInputMode;
+ use codex_protocol::turn_input::TurnInputRequest;
+ use codex_protocol::turn_input::TurnInputSubmission;
++
++fn default_execution_account(
++    auth_manager: &Arc<AuthManager>,
++    models_manager: &SharedModelsManager,
++) -> Arc<crate::execution_account::ExecutionAccountContext> {
++    Arc::new(crate::execution_account::ExecutionAccountContext {
++        binding: codex_protocol::protocol::ExecutionAccountBinding {
++            slot_id: "default".to_string(),
++            generation: 1,
++        },
++        auth_manager: Arc::clone(auth_manager),
++        models_manager: Arc::clone(models_manager),
++    })
++}
+ use codex_tools::ToolSpec;
+ use codex_utils_path_uri::PathUri;
+ use std::collections::BTreeMap;
+@@ -3516,6 +3530,7 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
+     let previous_model = "forked-rollout-model";
+     let previous_context_item = TurnContextItem {
+         turn_id: Some(turn_context.sub_id.clone()),
++        execution_account: None,
+         #[allow(deprecated)]
+         cwd: turn_context.cwd.clone(),
+         workspace_roots: None,
+@@ -3955,6 +3970,7 @@ async fn thread_rollback_restores_cleared_reference_context_item_after_compactio
+         })),
+         RolloutItem::TurnContext(TurnContextItem {
+             turn_id: Some(rolled_back_turn_id.clone()),
++            execution_account: None,
+             model: "rolled-back-model".to_string(),
+             comp_hash: None,
+             ..first_context_item.clone()
+@@ -5716,8 +5732,9 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
+         Arc::clone(&config),
+         /*user_instructions*/ None,
+         "11111111-1111-4111-8111-111111111111".to_string(),
+-        auth_manager,
+-        models_manager,
++        Arc::clone(&auth_manager),
++        Arc::clone(&models_manager),
++        default_execution_account(&auth_manager, &models_manager),
+         model_info,
+         Arc::new(ExecPolicyManager::default()),
+         tx_event,
+@@ -5982,6 +5999,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+ 
+     let session = Session {
+         thread_id,
++        execution_account: default_execution_account(&auth_manager, &models_manager),
+         installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
+         tx_event,
+         agent_status: agent_status_tx,
+@@ -6033,6 +6051,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+         thread_id,
+         SessionId::from(thread_id),
+         Some(Arc::clone(&auth_manager)),
++        default_execution_account(&auth_manager, &models_manager),
+         &session_telemetry,
+         session_configuration.provider.clone(),
+         &session_configuration,
+@@ -6152,8 +6171,9 @@ async fn make_session_with_config_and_rx(
+         Arc::clone(&config),
+         /*user_instructions*/ None,
+         "11111111-1111-4111-8111-111111111111".to_string(),
+-        auth_manager,
+-        models_manager,
++        Arc::clone(&auth_manager),
++        Arc::clone(&models_manager),
++        default_execution_account(&auth_manager, &models_manager),
+         model_info,
+         Arc::new(ExecPolicyManager::default()),
+         tx_event,
+@@ -6273,8 +6293,9 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
+         Arc::clone(&config),
+         /*user_instructions*/ None,
+         "11111111-1111-4111-8111-111111111111".to_string(),
+-        auth_manager,
+-        models_manager,
++        Arc::clone(&auth_manager),
++        Arc::clone(&models_manager),
++        default_execution_account(&auth_manager, &models_manager),
+         model_info,
+         Arc::new(ExecPolicyManager::default()),
+         tx_event,
+@@ -6343,6 +6364,27 @@ async fn resumed_root_session_uses_thread_id_as_session_id() {
+     assert_eq!(event.thread_id, thread_id);
+ }
+ 
++#[tokio::test]
++async fn ephemeral_session_does_not_create_durable_execution_account_binding() {
++    let (session, _rx_event) = make_session_with_history_source_and_agent_control_and_rx(
++        InitialHistory::New,
++        SessionSource::Exec,
++        AgentControl::default(),
++    )
++    .await
++    .expect("ephemeral session should start");
++
++    assert_eq!(
++        session
++            .services
++            .thread_store
++            .execution_account_binding(session.thread_id())
++            .await
++            .expect("read durable binding"),
++        None
++    );
++}
++
+ #[tokio::test]
+ async fn resumed_subagent_session_restores_persisted_session_id() {
+     let parent_thread_id = ThreadId::new();
+@@ -8191,6 +8233,7 @@ where
+ 
+     let session = Arc::new(Session {
+         thread_id,
++        execution_account: default_execution_account(&auth_manager, &models_manager),
+         installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
+         tx_event,
+         agent_status: agent_status_tx,
+@@ -8242,6 +8285,7 @@ where
+         thread_id,
+         SessionId::from(thread_id),
+         Some(Arc::clone(&auth_manager)),
++        default_execution_account(&auth_manager, &models_manager),
+         &session_telemetry,
+         session_configuration.provider.clone(),
+         &session_configuration,
+diff --git a/codex-rs/core/src/session/tests/guardian_tests.rs b/codex-rs/core/src/session/tests/guardian_tests.rs
+index 67133adb8..b19e0169f 100644
+--- a/codex-rs/core/src/session/tests/guardian_tests.rs
++++ b/codex-rs/core/src/session/tests/guardian_tests.rs
+@@ -803,8 +803,16 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
+         allow_provider_model_fallback: false,
+         user_instructions: Default::default(),
+         installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
+-        auth_manager,
+-        models_manager,
++        auth_manager: Arc::clone(&auth_manager),
++        models_manager: Arc::clone(&models_manager),
++        execution_account: Arc::new(crate::execution_account::ExecutionAccountContext {
++            binding: codex_protocol::protocol::ExecutionAccountBinding {
++                slot_id: "default".to_string(),
++                generation: 1,
++            },
++            auth_manager,
++            models_manager,
++        }),
+         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
+         skills_service,
+         plugins_manager,
+diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
+index 728749a41..bb0698fdf 100644
+--- a/codex-rs/core/src/session/turn_context.rs
++++ b/codex-rs/core/src/session/turn_context.rs
+@@ -147,6 +147,7 @@ pub struct TurnContext {
+     /// Turn-scoped configuration. Read step-specific settings such as service tier and
+     /// approvals reviewer from the corresponding `StepContext` fields instead.
+     pub config: Arc<Config>,
++    pub(crate) execution_account: Arc<crate::execution_account::ExecutionAccountContext>,
+     pub(crate) auth_manager: Option<Arc<AuthManager>>,
+     /// Legacy turn model; step-scoped execution should use `StepContext::model_info`.
+     pub(crate) model_info: Arc<ModelInfo>,
+@@ -402,6 +403,7 @@ impl TurnContext {
+             realtime_active: self.realtime_active,
+             code_mode_available: self.code_mode_available,
+             config: Arc::new(config),
++            execution_account: Arc::clone(&self.execution_account),
+             auth_manager: self.auth_manager.clone(),
+             model_info: Arc::clone(&model_info),
+             session_telemetry: self
+@@ -498,6 +500,7 @@ impl TurnContext {
+         let cwd = self.cwd.clone();
+         TurnContextItem {
+             turn_id: Some(self.sub_id.clone()),
++            execution_account: Some(self.execution_account.binding.clone()),
+             cwd,
+             workspace_roots: (!workspace_roots.is_empty()).then_some(workspace_roots),
+             current_date: self.current_date.clone(),
+@@ -618,6 +621,7 @@ impl Session {
+         thread_id: ThreadId,
+         session_id: SessionId,
+         auth_manager: Option<Arc<AuthManager>>,
++        execution_account: Arc<crate::execution_account::ExecutionAccountContext>,
+         session_telemetry: &SessionTelemetry,
+         provider: SharedModelProvider,
+         session_configuration: &SessionConfiguration,
+@@ -694,6 +698,7 @@ impl Session {
+             realtime_active: false,
+             code_mode_available: true,
+             config: per_turn_config,
++            execution_account,
+             auth_manager,
+             model_info: Arc::new(model_info),
+             session_telemetry: session_telemetry_for_context,
+@@ -923,6 +928,7 @@ impl Session {
+             self.thread_id(),
+             self.session_id(),
+             Some(Arc::clone(&self.services.auth_manager)),
++            self.execution_account(),
+             &self.services.session_telemetry,
+             session_configuration.provider.clone(),
+             &session_configuration,
+diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
+index e91143d56..bfdeb3e21 100644
+--- a/codex-rs/core/src/thread_manager.rs
++++ b/codex-rs/core/src/thread_manager.rs
+@@ -7,6 +7,9 @@ use crate::config::ThreadStoreConfig;
+ use crate::current_time::TimeProvider;
+ use crate::environment_selection::TurnEnvironmentSnapshot;
+ use crate::environment_selection::default_thread_environment_selections;
++use crate::execution_account::DefaultExecutionAccountResolver;
++use crate::execution_account::ExecutionAccountContext;
++use crate::execution_account::ExecutionAccountResolver;
+ use crate::mcp::McpManager;
+ use crate::rollout::truncation;
+ use crate::session::ForkPersistence;
+@@ -55,6 +58,7 @@ use codex_protocol::mcp::OPENAI_STANDARD_FORM_INPUT_EXTENSION_ID;
+ use codex_protocol::openai_models::ModelPreset;
+ use codex_protocol::protocol::Event;
+ use codex_protocol::protocol::EventMsg;
++use codex_protocol::protocol::ExecutionAccountBinding;
+ use codex_protocol::protocol::MultiAgentVersion;
+ use codex_protocol::protocol::Op;
+ use codex_protocol::protocol::SessionConfiguredEvent;
+@@ -260,6 +264,7 @@ impl StartThreadOptions {
+ struct ThreadSpawnRequest {
+     options: StartThreadOptions,
+     auth_manager: Arc<AuthManager>,
++    execution_account: Option<Arc<ExecutionAccountContext>>,
+     agent_control: AgentControl,
+     parent_thread_id: Option<ThreadId>,
+     forked_from_thread_id: Option<ThreadId>,
+@@ -278,6 +283,7 @@ impl ThreadSpawnRequest {
+         Self {
+             options,
+             auth_manager,
++            execution_account: None,
+             agent_control,
+             parent_thread_id: None,
+             forked_from_thread_id: None,
+@@ -339,6 +345,7 @@ pub(crate) struct ThreadManagerState {
+     thread_id_generator: ThreadIdGenerator,
+     auth_manager: Arc<AuthManager>,
+     models_manager: SharedModelsManager,
++    execution_account_resolver: Arc<dyn ExecutionAccountResolver>,
+     environment_manager: Arc<EnvironmentManager>,
+     starting_mcp_runtimes: std::sync::Mutex<Vec<std::sync::Weak<AtomicBool>>>,
+     skills_service: Arc<HostSkillsService>,
+@@ -460,12 +467,17 @@ impl ThreadManager {
+             } else {
+                 Arc::new(DisabledCodeModeSessionProvider)
+             };
++        let execution_account_resolver = Arc::new(DefaultExecutionAccountResolver::new(
++            Arc::clone(&auth_manager),
++            Arc::clone(&models_manager),
++        ));
+         Self {
+             state: Arc::new(ThreadManagerState {
+                 threads: Arc::new(RwLock::new(HashMap::new())),
+                 thread_created_tx,
+                 thread_id_generator: default_thread_id_generator(),
+                 models_manager,
++                execution_account_resolver,
+                 environment_manager,
+                 starting_mcp_runtimes: std::sync::Mutex::new(Vec::new()),
+                 skills_service,
+@@ -501,6 +513,17 @@ impl ThreadManager {
+         self
+     }
+ 
++    pub fn with_execution_account_resolver(
++        mut self,
++        resolver: Arc<dyn ExecutionAccountResolver>,
++    ) -> Self {
++        let Some(state) = Arc::get_mut(&mut self.state) else {
++            unreachable!("execution account resolver must be set before thread manager is shared");
++        };
++        state.execution_account_resolver = resolver;
++        self
++    }
++
+     /// Replaces the process-wide provider before this manager is shared with threads.
+     pub fn with_code_mode_session_provider(
+         mut self,
+@@ -606,13 +629,19 @@ impl ThreadManager {
+             state_db.clone(),
+         ));
+         let agent_graph_store = local_agent_graph_store_from_state_db(state_db.as_ref());
++        let models_manager = create_model_provider(provider, Some(auth_manager.clone()))
++            .models_manager(codex_home, /*config_model_catalog*/ None);
++        let execution_account_resolver = Arc::new(DefaultExecutionAccountResolver::new(
++            Arc::clone(&auth_manager),
++            Arc::clone(&models_manager),
++        ));
+         Self {
+             state: Arc::new(ThreadManagerState {
+                 threads: Arc::new(RwLock::new(HashMap::new())),
+                 thread_created_tx,
+                 thread_id_generator: default_thread_id_generator(),
+-                models_manager: create_model_provider(provider, Some(auth_manager.clone()))
+-                    .models_manager(codex_home, /*config_model_catalog*/ None),
++                models_manager,
++                execution_account_resolver,
+                 environment_manager,
+                 starting_mcp_runtimes: std::sync::Mutex::new(Vec::new()),
+                 skills_service,
+@@ -756,6 +785,33 @@ impl ThreadManager {
+         self.state.models_manager.clone()
+     }
+ 
++    pub async fn execution_account_for_thread(
++        &self,
++        thread_id: ThreadId,
++    ) -> CodexResult<Arc<ExecutionAccountContext>> {
++        if let Ok(thread) = self.get_thread(thread_id).await {
++            return Ok(thread.session.execution_account());
++        }
++        let binding = match self
++            .state
++            .thread_store
++            .execution_account_binding(thread_id)
++            .await
++        {
++            Ok(Some(binding)) => binding,
++            Ok(None) | Err(ThreadStoreError::Unsupported { .. }) => ExecutionAccountBinding {
++                slot_id: "default".to_string(),
++                generation: 1,
++            },
++            Err(err) => {
++                return Err(CodexErr::Fatal(format!(
++                    "failed to read execution account for thread {thread_id}: {err}"
++                )));
++            }
++        };
++        self.state.execution_account_resolver.resolve(binding).await
++    }
++
+     pub async fn list_models(
+         &self,
+         refresh_strategy: RefreshStrategy,
+@@ -906,6 +962,21 @@ impl ThreadManager {
+         Box::pin(self.start_thread_inner(options, /*forked_from_thread_id*/ None)).await
+     }
+ 
++    pub async fn start_thread_with_execution_account(
++        &self,
++        options: StartThreadOptions,
++        execution_account: Arc<ExecutionAccountContext>,
++    ) -> CodexResult<NewThread> {
++        let agent_control = self.agent_control_for_config(&options.config);
++        let mut request = ThreadSpawnRequest::new(
++            options,
++            Arc::clone(&execution_account.auth_manager),
++            agent_control,
++        );
++        request.execution_account = Some(execution_account);
++        Box::pin(self.state.spawn_thread(request)).await
++    }
++
+     /// Allocates a thread ID before startup so a caller can associate host-owned state with it.
+     pub fn reserve_thread_id(&self) -> ThreadId {
+         self.state.thread_id_generator.as_ref()()
+@@ -1027,6 +1098,44 @@ impl ThreadManager {
+         .await
+     }
+ 
++    #[instrument(level = "trace", skip_all)]
++    pub async fn resume_thread_with_history_and_execution_account(
++        &self,
++        config: Config,
++        initial_history: InitialHistory,
++        execution_account: Arc<ExecutionAccountContext>,
++        parent_trace: Option<W3cTraceContext>,
++        client_mcp_extensions: ClientMcpExtensions,
++    ) -> CodexResult<NewThread> {
++        let agent_control = self.agent_control_for_config(&config);
++        let (session_source, thread_source) = initial_history
++            .get_resumed_session_sources()
++            .unwrap_or_else(|| (self.state.session_source.clone(), None));
++        if let InitialHistory::Resumed(resumed) = &initial_history
++            && initial_history.get_multi_agent_version() == Some(MultiAgentVersion::V2)
++            && !session_source.is_non_root_agent()
++        {
++            agent_control
++                .restore_v2_agent_metadata(&config, resumed.conversation_id)
++                .await;
++        }
++        let options = StartThreadOptions {
++            initial_history,
++            session_source: Some(session_source),
++            thread_source,
++            parent_trace,
++            client_mcp_extensions,
++            ..StartThreadOptions::new(config)
++        };
++        let mut request = ThreadSpawnRequest::new(
++            options,
++            Arc::clone(&execution_account.auth_manager),
++            agent_control,
++        );
++        request.execution_account = Some(execution_account);
++        Box::pin(self.state.spawn_thread(request)).await
++    }
++
+     pub(crate) async fn start_thread_with_user_shell_override_for_tests(
+         &self,
+         config: Config,
+@@ -1764,6 +1873,7 @@ impl ThreadManagerState {
+         let ThreadSpawnRequest {
+             options,
+             auth_manager,
++            execution_account,
+             agent_control,
+             parent_thread_id,
+             forked_from_thread_id,
+@@ -1822,6 +1932,69 @@ impl ThreadManagerState {
+                 threads.remove(&resumed.conversation_id);
+             }
+         }
++        let execution_account = if let Some(execution_account) = execution_account {
++            execution_account
++        } else if let Some(source_thread_id) = forked_from_thread_id.or(parent_thread_id) {
++            if let Some(source) = self.threads.read().await.get(&source_thread_id).cloned() {
++                source.session.execution_account()
++            } else {
++                match self
++                    .thread_store
++                    .execution_account_binding(source_thread_id)
++                    .await
++                {
++                    Ok(Some(binding)) => self.execution_account_resolver.resolve(binding).await?,
++                    Ok(None) | Err(ThreadStoreError::Unsupported { .. }) => {
++                        Arc::new(ExecutionAccountContext {
++                            binding: ExecutionAccountBinding {
++                                slot_id: "default".to_string(),
++                                generation: 1,
++                            },
++                            auth_manager: Arc::clone(&auth_manager),
++                            models_manager: Arc::clone(&self.models_manager),
++                        })
++                    }
++                    Err(err) => {
++                        return Err(CodexErr::Fatal(format!(
++                            "failed to read execution account for source thread {source_thread_id}: {err}"
++                        )));
++                    }
++                }
++            }
++        } else if let InitialHistory::Resumed(resumed) = &initial_history {
++            match self
++                .thread_store
++                .execution_account_binding(resumed.conversation_id)
++                .await
++            {
++                Ok(Some(binding)) => self.execution_account_resolver.resolve(binding).await?,
++                Ok(None) | Err(ThreadStoreError::Unsupported { .. }) => {
++                    Arc::new(ExecutionAccountContext {
++                        binding: ExecutionAccountBinding {
++                            slot_id: "default".to_string(),
++                            generation: 1,
++                        },
++                        auth_manager: Arc::clone(&auth_manager),
++                        models_manager: Arc::clone(&self.models_manager),
++                    })
++                }
++                Err(err) => {
++                    return Err(CodexErr::Fatal(format!(
++                        "failed to read execution account for thread {}: {err}",
++                        resumed.conversation_id
++                    )));
++                }
++            }
++        } else {
++            Arc::new(ExecutionAccountContext {
++                binding: ExecutionAccountBinding {
++                    slot_id: "default".to_string(),
++                    generation: 1,
++                },
++                auth_manager: Arc::clone(&auth_manager),
++                models_manager: Arc::clone(&self.models_manager),
++            })
++        };
+         let user_instructions = self
+             .user_instructions_for_spawn(&session_source, parent_thread_id, forked_from_thread_id)
+             .await;
+@@ -1860,8 +2033,9 @@ impl ThreadManagerState {
+             allow_provider_model_fallback,
+             user_instructions,
+             installation_id: self.installation_id.clone(),
+-            auth_manager,
+-            models_manager: Arc::clone(&self.models_manager),
++            auth_manager: Arc::clone(&execution_account.auth_manager),
++            models_manager: Arc::clone(&execution_account.models_manager),
++            execution_account,
+             environment_manager: Arc::clone(&self.environment_manager),
+             skills_service: Arc::clone(&self.skills_service),
+             plugins_manager: Arc::clone(&self.plugins_manager),
+diff --git a/codex-rs/core/tests/suite/resume_warning.rs b/codex-rs/core/tests/suite/resume_warning.rs
+index a02519282..66b52a2c3 100644
+--- a/codex-rs/core/tests/suite/resume_warning.rs
++++ b/codex-rs/core/tests/suite/resume_warning.rs
+@@ -30,6 +30,7 @@ fn resume_history(
+     let turn_id = "resume-warning-seed-turn".to_string();
+     let turn_ctx = TurnContextItem {
+         turn_id: Some(turn_id.clone()),
++        execution_account: None,
+         cwd: config.cwd.clone(),
+         workspace_roots: None,
+         current_date: None,
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index b2230b0ae..42e8dece9 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -3019,6 +3019,18 @@ pub struct TurnContextNetworkItem {
+     pub denied_domains: Vec<String>,
+ }
+ 
++/// Durable account selection used to execute a thread or an individual turn.
++///
++/// `slot_id` is an opaque host-managed identifier. `generation` changes whenever the current
++/// thread binding is replaced, allowing callers to detect stale account snapshots.
++#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, TS)]
++#[serde(rename_all = "camelCase")]
++#[ts(rename_all = "camelCase")]
++pub struct ExecutionAccountBinding {
++    pub slot_id: String,
++    pub generation: u64,
++}
++
+ /// Persist once per real user turn after computing that turn's model-visible
+ /// context updates, and again after mid-turn compaction when replacement
+ /// history re-establishes full context, so resume/fork replay can recover the
+@@ -3027,6 +3039,8 @@ pub struct TurnContextNetworkItem {
+ pub struct TurnContextItem {
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub turn_id: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub execution_account: Option<ExecutionAccountBinding>,
+     pub cwd: AbsolutePathBuf,
+     /// Effective workspace roots used to materialize symbolic
+     /// `:workspace_roots` filesystem permissions in `permission_profile`.
+@@ -5761,6 +5775,34 @@ mod tests {
+         assert_eq!(item.network, None);
+         assert_eq!(item.file_system_sandbox_policy, None);
+         assert_eq!(item.comp_hash, None);
++        assert_eq!(item.execution_account, None);
++        Ok(())
++    }
++
++    #[test]
++    fn turn_context_item_round_trips_execution_account() -> Result<()> {
++        let value = json!({
++            "turn_id": "turn-1",
++            "execution_account": {"slotId": "secondary", "generation": 4},
++            "cwd": test_path_buf("/tmp"),
++            "approval_policy": "never",
++            "sandbox_policy": { "type": "danger-full-access" },
++            "model": "gpt-5",
++            "summary": "auto",
++        });
++
++        let item: TurnContextItem = serde_json::from_value(value.clone())?;
++        assert_eq!(
++            item.execution_account,
++            Some(ExecutionAccountBinding {
++                slot_id: "secondary".to_string(),
++                generation: 4,
++            })
++        );
++        assert_eq!(
++            serde_json::to_value(item)?["execution_account"],
++            value["execution_account"]
++        );
+         Ok(())
+     }
+ 
+@@ -5782,6 +5824,7 @@ mod tests {
+     fn turn_context_item_serializes_network_when_present() -> Result<()> {
+         let item = TurnContextItem {
+             turn_id: None,
++            execution_account: None,
+             cwd: test_path_buf("/tmp").abs(),
+             workspace_roots: None,
+             current_date: None,
+diff --git a/codex-rs/rollout/src/recorder_tests.rs b/codex-rs/rollout/src/recorder_tests.rs
+index 0c4e663aa..8bb8d54e4 100644
+--- a/codex-rs/rollout/src/recorder_tests.rs
++++ b/codex-rs/rollout/src/recorder_tests.rs
+@@ -1699,6 +1699,7 @@ async fn resume_candidate_matches_cwd_reads_latest_turn_context() -> std::io::Re
+         ordinal: None,
+         item: RolloutItem::TurnContext(TurnContextItem {
+             turn_id: Some("turn-1".to_string()),
++            execution_account: None,
+             cwd: serde_json::from_value(serde_json::json!(&latest_cwd))
+                 .expect("absolute latest cwd"),
+             workspace_roots: None,
+diff --git a/codex-rs/state/goals_migrations/0003_thread_goal_revisions.sql b/codex-rs/state/goals_migrations/0003_thread_goal_revisions.sql
+new file mode 100644
+index 000000000..5c3042693
+--- /dev/null
++++ b/codex-rs/state/goals_migrations/0003_thread_goal_revisions.sql
+@@ -0,0 +1,7 @@
++ALTER TABLE thread_goals
++ADD COLUMN revision INTEGER NOT NULL DEFAULT 1 CHECK(revision >= 1);
++
++CREATE TABLE thread_goal_revision_tombstones (
++    thread_id TEXT PRIMARY KEY NOT NULL,
++    revision INTEGER NOT NULL CHECK(revision >= 1)
++);
+diff --git a/codex-rs/state/src/extract.rs b/codex-rs/state/src/extract.rs
+index 989075a23..366d81c05 100644
+--- a/codex-rs/state/src/extract.rs
++++ b/codex-rs/state/src/extract.rs
+@@ -421,6 +421,7 @@ mod tests {
+             &mut metadata,
+             &RolloutItem::TurnContext(TurnContextItem {
+                 turn_id: Some("turn-1".to_string()),
++                execution_account: None,
+                 cwd: serde_json::from_value(serde_json::json!(
+                     std::env::current_dir()
+                         .expect("current directory")
+@@ -468,6 +469,7 @@ mod tests {
+             &mut metadata,
+             &RolloutItem::TurnContext(TurnContextItem {
+                 turn_id: Some("turn-1".to_string()),
++                execution_account: None,
+                 cwd: serde_json::from_value(serde_json::json!(
+                     std::env::current_dir()
+                         .expect("current directory")
+@@ -515,6 +517,7 @@ mod tests {
+             &mut metadata,
+             &RolloutItem::TurnContext(TurnContextItem {
+                 turn_id: Some("turn-1".to_string()),
++                execution_account: None,
+                 cwd: serde_json::from_value(serde_json::json!(&fallback_cwd))
+                     .expect("absolute fallback cwd"),
+                 workspace_roots: None,
+@@ -551,6 +554,7 @@ mod tests {
+             &mut metadata,
+             &RolloutItem::TurnContext(TurnContextItem {
+                 turn_id: Some("turn-1".to_string()),
++                execution_account: None,
+                 cwd: serde_json::from_value(serde_json::json!(
+                     std::env::current_dir()
+                         .expect("current directory")
+diff --git a/codex-rs/state/src/migrations.rs b/codex-rs/state/src/migrations.rs
+index 9d14b7997..ba26e455c 100644
+--- a/codex-rs/state/src/migrations.rs
++++ b/codex-rs/state/src/migrations.rs
+@@ -133,7 +133,8 @@ CREATE TABLE thread_turn_execution_accounts (
+     ],
+ };
+ 
+-const ACTIVE_CUSTOM_SCHEMA_MIGRATIONS: &[&CustomSchemaMigration] = &[&CUSTOM_SCHEMA_V1];
++const ACTIVE_CUSTOM_SCHEMA_MIGRATIONS: &[&CustomSchemaMigration] =
++    &[&CUSTOM_SCHEMA_V1, &CUSTOM_SCHEMA_V2];
+ const LEGACY_CUSTOM_SCHEMA_MIGRATIONS: &[&CustomSchemaMigration] =
+     &[&CUSTOM_SCHEMA_V1, &CUSTOM_SCHEMA_V2];
+ 
+diff --git a/codex-rs/state/src/migrations_tests.rs b/codex-rs/state/src/migrations_tests.rs
+index 4b667dd57..3e2202656 100644
+--- a/codex-rs/state/src/migrations_tests.rs
++++ b/codex-rs/state/src/migrations_tests.rs
+@@ -96,15 +96,23 @@ async fn custom_schema_bootstrap_serializes_concurrent_callers() {
+     .expect("custom migration record should load");
+     assert_eq!(
+         applied,
+-        vec![(
+-            1,
+-            "writer_authority".to_string(),
+-            CUSTOM_SCHEMA_V1.definition.to_string(),
+-        )]
++        vec![
++            (
++                1,
++                "writer_authority".to_string(),
++                CUSTOM_SCHEMA_V1.definition.to_string(),
++            ),
++            (
++                2,
++                "execution_account_bindings".to_string(),
++                CUSTOM_SCHEMA_V2.definition.to_string(),
++            ),
++        ]
+     );
+     let custom_tables = sqlx::query_scalar::<_, String>(
+         "SELECT name FROM sqlite_master WHERE type = 'table' \
+-         AND name IN ('writer_authority_store', 'thread_writer_generations') ORDER BY name",
++         AND name IN ('writer_authority_store', 'thread_writer_generations', \
++         'thread_execution_account_bindings', 'thread_turn_execution_accounts') ORDER BY name",
+     )
+     .fetch_all(&pool)
+     .await
+@@ -112,6 +120,8 @@ async fn custom_schema_bootstrap_serializes_concurrent_callers() {
+     assert_eq!(
+         custom_tables,
+         vec![
++            "thread_execution_account_bindings".to_string(),
++            "thread_turn_execution_accounts".to_string(),
+             "thread_writer_generations".to_string(),
+             "writer_authority_store".to_string(),
+         ]
+diff --git a/codex-rs/state/src/model/thread_goal.rs b/codex-rs/state/src/model/thread_goal.rs
+index 12d2a78da..48c821362 100644
+--- a/codex-rs/state/src/model/thread_goal.rs
++++ b/codex-rs/state/src/model/thread_goal.rs
+@@ -61,6 +61,7 @@ impl TryFrom<&str> for ThreadGoalStatus {
+ pub struct ThreadGoal {
+     pub thread_id: ThreadId,
+     pub goal_id: String,
++    pub revision: i64,
+     pub objective: String,
+     pub status: ThreadGoalStatus,
+     pub token_budget: Option<i64>,
+@@ -73,6 +74,7 @@ pub struct ThreadGoal {
+ pub(crate) struct ThreadGoalRow {
+     pub thread_id: String,
+     pub goal_id: String,
++    pub revision: i64,
+     pub objective: String,
+     pub status: String,
+     pub token_budget: Option<i64>,
+@@ -87,6 +89,7 @@ impl ThreadGoalRow {
+         Ok(Self {
+             thread_id: row.try_get("thread_id")?,
+             goal_id: row.try_get("goal_id")?,
++            revision: row.try_get("revision")?,
+             objective: row.try_get("objective")?,
+             status: row.try_get("status")?,
+             token_budget: row.try_get("token_budget")?,
+@@ -105,6 +108,7 @@ impl TryFrom<ThreadGoalRow> for ThreadGoal {
+         Ok(Self {
+             thread_id: ThreadId::try_from(row.thread_id)?,
+             goal_id: row.goal_id,
++            revision: row.revision,
+             objective: row.objective,
+             status: ThreadGoalStatus::try_from(row.status.as_str())?,
+             token_budget: row.token_budget,
+diff --git a/codex-rs/state/src/runtime.rs b/codex-rs/state/src/runtime.rs
+index ca80e9b3f..9782c7139 100644
+--- a/codex-rs/state/src/runtime.rs
++++ b/codex-rs/state/src/runtime.rs
+@@ -41,6 +41,7 @@ use std::time::Instant;
+ use tracing::warn;
+ 
+ mod backfill;
++mod execution_account;
+ mod external_agent_config_imports;
+ mod goals;
+ mod logs;
+diff --git a/codex-rs/state/src/runtime/execution_account.rs b/codex-rs/state/src/runtime/execution_account.rs
+new file mode 100644
+index 000000000..fc15a2d32
+--- /dev/null
++++ b/codex-rs/state/src/runtime/execution_account.rs
+@@ -0,0 +1,276 @@
++use anyhow::Context;
++use codex_protocol::ThreadId;
++use codex_protocol::protocol::ExecutionAccountBinding;
++use sqlx::Row;
++
++use super::StateRuntime;
++
++impl StateRuntime {
++    /// Returns one transactionally consistent runtime version and complete durable binding set.
++    ///
++    /// Slots created before runtime versioning have no row and therefore read as version zero.
++    pub async fn execution_account_slot_runtime_state(
++        &self,
++        slot_id: &str,
++    ) -> anyhow::Result<(u64, Vec<(ThreadId, ExecutionAccountBinding)>)> {
++        let mut transaction = self.pool.begin().await?;
++        let runtime_version = slot_runtime_version(&mut transaction, slot_id).await?;
++        let bindings = slot_bindings(&mut transaction, slot_id).await?;
++        transaction.commit().await?;
++        Ok((runtime_version, bindings))
++    }
++
++    /// Advances one slot runtime and every exact expected binding in one transaction.
++    ///
++    /// Returns `None` without mutation when either the version or the complete binding set changed.
++    /// A successful commit increments the runtime version and every binding generation exactly once.
++    pub async fn compare_and_swap_execution_account_slot_runtime(
++        &self,
++        slot_id: &str,
++        expected_runtime_version: u64,
++        expected_bindings: &[(ThreadId, ExecutionAccountBinding)],
++    ) -> anyhow::Result<Option<(u64, Vec<(ThreadId, ExecutionAccountBinding)>)>> {
++        let next_runtime_version = expected_runtime_version
++            .checked_add(1)
++            .context("execution account runtime version overflow")?;
++        let next_runtime_version_i64 = i64::try_from(next_runtime_version)?;
++        let expected_runtime_version_i64 = i64::try_from(expected_runtime_version)?;
++        let mut expected_bindings = expected_bindings.to_vec();
++        expected_bindings.sort_by_key(|(thread_id, _)| thread_id.to_string());
++        let mut next_bindings = Vec::with_capacity(expected_bindings.len());
++        for (thread_id, binding) in &expected_bindings {
++            if binding.slot_id != slot_id {
++                anyhow::bail!(
++                    "thread {thread_id} belongs to slot {}, not {slot_id}",
++                    binding.slot_id
++                );
++            }
++            let generation = binding
++                .generation
++                .checked_add(1)
++                .context("execution account generation overflow")?;
++            let _ = i64::try_from(generation)?;
++            next_bindings.push((
++                *thread_id,
++                ExecutionAccountBinding {
++                    slot_id: slot_id.to_string(),
++                    generation,
++                },
++            ));
++        }
++        if expected_bindings
++            .windows(2)
++            .any(|bindings| bindings[0].0 == bindings[1].0)
++        {
++            anyhow::bail!("expected execution account binding set contains duplicate threads");
++        }
++
++        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
++        let current_runtime_version = slot_runtime_version(&mut transaction, slot_id).await?;
++        let current_bindings = slot_bindings(&mut transaction, slot_id).await?;
++        if current_runtime_version != expected_runtime_version
++            || current_bindings != expected_bindings
++        {
++            transaction.rollback().await?;
++            return Ok(None);
++        }
++
++        let runtime_version_updated = sqlx::query(
++            "INSERT INTO account_slot_runtime_versions (slot_id, runtime_version) VALUES (?, ?) \
++             ON CONFLICT(slot_id) DO UPDATE SET runtime_version = excluded.runtime_version \
++             WHERE account_slot_runtime_versions.runtime_version = ?",
++        )
++        .bind(slot_id)
++        .bind(next_runtime_version_i64)
++        .bind(expected_runtime_version_i64)
++        .execute(&mut *transaction)
++        .await?;
++        if runtime_version_updated.rows_affected() != 1 {
++            transaction.rollback().await?;
++            return Ok(None);
++        }
++        for ((thread_id, expected), (_, next)) in expected_bindings.iter().zip(&next_bindings) {
++            let binding_updated = sqlx::query(
++                "UPDATE thread_execution_account_bindings SET generation = ? \
++                 WHERE thread_id = ? AND slot_id = ? AND generation = ?",
++            )
++            .bind(i64::try_from(next.generation)?)
++            .bind(thread_id.to_string())
++            .bind(slot_id)
++            .bind(i64::try_from(expected.generation)?)
++            .execute(&mut *transaction)
++            .await?;
++            if binding_updated.rows_affected() != 1 {
++                transaction.rollback().await?;
++                return Ok(None);
++            }
++        }
++        transaction.commit().await?;
++        Ok(Some((next_runtime_version, next_bindings)))
++    }
++
++    pub async fn execution_account_binding(
++        &self,
++        thread_id: ThreadId,
++    ) -> anyhow::Result<Option<ExecutionAccountBinding>> {
++        let row = sqlx::query(
++            "SELECT slot_id, generation FROM thread_execution_account_bindings WHERE thread_id = ?",
++        )
++        .bind(thread_id.to_string())
++        .fetch_optional(self.pool.as_ref())
++        .await?;
++        row.map(binding_from_row).transpose()
++    }
++
++    pub async fn initialize_execution_account_binding(
++        &self,
++        thread_id: ThreadId,
++        initial: &ExecutionAccountBinding,
++    ) -> anyhow::Result<ExecutionAccountBinding> {
++        let mut transaction = self.pool.begin().await?;
++        sqlx::query(
++            "INSERT INTO thread_execution_account_bindings (thread_id, slot_id, generation) \
++             VALUES (?, ?, ?) ON CONFLICT(thread_id) DO NOTHING",
++        )
++        .bind(thread_id.to_string())
++        .bind(&initial.slot_id)
++        .bind(i64::try_from(initial.generation)?)
++        .execute(&mut *transaction)
++        .await?;
++        let row = sqlx::query(
++            "SELECT slot_id, generation FROM thread_execution_account_bindings WHERE thread_id = ?",
++        )
++        .bind(thread_id.to_string())
++        .fetch_one(&mut *transaction)
++        .await?;
++        transaction.commit().await?;
++        binding_from_row(row)
++    }
++
++    pub async fn compare_and_swap_execution_account_binding(
++        &self,
++        thread_id: ThreadId,
++        expected: &ExecutionAccountBinding,
++        next_slot_id: &str,
++    ) -> anyhow::Result<Option<ExecutionAccountBinding>> {
++        let generation = i64::try_from(expected.generation)?
++            .checked_add(1)
++            .context("execution account generation overflow")?;
++        let result = sqlx::query(
++            "UPDATE thread_execution_account_bindings SET slot_id = ?, generation = ? \
++             WHERE thread_id = ? AND slot_id = ? AND generation = ?",
++        )
++        .bind(next_slot_id)
++        .bind(generation)
++        .bind(thread_id.to_string())
++        .bind(&expected.slot_id)
++        .bind(i64::try_from(expected.generation)?)
++        .execute(self.pool.as_ref())
++        .await?;
++        if result.rows_affected() == 0 {
++            return Ok(None);
++        }
++        Ok(Some(ExecutionAccountBinding {
++            slot_id: next_slot_id.to_string(),
++            generation: u64::try_from(generation)?,
++        }))
++    }
++
++    pub async fn record_turn_execution_account(
++        &self,
++        thread_id: ThreadId,
++        turn_id: &str,
++        binding: &ExecutionAccountBinding,
++    ) -> anyhow::Result<()> {
++        let result = sqlx::query(
++            "INSERT INTO thread_turn_execution_accounts (thread_id, turn_id, slot_id, generation) \
++             VALUES (?, ?, ?, ?) ON CONFLICT(thread_id, turn_id) DO NOTHING",
++        )
++        .bind(thread_id.to_string())
++        .bind(turn_id)
++        .bind(&binding.slot_id)
++        .bind(i64::try_from(binding.generation)?)
++        .execute(self.pool.as_ref())
++        .await?;
++        if result.rows_affected() == 1 {
++            return Ok(());
++        }
++        let existing = self
++            .turn_execution_account(thread_id, turn_id)
++            .await?
++            .context("turn execution account disappeared after conflict")?;
++        if existing == *binding {
++            Ok(())
++        } else {
++            anyhow::bail!(
++                "turn {turn_id} for thread {thread_id} already has a different execution account"
++            )
++        }
++    }
++
++    pub async fn turn_execution_account(
++        &self,
++        thread_id: ThreadId,
++        turn_id: &str,
++    ) -> anyhow::Result<Option<ExecutionAccountBinding>> {
++        let row = sqlx::query(
++            "SELECT slot_id, generation FROM thread_turn_execution_accounts \
++             WHERE thread_id = ? AND turn_id = ?",
++        )
++        .bind(thread_id.to_string())
++        .bind(turn_id)
++        .fetch_optional(self.pool.as_ref())
++        .await?;
++        row.map(binding_from_row).transpose()
++    }
++}
++
++async fn slot_runtime_version(
++    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
++    slot_id: &str,
++) -> anyhow::Result<u64> {
++    let runtime_version = sqlx::query_scalar::<_, i64>(
++        "SELECT runtime_version FROM account_slot_runtime_versions WHERE slot_id = ?",
++    )
++    .bind(slot_id)
++    .fetch_optional(&mut **transaction)
++    .await?;
++    Ok(runtime_version
++        .map(u64::try_from)
++        .transpose()?
++        .unwrap_or_default())
++}
++
++async fn slot_bindings(
++    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
++    slot_id: &str,
++) -> anyhow::Result<Vec<(ThreadId, ExecutionAccountBinding)>> {
++    sqlx::query(
++        "SELECT thread_id, slot_id, generation FROM thread_execution_account_bindings \
++         WHERE slot_id = ? ORDER BY thread_id",
++    )
++    .bind(slot_id)
++    .fetch_all(&mut **transaction)
++    .await?
++    .into_iter()
++    .map(|row| -> anyhow::Result<_> {
++        let thread_id = row.try_get::<String, _>("thread_id")?;
++        Ok((
++            ThreadId::from_string(&thread_id)
++                .with_context(|| format!("invalid execution account thread id {thread_id}"))?,
++            binding_from_row(row)?,
++        ))
++    })
++    .collect()
++}
++
++fn binding_from_row(row: sqlx::sqlite::SqliteRow) -> anyhow::Result<ExecutionAccountBinding> {
++    Ok(ExecutionAccountBinding {
++        slot_id: row.try_get("slot_id")?,
++        generation: u64::try_from(row.try_get::<i64, _>("generation")?)?,
++    })
++}
++
++#[cfg(test)]
++#[path = "execution_account_tests.rs"]
++mod tests;
+diff --git a/codex-rs/state/src/runtime/execution_account_tests.rs b/codex-rs/state/src/runtime/execution_account_tests.rs
+new file mode 100644
+index 000000000..f88a0983a
+--- /dev/null
++++ b/codex-rs/state/src/runtime/execution_account_tests.rs
+@@ -0,0 +1,233 @@
++use codex_protocol::ThreadId;
++use codex_protocol::protocol::ExecutionAccountBinding;
++use codex_utils_absolute_path::test_support::PathExt;
++use pretty_assertions::assert_eq;
++
++use crate::SqliteConfig;
++use crate::StateRuntime;
++
++#[tokio::test]
++async fn binding_cas_and_turn_provenance_are_durable() {
++    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
++    tokio::fs::create_dir_all(&sqlite_home)
++        .await
++        .expect("create sqlite home");
++    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
++        let _ = std::fs::remove_dir_all(sqlite_home);
++    });
++    let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
++    let thread_id = ThreadId::default();
++    let runtime = StateRuntime::init(sqlite, "test-provider".to_string())
++        .await
++        .expect("initialize runtime");
++
++    let initial = ExecutionAccountBinding {
++        slot_id: "default".to_string(),
++        generation: 1,
++    };
++    assert_eq!(
++        runtime
++            .initialize_execution_account_binding(thread_id, &initial)
++            .await
++            .expect("initialize binding"),
++        initial
++    );
++    let next = runtime
++        .compare_and_swap_execution_account_binding(thread_id, &initial, "secondary")
++        .await
++        .expect("compare and swap")
++        .expect("matching generation");
++    assert_eq!(
++        next,
++        ExecutionAccountBinding {
++            slot_id: "secondary".to_string(),
++            generation: 2,
++        }
++    );
++    assert_eq!(
++        runtime
++            .compare_and_swap_execution_account_binding(thread_id, &initial, "stale")
++            .await
++            .expect("stale compare and swap"),
++        None
++    );
++
++    runtime
++        .record_turn_execution_account(thread_id, "turn-1", &next)
++        .await
++        .expect("record provenance");
++    runtime
++        .record_turn_execution_account(thread_id, "turn-1", &next)
++        .await
++        .expect("idempotent provenance");
++    assert_eq!(
++        runtime
++            .turn_execution_account(thread_id, "turn-1")
++            .await
++            .expect("read provenance"),
++        Some(next)
++    );
++    let err = runtime
++        .record_turn_execution_account(thread_id, "turn-1", &initial)
++        .await
++        .expect_err("different provenance must not overwrite");
++    assert!(err.to_string().contains("different execution account"));
++    runtime.close().await;
++}
++
++#[tokio::test]
++async fn account_slot_runtime_batch_cas_is_exact_atomic_and_legacy_versioned() {
++    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
++    tokio::fs::create_dir_all(&sqlite_home)
++        .await
++        .expect("create sqlite home");
++    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
++        let _ = std::fs::remove_dir_all(sqlite_home);
++    });
++    let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
++    let runtime = StateRuntime::init(sqlite, "test-provider".to_string())
++        .await
++        .expect("initialize runtime");
++    let first_thread =
++        ThreadId::from_string("00000000-0000-0000-0000-000000000001").expect("thread id");
++    let second_thread =
++        ThreadId::from_string("00000000-0000-0000-0000-000000000002").expect("thread id");
++    let phantom_thread =
++        ThreadId::from_string("00000000-0000-0000-0000-000000000003").expect("thread id");
++    let other_thread =
++        ThreadId::from_string("00000000-0000-0000-0000-000000000004").expect("thread id");
++    for (thread_id, slot_id, generation) in [
++        (first_thread, "secondary", 1),
++        (second_thread, "secondary", 3),
++        (other_thread, "other", 7),
++    ] {
++        runtime
++            .initialize_execution_account_binding(
++                thread_id,
++                &ExecutionAccountBinding {
++                    slot_id: slot_id.to_string(),
++                    generation,
++                },
++            )
++            .await
++            .expect("initialize binding");
++    }
++
++    let legacy = runtime
++        .execution_account_slot_runtime_state("secondary")
++        .await
++        .expect("read legacy slot runtime");
++    assert_eq!(
++        legacy,
++        (
++            0,
++            vec![
++                (
++                    first_thread,
++                    ExecutionAccountBinding {
++                        slot_id: "secondary".to_string(),
++                        generation: 1,
++                    },
++                ),
++                (
++                    second_thread,
++                    ExecutionAccountBinding {
++                        slot_id: "secondary".to_string(),
++                        generation: 3,
++                    },
++                ),
++            ],
++        )
++    );
++    let committed = runtime
++        .compare_and_swap_execution_account_slot_runtime("secondary", legacy.0, &legacy.1)
++        .await
++        .expect("commit slot runtime")
++        .expect("exact snapshot should commit");
++    assert_eq!(
++        committed,
++        (
++            1,
++            vec![
++                (
++                    first_thread,
++                    ExecutionAccountBinding {
++                        slot_id: "secondary".to_string(),
++                        generation: 2,
++                    },
++                ),
++                (
++                    second_thread,
++                    ExecutionAccountBinding {
++                        slot_id: "secondary".to_string(),
++                        generation: 4,
++                    },
++                ),
++            ],
++        )
++    );
++    assert_eq!(
++        runtime
++            .compare_and_swap_execution_account_slot_runtime("secondary", legacy.0, &legacy.1)
++            .await
++            .expect("stale commit should not fail"),
++        None
++    );
++
++    let before_phantom = runtime
++        .execution_account_slot_runtime_state("secondary")
++        .await
++        .expect("read current runtime");
++    runtime
++        .initialize_execution_account_binding(
++            phantom_thread,
++            &ExecutionAccountBinding {
++                slot_id: "secondary".to_string(),
++                generation: 1,
++            },
++        )
++        .await
++        .expect("insert phantom binding");
++    assert_eq!(
++        runtime
++            .compare_and_swap_execution_account_slot_runtime(
++                "secondary",
++                before_phantom.0,
++                &before_phantom.1,
++            )
++            .await
++            .expect("phantom commit should not fail"),
++        None
++    );
++    let before_overflow = runtime
++        .execution_account_slot_runtime_state("secondary")
++        .await
++        .expect("read runtime after phantom");
++    sqlx::query("UPDATE thread_execution_account_bindings SET generation = ? WHERE thread_id = ?")
++        .bind(i64::MAX)
++        .bind(phantom_thread.to_string())
++        .execute(runtime.pool.as_ref())
++        .await
++        .expect("set overflow generation");
++    let overflow_state = runtime
++        .execution_account_slot_runtime_state("secondary")
++        .await
++        .expect("read overflow state");
++    runtime
++        .compare_and_swap_execution_account_slot_runtime(
++            "secondary",
++            overflow_state.0,
++            &overflow_state.1,
++        )
++        .await
++        .expect_err("generation overflow should reject the whole batch");
++    assert_eq!(
++        runtime
++            .execution_account_slot_runtime_state("secondary")
++            .await
++            .expect("read state after overflow"),
++        overflow_state
++    );
++    assert_eq!(overflow_state.0, before_overflow.0);
++    runtime.close().await;
++}
+diff --git a/codex-rs/state/src/runtime/goals.rs b/codex-rs/state/src/runtime/goals.rs
+index ed616e16b..d2e08a32d 100644
+--- a/codex-rs/state/src/runtime/goals.rs
++++ b/codex-rs/state/src/runtime/goals.rs
+@@ -1,10 +1,9 @@
+ use super::*;
+ use crate::model::ThreadGoalRow;
+-use uuid::Uuid;
+ 
+ #[derive(Clone)]
+ pub struct GoalStore {
+-    pool: Arc<SqlitePool>,
++    pub(super) pool: Arc<SqlitePool>,
+ }
+ 
+ impl GoalStore {
+@@ -24,6 +23,33 @@ pub struct GoalUpdate {
+     pub expected_goal_id: Option<String>,
+ }
+ 
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct GoalVersion {
++    pub goal_id: String,
++    pub revision: i64,
++}
++
++impl From<&crate::ThreadGoal> for GoalVersion {
++    fn from(goal: &crate::ThreadGoal) -> Self {
++        Self {
++            goal_id: goal.goal_id.clone(),
++            revision: goal.revision,
++        }
++    }
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct GoalClearOutcome {
++    pub previous_goal: crate::ThreadGoal,
++    pub revision: i64,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct GoalReplaceOutcome {
++    pub previous_goal: crate::ThreadGoal,
++    pub goal: crate::ThreadGoal,
++}
++
+ pub enum GoalAccountingOutcome {
+     Unchanged(Option<crate::ThreadGoal>),
+     Updated(crate::ThreadGoal),
+@@ -47,6 +73,7 @@ impl GoalStore {
+ SELECT
+     thread_id,
+     goal_id,
++    revision,
+     objective,
+     status,
+     token_budget,
+@@ -65,16 +92,54 @@ WHERE thread_id = ?
+         row.map(|row| thread_goal_from_row(&row)).transpose()
+     }
+ 
++    pub async fn get_thread_goal_revision(&self, thread_id: ThreadId) -> anyhow::Result<i64> {
++        sqlx::query_scalar(
++            r#"
++SELECT COALESCE(
++    (SELECT revision FROM thread_goals WHERE thread_id = ?),
++    (SELECT revision FROM thread_goal_revision_tombstones WHERE thread_id = ?),
++    0
++)
++            "#,
++        )
++        .bind(thread_id.to_string())
++        .bind(thread_id.to_string())
++        .fetch_one(self.pool.as_ref())
++        .await
++        .map_err(Into::into)
++    }
++
+     pub async fn replace_thread_goal_snapshot(
+         &self,
+         goal: &crate::ThreadGoal,
+     ) -> anyhow::Result<()> {
+-        let mut transaction = self.pool.begin().await?;
++        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
++        let (current_revision, has_goal): (i64, bool) = sqlx::query_as(
++            r#"
++SELECT COALESCE(
++    (SELECT revision FROM thread_goals WHERE thread_id = ?),
++    (SELECT revision FROM thread_goal_revision_tombstones WHERE thread_id = ?),
++    0
++), EXISTS(SELECT 1 FROM thread_goals WHERE thread_id = ?)
++            "#,
++        )
++        .bind(goal.thread_id.to_string())
++        .bind(goal.thread_id.to_string())
++        .bind(goal.thread_id.to_string())
++        .fetch_one(&mut *transaction)
++        .await?;
++        if has_goal {
++            anyhow::bail!("target thread already has a goal snapshot");
++        }
++        let revision = current_revision
++            .checked_add(1)
++            .ok_or_else(|| anyhow::anyhow!("goal revision overflow"))?;
+         sqlx::query(
+             r#"
+ INSERT INTO thread_goals (
+     thread_id,
+     goal_id,
++    revision,
+     objective,
+     status,
+     token_budget,
+@@ -82,20 +147,12 @@ INSERT INTO thread_goals (
+     time_used_seconds,
+     created_at_ms,
+     updated_at_ms
+-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+-ON CONFLICT(thread_id) DO UPDATE SET
+-    goal_id = excluded.goal_id,
+-    objective = excluded.objective,
+-    status = excluded.status,
+-    token_budget = excluded.token_budget,
+-    tokens_used = excluded.tokens_used,
+-    time_used_seconds = excluded.time_used_seconds,
+-    created_at_ms = excluded.created_at_ms,
+-    updated_at_ms = excluded.updated_at_ms
++) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             "#,
+         )
+         .bind(goal.thread_id.to_string())
+         .bind(&goal.goal_id)
++        .bind(revision)
+         .bind(&goal.objective)
+         .bind(goal.status.as_str())
+         .bind(goal.token_budget)
+@@ -106,6 +163,11 @@ ON CONFLICT(thread_id) DO UPDATE SET
+         .execute(&mut *transaction)
+         .await?;
+ 
++        sqlx::query("DELETE FROM thread_goal_revision_tombstones WHERE thread_id = ?")
++            .bind(goal.thread_id.to_string())
++            .execute(&mut *transaction)
++            .await?;
++
+         sqlx::query(
+             r#"
+ INSERT INTO thread_goal_continuation_deferrals (thread_id)
+@@ -160,54 +222,23 @@ SELECT EXISTS(
+         status: crate::ThreadGoalStatus,
+         token_budget: Option<i64>,
+     ) -> anyhow::Result<crate::ThreadGoal> {
+-        let goal_id = Uuid::new_v4().to_string();
+-        let now_ms = datetime_to_epoch_millis(Utc::now());
+-        let status = status_after_budget_limit(status, /*tokens_used*/ 0, token_budget);
+-        let row = sqlx::query(
+-            r#"
+-INSERT INTO thread_goals (
+-    thread_id,
+-    goal_id,
+-    objective,
+-    status,
+-    token_budget,
+-    tokens_used,
+-    time_used_seconds,
+-    created_at_ms,
+-    updated_at_ms
+-) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?)
+-ON CONFLICT(thread_id) DO UPDATE SET
+-    goal_id = excluded.goal_id,
+-    objective = excluded.objective,
+-    status = excluded.status,
+-    token_budget = excluded.token_budget,
+-    tokens_used = 0,
+-    time_used_seconds = 0,
+-    created_at_ms = excluded.created_at_ms,
+-    updated_at_ms = excluded.updated_at_ms
+-RETURNING
+-    thread_id,
+-    goal_id,
+-    objective,
+-    status,
+-    token_budget,
+-    tokens_used,
+-    time_used_seconds,
+-    created_at_ms,
+-    updated_at_ms
+-            "#,
+-        )
+-        .bind(thread_id.to_string())
+-        .bind(goal_id)
+-        .bind(objective)
+-        .bind(status.as_str())
+-        .bind(token_budget)
+-        .bind(now_ms)
+-        .bind(now_ms)
+-        .fetch_one(self.pool.as_ref())
+-        .await?;
+-
+-        thread_goal_from_row(&row)
++        if let Some(goal) = self.get_thread_goal(thread_id).await? {
++            return self
++                .replace_thread_goal_exact(
++                    thread_id,
++                    &GoalVersion::from(&goal),
++                    objective,
++                    status,
++                    token_budget,
++                )
++                .await?
++                .map(|outcome| outcome.goal)
++                .ok_or_else(|| anyhow::anyhow!("goal changed during replacement"));
++        }
++        let revision = self.get_thread_goal_revision(thread_id).await?;
++        self.create_thread_goal_exact(thread_id, revision, objective, status, token_budget)
++            .await?
++            .ok_or_else(|| anyhow::anyhow!("goal changed during creation"))
+     }
+ 
+     pub async fn insert_thread_goal(
+@@ -217,55 +248,24 @@ RETURNING
+         status: crate::ThreadGoalStatus,
+         token_budget: Option<i64>,
+     ) -> anyhow::Result<Option<crate::ThreadGoal>> {
+-        let goal_id = Uuid::new_v4().to_string();
+-        let now_ms = datetime_to_epoch_millis(Utc::now());
+-        let status = status_after_budget_limit(status, /*tokens_used*/ 0, token_budget);
+-        let row = sqlx::query(
+-            r#"
+-INSERT INTO thread_goals (
+-    thread_id,
+-    goal_id,
+-    objective,
+-    status,
+-    token_budget,
+-    tokens_used,
+-    time_used_seconds,
+-    created_at_ms,
+-    updated_at_ms
+-) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?)
+-ON CONFLICT(thread_id) DO UPDATE SET
+-    goal_id = excluded.goal_id,
+-    objective = excluded.objective,
+-    status = excluded.status,
+-    token_budget = excluded.token_budget,
+-    tokens_used = 0,
+-    time_used_seconds = 0,
+-    created_at_ms = excluded.created_at_ms,
+-    updated_at_ms = excluded.updated_at_ms
+-WHERE thread_goals.status = 'complete'
+-RETURNING
+-    thread_id,
+-    goal_id,
+-    objective,
+-    status,
+-    token_budget,
+-    tokens_used,
+-    time_used_seconds,
+-    created_at_ms,
+-    updated_at_ms
+-            "#,
+-        )
+-        .bind(thread_id.to_string())
+-        .bind(goal_id)
+-        .bind(objective)
+-        .bind(status.as_str())
+-        .bind(token_budget)
+-        .bind(now_ms)
+-        .bind(now_ms)
+-        .fetch_optional(self.pool.as_ref())
+-        .await?;
+-
+-        row.map(|row| thread_goal_from_row(&row)).transpose()
++        match self.get_thread_goal(thread_id).await? {
++            Some(goal) if goal.status == crate::ThreadGoalStatus::Complete => self
++                .replace_thread_goal_exact(
++                    thread_id,
++                    &GoalVersion::from(&goal),
++                    objective,
++                    status,
++                    token_budget,
++                )
++                .await
++                .map(|outcome| outcome.map(|outcome| outcome.goal)),
++            Some(_) => Ok(None),
++            None => {
++                let revision = self.get_thread_goal_revision(thread_id).await?;
++                self.create_thread_goal_exact(thread_id, revision, objective, status, token_budget)
++                    .await
++            }
++        }
+     }
+ 
+     pub async fn update_thread_goal(
+@@ -295,8 +295,10 @@ SET
+         ELSE ?
+     END,
+     token_budget = ?,
++    revision = revision + 1,
+     updated_at_ms = ?
+ WHERE thread_id = ?
++  AND revision < 9223372036854775807
+   AND (? IS NULL OR goal_id = ?)
+             "#,
+                 )
+@@ -329,8 +331,10 @@ SET
+         WHEN ? = 'active' AND token_budget IS NOT NULL AND tokens_used >= token_budget THEN ?
+         ELSE ?
+     END,
++    revision = revision + 1,
+     updated_at_ms = ?
+ WHERE thread_id = ?
++  AND revision < 9223372036854775807
+   AND (? IS NULL OR goal_id = ?)
+             "#,
+                 )
+@@ -360,8 +364,10 @@ SET
+         WHEN status = 'active' AND ? IS NOT NULL AND tokens_used >= ? THEN ?
+         ELSE status
+     END,
++    revision = revision + 1,
+     updated_at_ms = ?
+ WHERE thread_id = ?
++  AND revision < 9223372036854775807
+   AND (? IS NULL OR goal_id = ?)
+             "#,
+                 )
+@@ -384,8 +390,10 @@ WHERE thread_id = ?
+ UPDATE thread_goals
+ SET
+     objective = ?,
++    revision = revision + 1,
+     updated_at_ms = ?
+ WHERE thread_id = ?
++  AND revision < 9223372036854775807
+   AND (? IS NULL OR goal_id = ?)
+             "#,
+                     )
+@@ -444,8 +452,10 @@ WHERE thread_id = ?
+ UPDATE thread_goals
+ SET
+     status = ?,
++    revision = revision + 1,
+     updated_at_ms = ?
+ WHERE thread_id = ?
++  AND revision < 9223372036854775807
+   AND (
+       status = 'active'
+       OR (
+@@ -473,27 +483,12 @@ WHERE thread_id = ?
+         &self,
+         thread_id: ThreadId,
+     ) -> anyhow::Result<Option<crate::ThreadGoal>> {
+-        let row = sqlx::query(
+-            r#"
+-DELETE FROM thread_goals
+-WHERE thread_id = ?
+-RETURNING
+-    thread_id,
+-    goal_id,
+-    objective,
+-    status,
+-    token_budget,
+-    tokens_used,
+-    time_used_seconds,
+-    created_at_ms,
+-    updated_at_ms
+-            "#,
+-        )
+-        .bind(thread_id.to_string())
+-        .fetch_optional(self.pool.as_ref())
+-        .await?;
+-
+-        row.map(|row| thread_goal_from_row(&row)).transpose()
++        let Some(goal) = self.get_thread_goal(thread_id).await? else {
++            return Ok(None);
++        };
++        self.clear_thread_goal_exact(thread_id, &GoalVersion::from(&goal))
++            .await
++            .map(|outcome| outcome.map(|outcome| outcome.previous_goal))
+     }
+ 
+     pub async fn account_thread_goal_usage(
+@@ -503,6 +498,26 @@ RETURNING
+         token_delta: i64,
+         mode: GoalAccountingMode,
+         expected_goal_id: Option<&str>,
++    ) -> anyhow::Result<GoalAccountingOutcome> {
++        self.account_thread_goal_usage_inner(
++            thread_id,
++            time_delta_seconds,
++            token_delta,
++            mode,
++            expected_goal_id,
++            /*expected_revision*/ None,
++        )
++        .await
++    }
++
++    pub(super) async fn account_thread_goal_usage_inner(
++        &self,
++        thread_id: ThreadId,
++        time_delta_seconds: i64,
++        token_delta: i64,
++        mode: GoalAccountingMode,
++        expected_goal_id: Option<&str>,
++        expected_revision: Option<i64>,
+     ) -> anyhow::Result<GoalAccountingOutcome> {
+         let time_delta_seconds = time_delta_seconds.max(0);
+         let token_delta = token_delta.max(0);
+@@ -568,6 +583,7 @@ SET
+             r#"
+         ELSE status
+     END,
++    revision = revision + 1,
+     updated_at_ms =
+             "#,
+         );
+@@ -580,14 +596,21 @@ WHERE thread_id =
+         builder.push_bind(thread_id.to_string());
+         builder.push(" AND ");
+         builder.push(status_filter);
++        builder.push(" AND revision < 9223372036854775807");
+         if let Some(expected_goal_id) = expected_goal_id {
+             builder.push(" AND goal_id = ").push_bind(expected_goal_id);
+         }
++        if let Some(expected_revision) = expected_revision {
++            builder
++                .push(" AND revision = ")
++                .push_bind(expected_revision);
++        }
+         builder.push(
+             r#"
+ RETURNING
+     thread_id,
+     goal_id,
++    revision,
+     objective,
+     status,
+     token_budget,
+@@ -611,11 +634,13 @@ RETURNING
+     }
+ }
+ 
+-fn thread_goal_from_row(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<crate::ThreadGoal> {
++pub(super) fn thread_goal_from_row(
++    row: &sqlx::sqlite::SqliteRow,
++) -> anyhow::Result<crate::ThreadGoal> {
+     ThreadGoalRow::try_from_row(row).and_then(crate::ThreadGoal::try_from)
+ }
+ 
+-fn status_after_budget_limit(
++pub(super) fn status_after_budget_limit(
+     status: crate::ThreadGoalStatus,
+     tokens_used: i64,
+     token_budget: Option<i64>,
+@@ -629,6 +654,10 @@ fn status_after_budget_limit(
+     }
+ }
+ 
++#[cfg(test)]
++#[path = "goals_revision_tests.rs"]
++mod revision_tests;
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -707,6 +736,7 @@ mod tests {
+         let expected = crate::ThreadGoal {
+             status: crate::ThreadGoalStatus::Paused,
+             token_budget: Some(200_000),
++            revision: updated.revision,
+             updated_at: updated.updated_at,
+             ..goal.clone()
+         };
+@@ -1007,6 +1037,7 @@ mod tests {
+             objective: "draft the report clearly".to_string(),
+             status: crate::ThreadGoalStatus::Paused,
+             token_budget: Some(200),
++            revision: updated.revision,
+             updated_at: updated.updated_at,
+             ..accounted
+         };
+@@ -1085,6 +1116,7 @@ mod tests {
+             .expect("active goal should be paused");
+         let expected = crate::ThreadGoal {
+             status: crate::ThreadGoalStatus::Paused,
++            revision: paused.revision,
+             updated_at: paused.updated_at,
+             ..goal
+         };
+@@ -1144,6 +1176,7 @@ mod tests {
+             .expect("active goal should become usage limited");
+         let expected = crate::ThreadGoal {
+             status: crate::ThreadGoalStatus::UsageLimited,
++            revision: usage_limited.revision,
+             updated_at: usage_limited.updated_at,
+             ..goal
+         };
+@@ -1174,6 +1207,7 @@ mod tests {
+             .expect("budget-limited goal should become usage limited");
+         let expected = crate::ThreadGoal {
+             status: crate::ThreadGoalStatus::UsageLimited,
++            revision: usage_limited.revision,
+             updated_at: usage_limited.updated_at,
+             ..budget_limited
+         };
+@@ -1525,6 +1559,7 @@ mod tests {
+             .expect("goal should exist");
+ 
+         let expected = crate::ThreadGoal {
++            revision: blocked.revision,
+             updated_at: blocked.updated_at,
+             ..budget_limited
+         };
+@@ -1724,5 +1759,13 @@ mod tests {
+                 .await
+                 .expect("goal read should succeed")
+         );
++        assert_eq!(
++            0,
++            runtime
++                .thread_goals()
++                .get_thread_goal_revision(thread_id)
++                .await
++                .expect("goal revision read should succeed")
++        );
+     }
+ }
+diff --git a/codex-rs/state/src/runtime/goals_revision_tests.rs b/codex-rs/state/src/runtime/goals_revision_tests.rs
+new file mode 100644
+index 000000000..bffb0eeef
+--- /dev/null
++++ b/codex-rs/state/src/runtime/goals_revision_tests.rs
+@@ -0,0 +1,145 @@
++use super::*;
++use crate::runtime::test_support::unique_temp_dir;
++use codex_utils_absolute_path::test_support::PathExt;
++use pretty_assertions::assert_eq;
++
++async fn test_runtime() -> Arc<StateRuntime> {
++    StateRuntime::init(
++        crate::SqliteConfig::new_for_testing(unique_temp_dir().as_path().abs()),
++        "test-provider".to_string(),
++    )
++    .await
++    .expect("state db should initialize")
++}
++
++fn test_thread_id() -> ThreadId {
++    ThreadId::from_string("00000000-0000-0000-0000-000000000321").expect("valid thread id")
++}
++
++#[tokio::test]
++async fn exact_goal_mutations_advance_revision_and_preserve_clear_tombstone() {
++    let runtime = test_runtime().await;
++    let thread_id = test_thread_id();
++    let first = runtime
++        .thread_goals()
++        .create_thread_goal_exact(
++            thread_id,
++            /*expected_revision*/ 0,
++            "first objective",
++            crate::ThreadGoalStatus::Active,
++            /*token_budget*/ None,
++        )
++        .await
++        .expect("create should succeed")
++        .expect("revision zero should match empty state");
++    assert_eq!(1, first.revision);
++
++    let updated = runtime
++        .thread_goals()
++        .update_thread_goal_exact(
++            thread_id,
++            &GoalVersion::from(&first),
++            GoalUpdate {
++                objective: None,
++                status: Some(crate::ThreadGoalStatus::Blocked),
++                token_budget: None,
++                expected_goal_id: Some(first.goal_id.clone()),
++            },
++        )
++        .await
++        .expect("update should succeed")
++        .expect("exact version should match");
++    assert_eq!(2, updated.revision);
++
++    let cleared = runtime
++        .thread_goals()
++        .clear_thread_goal_exact(thread_id, &GoalVersion::from(&updated))
++        .await
++        .expect("clear should succeed")
++        .expect("exact version should clear");
++    assert_eq!(3, cleared.revision);
++    assert_eq!(
++        3,
++        runtime
++            .thread_goals()
++            .get_thread_goal_revision(thread_id)
++            .await
++            .unwrap()
++    );
++
++    let second = runtime
++        .thread_goals()
++        .create_thread_goal_exact(
++            thread_id,
++            /*expected_revision*/ 3,
++            "second objective",
++            crate::ThreadGoalStatus::Active,
++            /*token_budget*/ Some(100),
++        )
++        .await
++        .expect("recreate should succeed")
++        .expect("tombstone revision should match");
++    assert_eq!(4, second.revision);
++    assert_ne!(first.goal_id, second.goal_id);
++
++    assert_eq!(
++        None,
++        runtime
++            .thread_goals()
++            .update_thread_goal_exact(
++                thread_id,
++                &GoalVersion::from(&first),
++                GoalUpdate {
++                    objective: None,
++                    status: Some(crate::ThreadGoalStatus::Complete),
++                    token_budget: None,
++                    expected_goal_id: Some(first.goal_id),
++                },
++            )
++            .await
++            .expect("stale update should not fail")
++    );
++    assert_eq!(
++        Some(second),
++        runtime
++            .thread_goals()
++            .get_thread_goal(thread_id)
++            .await
++            .unwrap()
++    );
++}
++
++#[tokio::test]
++async fn exact_accounting_returns_the_promoted_version() {
++    let runtime = test_runtime().await;
++    let thread_id = test_thread_id();
++    let goal = runtime
++        .thread_goals()
++        .create_thread_goal_exact(
++            thread_id,
++            /*expected_revision*/ 0,
++            "account usage",
++            crate::ThreadGoalStatus::Active,
++            /*token_budget*/ Some(100),
++        )
++        .await
++        .unwrap()
++        .unwrap();
++    let outcome = runtime
++        .thread_goals()
++        .account_thread_goal_usage_exact(
++            thread_id,
++            /*time_delta_seconds*/ 2,
++            /*token_delta*/ 3,
++            GoalAccountingMode::ActiveOnly,
++            &GoalVersion::from(&goal),
++        )
++        .await
++        .unwrap();
++    let GoalAccountingOutcome::Updated(updated) = outcome else {
++        panic!("exact accounting should update the goal");
++    };
++    assert_eq!(2, updated.revision);
++    assert_eq!(3, updated.tokens_used);
++    assert_eq!(2, updated.time_used_seconds);
++}
+diff --git a/codex-rs/state/src/runtime/threads.rs b/codex-rs/state/src/runtime/threads.rs
+index 4bb83cd16..ee37610b4 100644
+--- a/codex-rs/state/src/runtime/threads.rs
++++ b/codex-rs/state/src/runtime/threads.rs
+@@ -1047,6 +1047,17 @@ ON CONFLICT(id) DO UPDATE SET
+             self.upsert_thread(&metadata).await
+         };
+         upsert_result?;
++        for item in items {
++            if let RolloutItem::TurnContext(context) = item
++                && let (Some(turn_id), Some(binding)) = (
++                    context.turn_id.as_deref(),
++                    context.execution_account.as_ref(),
++                )
++            {
++                self.record_turn_execution_account(builder.id, turn_id, binding)
++                    .await?;
++            }
++        }
+         if let Some(memory_mode) = extract_memory_mode(items)
+             && let Err(err) = self
+                 .set_thread_memory_mode(builder.id, memory_mode.as_str())
+@@ -1139,6 +1150,16 @@ ON CONFLICT(id) DO UPDATE SET
+                 .execute(&mut *tx)
+                 .await?;
+         }
++        for thread_id_string in &thread_id_strings {
++            sqlx::query("DELETE FROM thread_turn_execution_accounts WHERE thread_id = ?")
++                .bind(thread_id_string)
++                .execute(&mut *tx)
++                .await?;
++            sqlx::query("DELETE FROM thread_execution_account_bindings WHERE thread_id = ?")
++                .bind(thread_id_string)
++                .execute(&mut *tx)
++                .await?;
++        }
+         for thread_id_string in &thread_id_strings {
+             sqlx::query(
+                 "DELETE FROM thread_spawn_edges WHERE parent_thread_id = ? OR child_thread_id = ?",
+diff --git a/codex-rs/thread-store/src/in_memory.rs b/codex-rs/thread-store/src/in_memory.rs
+index 9ea7e2bde..0724a4655 100644
+--- a/codex-rs/thread-store/src/in_memory.rs
++++ b/codex-rs/thread-store/src/in_memory.rs
+@@ -13,6 +13,7 @@ use chrono::Utc;
+ use codex_protocol::ThreadId;
+ use codex_protocol::models::PermissionProfile;
+ use codex_protocol::protocol::AskForApproval;
++use codex_protocol::protocol::ExecutionAccountBinding;
+ use codex_protocol::protocol::SessionContextWindow;
+ use codex_protocol::protocol::SessionMeta;
+ use codex_protocol::protocol::SessionMetaLine;
+@@ -66,6 +67,49 @@ mod tests {
+     use codex_protocol::models::BaseInstructions;
+     use codex_protocol::protocol::SessionSource;
+ 
++    #[tokio::test]
++    async fn execution_account_binding_uses_exact_cas_semantics() {
++        let store = InMemoryThreadStore::default();
++        let thread_id = ThreadId::default();
++        let initial = ExecutionAccountBinding {
++            slot_id: "default".to_string(),
++            generation: 1,
++        };
++
++        assert_eq!(
++            store
++                .initialize_execution_account_binding(thread_id, initial.clone())
++                .await
++                .expect("initialize binding"),
++            initial
++        );
++        assert_eq!(
++            store
++                .compare_and_swap_execution_account_binding(
++                    thread_id,
++                    initial.clone(),
++                    "secondary".to_string(),
++                )
++                .await
++                .expect("compare and swap"),
++            Some(ExecutionAccountBinding {
++                slot_id: "secondary".to_string(),
++                generation: 2,
++            })
++        );
++        assert_eq!(
++            store
++                .compare_and_swap_execution_account_binding(
++                    thread_id,
++                    initial,
++                    "stale".to_string(),
++                )
++                .await
++                .expect("stale compare and swap"),
++            None
++        );
++    }
++
+     #[tokio::test]
+     async fn default_turn_pagination_methods_return_unsupported() {
+         let store = InMemoryThreadStore::default();
+@@ -510,6 +554,8 @@ struct InMemoryThreadStoreState {
+     section_entered_at: HashMap<ThreadId, DateTime<Utc>>,
+     names: HashMap<ThreadId, Option<String>>,
+     rollout_paths: HashMap<PathBuf, ThreadId>,
++    execution_accounts: HashMap<ThreadId, ExecutionAccountBinding>,
++    turn_execution_accounts: HashMap<(ThreadId, String), ExecutionAccountBinding>,
+ }
+ 
+ impl InMemoryThreadStore {
+@@ -611,7 +657,25 @@ impl InMemoryThreadStore {
+             .histories
+             .entry(params.thread_id)
+             .or_default()
+-            .extend(persisted_items);
++            .extend(persisted_items.clone());
++        for item in persisted_items {
++            if let RolloutItem::TurnContext(context) = item
++                && let (Some(turn_id), Some(binding)) = (context.turn_id, context.execution_account)
++            {
++                let key = (params.thread_id, turn_id);
++                match state.turn_execution_accounts.get(&key) {
++                    Some(existing) if existing != &binding => {
++                        return Err(ThreadStoreError::Conflict {
++                            message: "turn execution account provenance is immutable".to_string(),
++                        });
++                    }
++                    Some(_) => {}
++                    None => {
++                        state.turn_execution_accounts.insert(key, binding);
++                    }
++                }
++            }
++        }
+         Ok(())
+     }
+ 
+@@ -830,6 +894,10 @@ impl InMemoryThreadStore {
+         state.names.remove(&params.thread_id);
+         state.metadata_updates.remove(&params.thread_id);
+         state.sections.remove(&params.thread_id);
++        state.execution_accounts.remove(&params.thread_id);
++        state
++            .turn_execution_accounts
++            .retain(|(thread_id, _), _| *thread_id != params.thread_id);
+         state.section_positions.remove(&params.thread_id);
+         state.section_entered_at.remove(&params.thread_id);
+         state
+@@ -850,6 +918,79 @@ impl ThreadStore for InMemoryThreadStore {
+         self
+     }
+ 
++    fn execution_account_binding(
++        &self,
++        thread_id: ThreadId,
++    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
++        Box::pin(async move {
++            Ok(self
++                .state
++                .lock()
++                .await
++                .execution_accounts
++                .get(&thread_id)
++                .cloned())
++        })
++    }
++
++    fn initialize_execution_account_binding(
++        &self,
++        thread_id: ThreadId,
++        initial: ExecutionAccountBinding,
++    ) -> ThreadStoreFuture<'_, ExecutionAccountBinding> {
++        Box::pin(async move {
++            let mut state = self.state.lock().await;
++            Ok(state
++                .execution_accounts
++                .entry(thread_id)
++                .or_insert(initial)
++                .clone())
++        })
++    }
++
++    fn compare_and_swap_execution_account_binding(
++        &self,
++        thread_id: ThreadId,
++        expected: ExecutionAccountBinding,
++        next_slot_id: String,
++    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
++        Box::pin(async move {
++            let mut state = self.state.lock().await;
++            let Some(current) = state.execution_accounts.get_mut(&thread_id) else {
++                return Ok(None);
++            };
++            if current != &expected {
++                return Ok(None);
++            }
++            let Some(generation) = current.generation.checked_add(1) else {
++                return Err(ThreadStoreError::Internal {
++                    message: "execution account generation overflow".to_string(),
++                });
++            };
++            *current = ExecutionAccountBinding {
++                slot_id: next_slot_id,
++                generation,
++            };
++            Ok(Some(current.clone()))
++        })
++    }
++
++    fn turn_execution_account(
++        &self,
++        thread_id: ThreadId,
++        turn_id: String,
++    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
++        Box::pin(async move {
++            Ok(self
++                .state
++                .lock()
++                .await
++                .turn_execution_accounts
++                .get(&(thread_id, turn_id))
++                .cloned())
++        })
++    }
++
+     fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreFuture<'_, ()> {
+         Box::pin(InMemoryThreadStore::create_thread(self, params))
+     }
+diff --git a/codex-rs/thread-store/src/local/live_writer.rs b/codex-rs/thread-store/src/local/live_writer.rs
+index 7bebf3d89..85ebe3a5e 100644
+--- a/codex-rs/thread-store/src/local/live_writer.rs
++++ b/codex-rs/thread-store/src/local/live_writer.rs
+@@ -328,8 +328,32 @@ async fn write_and_project(
+         RolloutWriteOp::Persist => RolloutWriteOp::Persist,
+         RolloutWriteOp::Flush => RolloutWriteOp::Flush,
+     };
++    let turn_execution_accounts = match &write_op {
++        RolloutWriteOp::AppendItems(items) => items
++            .iter()
++            .filter_map(|item| {
++                let RolloutItem::TurnContext(context) = item else {
++                    return None;
++                };
++                Some((context.turn_id.clone()?, context.execution_account.clone()?))
++            })
++            .collect::<Vec<_>>(),
++        RolloutWriteOp::Persist | RolloutWriteOp::Flush => Vec::new(),
++    };
+     if matches!(history_mode, ThreadHistoryMode::Legacy) {
+         durable_write(&recorder, write_op).await?;
++        if let Some(state_db) = store.state_db().await {
++            for (turn_id, binding) in turn_execution_accounts {
++                state_db
++                    .record_turn_execution_account(thread_id, turn_id.as_str(), &binding)
++                    .await
++                    .map_err(|err| ThreadStoreError::Internal {
++                        message: format!(
++                            "failed to record execution account for thread {thread_id} turn {turn_id}: {err}"
++                        ),
++                    })?;
++            }
++        }
+     } else {
+         let rollout_path = recorder.rollout_path();
+         // SQLite is a rebuildable view. The flush barrier must win before projection starts so it
+diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
+index 238b4a80a..97b04a0b0 100644
+--- a/codex-rs/thread-store/src/local/mod.rs
++++ b/codex-rs/thread-store/src/local/mod.rs
+@@ -31,6 +31,7 @@ mod pending_thread_metadata_tests;
+ mod test_support;
+ 
+ use codex_protocol::ThreadId;
++use codex_protocol::protocol::ExecutionAccountBinding;
+ use codex_protocol::protocol::ThreadHistoryMode;
+ use codex_rollout::RolloutRecorder;
+ use codex_rollout::StateDbHandle;
+@@ -255,6 +256,35 @@ impl LocalThreadStore {
+         self.state_db.clone()
+     }
+ 
++    /// Check the durable thread binding authority for an account slot.
++    pub async fn durable_execution_account_slot_in_use(
++        &self,
++        account_slot_id: &str,
++    ) -> ThreadStoreResult<bool> {
++        if self.state_db.is_none() {
++            return Ok(false);
++        }
++        let pool = self
++            .config
++            .sqlite
++            .open_read_only_pool(&self.config.sqlite.state_db_path())
++            .await
++            .map_err(|err| ThreadStoreError::Internal {
++                message: format!("failed to open execution account binding store: {err}"),
++            })?;
++        let result = sqlx::query_scalar::<_, bool>(
++            "SELECT EXISTS(SELECT 1 FROM thread_execution_account_bindings WHERE slot_id = ?)",
++        )
++        .bind(account_slot_id)
++        .fetch_one(&pool)
++        .await
++        .map_err(|err| ThreadStoreError::Internal {
++            message: format!("failed to scan execution account bindings: {err}"),
++        });
++        pool.close().await;
++        result
++    }
++
+     /// Probe current writer ownership and persistent control metadata without
+     /// creating, deleting, or taking ownership of a thread lock.
+     pub async fn probe_writer_authority(
+@@ -466,6 +496,92 @@ impl ThreadStore for LocalThreadStore {
+         self
+     }
+ 
++    fn execution_account_binding(
++        &self,
++        thread_id: ThreadId,
++    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
++        Box::pin(async move {
++            let Some(state_db) = self.state_db.as_ref() else {
++                return Ok(Some(ExecutionAccountBinding {
++                    slot_id: "default".to_string(),
++                    generation: 1,
++                }));
++            };
++            state_db
++                .execution_account_binding(thread_id)
++                .await
++                .map_err(|err| ThreadStoreError::Internal {
++                    message: format!("failed to read execution account binding: {err}"),
++                })
++        })
++    }
++
++    fn initialize_execution_account_binding(
++        &self,
++        thread_id: ThreadId,
++        initial: ExecutionAccountBinding,
++    ) -> ThreadStoreFuture<'_, ExecutionAccountBinding> {
++        Box::pin(async move {
++            let Some(state_db) = self.state_db.as_ref() else {
++                if initial.slot_id == "default" && initial.generation == 1 {
++                    return Ok(initial);
++                }
++                return Err(ThreadStoreError::Unsupported {
++                    operation: "initialize_non_default_execution_account_binding",
++                });
++            };
++            state_db
++                .initialize_execution_account_binding(thread_id, &initial)
++                .await
++                .map_err(|err| ThreadStoreError::Internal {
++                    message: format!("failed to initialize execution account binding: {err}"),
++                })
++        })
++    }
++
++    fn compare_and_swap_execution_account_binding(
++        &self,
++        thread_id: ThreadId,
++        expected: ExecutionAccountBinding,
++        next_slot_id: String,
++    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
++        Box::pin(async move {
++            let Some(state_db) = self.state_db.as_ref() else {
++                return Err(ThreadStoreError::Unsupported {
++                    operation: "compare_and_swap_execution_account_binding",
++                });
++            };
++            state_db
++                .compare_and_swap_execution_account_binding(
++                    thread_id,
++                    &expected,
++                    next_slot_id.as_str(),
++                )
++                .await
++                .map_err(|err| ThreadStoreError::Internal {
++                    message: format!("failed to compare and swap execution account binding: {err}"),
++                })
++        })
++    }
++
++    fn turn_execution_account(
++        &self,
++        thread_id: ThreadId,
++        turn_id: String,
++    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
++        Box::pin(async move {
++            let Some(state_db) = self.state_db.as_ref() else {
++                return Ok(None);
++            };
++            state_db
++                .turn_execution_account(thread_id, turn_id.as_str())
++                .await
++                .map_err(|err| ThreadStoreError::Internal {
++                    message: format!("failed to read turn execution account: {err}"),
++                })
++        })
++    }
++
+     fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreFuture<'_, ()> {
+         Box::pin(async move { live_writer::create_thread(self, params).await })
+     }
+@@ -726,6 +842,7 @@ mod tests {
+     use codex_protocol::protocol::AgentMessageEvent;
+     use codex_protocol::protocol::AskForApproval;
+     use codex_protocol::protocol::EventMsg;
++    use codex_protocol::protocol::ExecutionAccountBinding;
+     use codex_protocol::protocol::ItemCompletedEvent;
+     use codex_protocol::protocol::SandboxPolicy;
+     use codex_protocol::protocol::SessionSource;
+@@ -832,6 +949,96 @@ mod tests {
+         );
+     }
+ 
++    #[tokio::test]
++    async fn legacy_append_records_turn_execution_account_after_durable_jsonl() {
++        let home = TempDir::new().expect("temp dir");
++        let config = test_config(home.path());
++        let runtime = codex_state::StateRuntime::init(
++            config.sqlite.clone(),
++            config.default_model_provider_id.clone(),
++        )
++        .await
++        .expect("state db should initialize");
++        let store = LocalThreadStore::new(config, Some(runtime));
++        let thread_id = ThreadId::default();
++        let binding = ExecutionAccountBinding {
++            slot_id: "secondary".to_string(),
++            generation: 3,
++        };
++
++        store
++            .create_thread(create_thread_params(thread_id))
++            .await
++            .expect("create legacy thread");
++        store
++            .initialize_execution_account_binding(thread_id, binding.clone())
++            .await
++            .expect("initialize binding");
++        let context = serde_json::from_value(serde_json::json!({
++            "turn_id": "turn-legacy",
++            "execution_account": {"slotId": "secondary", "generation": 3},
++            "cwd": std::env::current_dir().expect("current directory"),
++            "approval_policy": "never",
++            "sandbox_policy": {"type": "danger-full-access"},
++            "model": "test-model",
++            "summary": "auto"
++        }))
++        .expect("turn context");
++        store
++            .append_items(AppendThreadItemsParams {
++                thread_id,
++                items: vec![RolloutItem::TurnContext(context)],
++            })
++            .await
++            .expect("append legacy turn context");
++
++        assert_eq!(
++            store
++                .turn_execution_account(thread_id, "turn-legacy".to_string())
++                .await
++                .expect("read turn binding"),
++            Some(binding)
++        );
++    }
++
++    #[tokio::test]
++    async fn durable_execution_account_slot_scan_reads_binding_authority() {
++        let home = TempDir::new().expect("temp dir");
++        let config = test_config(home.path());
++        let runtime = codex_state::StateRuntime::init(
++            config.sqlite.clone(),
++            config.default_model_provider_id.clone(),
++        )
++        .await
++        .expect("state db should initialize");
++        let store = LocalThreadStore::new(config, Some(runtime));
++        let thread_id = ThreadId::default();
++
++        store
++            .initialize_execution_account_binding(
++                thread_id,
++                ExecutionAccountBinding {
++                    slot_id: "secondary".to_string(),
++                    generation: 1,
++                },
++            )
++            .await
++            .expect("initialize durable binding");
++
++        assert!(
++            store
++                .durable_execution_account_slot_in_use("secondary")
++                .await
++                .expect("scan durable bindings")
++        );
++        assert!(
++            !store
++                .durable_execution_account_slot_in_use("unused")
++                .await
++                .expect("scan durable bindings")
++        );
++    }
++
+     #[tokio::test]
+     async fn live_thread_observes_appended_items_into_sqlite_metadata() {
+         let home = TempDir::new().expect("temp dir");
+@@ -968,6 +1175,7 @@ mod tests {
+         let turn_context = |model: &str, approval_policy| {
+             RolloutItem::TurnContext(TurnContextItem {
+                 turn_id: Some("turn-1".to_string()),
++                execution_account: None,
+                 cwd: serde_json::from_value(serde_json::json!(cwd)).expect("absolute cwd"),
+                 workspace_roots: None,
+                 current_date: None,
+diff --git a/codex-rs/thread-store/src/local/model_context_tests.rs b/codex-rs/thread-store/src/local/model_context_tests.rs
+index 7e83d8a74..684409cf2 100644
+--- a/codex-rs/thread-store/src/local/model_context_tests.rs
++++ b/codex-rs/thread-store/src/local/model_context_tests.rs
+@@ -595,6 +595,7 @@ fn agent_message(message: &str) -> RolloutItem {
+ fn turn_context(root: &Path, turn_id: &str) -> RolloutItem {
+     RolloutItem::TurnContext(TurnContextItem {
+         turn_id: Some(turn_id.to_string()),
++        execution_account: None,
+         cwd: serde_json::from_value(serde_json::json!(root)).expect("absolute cwd"),
+         workspace_roots: None,
+         current_date: None,
+diff --git a/codex-rs/thread-store/src/local/rollout_migration_tests.rs b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
+index 1fd9af769..aee7b3517 100644
+--- a/codex-rs/thread-store/src/local/rollout_migration_tests.rs
++++ b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
+@@ -1417,6 +1417,7 @@ async fn migration_compacts_subagent_prefix_and_does_not_project_it() {
+             started("child-turn"),
+             RolloutItem::TurnContext(TurnContextItem {
+                 turn_id: Some("child-turn".to_string()),
++                execution_account: None,
+                 cwd: serde_json::from_value(json!(home.path())).expect("absolute cwd"),
+                 workspace_roots: None,
+                 current_date: None,
+diff --git a/codex-rs/thread-store/src/store.rs b/codex-rs/thread-store/src/store.rs
+index 5cc582c51..f8f00b991 100644
+--- a/codex-rs/thread-store/src/store.rs
++++ b/codex-rs/thread-store/src/store.rs
+@@ -1,4 +1,5 @@
+ use codex_protocol::ThreadId;
++use codex_protocol::protocol::ExecutionAccountBinding;
+ use codex_protocol::protocol::ThreadHistoryMode;
+ use std::any::Any;
+ use std::future::Future;
+@@ -77,6 +78,54 @@ pub trait ThreadStore: Any + Send + Sync {
+         ThreadHistoryMode::Legacy
+     }
+ 
++    fn execution_account_binding(
++        &self,
++        _thread_id: ThreadId,
++    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
++        Box::pin(async {
++            Err(ThreadStoreError::Unsupported {
++                operation: "execution_account_binding",
++            })
++        })
++    }
++
++    fn initialize_execution_account_binding(
++        &self,
++        _thread_id: ThreadId,
++        _initial: ExecutionAccountBinding,
++    ) -> ThreadStoreFuture<'_, ExecutionAccountBinding> {
++        Box::pin(async {
++            Err(ThreadStoreError::Unsupported {
++                operation: "initialize_execution_account_binding",
++            })
++        })
++    }
++
++    fn compare_and_swap_execution_account_binding(
++        &self,
++        _thread_id: ThreadId,
++        _expected: ExecutionAccountBinding,
++        _next_slot_id: String,
++    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
++        Box::pin(async {
++            Err(ThreadStoreError::Unsupported {
++                operation: "compare_and_swap_execution_account_binding",
++            })
++        })
++    }
++
++    fn turn_execution_account(
++        &self,
++        _thread_id: ThreadId,
++        _turn_id: String,
++    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
++        Box::pin(async {
++            Err(ThreadStoreError::Unsupported {
++                operation: "turn_execution_account",
++            })
++        })
++    }
++
+     /// Creates a new live thread.
+     fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreFuture<'_, ()>;
+ 
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,1680 @@
+From 81bdd2b15346281c3df5bcd84cd8109aa34716e7 Mon Sep 17 00:00:00 2001
+From: patch-verifier <patch-verifier@localhost>
+Date: Fri, 21 Aug 2026 18:06:29 +0900
+Subject: [PATCH] feat(custom): relinquish thread writers strictly for 0.149
+
+---
+ codex-rs/app-server/src/message_processor.rs  |  11 +-
+ .../app-server/src/session_runtime/mod.rs     |   4 +
+ .../src/session_runtime/relinquish.rs         | 392 ++++++++++++++++++
+ .../src/session_runtime/snapshot.rs           |  47 ++-
+ codex-rs/app-server/src/thread_state.rs       |  36 ++
+ codex-rs/app-server/tests/suite/v2/mod.rs     |   1 +
+ .../tests/suite/v2/thread_relinquish.rs       | 111 +++++
+ codex-rs/core/src/codex_thread.rs             |  22 +
+ codex-rs/core/src/realtime_conversation.rs    |  10 +
+ codex-rs/core/src/session/handlers.rs         |  74 ++++
+ codex-rs/core/src/session/mod.rs              |  20 +
+ codex-rs/core/src/session/session.rs          |  33 ++
+ codex-rs/core/src/session/tests.rs            |   4 +
+ codex-rs/core/src/session/turn_input.rs       |  20 +
+ codex-rs/core/src/session/turn_input_tests.rs |  66 +++
+ codex-rs/core/src/tasks/mod.rs                |   8 +
+ codex-rs/protocol/src/protocol.rs             |   7 +
+ codex-rs/thread-store/src/in_memory.rs        |  20 +
+ codex-rs/thread-store/src/live_thread.rs      |  12 +
+ .../thread-store/src/local/live_writer.rs     |  58 ++-
+ codex-rs/thread-store/src/local/mod.rs        |  35 ++
+ .../src/local/tests/relinquish_tests.rs       | 127 ++++++
+ .../thread-store/src/local/writer_lock.rs     |  12 +-
+ codex-rs/thread-store/src/store.rs            |  23 +
+ 24 files changed, 1128 insertions(+), 25 deletions(-)
+ create mode 100644 codex-rs/app-server/src/session_runtime/relinquish.rs
+ create mode 100644 codex-rs/app-server/tests/suite/v2/thread_relinquish.rs
+ create mode 100644 codex-rs/thread-store/src/local/tests/relinquish_tests.rs
+
+diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
+index e58c9df42..25f068b6d 100644
+--- a/codex-rs/app-server/src/message_processor.rs
++++ b/codex-rs/app-server/src/message_processor.rs
+@@ -393,6 +393,7 @@ impl MessageProcessor {
+         );
+ 
+         let pending_thread_unloads = Arc::new(Mutex::new(HashSet::new()));
++        let thread_list_state_permit = Arc::new(Semaphore::new(/*permits*/ 1));
+         let thread_watch_manager =
+             crate::thread_status::ThreadWatchManager::new_with_outgoing(outgoing.clone());
+         let session_runtime = Arc::new(crate::session_runtime::SessionRuntimeEngine::new(
+@@ -401,12 +402,12 @@ impl MessageProcessor {
+             thread_state_manager.clone(),
+             thread_watch_manager.clone(),
+             Arc::clone(&pending_thread_unloads),
++            Arc::clone(&thread_list_state_permit),
+             Arc::clone(&account_registry),
+             outgoing.clone(),
+         ));
+         thread_state_manager.attach_runtime_engine(&session_runtime);
+         thread_watch_manager.attach_runtime_engine(&session_runtime);
+-        let thread_list_state_permit = Arc::new(Semaphore::new(/*permits*/ 1));
+         let app_list_shutdown_token = CancellationToken::new();
+         let request_serialization_queues = RequestSerializationQueues::default();
+         let config_processor = ConfigRequestProcessor::new(
+@@ -1022,9 +1023,11 @@ impl MessageProcessor {
+             ClientRequest::ThreadAccountSwitch { .. } => Err(method_not_found(
+                 "thread/account/switch is not implemented yet",
+             )),
+-            ClientRequest::ThreadRelinquish { .. } => {
+-                Err(method_not_found("thread/relinquish is not implemented yet"))
+-            }
++            ClientRequest::ThreadRelinquish { params, .. } => self
++                .session_runtime
++                .relinquish(connection_id, params)
++                .await
++                .map(|response| Some(response.into())),
+             ClientRequest::ConfigRead { params, .. } => self
+                 .config_processor
+                 .read(params)
+diff --git a/codex-rs/app-server/src/session_runtime/mod.rs b/codex-rs/app-server/src/session_runtime/mod.rs
+index b5533ded9..8a93006cc 100644
+--- a/codex-rs/app-server/src/session_runtime/mod.rs
++++ b/codex-rs/app-server/src/session_runtime/mod.rs
+@@ -1,6 +1,7 @@
+ #[allow(dead_code)]
+ mod operations;
+ mod pagination;
++mod relinquish;
+ mod snapshot;
+ 
+ use std::collections::HashMap;
+@@ -42,6 +43,7 @@ pub(crate) struct SessionRuntimeEngine {
+     thread_state_manager: ThreadStateManager,
+     thread_watch_manager: ThreadWatchManager,
+     pending_thread_unloads: Arc<Mutex<HashSet<ThreadId>>>,
++    thread_list_state_permit: Arc<Semaphore>,
+     account_registry: Arc<AccountRegistry>,
+     outgoing: Arc<OutgoingMessageSender>,
+ }
+@@ -71,6 +73,7 @@ impl SessionRuntimeEngine {
+         thread_state_manager: ThreadStateManager,
+         thread_watch_manager: ThreadWatchManager,
+         pending_thread_unloads: Arc<Mutex<HashSet<ThreadId>>>,
++        thread_list_state_permit: Arc<Semaphore>,
+         account_registry: Arc<AccountRegistry>,
+         outgoing: Arc<OutgoingMessageSender>,
+     ) -> Self {
+@@ -84,6 +87,7 @@ impl SessionRuntimeEngine {
+             thread_state_manager,
+             thread_watch_manager,
+             pending_thread_unloads,
++            thread_list_state_permit,
+             account_registry,
+             outgoing,
+         }
+diff --git a/codex-rs/app-server/src/session_runtime/relinquish.rs b/codex-rs/app-server/src/session_runtime/relinquish.rs
+new file mode 100644
+index 000000000..f0b05d0d6
+--- /dev/null
++++ b/codex-rs/app-server/src/session_runtime/relinquish.rs
+@@ -0,0 +1,392 @@
++use codex_app_server_protocol::JSONRPCErrorError;
++use codex_app_server_protocol::ServerNotification;
++use codex_app_server_protocol::SessionRuntimeChangedNotification;
++use codex_app_server_protocol::SessionRuntimeLifecycleState;
++use codex_app_server_protocol::SessionRuntimeOperation;
++use codex_app_server_protocol::SessionRuntimeOperationAction;
++use codex_app_server_protocol::SessionRuntimeOperationError;
++use codex_app_server_protocol::SessionRuntimeOperationStatus;
++use codex_app_server_protocol::SessionRuntimeOperationUpdatedNotification;
++use codex_app_server_protocol::SessionRuntimePersistenceHealth;
++use codex_app_server_protocol::SessionRuntimeWriterState;
++use codex_app_server_protocol::ThreadClosedNotification;
++use codex_app_server_protocol::ThreadRelinquishParams;
++use codex_app_server_protocol::ThreadRelinquishResponse;
++use codex_protocol::ThreadId;
++use sha2::Digest;
++use sha2::Sha256;
++
++use super::RuntimeActivity;
++use super::SessionRuntimeEngine;
++use super::operations::evict_terminal_operations;
++use super::snapshot::action_snapshot;
++use super::snapshot::persistence_snapshot;
++use super::snapshot::writer_snapshot;
++use super::unix_timestamp;
++use crate::error_code::internal_error;
++use crate::error_code::invalid_params;
++use crate::outgoing_message::ConnectionId;
++use crate::thread_state::RelinquishReservation;
++
++impl SessionRuntimeEngine {
++    pub(crate) async fn relinquish(
++        &self,
++        connection_id: ConnectionId,
++        params: ThreadRelinquishParams,
++    ) -> Result<ThreadRelinquishResponse, JSONRPCErrorError> {
++        let thread_id = ThreadId::from_string(&params.thread_id)
++            .map_err(|_| invalid_params("thread/relinquish threadId is invalid"))?;
++        let _thread_list_guard = self
++            .thread_list_state_permit
++            .acquire()
++            .await
++            .map_err(|_| internal_error("thread lifecycle coordinator is unavailable"))?;
++        let _transition_admission_permit = self
++            .thread_state_manager
++            .acquire_thread_mutation_permit(thread_id)
++            .await
++            .map_err(|reason| invalid_params(reason.replace('_', " ")))?;
++        let operation = self.begin_operation(relinquish_operation(&params)).await?;
++        if operation.status != SessionRuntimeOperationStatus::Accepted {
++            return Ok(ThreadRelinquishResponse { operation });
++        }
++
++        if params.expected_instance_epoch != self.instance_epoch {
++            return self
++                .failed_relinquish(
++                    &params.operation_id,
++                    "stale_instance_epoch",
++                    "server process incarnation changed",
++                )
++                .await;
++        }
++        let snapshot = match self.refresh_snapshot_for_control(thread_id).await {
++            Ok(snapshot) => snapshot,
++            Err(error) => {
++                let _ = self
++                    .update_operation_status(
++                        &params.operation_id,
++                        SessionRuntimeOperationStatus::Failed,
++                        Some(SessionRuntimeOperationError {
++                            code: "runtime_snapshot_unavailable".to_string(),
++                            message: "thread runtime snapshot is unavailable".to_string(),
++                        }),
++                    )
++                    .await;
++                return Err(error);
++            }
++        };
++        if snapshot.state_revision != params.expected_state_revision {
++            return self
++                .failed_relinquish(
++                    &params.operation_id,
++                    "stale_state_revision",
++                    "thread runtime state changed",
++                )
++                .await;
++        }
++        if snapshot.writer.writer_generation != Some(params.expected_writer_generation)
++            || snapshot.writer.store_id.is_none()
++        {
++            return self
++                .failed_relinquish(
++                    &params.operation_id,
++                    "stale_writer_fence",
++                    "thread writer authority changed",
++                )
++                .await;
++        }
++        if snapshot.writer.state != SessionRuntimeWriterState::OwnedHere {
++            return self
++                .failed_relinquish(
++                    &params.operation_id,
++                    "writer_not_owned",
++                    "thread writer is not owned by this process",
++                )
++                .await;
++        }
++        if snapshot.lifecycle.state != SessionRuntimeLifecycleState::Idle
++            || snapshot.lifecycle.active_turn_id.is_some()
++            || !snapshot.lifecycle.waiting_on.is_empty()
++        {
++            return self
++                .failed_relinquish(
++                    &params.operation_id,
++                    "thread_not_idle",
++                    "thread is not idle",
++                )
++                .await;
++        }
++        let Ok(thread) = self.thread_manager.get_thread(thread_id).await else {
++            return self
++                .failed_relinquish(
++                    &params.operation_id,
++                    "thread_not_loaded",
++                    "thread runtime is not loaded",
++                )
++                .await;
++        };
++        match self
++            .thread_state_manager
++            .reserve_relinquish(
++                self.pending_thread_unloads.as_ref(),
++                thread_id,
++                connection_id,
++            )
++            .await
++        {
++            RelinquishReservation::Reserved => {}
++            RelinquishReservation::AlreadyClosing => {
++                return self
++                    .failed_relinquish(
++                        &params.operation_id,
++                        "thread_closing",
++                        "thread is already closing",
++                    )
++                    .await;
++            }
++            RelinquishReservation::OtherSubscribersPresent => {
++                return self
++                    .failed_relinquish(
++                        &params.operation_id,
++                        "other_subscribers_present",
++                        "other subscribers are still attached",
++                    )
++                    .await;
++            }
++        }
++        if let Err(error) = self
++            .update_operation_status(
++                params.operation_id.as_str(),
++                SessionRuntimeOperationStatus::Running,
++                None,
++            )
++            .await
++        {
++            self.clear_relinquish_reservation(thread_id).await;
++            return Err(error);
++        }
++        self.publish_thread(thread_id).await;
++
++        if let Err(error) = thread
++            .relinquish_and_wait(params.expected_writer_generation)
++            .await
++        {
++            self.clear_relinquish_reservation(thread_id).await;
++            self.publish_thread(thread_id).await;
++            let (code, message) = if error == "thread is not idle" {
++                (
++                    "thread_not_idle",
++                    "thread became busy before writer release",
++                )
++            } else {
++                (
++                    "durability_failed",
++                    "strict writer release failed; the thread remains loaded",
++                )
++            };
++            return self
++                .failed_relinquish(&params.operation_id, code, message)
++                .await;
++        }
++
++        // The lifecycle permit and pending-unload reservation prevent app-server resume/replace
++        // while this operation runs. If another owner already removed the exact Arc, the strict
++        // writer commit is still authoritative: keep the reservation and publish the same terminal
++        // pair instead of opening a re-entry window after a committed release.
++        let _ = self
++            .thread_manager
++            .remove_thread_if_matches(&thread_id, &thread)
++            .await;
++        self.thread_watch_manager
++            .remove_thread(&thread_id.to_string())
++            .await;
++        self.thread_state_manager
++            .remove_thread_state(thread_id)
++            .await;
++        let operation = self
++            .publish_relinquish_terminal(thread_id, params.operation_id.as_str())
++            .await?;
++        Ok(ThreadRelinquishResponse { operation })
++    }
++
++    async fn clear_relinquish_reservation(&self, thread_id: ThreadId) {
++        self.pending_thread_unloads.lock().await.remove(&thread_id);
++    }
++
++    async fn failed_relinquish(
++        &self,
++        operation_id: &str,
++        code: &str,
++        message: &str,
++    ) -> Result<ThreadRelinquishResponse, JSONRPCErrorError> {
++        let operation = self
++            .update_operation_status(
++                operation_id,
++                SessionRuntimeOperationStatus::Failed,
++                Some(SessionRuntimeOperationError {
++                    code: code.to_string(),
++                    message: message.to_string(),
++                }),
++            )
++            .await?;
++        Ok(ThreadRelinquishResponse { operation })
++    }
++
++    async fn refresh_snapshot_for_control(
++        &self,
++        thread_id: ThreadId,
++    ) -> Result<codex_app_server_protocol::SessionRuntimeSnapshot, JSONRPCErrorError> {
++        let _build_guard = self
++            .build_lock
++            .acquire()
++            .await
++            .map_err(|_| internal_error("session runtime publisher is unavailable"))?;
++        let thread_id_text = thread_id.to_string();
++        let mut snapshots = self
++            .build_consistent_snapshots(Some(thread_id_text.as_str()))
++            .await?;
++        let Some(mut snapshot) = snapshots.pop() else {
++            return Err(invalid_params("thread runtime was not found"));
++        };
++        let notification = {
++            let mut state = self.state.lock().await;
++            let changed =
++                Self::apply_runtime_state(&mut state, &mut snapshot, RuntimeActivity::Observe);
++            changed.then(|| {
++                state.sequence = state.sequence.saturating_add(1);
++                state.pages.clear();
++                SessionRuntimeChangedNotification {
++                    instance_epoch: self.instance_epoch.clone(),
++                    sequence: state.sequence,
++                    snapshot: snapshot.clone(),
++                }
++            })
++        };
++        if let Some(notification) = notification {
++            self.outgoing
++                .send_server_notification(ServerNotification::SessionRuntimeChanged(notification))
++                .await;
++        }
++        Ok(snapshot)
++    }
++
++    async fn publish_relinquish_terminal(
++        &self,
++        thread_id: ThreadId,
++        operation_id: &str,
++    ) -> Result<SessionRuntimeOperation, JSONRPCErrorError> {
++        let _build_guard = self
++            .build_lock
++            .acquire()
++            .await
++            .map_err(|_| internal_error("session runtime publisher is unavailable"))?;
++        let store_runtime = self.thread_store.runtime_snapshot(thread_id).await;
++        let (runtime_notification, operation_notification, operation) = {
++            let mut state = self.state.lock().await;
++            let mut snapshot = state
++                .threads
++                .get(&thread_id)
++                .and_then(|runtime| runtime.last_snapshot.clone())
++                .ok_or_else(|| internal_error("released thread snapshot disappeared"))?;
++            snapshot.lifecycle.state = SessionRuntimeLifecycleState::NotLoaded;
++            snapshot.lifecycle.active_turn_id = None;
++            snapshot.lifecycle.waiting_on.clear();
++            snapshot.lifecycle.subscriber_count = 0;
++            snapshot.lifecycle.client_incarnations.clear();
++            snapshot.lifecycle.unload_at = None;
++            match store_runtime {
++                Ok(store_runtime) => {
++                    snapshot.writer = writer_snapshot(&store_runtime);
++                    snapshot.persistence = persistence_snapshot(&store_runtime);
++                }
++                Err(_) => {
++                    snapshot.writer.state = SessionRuntimeWriterState::None;
++                    snapshot.writer.deny_reason = None;
++                    snapshot.persistence.flush_health = SessionRuntimePersistenceHealth::Unknown;
++                    snapshot.persistence.materialize_health =
++                        SessionRuntimePersistenceHealth::Unknown;
++                    snapshot.persistence.deny_reason =
++                        Some("released_persistence_snapshot_unavailable".to_string());
++                }
++            }
++            snapshot.actions = action_snapshot(&snapshot.lifecycle, &snapshot.writer);
++            Self::apply_runtime_state(&mut state, &mut snapshot, RuntimeActivity::Activity);
++            state.sequence = state.sequence.saturating_add(1);
++            state.pages.clear();
++            let runtime_notification = SessionRuntimeChangedNotification {
++                instance_epoch: self.instance_epoch.clone(),
++                sequence: state.sequence,
++                snapshot,
++            };
++
++            let mut operation = state
++                .operations
++                .operations
++                .get(operation_id)
++                .cloned()
++                .ok_or_else(|| internal_error("relinquish operation cache entry disappeared"))?;
++            operation.status = SessionRuntimeOperationStatus::Released;
++            operation.state_revision = Some(runtime_notification.snapshot.state_revision);
++            operation.error = None;
++            operation.updated_at = unix_timestamp();
++            state.sequence = state.sequence.saturating_add(1);
++            state.pages.clear();
++            state
++                .operations
++                .terminal_order
++                .push_back(operation.operation_id.clone());
++            state
++                .operations
++                .operations
++                .insert(operation.operation_id.clone(), operation.clone());
++            evict_terminal_operations(&mut state.operations);
++            let operation_notification = SessionRuntimeOperationUpdatedNotification {
++                instance_epoch: self.instance_epoch.clone(),
++                sequence: state.sequence,
++                operation: operation.clone(),
++            };
++            (runtime_notification, operation_notification, operation)
++        };
++        self.outgoing
++            .send_server_notification(ServerNotification::SessionRuntimeChanged(
++                runtime_notification,
++            ))
++            .await;
++        self.outgoing
++            .send_server_notification(ServerNotification::SessionRuntimeOperationUpdated(
++                operation_notification,
++            ))
++            .await;
++        self.outgoing
++            .send_server_notification(ServerNotification::ThreadClosed(ThreadClosedNotification {
++                thread_id: thread_id.to_string(),
++            }))
++            .await;
++        self.clear_relinquish_reservation(thread_id).await;
++        Ok(operation)
++    }
++}
++
++fn relinquish_operation(params: &ThreadRelinquishParams) -> SessionRuntimeOperation {
++    let fingerprint_input = format!(
++        "thread/relinquish:{}:{}:{}:{}",
++        params.thread_id,
++        params.expected_instance_epoch,
++        params.expected_state_revision,
++        params.expected_writer_generation,
++    );
++    SessionRuntimeOperation {
++        operation_id: params.operation_id.clone(),
++        request_fingerprint: format!("{:x}", Sha256::digest(fingerprint_input.as_bytes())),
++        action: SessionRuntimeOperationAction::ThreadRelinquish,
++        status: SessionRuntimeOperationStatus::Accepted,
++        thread_id: Some(params.thread_id.clone()),
++        account_slot_id: None,
++        state_revision: Some(params.expected_state_revision),
++        writer_generation: Some(params.expected_writer_generation),
++        execution_generation: None,
++        error: None,
++        updated_at: unix_timestamp(),
++    }
++}
+diff --git a/codex-rs/app-server/src/session_runtime/snapshot.rs b/codex-rs/app-server/src/session_runtime/snapshot.rs
+index 96be01563..eeafa1711 100644
+--- a/codex-rs/app-server/src/session_runtime/snapshot.rs
++++ b/codex-rs/app-server/src/session_runtime/snapshot.rs
+@@ -233,6 +233,7 @@ impl SessionRuntimeEngine {
+         let writer = writer_snapshot(&store_runtime);
+         let account =
+             account_snapshot(current_binding, active_binding, account_capability.as_ref());
++        let actions = action_snapshot(&lifecycle, &writer);
+         SessionRuntimeSnapshot {
+             thread_id: thread_id.to_string(),
+             state_revision: 0,
+@@ -241,7 +242,7 @@ impl SessionRuntimeEngine {
+             writer,
+             persistence: persistence_snapshot(&store_runtime),
+             account,
+-            actions: unavailable_actions(),
++            actions,
+         }
+     }
+ 
+@@ -398,7 +399,7 @@ fn subagent_status(status: AgentStatus) -> ThreadStatus {
+     }
+ }
+ 
+-fn writer_snapshot(
++pub(super) fn writer_snapshot(
+     runtime: &codex_thread_store::ThreadStoreRuntimeSnapshot,
+ ) -> SessionRuntimeWriter {
+     SessionRuntimeWriter {
+@@ -414,7 +415,7 @@ fn writer_snapshot(
+     }
+ }
+ 
+-fn persistence_snapshot(
++pub(super) fn persistence_snapshot(
+     runtime: &codex_thread_store::ThreadStoreRuntimeSnapshot,
+ ) -> SessionRuntimePersistence {
+     SessionRuntimePersistence {
+@@ -482,18 +483,36 @@ fn account_ref(binding: ExecutionAccountBinding) -> SessionRuntimeAccountRef {
+     }
+ }
+ 
+-fn unavailable_actions() -> Vec<SessionRuntimeActionAvailability> {
+-    [
+-        SessionRuntimeAction::Relinquish,
+-        SessionRuntimeAction::SwitchAccount,
++pub(super) fn action_snapshot(
++    lifecycle: &SessionRuntimeLifecycle,
++    writer: &SessionRuntimeWriter,
++) -> Vec<SessionRuntimeActionAvailability> {
++    let relinquish_denial = if lifecycle.state != SessionRuntimeLifecycleState::Idle
++        || lifecycle.active_turn_id.is_some()
++        || !lifecycle.waiting_on.is_empty()
++    {
++        Some("thread_not_idle")
++    } else if lifecycle.subscriber_count > 1 {
++        Some("other_subscribers_present")
++    } else if writer.state != SessionRuntimeWriterState::OwnedHere {
++        Some("writer_not_owned")
++    } else if writer.store_id.is_none() || writer.writer_generation.is_none() {
++        Some("writer_control_unavailable")
++    } else {
++        None
++    };
++    vec![
++        SessionRuntimeActionAvailability {
++            action: SessionRuntimeAction::Relinquish,
++            allowed: relinquish_denial.is_none(),
++            deny_reason: relinquish_denial.map(str::to_string),
++        },
++        SessionRuntimeActionAvailability {
++            action: SessionRuntimeAction::SwitchAccount,
++            allowed: false,
++            deny_reason: Some(CONTROL_NOT_IMPLEMENTED.to_string()),
++        },
+     ]
+-    .into_iter()
+-    .map(|action| SessionRuntimeActionAvailability {
+-        action,
+-        allowed: false,
+-        deny_reason: Some(CONTROL_NOT_IMPLEMENTED.to_string()),
+-    })
+-    .collect()
+ }
+ 
+ fn sanitize_git_origin(origin: String) -> Option<String> {
+diff --git a/codex-rs/app-server/src/thread_state.rs b/codex-rs/app-server/src/thread_state.rs
+index 13580f9d7..51b8d0c65 100644
+--- a/codex-rs/app-server/src/thread_state.rs
++++ b/codex-rs/app-server/src/thread_state.rs
+@@ -125,6 +125,13 @@ pub(crate) enum PendingUnloadSubscription<T> {
+     Subscribed(T),
+ }
+ 
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub(crate) enum RelinquishReservation {
++    Reserved,
++    AlreadyClosing,
++    OtherSubscribersPresent,
++}
++
+ impl ThreadState {
+     fn runtime_snapshot(&self) -> (Option<String>, Option<ThreadSettings>) {
+         (
+@@ -515,6 +522,35 @@ impl ThreadStateManager {
+         }
+     }
+ 
++    /// Atomically fence new subscriptions and validate the caller's existing subscription set.
++    #[expect(
++        clippy::await_holding_invalid_type,
++        reason = "the pending-unload fence must cover subscriber validation and reservation"
++    )]
++    pub(crate) async fn reserve_relinquish(
++        &self,
++        pending_thread_unloads: &Mutex<HashSet<ThreadId>>,
++        thread_id: ThreadId,
++        connection_id: ConnectionId,
++    ) -> RelinquishReservation {
++        let mut pending = pending_thread_unloads.lock().await;
++        if pending.contains(&thread_id) {
++            return RelinquishReservation::AlreadyClosing;
++        }
++        let state = self.state.lock().await;
++        let Some(entry) = state.threads.get(&thread_id) else {
++            pending.insert(thread_id);
++            return RelinquishReservation::Reserved;
++        };
++        let caller_subscribed = entry.connection_ids.contains(&connection_id);
++        if entry.connection_ids.len() > 1 || (entry.connection_ids.len() == 1 && !caller_subscribed)
++        {
++            return RelinquishReservation::OtherSubscribersPresent;
++        }
++        pending.insert(thread_id);
++        RelinquishReservation::Reserved
++    }
++
+     pub(crate) async fn set_unload_at(&self, thread_id: ThreadId, unload_at: Option<i64>) {
+         self.mark_runtime_dirty();
+         let changed = {
+diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
+index 6f9dd9b44..3c39bcc4a 100644
+--- a/codex-rs/app-server/tests/suite/v2/mod.rs
++++ b/codex-rs/app-server/tests/suite/v2/mod.rs
+@@ -99,6 +99,7 @@ mod thread_metadata_update;
+ mod thread_name_websocket;
+ mod thread_queue;
+ mod thread_read;
++mod thread_relinquish;
+ mod thread_resume;
+ mod thread_revert;
+ mod thread_rollback;
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_relinquish.rs b/codex-rs/app-server/tests/suite/v2/thread_relinquish.rs
+new file mode 100644
+index 000000000..3bddc88c3
+--- /dev/null
++++ b/codex-rs/app-server/tests/suite/v2/thread_relinquish.rs
+@@ -0,0 +1,111 @@
++use anyhow::Result;
++use app_test_support::MockResponsesConfig;
++use app_test_support::TestAppServer;
++use app_test_support::create_mock_responses_server_repeating_assistant;
++use codex_app_server_protocol::ClientRequest;
++use codex_app_server_protocol::SessionRuntimeLifecycleState;
++use codex_app_server_protocol::SessionRuntimeListParams;
++use codex_app_server_protocol::SessionRuntimeListResponse;
++use codex_app_server_protocol::SessionRuntimeOperationStatus;
++use codex_app_server_protocol::SessionRuntimeOperationUpdatedNotification;
++use codex_app_server_protocol::SessionRuntimeWriterState;
++use codex_app_server_protocol::ThreadClosedNotification;
++use codex_app_server_protocol::ThreadRelinquishParams;
++use codex_app_server_protocol::ThreadRelinquishResponse;
++use codex_app_server_protocol::ThreadStartParams;
++use codex_app_server_protocol::ThreadStartResponse;
++use codex_app_server_protocol::TurnStartParams;
++use codex_app_server_protocol::UserInput;
++use codex_features::Feature;
++use pretty_assertions::assert_eq;
++use tempfile::TempDir;
++
++#[tokio::test]
++async fn idle_relinquish_publishes_released_then_closed_and_not_loaded() -> Result<()> {
++    let codex_home = TempDir::new()?;
++    let server = create_mock_responses_server_repeating_assistant("unused").await;
++    MockResponsesConfig::new(&server.uri())
++        .enable_feature(Feature::Sqlite)
++        .write(codex_home.path())?;
++    let sqlite_home = codex_home.path().to_string_lossy();
++    let mut app = TestAppServer::builder()
++        .with_codex_home(codex_home.path())
++        .with_env_overrides(&[("CODEX_SQLITE_HOME", Some(sqlite_home.as_ref()))])
++        .build_initialized()
++        .await?;
++    let ThreadStartResponse { thread, .. } = app
++        .start_thread(ThreadStartParams {
++            model: Some("gpt-5.2".to_string()),
++            ..Default::default()
++        })
++        .await?;
++    app.start_turn_and_wait_for_completion(TurnStartParams {
++        thread_id: thread.id.clone(),
++        input: vec![UserInput::Text {
++            text: "persist before relinquish".to_string(),
++            text_elements: Vec::new(),
++        }],
++        ..Default::default()
++    })
++    .await?;
++    let before: SessionRuntimeListResponse = app
++        .request(|request_id| ClientRequest::SessionRuntimeList {
++            request_id,
++            params: SessionRuntimeListParams {
++                thread_id: Some(thread.id.clone()),
++                cursor: None,
++                limit: None,
++            },
++        })
++        .await?;
++    let snapshot = before.data.into_iter().next().expect("runtime snapshot");
++
++    let response: ThreadRelinquishResponse = app
++        .request(|request_id| ClientRequest::ThreadRelinquish {
++            request_id,
++            params: ThreadRelinquishParams {
++                operation_id: "release-idle-thread".to_string(),
++                thread_id: thread.id.clone(),
++                expected_instance_epoch: before.instance_epoch,
++                expected_state_revision: snapshot.state_revision,
++                expected_writer_generation: snapshot
++                    .writer
++                    .writer_generation
++                    .expect("writer generation"),
++            },
++        })
++        .await?;
++    assert_eq!(
++        response.operation.status,
++        SessionRuntimeOperationStatus::Released
++    );
++    let mut released_seen = false;
++    while !released_seen {
++        let update: SessionRuntimeOperationUpdatedNotification = app
++            .read_notification("sessionRuntime/operation/updated")
++            .await?;
++        released_seen = update.operation.status == SessionRuntimeOperationStatus::Released;
++    }
++    let closed: ThreadClosedNotification = app.read_notification("thread/closed").await?;
++    assert_eq!(closed.thread_id, thread.id);
++
++    let after: SessionRuntimeListResponse = app
++        .request(|request_id| ClientRequest::SessionRuntimeList {
++            request_id,
++            params: SessionRuntimeListParams {
++                thread_id: Some(thread.id),
++                cursor: None,
++                limit: None,
++            },
++        })
++        .await?;
++    let terminal = after.data.into_iter().next().expect("terminal snapshot");
++    assert_eq!(
++        (terminal.lifecycle.state, terminal.writer.state),
++        (
++            SessionRuntimeLifecycleState::NotLoaded,
++            SessionRuntimeWriterState::None,
++        )
++    );
++    Ok(())
++}
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index 5359c4f14..6d12dd0a9 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -191,6 +191,13 @@ impl CodexThread {
+         self.io.submit(op).await
+     }
+ 
++    /// Strictly release the exact persistent writer generation and wait for termination.
++    pub async fn relinquish_and_wait(&self, expected_writer_generation: u64) -> Result<(), String> {
++        self.io
++            .relinquish_and_wait(expected_writer_generation)
++            .await
++    }
++
+     /// Returns the session telemetry handle for thread-scoped production instrumentation.
+     pub fn session_telemetry(&self) -> SessionTelemetry {
+         self.session.services.session_telemetry.clone()
+@@ -777,7 +784,17 @@ impl CodexThread {
+         self.session.enabled(feature)
+     }
+ 
++    #[expect(
++        clippy::await_holding_invalid_type,
++        reason = "out-of-band input ownership and execution control share one transition fence"
++    )]
+     pub async fn increment_out_of_band_elicitation_count(&self) -> CodexResult<i64> {
++        let _transition = self.session.execution_runtime_transition_lock.lock().await;
++        if self.session.execution_control_is_closing() {
++            return Err(CodexErr::InvalidRequest(
++                "thread runtime is closing".to_string(),
++            ));
++        }
+         let mut elicitations = self.out_of_band_elicitations.lock().await;
+         let incremented = elicitations.count.checked_add(1).ok_or_else(|| {
+             CodexErr::Fatal("out-of-band elicitation count overflowed".to_string())
+@@ -789,7 +806,12 @@ impl CodexThread {
+         Ok(incremented)
+     }
+ 
++    #[expect(
++        clippy::await_holding_invalid_type,
++        reason = "out-of-band cleanup and execution control share one transition fence"
++    )]
+     pub async fn decrement_out_of_band_elicitation_count(&self) -> CodexResult<i64> {
++        let _transition = self.session.execution_runtime_transition_lock.lock().await;
+         let mut elicitations = self.out_of_band_elicitations.lock().await;
+         if elicitations.count == 0 {
+             return Err(CodexErr::InvalidRequest(
+diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
+index f9c96bea3..6b76b7be0 100644
+--- a/codex-rs/core/src/realtime_conversation.rs
++++ b/codex-rs/core/src/realtime_conversation.rs
+@@ -1082,11 +1082,21 @@ async fn stop_conversation_state(
+     }
+ }
+ 
++#[expect(
++    clippy::await_holding_invalid_type,
++    reason = "realtime startup and execution control share one transition fence"
++)]
+ pub(crate) async fn handle_start(
+     sess: &Arc<Session>,
+     sub_id: String,
+     params: ConversationStartParams,
+ ) -> CodexResult<()> {
++    let _transition = sess.execution_runtime_transition_lock.lock().await;
++    if sess.execution_control_is_closing() {
++        return Err(CodexErr::InvalidRequest(
++            "thread runtime is closing".to_string(),
++        ));
++    }
+     let prepared_start = match prepare_realtime_start(sess, params).await {
+         Ok(prepared_start) => prepared_start,
+         Err(err) => {
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+index a928090cc..35c1182aa 100644
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -79,6 +79,10 @@ pub async fn realtime_conversation_list_voices(sess: &Session, sub_id: String) {
+ 
+ /// Queues an inter-agent message, then lets the shared pending-work scheduler
+ /// decide whether an idle session should start a regular turn.
++#[expect(
++    clippy::await_holding_invalid_type,
++    reason = "mailbox admission and execution control share one transition fence"
++)]
+ pub async fn inter_agent_communication(
+     sess: &Arc<Session>,
+     sub_id: String,
+@@ -86,6 +90,10 @@ pub async fn inter_agent_communication(
+     parent_turn_id: Option<String>,
+     root_turn_id: Option<String>,
+ ) {
++    let transition = sess.execution_runtime_transition_lock.lock().await;
++    if sess.execution_control_is_closing() {
++        return;
++    }
+     let trigger_turn = communication.trigger_turn;
+     sess.input_queue
+         .enqueue_mailbox_communication(
+@@ -95,13 +103,22 @@ pub async fn inter_agent_communication(
+         )
+         .await;
+     crate::agent_communication::emit_agent_communication_receive(&sub_id);
++    drop(transition);
+     if trigger_turn || sess.has_outstanding_durable_sleep() {
+         sess.maybe_start_turn_for_pending_work_with_sub_id(sub_id)
+             .await;
+     }
+ }
+ 
++#[expect(
++    clippy::await_holding_invalid_type,
++    reason = "idle shell admission and execution control share one transition fence"
++)]
+ pub async fn run_user_shell_command(sess: &Arc<Session>, sub_id: String, command: String) {
++    let _transition = sess.execution_runtime_transition_lock.lock().await;
++    if sess.execution_control_is_closing() {
++        return;
++    }
+     if let Some((turn_context, cancellation_token)) =
+         sess.active_turn_context_and_cancellation_token().await
+     {
+@@ -241,7 +258,15 @@ pub async fn reload_user_config(sess: &Arc<Session>) {
+     sess.reload_user_config_layer().await;
+ }
+ 
++#[expect(
++    clippy::await_holding_invalid_type,
++    reason = "compact admission and execution control share one transition fence"
++)]
+ pub async fn compact(sess: &Arc<Session>, sub_id: String) {
++    let _transition = sess.execution_runtime_transition_lock.lock().await;
++    if sess.execution_control_is_closing() {
++        return;
++    }
+     let turn_context = sess.new_default_turn_with_sub_id(sub_id).await;
+ 
+     sess.spawn_task(Arc::clone(&turn_context), Vec::new(), CompactTask)
+@@ -478,12 +503,57 @@ pub async fn shutdown(sess: &Arc<Session>, sub_id: String) -> bool {
+     true
+ }
+ 
++#[expect(
++    clippy::await_holding_invalid_type,
++    reason = "strict writer release owns the execution transition through its commit"
++)]
++pub async fn relinquish(
++    sess: &Arc<Session>,
++    expected_writer_generation: u64,
++    reply: tokio::sync::oneshot::Sender<Result<(), String>>,
++) -> bool {
++    let transition = sess.execution_runtime_transition_lock.lock().await;
++    if sess.begin_execution_control_transition().await.is_err() {
++        let _ = reply.send(Err("thread is not idle".to_string()));
++        return false;
++    }
++    let result = match sess.live_thread() {
++        Some(live_thread) => live_thread
++            .relinquish(expected_writer_generation)
++            .await
++            .map_err(|err| err.to_string()),
++        None => Err("thread persistence is unavailable".to_string()),
++    };
++    if let Err(err) = result {
++        sess.end_execution_control_transition();
++        let _ = reply.send(Err(err));
++        return false;
++    }
++    drop(transition);
++
++    shutdown_session_runtime(sess).await;
++    emit_thread_stop_lifecycle(sess.as_ref()).await;
++    sess.services
++        .rollout_thread_trace
++        .record_ended(codex_rollout_trace::RolloutStatus::Completed);
++    let _ = reply.send(Ok(()));
++    true
++}
++
++#[expect(
++    clippy::await_holding_invalid_type,
++    reason = "review admission and execution control share one transition fence"
++)]
+ pub async fn review(
+     sess: &Arc<Session>,
+     config: &Arc<Config>,
+     sub_id: String,
+     review_request: ReviewRequest,
+ ) {
++    let _transition = sess.execution_runtime_transition_lock.lock().await;
++    if sess.execution_control_is_closing() {
++        return;
++    }
+     let turn_context = sess.new_default_turn_with_sub_id(sub_id.clone()).await;
+     sess.maybe_emit_model_warnings_for_turn(turn_context.as_ref())
+         .await;
+@@ -660,6 +730,10 @@ pub(super) async fn submission_loop(
+                     false
+                 }
+                 Op::Shutdown => shutdown(&sess, sub.id.clone()).await,
++                Op::Relinquish {
++                    expected_writer_generation,
++                    reply,
++                } => relinquish(&sess, expected_writer_generation, reply).await,
+                 Op::Review { review_request } => {
+                     review(&sess, &config, sub.id.clone(), review_request).await;
+                     false
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index cf888ec94..6fe06e2f9 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -896,6 +896,26 @@ impl SessionIo {
+         Ok(())
+     }
+ 
++    /// Strictly release the exact writer generation and wait for runtime termination.
++    pub(crate) async fn relinquish_and_wait(
++        &self,
++        expected_writer_generation: u64,
++    ) -> Result<(), String> {
++        let session_loop_termination = self.session_loop_termination.clone();
++        let (reply, result) = oneshot::channel();
++        self.submit(Op::Relinquish {
++            expected_writer_generation,
++            reply,
++        })
++        .await
++        .map_err(|_| "thread runtime is unavailable".to_string())?;
++        result
++            .await
++            .map_err(|_| "thread runtime ended before writer release completed".to_string())??;
++        session_loop_termination.await;
++        Ok(())
++    }
++
+     pub(crate) async fn next_event(&self) -> CodexResult<Event> {
+         let event = self
+             .rx_event
+diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
+index 79fcab481..fdd096e50 100644
+--- a/codex-rs/core/src/session/session.rs
++++ b/codex-rs/core/src/session/session.rs
+@@ -30,6 +30,8 @@ use codex_protocol::protocol::TurnEnvironmentSelections;
+ use codex_protocol::security_risk::SecurityRiskScore;
+ use codex_skills::SkillError;
+ use std::sync::OnceLock;
++use std::sync::atomic::AtomicBool;
++use std::sync::atomic::Ordering;
+ use tokio::sync::Semaphore;
+ 
+ /// Context for an initialized model agent
+@@ -60,6 +62,8 @@ pub(crate) struct Session {
+     pub(super) mcp_prewarm_task: std::sync::Mutex<Option<JoinHandle<()>>>,
+     pub(crate) conversation: Arc<RealtimeConversationManager>,
+     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
++    pub(crate) execution_runtime_transition_lock: Mutex<()>,
++    pub(crate) execution_control_closing: AtomicBool,
+     pub(crate) async_hook_results: async_channel::Receiver<HookCompletedEvent>,
+     pub(crate) input_queue: InputQueue,
+     pub(crate) guardian_review_session: GuardianReviewSessionManager,
+@@ -646,6 +650,33 @@ impl Session {
+         Arc::clone(&self.execution_account)
+     }
+ 
++    /// Close the idle input boundary immediately before a writer-control commit.
++    ///
++    /// Callers must hold `execution_runtime_transition_lock`. Every admission path uses the same
++    /// lock, while the closing flag keeps a successfully relinquished runtime terminal.
++    pub(crate) async fn begin_execution_control_transition(&self) -> Result<(), ()> {
++        if self.execution_control_is_closing()
++            || self.active_turn.lock().await.is_some()
++            || self.input_queue.has_pending_mailbox_items().await
++            || *self.services.elicitations.subscribe().borrow()
++            || self.conversation.running_state().await.is_some()
++        {
++            return Err(());
++        }
++        self.execution_control_closing
++            .store(true, Ordering::Release);
++        Ok(())
++    }
++
++    pub(crate) fn end_execution_control_transition(&self) {
++        self.execution_control_closing
++            .store(false, Ordering::Release);
++    }
++
++    pub(crate) fn execution_control_is_closing(&self) -> bool {
++        self.execution_control_closing.load(Ordering::Acquire)
++    }
++
+     #[instrument(name = "session_init", level = "info", skip_all)]
+     #[allow(clippy::too_many_arguments)]
+     pub(crate) async fn new(
+@@ -1453,6 +1484,8 @@ impl Session {
+                 mcp_prewarm_task: std::sync::Mutex::new(None),
+                 conversation: Arc::new(RealtimeConversationManager::new()),
+                 active_turn: Mutex::new(None),
++                execution_runtime_transition_lock: Mutex::new(()),
++                execution_control_closing: AtomicBool::new(false),
+                 async_hook_results,
+                 input_queue: InputQueue::new(),
+                 guardian_review_session: GuardianReviewSessionManager::default(),
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 73e19f137..4e584db22 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -6017,6 +6017,8 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+         mcp_prewarm_task: std::sync::Mutex::new(None),
+         conversation: Arc::new(RealtimeConversationManager::new()),
+         active_turn: Mutex::new(None),
++        execution_runtime_transition_lock: Mutex::new(()),
++        execution_control_closing: std::sync::atomic::AtomicBool::new(false),
+         async_hook_results,
+         input_queue: super::input_queue::InputQueue::new(),
+         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
+@@ -8255,6 +8257,8 @@ where
+         mcp_prewarm_task: std::sync::Mutex::new(None),
+         conversation: Arc::new(RealtimeConversationManager::new()),
+         active_turn: Mutex::new(None),
++        execution_runtime_transition_lock: Mutex::new(()),
++        execution_control_closing: std::sync::atomic::AtomicBool::new(false),
+         async_hook_results,
+         input_queue: super::input_queue::InputQueue::new(),
+         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
+diff --git a/codex-rs/core/src/session/turn_input.rs b/codex-rs/core/src/session/turn_input.rs
+index 424faf3c3..d1894fdcf 100644
+--- a/codex-rs/core/src/session/turn_input.rs
++++ b/codex-rs/core/src/session/turn_input.rs
+@@ -138,12 +138,22 @@ impl PreparedTurnInputSettings {
+     }
+ }
+ 
++#[expect(
++    clippy::await_holding_invalid_type,
++    reason = "turn admission and execution control share one transition fence"
++)]
+ pub(super) async fn handle(
+     session: &Arc<Session>,
+     request: TurnInputRequest,
+     mode: TurnInputMode,
+     submission_id: String,
+ ) -> CodexResult<TurnInputSubmission> {
++    let _transition = session.execution_runtime_transition_lock.lock().await;
++    if session.execution_control_is_closing() {
++        return Err(CodexErr::InvalidRequest(
++            "thread runtime is closing".to_string(),
++        ));
++    }
+     match mode {
+         TurnInputMode::StartOrSteer => start_or_steer(session, request, submission_id).await,
+         TurnInputMode::StartIfIdle => {
+@@ -155,11 +165,21 @@ pub(super) async fn handle(
+     }
+ }
+ 
++#[expect(
++    clippy::await_holding_invalid_type,
++    reason = "turn recovery admission and execution control share one transition fence"
++)]
+ pub(super) async fn handle_recovery(
+     session: &Arc<Session>,
+     thread_settings: ThreadSettingsOverrides,
+     submission_id: String,
+ ) -> CodexResult<TurnInputSubmission> {
++    let _transition = session.execution_runtime_transition_lock.lock().await;
++    if session.execution_control_is_closing() {
++        return Err(CodexErr::InvalidRequest(
++            "thread runtime is closing".to_string(),
++        ));
++    }
+     let request = TurnInputRequest::user_input(Vec::new()).with_thread_settings(thread_settings);
+     start_if_idle(session, request, submission_id, /*is_recovery*/ true).await
+ }
+diff --git a/codex-rs/core/src/session/turn_input_tests.rs b/codex-rs/core/src/session/turn_input_tests.rs
+index b1eb5f07f..f97b16ece 100644
+--- a/codex-rs/core/src/session/turn_input_tests.rs
++++ b/codex-rs/core/src/session/turn_input_tests.rs
+@@ -64,6 +64,72 @@ fn user_message(text: &str) -> ResponseItem {
+     }
+ }
+ 
++#[tokio::test]
++#[expect(
++    clippy::await_holding_invalid_type,
++    reason = "the test proves turn admission waits on the transition fence"
++)]
++async fn turn_and_mailbox_admission_wait_for_execution_control_transition() {
++    let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
++    let transition = session.execution_runtime_transition_lock.lock().await;
++    let session_for_submission = Arc::clone(&session);
++    let mut submission = tokio::spawn(async move {
++        handle(
++            &session_for_submission,
++            TurnInputRequest::user_input(vec![UserInput::Text {
++                text: "queued while closing".to_string(),
++                text_elements: Vec::new(),
++            }]),
++            TurnInputMode::Steer {
++                expected_turn_id: "missing-turn".to_string(),
++            },
++            "serialized-submission".to_string(),
++        )
++        .await
++    });
++    let session_for_delivery = Arc::clone(&session);
++    let mut delivery = tokio::spawn(async move {
++        crate::session::handlers::inter_agent_communication(
++            &session_for_delivery,
++            "mailbox-submission".to_string(),
++            InterAgentCommunication::new(
++                AgentPath::root(),
++                AgentPath::root(),
++                Vec::new(),
++                "queued while closing".to_string(),
++                /*trigger_turn*/ false,
++            ),
++            /*parent_turn_id*/ None,
++            /*root_turn_id*/ None,
++        )
++        .await;
++    });
++
++    assert!(
++        tokio::time::timeout(std::time::Duration::from_millis(20), &mut submission)
++            .await
++            .is_err()
++    );
++    assert!(
++        tokio::time::timeout(std::time::Duration::from_millis(20), &mut delivery)
++            .await
++            .is_err()
++    );
++    assert!(!session.input_queue.has_pending_mailbox_items().await);
++    drop(transition);
++    assert_eq!(
++        submission
++            .await
++            .expect("submission task")
++            .expect("submission"),
++        TurnInputSubmission::NotSubmitted {
++            reason: NotSubmittedReason::NoActiveTurn,
++        }
++    );
++    delivery.await.expect("mailbox delivery");
++    assert!(session.input_queue.has_pending_mailbox_items().await);
++}
++
+ async fn submit_start_only(
+     session: &Arc<Session>,
+     input: SubmittedTurnInput,
+diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
+index cc71acb3b..0c4f1bbfd 100644
+--- a/codex-rs/core/src/tasks/mod.rs
++++ b/codex-rs/core/src/tasks/mod.rs
+@@ -460,10 +460,18 @@ impl Session {
+     ///
+     /// The turn is created only when the session is idle and mailbox mail either requests a turn
+     /// or can wake an outstanding durable sleep.
++    #[expect(
++        clippy::await_holding_invalid_type,
++        reason = "automatic turn admission and execution control share one transition fence"
++    )]
+     pub(crate) async fn maybe_start_turn_for_pending_work_with_sub_id(
+         self: &Arc<Self>,
+         sub_id: String,
+     ) {
++        let _transition = self.execution_runtime_transition_lock.lock().await;
++        if self.execution_control_is_closing() {
++            return;
++        }
+         if !self.input_queue.has_pending_mailbox_items().await
+             || (!self.input_queue.has_trigger_turn_mailbox_items().await
+                 && !self.has_outstanding_durable_sleep())
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 42e8dece9..fe7cc42ee 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -686,6 +686,12 @@ pub enum Op {
+     /// Request to shut down codex instance.
+     Shutdown,
+ 
++    /// Strictly durabilize and release this exact writer generation.
++    Relinquish {
++        expected_writer_generation: u64,
++        reply: oneshot::Sender<Result<(), String>>,
++    },
++
+     /// Execute a user-initiated one-off shell command (triggered by "!cmd").
+     ///
+     /// The command string is executed using the user's default shell and may
+@@ -890,6 +896,7 @@ impl Op {
+             Self::Review { .. } => "review",
+             Self::ApproveGuardianDeniedAction { .. } => "approve_guardian_denied_action",
+             Self::Shutdown => "shutdown",
++            Self::Relinquish { .. } => "relinquish",
+             Self::RunUserShellCommand { .. } => "run_user_shell_command",
+         }
+     }
+diff --git a/codex-rs/thread-store/src/in_memory.rs b/codex-rs/thread-store/src/in_memory.rs
+index 4529e319e..00759a11c 100644
+--- a/codex-rs/thread-store/src/in_memory.rs
++++ b/codex-rs/thread-store/src/in_memory.rs
+@@ -1070,6 +1070,26 @@ impl ThreadStore for InMemoryThreadStore {
+         })
+     }
+ 
++    fn relinquish_thread(
++        &self,
++        _thread_id: ThreadId,
++        _expected_writer_generation: u64,
++    ) -> ThreadStoreFuture<'_, ()> {
++        Box::pin(async move {
++            let mut state = self.state.lock().await;
++            state.calls.shutdown_thread += 1;
++            Ok(())
++        })
++    }
++
++    fn validate_writer_generation(
++        &self,
++        _thread_id: ThreadId,
++        _expected_writer_generation: u64,
++    ) -> ThreadStoreFuture<'_, ()> {
++        Box::pin(async { Ok(()) })
++    }
++
+     fn discard_thread(&self, _thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+         Box::pin(async move {
+             self.state.lock().await.calls.discard_thread += 1;
+diff --git a/codex-rs/thread-store/src/live_thread.rs b/codex-rs/thread-store/src/live_thread.rs
+index 2f043800f..8f367d699 100644
+--- a/codex-rs/thread-store/src/live_thread.rs
++++ b/codex-rs/thread-store/src/live_thread.rs
+@@ -287,6 +287,18 @@ impl LiveThread {
+         }
+     }
+ 
++    /// Durably release this thread's exact writer generation for an ownership handoff.
++    pub async fn relinquish(&self, expected_writer_generation: u64) -> ThreadStoreResult<()> {
++        self.thread_store
++            .validate_writer_generation(self.thread_id, expected_writer_generation)
++            .await?;
++        self.flush_pending_metadata_update_for_existing_history()
++            .await?;
++        self.thread_store
++            .relinquish_thread(self.thread_id, expected_writer_generation)
++            .await
++    }
++
+     pub async fn discard(&self) -> ThreadStoreResult<()> {
+         self.thread_store.discard_thread(self.thread_id).await
+     }
+diff --git a/codex-rs/thread-store/src/local/live_writer.rs b/codex-rs/thread-store/src/local/live_writer.rs
+index 85ebe3a5e..7e2395179 100644
+--- a/codex-rs/thread-store/src/local/live_writer.rs
++++ b/codex-rs/thread-store/src/local/live_writer.rs
+@@ -198,6 +198,47 @@ pub(super) async fn shutdown_thread(
+     Ok(())
+ }
+ 
++pub(super) async fn relinquish_thread(
++    store: &LocalThreadStore,
++    thread_id: ThreadId,
++    expected_writer_generation: u64,
++) -> ThreadStoreResult<()> {
++    let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
++    let (recorder, rollout_id, history_mode) = {
++        let live_recorders = store.live_recorders.lock().await;
++        let entry = live_recorders
++            .get(&thread_id)
++            .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
++        if entry.writer_lock.generation() != Some(expected_writer_generation) {
++            return Err(ThreadStoreError::Conflict {
++                message: format!(
++                    "thread {thread_id} writer generation does not match expected generation {expected_writer_generation}"
++                ),
++            });
++        }
++        (entry.recorder.clone(), entry.rollout_id, entry.history_mode)
++    };
++    let rollout_path = recorder.rollout_path().to_path_buf();
++
++    recorder.flush().await.map_err(thread_store_io_error)?;
++    recorder.progress().await.map_err(thread_store_io_error)?;
++    if !matches!(history_mode, ThreadHistoryMode::Legacy) {
++        super::thread_history_materialization::materialize_to_sqlite(
++            store,
++            rollout_id,
++            rollout_path.as_path(),
++        )
++        .await?;
++    }
++    sync_materialized_rollout_path_strict(store, thread_id, rollout_path.as_path()).await?;
++    recorder
++        .shutdown_with_progress()
++        .await
++        .map_err(thread_store_io_error)?;
++    store.live_recorders.lock().await.remove(&thread_id);
++    Ok(())
++}
++
+ pub(super) async fn discard_thread(
+     store: &LocalThreadStore,
+     thread_id: ThreadId,
+@@ -235,6 +276,18 @@ async fn sync_materialized_rollout_path(
+     store: &LocalThreadStore,
+     thread_id: ThreadId,
+     rollout_path: &std::path::Path,
++) -> ThreadStoreResult<()> {
++    let result = sync_materialized_rollout_path_strict(store, thread_id, rollout_path).await;
++    if let Err(err) = result {
++        warn!("failed to sync materialized rollout path for thread {thread_id}: {err}");
++    }
++    Ok(())
++}
++
++async fn sync_materialized_rollout_path_strict(
++    store: &LocalThreadStore,
++    thread_id: ThreadId,
++    rollout_path: &std::path::Path,
+ ) -> ThreadStoreResult<()> {
+     if codex_rollout::existing_rollout_path(rollout_path)
+         .await
+@@ -268,10 +321,7 @@ async fn sync_materialized_rollout_path(
+         Ok(())
+     }
+     .await;
+-    if let Err(err) = result {
+-        warn!("failed to sync materialized rollout path for thread {thread_id}: {err}");
+-    }
+-    Ok(())
++    result
+ }
+ 
+ fn thread_store_io_error(err: std::io::Error) -> ThreadStoreError {
+diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
+index c89d30761..ece58f389 100644
+--- a/codex-rs/thread-store/src/local/mod.rs
++++ b/codex-rs/thread-store/src/local/mod.rs
+@@ -759,6 +759,38 @@ impl ThreadStore for LocalThreadStore {
+         Box::pin(async move { live_writer::shutdown_thread(self, thread_id).await })
+     }
+ 
++    fn relinquish_thread(
++        &self,
++        thread_id: ThreadId,
++        expected_writer_generation: u64,
++    ) -> ThreadStoreFuture<'_, ()> {
++        Box::pin(async move {
++            live_writer::relinquish_thread(self, thread_id, expected_writer_generation).await
++        })
++    }
++
++    fn validate_writer_generation(
++        &self,
++        thread_id: ThreadId,
++        expected_writer_generation: u64,
++    ) -> ThreadStoreFuture<'_, ()> {
++        Box::pin(async move {
++            let _live_writer_guard = self.live_writer_locks.lock(thread_id).await;
++            let live_recorders = self.live_recorders.lock().await;
++            let entry = live_recorders
++                .get(&thread_id)
++                .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
++            if entry.writer_lock.generation() != Some(expected_writer_generation) {
++                return Err(ThreadStoreError::Conflict {
++                    message: format!(
++                        "thread {thread_id} writer generation does not match expected generation {expected_writer_generation}"
++                    ),
++                });
++            }
++            Ok(())
++        })
++    }
++
+     fn discard_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+         Box::pin(async move { live_writer::discard_thread(self, thread_id).await })
+     }
+@@ -951,6 +983,9 @@ impl ThreadStore for LocalThreadStore {
+ 
+ #[cfg(test)]
+ mod tests {
++    #[path = "relinquish_tests.rs"]
++    mod relinquish_tests;
++
+     use std::sync::Arc;
+ 
+     use codex_protocol::ThreadId;
+diff --git a/codex-rs/thread-store/src/local/tests/relinquish_tests.rs b/codex-rs/thread-store/src/local/tests/relinquish_tests.rs
+new file mode 100644
+index 000000000..a435c467c
+--- /dev/null
++++ b/codex-rs/thread-store/src/local/tests/relinquish_tests.rs
+@@ -0,0 +1,127 @@
++use super::*;
++
++#[tokio::test]
++async fn strict_relinquish_releases_exact_generation_for_resume() {
++    let home = TempDir::new().expect("temp dir");
++    let config = test_config(home.path());
++    let runtime = codex_state::StateRuntime::init(
++        config.sqlite.clone(),
++        config.default_model_provider_id.clone(),
++    )
++    .await
++    .expect("state db");
++    let thread_id = ThreadId::default();
++    let first = LocalThreadStore::new(config.clone(), Some(runtime.clone()));
++    let mut params = create_thread_params(thread_id);
++    params.history_mode = ThreadHistoryMode::Paginated;
++    first.create_thread(params).await.expect("create thread");
++    first
++        .persist_thread(thread_id, PersistContext::Standard)
++        .await
++        .expect("persist session metadata");
++    first
++        .append_items(AppendThreadItemsParams {
++            thread_id,
++            items: vec![user_message_item("strict-success")],
++        })
++        .await
++        .expect("append durable item");
++    let rollout_path = first
++        .live_rollout_path(thread_id)
++        .await
++        .expect("rollout path");
++    let generation = first
++        .runtime_snapshot(thread_id)
++        .await
++        .expect("runtime snapshot")
++        .writer_generation
++        .expect("writer generation");
++
++    first
++        .relinquish_thread(thread_id, generation)
++        .await
++        .expect("strict release");
++    let second = LocalThreadStore::new(config, Some(runtime));
++    second
++        .resume_thread(ResumeThreadParams {
++            thread_id,
++            rollout_path: Some(rollout_path),
++            history: None,
++            include_archived: true,
++            metadata: thread_metadata(),
++        })
++        .await
++        .expect("resume released thread");
++    let second_generation = second
++        .runtime_snapshot(thread_id)
++        .await
++        .expect("second snapshot")
++        .writer_generation
++        .expect("second generation");
++    assert!(second_generation > generation);
++}
++
++#[tokio::test]
++async fn strict_relinquish_failure_retains_writer() {
++    let home = TempDir::new().expect("temp dir");
++    let config = test_config(home.path());
++    let runtime = codex_state::StateRuntime::init(
++        config.sqlite.clone(),
++        config.default_model_provider_id.clone(),
++    )
++    .await
++    .expect("state db");
++    let thread_id = ThreadId::default();
++    let first = LocalThreadStore::new(config.clone(), Some(runtime.clone()));
++    let mut params = create_thread_params(thread_id);
++    params.history_mode = ThreadHistoryMode::Paginated;
++    first.create_thread(params).await.expect("create thread");
++    first
++        .persist_thread(thread_id, PersistContext::Standard)
++        .await
++        .expect("persist session metadata");
++    first
++        .append_items(AppendThreadItemsParams {
++            thread_id,
++            items: vec![user_message_item("strict-failure")],
++        })
++        .await
++        .expect("append durable item");
++    first
++        .flush_thread(thread_id)
++        .await
++        .expect("initialize projection");
++    let generation = first
++        .runtime_snapshot(thread_id)
++        .await
++        .expect("runtime snapshot")
++        .writer_generation
++        .expect("writer generation");
++    first
++        .thread_history_db
++        .get()
++        .expect("projection pool")
++        .close()
++        .await;
++
++    first
++        .relinquish_thread(thread_id, generation)
++        .await
++        .expect_err("closed projection must fail release");
++    let second = LocalThreadStore::new(config, Some(runtime));
++    let competing = second
++        .resume_thread(ResumeThreadParams {
++            thread_id,
++            rollout_path: Some(
++                first
++                    .live_rollout_path(thread_id)
++                    .await
++                    .expect("live rollout path"),
++            ),
++            history: None,
++            include_archived: true,
++            metadata: thread_metadata(),
++        })
++        .await;
++    assert!(matches!(competing, Err(ThreadStoreError::Conflict { .. })));
++}
+diff --git a/codex-rs/thread-store/src/local/writer_lock.rs b/codex-rs/thread-store/src/local/writer_lock.rs
+index fa08b6b32..c8bb4f68b 100644
+--- a/codex-rs/thread-store/src/local/writer_lock.rs
++++ b/codex-rs/thread-store/src/local/writer_lock.rs
+@@ -31,7 +31,7 @@ pub(super) struct WriterLockGuard {
+     thread_id: ThreadId,
+     path: PathBuf,
+     file: Option<File>,
+-    _generation: Option<WriterGeneration>,
++    generation: Option<WriterGeneration>,
+ }
+ 
+ /// Filesystem ownership observed for one exact thread UUID.
+@@ -115,7 +115,7 @@ impl WriterLockCoordinator {
+             thread_id,
+             path,
+             file: Some(file),
+-            _generation: None,
++            generation: None,
+         })
+     }
+ 
+@@ -270,9 +270,15 @@ impl WriterLockCoordinator {
+ 
+ impl WriterLockGuard {
+     pub(super) fn with_generation(mut self, generation: WriterGeneration) -> Self {
+-        self._generation = Some(generation);
++        self.generation = Some(generation);
+         self
+     }
++
++    pub(super) fn generation(&self) -> Option<u64> {
++        self.generation
++            .as_ref()
++            .map(|generation| generation.generation)
++    }
+ }
+ 
+ impl Drop for WriterLockGuard {
+diff --git a/codex-rs/thread-store/src/store.rs b/codex-rs/thread-store/src/store.rs
+index e4510eabd..ef163a700 100644
+--- a/codex-rs/thread-store/src/store.rs
++++ b/codex-rs/thread-store/src/store.rs
+@@ -261,6 +261,29 @@ pub trait ThreadStore: Any + Send + Sync {
+     /// Flushes pending items and closes the live thread writer.
+     fn shutdown_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()>;
+ 
++    /// Strictly durabilizes and releases the live writer for an explicit ownership handoff.
++    ///
++    /// Implementations must validate `expected_writer_generation` before mutating persistence and
++    /// retain the writer when any durability step fails. Only success may release ownership.
++    fn relinquish_thread(
++        &self,
++        thread_id: ThreadId,
++        expected_writer_generation: u64,
++    ) -> ThreadStoreFuture<'_, ()>;
++
++    /// Validates the exact live writer generation without mutating persistence.
++    fn validate_writer_generation(
++        &self,
++        _thread_id: ThreadId,
++        _expected_writer_generation: u64,
++    ) -> ThreadStoreFuture<'_, ()> {
++        Box::pin(async {
++            Err(ThreadStoreError::Unsupported {
++                operation: "validate_writer_generation",
++            })
++        })
++    }
++
+     /// Discards the live thread writer without forcing pending in-memory items to become durable.
+     ///
+     /// Core calls this when session initialization fails after a live writer has been created.
+-- 
+2.50.1 (Apple Git-155)
+

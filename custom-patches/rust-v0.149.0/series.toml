@@ -1,0 +1,59 @@
+schema_version = 1
+applies_to = "rust-v0.149.0"
+base_commit = "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0"
+final_tree = "70d5992eaee56f500fd1d09479d8ee30876ffdf1"
+
+[[patches]]
+number = "P001"
+file = "0001-P001-shared-writer-authority.patch"
+sha256 = "50bc0985e1b4cb45b12d69a65fea52c84471cf28e933fbeb817647ae7096a100"
+
+[[patches]]
+number = "P002"
+file = "0002-P002-session-runtime-protocol.patch"
+sha256 = "92dbc1f7ccb854a4c79481f0493d4ee374aae8e27693c3460b1497cad263927c"
+
+[[patches]]
+number = "P003"
+file = "0003-P003-multi-account-registry.patch"
+sha256 = "2940edc9c081e2fb71bbc37b8dfde8ad29c2bb9d3a517aafa4df81474b0bf7e7"
+
+[[patches]]
+number = "P004"
+file = "0004-P004-durable-execution-binding-and-history.patch"
+sha256 = "dfd2a831f74bbf82af9b396b6b13ad045d8c1500c795ea6f0fe180109a0815f3"
+
+[[patches]]
+number = "P005"
+file = "0005-P005-propagate-execution-account-to-auth-consumers.patch"
+sha256 = "810f4444c58beba3313559545dce20b03b90702c565f2b2dc9232393336bd59f"
+
+[[patches]]
+number = "P006"
+file = "0006-P006-publish-session-runtime-state.patch"
+sha256 = "3f21b870084c262b39eb1680872f3dc202b6900f61dc0152f03466a688bcd3a1"
+
+[[patches]]
+number = "P007"
+file = "0007-P007-add-live-account-registration.patch"
+sha256 = "8bb6e53c74f43951d38170b3cdcab38fc035954bcfb3dd8d905fb50a5bd6a74e"
+
+[[patches]]
+number = "P008"
+file = "0008-P008-relinquish-thread-writers-strictly.patch"
+sha256 = "4285de7949743ea5b653ad5b5d9f60316549de4465f48383be34f2c460ee752b"
+
+[[patches]]
+number = "P009"
+file = "0009-P009-switch-thread-execution-accounts.patch"
+sha256 = "a68b92a0adbe6e93499c7b212cf100f851e7511272cf282ffddede109d8a295c"
+
+[[patches]]
+number = "P010"
+file = "0010-P010-add-TUI-session-and-account-controls.patch"
+sha256 = "d4024126df2b18c97b41dd37704d61f55d0bb3ec76b60db764b6e05bc91a4af4"
+
+[[patches]]
+number = "P011"
+file = "0011-P011-installable-plugin-commands-and-presentation.patch"
+sha256 = "4928ee9057659e740352efd6f3ccfcc3a516f1823810884762a47bd2063b7e88"

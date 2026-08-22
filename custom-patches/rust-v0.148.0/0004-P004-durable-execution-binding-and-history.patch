@@ -1,0 +1,2492 @@
+From d46f49800b1e4875def14db859531cec0c67f6f1 Mon Sep 17 00:00:00 2001
+From: Codex CLI Custom <codex-cli-custom@users.noreply.github.com>
+Date: Fri, 21 Aug 2026 10:10:14 +0900
+Subject: [PATCH 04/11] P004: durable execution binding and history
+
+---
+ codex-rs/app-server/src/account_registry.rs   |  54 ++
+ codex-rs/core/src/execution_account.rs        | 118 ++++
+ codex-rs/core/src/lib.rs                      |   5 +
+ codex-rs/protocol/src/protocol.rs             |  43 ++
+ codex-rs/rollout/src/lib.rs                   |   1 +
+ codex-rs/rollout/src/recorder.rs              |  79 ++-
+ codex-rs/rollout/src/recorder_tests.rs        |  49 ++
+ ...0050_thread_execution_account_bindings.sql |  13 +
+ codex-rs/state/src/extract.rs                 |   4 +
+ codex-rs/state/src/runtime.rs                 |   1 +
+ .../state/src/runtime/execution_account.rs    | 139 ++++
+ .../src/runtime/execution_account_tests.rs    |  96 +++
+ codex-rs/state/src/runtime/threads.rs         |  21 +
+ codex-rs/thread-store/src/in_memory.rs        | 259 +++++++-
+ codex-rs/thread-store/src/lib.rs              |   4 +
+ codex-rs/thread-store/src/live_thread.rs      |   7 +
+ .../thread-store/src/local/live_writer.rs     | 163 ++++-
+ codex-rs/thread-store/src/local/mod.rs        | 621 +++++++++++++++++-
+ .../src/local/model_context_tests.rs          |   1 +
+ .../src/local/rollout_migration_tests.rs      |   1 +
+ codex-rs/thread-store/src/store.rs            | 140 ++++
+ 21 files changed, 1785 insertions(+), 34 deletions(-)
+ create mode 100644 codex-rs/core/src/execution_account.rs
+ create mode 100644 codex-rs/state/migrations/0050_thread_execution_account_bindings.sql
+ create mode 100644 codex-rs/state/src/runtime/execution_account.rs
+ create mode 100644 codex-rs/state/src/runtime/execution_account_tests.rs
+
+diff --git a/codex-rs/app-server/src/account_registry.rs b/codex-rs/app-server/src/account_registry.rs
+index d77295e..49e71a1 100644
+--- a/codex-rs/app-server/src/account_registry.rs
++++ b/codex-rs/app-server/src/account_registry.rs
+@@ -14,6 +14,9 @@ use codex_app_server_protocol::AccountSlotListResponse;
+ use codex_app_server_protocol::AccountSlotSnapshot;
+ use codex_app_server_protocol::AccountSlotStatus;
+ use codex_app_server_protocol::JSONRPCErrorError;
++use codex_core::ExecutionAccountContext;
++use codex_core::ExecutionAccountResolver;
++use codex_core::ExecutionAccountResolverFuture;
+ use codex_core::config::Config;
+ use codex_core::path_utils::write_atomically;
+ use codex_login::AuthConfig;
+@@ -21,6 +24,8 @@ use codex_login::AuthManager;
+ use codex_login::AuthSourceKind;
+ use codex_model_provider::create_model_provider;
+ use codex_models_manager::manager::SharedModelsManager;
++use codex_protocol::error::CodexErr;
++use codex_protocol::protocol::ExecutionAccountBinding;
+ use serde::Deserialize;
+ use serde::Serialize;
+ use tokio::sync::OnceCell;
+@@ -493,6 +498,55 @@ impl AccountRegistry {
+     }
+ }
+ 
++impl ExecutionAccountResolver for AccountRegistry {
++    fn resolve(&self, binding: ExecutionAccountBinding) -> ExecutionAccountResolverFuture<'_> {
++        Box::pin(async move {
++            let (slot, manifest_error) = {
++                let state = self.state.read().map_err(|_| {
++                    CodexErr::Fatal("account slot registry is unavailable".to_string())
++                })?;
++                (
++                    state
++                        .slots
++                        .iter()
++                        .find(|slot| slot.manifest.account_slot_id == binding.slot_id)
++                        .cloned(),
++                    state.manifest_error,
++                )
++            };
++            let slot = slot.ok_or_else(|| {
++                CodexErr::InvalidRequest(format!(
++                    "execution account slot `{}` is unavailable",
++                    binding.slot_id
++                ))
++            })?;
++            let capability = self.capability(manifest_error);
++            if !slot.manifest.is_default && !capability.available {
++                return Err(CodexErr::InvalidRequest(format!(
++                    "execution account slot `{}` is unavailable: {}",
++                    binding.slot_id,
++                    capability
++                        .deny_reason
++                        .as_deref()
++                        .unwrap_or("multi_account_unavailable")
++                )));
++            }
++            if !slot.manifest.is_default && slot.manifest.status != ManifestSlotStatus::Ready {
++                return Err(CodexErr::InvalidRequest(format!(
++                    "execution account slot `{}` is not ready",
++                    binding.slot_id
++                )));
++            }
++            let runtime = self.runtime(&slot).await;
++            Ok(Arc::new(ExecutionAccountContext {
++                binding,
++                auth_manager: Arc::clone(&runtime.auth_manager),
++                models_manager: Arc::clone(&runtime.models_manager),
++            }))
++        })
++    }
++}
++
+ fn virtual_default_manifest(process_home: &Path) -> AccountSlotsManifest {
+     AccountSlotsManifest {
+         schema_version: MANIFEST_SCHEMA_VERSION,
+diff --git a/codex-rs/core/src/execution_account.rs b/codex-rs/core/src/execution_account.rs
+new file mode 100644
+index 0000000..dc105d0
+--- /dev/null
++++ b/codex-rs/core/src/execution_account.rs
+@@ -0,0 +1,118 @@
++use std::future::Future;
++use std::pin::Pin;
++use std::sync::Arc;
++
++use codex_analytics::AnalyticsEventsClient;
++use codex_core_plugins::PluginsManager;
++use codex_login::AuthManager;
++use codex_models_manager::manager::SharedModelsManager;
++use codex_protocol::error::CodexErr;
++use codex_protocol::error::Result as CodexResult;
++use codex_protocol::protocol::ExecutionAccountBinding;
++
++/// Immutable resources and durable provenance used to execute a thread or turn.
++#[derive(Clone)]
++pub struct ExecutionAccountContext {
++    pub binding: ExecutionAccountBinding,
++    pub auth_manager: Arc<AuthManager>,
++    pub models_manager: SharedModelsManager,
++}
++
++/// Account-scoped plugin and MCP services shared by threads bound to one slot.
++///
++/// Hosts must resolve this bundle from the same [`ExecutionAccountContext`] used for execution so
++/// mutable authentication state and connector caches never cross account-slot boundaries.
++#[derive(Clone)]
++pub struct ExecutionAccountServices {
++    pub plugins_manager: Arc<PluginsManager>,
++    pub mcp_manager: Arc<crate::mcp::McpManager>,
++}
++
++/// Fully prepared account-sensitive runtime captured atomically by a session or turn.
++///
++/// A hot switch builds this bundle before updating the durable binding. After that commit point,
++/// publishing the bundle is an infallible pointer swap, while turns that already captured an older
++/// bundle continue using it through completion.
++pub(crate) struct ExecutionAccountRuntime {
++    pub(crate) execution_account: Arc<ExecutionAccountContext>,
++    pub(crate) services: ExecutionAccountServices,
++    pub(crate) mcp_runtime: Arc<codex_mcp::McpRuntime>,
++    pub(crate) model_client: crate::client::ModelClient,
++    pub(crate) analytics_events_client: AnalyticsEventsClient,
++    pub(crate) model_info: Option<codex_protocol::openai_models::ModelInfo>,
++}
++
++#[derive(Debug, thiserror::Error, PartialEq, Eq)]
++pub enum ExecutionAccountSwitchError {
++    #[error("target execution account is unavailable")]
++    TargetUnavailable,
++    #[error("target execution account runtime preparation failed")]
++    PreparationFailed,
++    #[error("execution account generation changed")]
++    StaleGeneration,
++    #[error("thread execution runtime is busy")]
++    ThreadBusy,
++    #[error("execution account binding persistence failed")]
++    PersistenceFailed,
++}
++
++impl std::fmt::Debug for ExecutionAccountServices {
++    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        formatter
++            .debug_struct("ExecutionAccountServices")
++            .finish_non_exhaustive()
++    }
++}
++
++impl std::fmt::Debug for ExecutionAccountContext {
++    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        formatter
++            .debug_struct("ExecutionAccountContext")
++            .field("binding", &self.binding)
++            .finish_non_exhaustive()
++    }
++}
++
++/// Future returned by [`ExecutionAccountResolver`] without requiring async-trait machinery.
++pub type ExecutionAccountResolverFuture<'a> =
++    Pin<Box<dyn Future<Output = CodexResult<Arc<ExecutionAccountContext>>> + Send + 'a>>;
++
++/// Resolves host-managed account slots into immutable execution resources.
++///
++/// Implementations must return a fresh context carrying the requested binding generation, even
++/// when the expensive slot-owned auth and model resources are cached.
++pub trait ExecutionAccountResolver: Send + Sync {
++    fn resolve(&self, binding: ExecutionAccountBinding) -> ExecutionAccountResolverFuture<'_>;
++}
++
++pub(crate) struct DefaultExecutionAccountResolver {
++    auth_manager: Arc<AuthManager>,
++    models_manager: SharedModelsManager,
++}
++
++impl DefaultExecutionAccountResolver {
++    pub(crate) fn new(auth_manager: Arc<AuthManager>, models_manager: SharedModelsManager) -> Self {
++        Self {
++            auth_manager,
++            models_manager,
++        }
++    }
++}
++
++impl ExecutionAccountResolver for DefaultExecutionAccountResolver {
++    fn resolve(&self, binding: ExecutionAccountBinding) -> ExecutionAccountResolverFuture<'_> {
++        Box::pin(async move {
++            if binding.slot_id != "default" {
++                return Err(CodexErr::InvalidRequest(format!(
++                    "execution account slot `{}` is unavailable",
++                    binding.slot_id
++                )));
++            }
++            Ok(Arc::new(ExecutionAccountContext {
++                binding,
++                auth_manager: Arc::clone(&self.auth_manager),
++                models_manager: Arc::clone(&self.models_manager),
++            }))
++        })
++    }
++}
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index e8335a4..da58d12 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -52,6 +52,7 @@ mod environment_selection;
+ pub mod exec;
+ pub mod exec_env;
+ mod exec_policy;
++pub mod execution_account;
+ #[cfg(test)]
+ mod git_info_tests;
+ mod guardian;
+@@ -104,6 +105,10 @@ pub use codex_prompts as review_prompts;
+ mod thread_manager;
+ pub(crate) mod web_search;
+ pub(crate) mod windows_sandbox_read_grants;
++pub use execution_account::ExecutionAccountContext;
++pub use execution_account::ExecutionAccountResolver;
++pub use execution_account::ExecutionAccountResolverFuture;
++pub use execution_account::ExecutionAccountServices;
+ pub use thread_manager::ForkSnapshot;
+ pub use thread_manager::NewThread;
+ pub use thread_manager::StartThreadOptions;
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 2ae44ae..7b35d8f 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -3013,6 +3013,18 @@ pub struct TurnContextNetworkItem {
+     pub denied_domains: Vec<String>,
+ }
+ 
++/// Durable account selection used to execute a thread or an individual turn.
++///
++/// `slot_id` is an opaque host-managed identifier. `generation` changes whenever the current
++/// thread binding is replaced, allowing callers to detect stale account snapshots.
++#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, TS)]
++#[serde(rename_all = "camelCase")]
++#[ts(rename_all = "camelCase")]
++pub struct ExecutionAccountBinding {
++    pub slot_id: String,
++    pub generation: u64,
++}
++
+ /// Persist once per real user turn after computing that turn's model-visible
+ /// context updates, and again after mid-turn compaction when replacement
+ /// history re-establishes full context, so resume/fork replay can recover the
+@@ -3021,6 +3033,8 @@ pub struct TurnContextNetworkItem {
+ pub struct TurnContextItem {
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub turn_id: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub execution_account: Option<ExecutionAccountBinding>,
+     pub cwd: AbsolutePathBuf,
+     /// Effective workspace roots used to materialize symbolic
+     /// `:workspace_roots` filesystem permissions in `permission_profile`.
+@@ -5746,6 +5760,34 @@ mod tests {
+         assert_eq!(item.network, None);
+         assert_eq!(item.file_system_sandbox_policy, None);
+         assert_eq!(item.comp_hash, None);
++        assert_eq!(item.execution_account, None);
++        Ok(())
++    }
++
++    #[test]
++    fn turn_context_item_round_trips_execution_account() -> Result<()> {
++        let value = json!({
++            "turn_id": "turn-1",
++            "execution_account": {"slotId": "secondary", "generation": 4},
++            "cwd": test_path_buf("/tmp"),
++            "approval_policy": "never",
++            "sandbox_policy": { "type": "danger-full-access" },
++            "model": "gpt-5",
++            "summary": "auto",
++        });
++
++        let item: TurnContextItem = serde_json::from_value(value.clone())?;
++        assert_eq!(
++            item.execution_account,
++            Some(ExecutionAccountBinding {
++                slot_id: "secondary".to_string(),
++                generation: 4,
++            })
++        );
++        assert_eq!(
++            serde_json::to_value(item)?["execution_account"],
++            value["execution_account"]
++        );
+         Ok(())
+     }
+ 
+@@ -5767,6 +5809,7 @@ mod tests {
+     fn turn_context_item_serializes_network_when_present() -> Result<()> {
+         let item = TurnContextItem {
+             turn_id: None,
++            execution_account: None,
+             cwd: test_path_buf("/tmp").abs(),
+             workspace_roots: None,
+             current_date: None,
+diff --git a/codex-rs/rollout/src/lib.rs b/codex-rs/rollout/src/lib.rs
+index 9f38cd5..70bae26 100644
+--- a/codex-rs/rollout/src/lib.rs
++++ b/codex-rs/rollout/src/lib.rs
+@@ -122,6 +122,7 @@ pub use persistence_metrics::measure_and_filter_rollout_items;
+ pub use policy::is_persisted_rollout_item;
+ pub use policy::persisted_rollout_items;
+ pub use policy::should_persist_response_item_for_memories;
++pub use recorder::RolloutProgress;
+ pub use recorder::RolloutRecorder;
+ pub use recorder::RolloutRecorderParams;
+ pub use recorder::append_rollout_item_to_path;
+diff --git a/codex-rs/rollout/src/recorder.rs b/codex-rs/rollout/src/recorder.rs
+index b6fba6b..a541531 100644
+--- a/codex-rs/rollout/src/recorder.rs
++++ b/codex-rs/rollout/src/recorder.rs
+@@ -89,6 +89,13 @@ pub struct RolloutRecorder {
+     pub(crate) rollout_path: PathBuf,
+ }
+ 
++/// Exact durable end position for a paginated rollout after a writer barrier.
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub struct RolloutProgress {
++    pub end_ordinal_exclusive: u64,
++    pub end_byte_offset: u64,
++}
++
+ #[derive(Clone)]
+ #[allow(clippy::large_enum_variant)]
+ pub enum RolloutRecorderParams {
+@@ -130,8 +137,11 @@ enum RolloutCmd {
+     Flush {
+         ack: oneshot::Sender<std::io::Result<()>>,
+     },
++    Progress {
++        ack: oneshot::Sender<std::io::Result<Option<RolloutProgress>>>,
++    },
+     Shutdown {
+-        ack: oneshot::Sender<std::io::Result<()>>,
++        ack: oneshot::Sender<std::io::Result<Option<RolloutProgress>>>,
+     },
+ }
+ 
+@@ -1001,6 +1011,27 @@ impl RolloutRecorder {
+         })?
+     }
+ 
++    /// Return the exact durable end position for a materialized paginated rollout.
++    ///
++    /// Legacy rollouts have no ordinal authority and deferred files have no durable
++    /// byte position, so both return `None`.
++    pub async fn progress(&self) -> std::io::Result<Option<RolloutProgress>> {
++        let (tx, rx) = oneshot::channel();
++        self.tx
++            .send(RolloutCmd::Progress { ack: tx })
++            .await
++            .map_err(|e| {
++                self.writer_task.terminal_failure().unwrap_or_else(|| {
++                    IoError::other(format!("failed to queue rollout progress read: {e}"))
++                })
++            })?;
++        rx.await.map_err(|e| {
++            self.writer_task.terminal_failure().unwrap_or_else(|| {
++                IoError::other(format!("failed waiting for rollout progress read: {e}"))
++            })
++        })?
++    }
++
+     pub async fn load_rollout_items(
+         path: &Path,
+     ) -> std::io::Result<(Vec<RolloutItem>, Option<ThreadId>, usize)> {
+@@ -1087,13 +1118,18 @@ impl RolloutRecorder {
+     ///
+     /// If draining fails, the writer stays alive so callers can continue retrying flush/shutdown.
+     pub async fn shutdown(&self) -> std::io::Result<()> {
++        self.shutdown_with_progress().await.map(drop)
++    }
++
++    /// Drain the writer and return its exact final paginated position.
++    pub async fn shutdown_with_progress(&self) -> std::io::Result<Option<RolloutProgress>> {
+         let (tx_done, rx_done) = oneshot::channel();
+         match self.tx.send(RolloutCmd::Shutdown { ack: tx_done }).await {
+             Ok(_) => rx_done.await.map_err(|e| {
+                 self.writer_task.terminal_failure().unwrap_or_else(|| {
+                     IoError::other(format!("failed waiting for rollout shutdown: {e}"))
+                 })
+-            })??,
++            })?,
+             Err(e) => {
+                 if let Some(err) = self.writer_task.terminal_failure() {
+                     warn!(
+@@ -1102,12 +1138,11 @@ impl RolloutRecorder {
+                     return Err(err);
+                 }
+                 warn!("failed to send rollout shutdown command: {e}");
+-                return Err(IoError::other(format!(
++                Err(IoError::other(format!(
+                     "failed to send rollout shutdown command: {e}"
+-                )));
++                )))
+             }
+-        };
+-        Ok(())
++        }
+     }
+ }
+ 
+@@ -1692,6 +1727,22 @@ impl RolloutWriterState {
+         self.write_pending_with_recovery("shutdown").await
+     }
+ 
++    async fn progress(&mut self) -> std::io::Result<Option<RolloutProgress>> {
++        if self.is_deferred() {
++            return Ok(None);
++        }
++        let Some(end_ordinal_exclusive) = self.ordinal_state.current()? else {
++            return Ok(None);
++        };
++        let Some(writer) = self.writer.as_mut() else {
++            return Ok(None);
++        };
++        Ok(Some(RolloutProgress {
++            end_ordinal_exclusive,
++            end_byte_offset: writer.file.metadata().await?.len(),
++        }))
++    }
++
+     async fn write_pending_with_recovery(&mut self, operation: &str) -> std::io::Result<()> {
+         match self.write_pending_once().await {
+             Ok(()) => {
+@@ -1827,11 +1878,19 @@ async fn rollout_writer(
+             RolloutCmd::Flush { ack } => {
+                 let _ = ack.send(state.flush().await);
+             }
++            RolloutCmd::Progress { ack } => {
++                let _ = ack.send(state.progress().await);
++            }
+             RolloutCmd::Shutdown { ack } => match state.shutdown().await {
+-                Ok(()) => {
+-                    let _ = ack.send(Ok(()));
+-                    break;
+-                }
++                Ok(()) => match state.progress().await {
++                    Ok(progress) => {
++                        let _ = ack.send(Ok(progress));
++                        break;
++                    }
++                    Err(err) => {
++                        let _ = ack.send(Err(err));
++                    }
++                },
+                 Err(err) => {
+                     let _ = ack.send(Err(err));
+                 }
+diff --git a/codex-rs/rollout/src/recorder_tests.rs b/codex-rs/rollout/src/recorder_tests.rs
+index a69919d..42b4c80 100644
+--- a/codex-rs/rollout/src/recorder_tests.rs
++++ b/codex-rs/rollout/src/recorder_tests.rs
+@@ -709,6 +709,54 @@ async fn recorder_materializes_on_flush_with_pending_items() -> std::io::Result<
+     Ok(())
+ }
+ 
++#[tokio::test]
++async fn paginated_progress_tracks_exact_durable_position_across_resume() -> std::io::Result<()> {
++    let home = TempDir::new().expect("temp dir");
++    let config = test_config(home.path());
++    let recorder = RolloutRecorder::new(
++        &config,
++        RolloutRecorderParams::new(
++            ThreadId::new(),
++            /*forked_from_id*/ None,
++            /*parent_thread_id*/ None,
++            SessionSource::Exec,
++            /*thread_source*/ None,
++            "test_originator".to_string(),
++            BaseInstructions::default(),
++            Vec::new(),
++        )
++        .with_history_mode(ThreadHistoryMode::Paginated),
++    )
++    .await?;
++    let rollout_path = recorder.rollout_path().to_path_buf();
++
++    assert_eq!(recorder.progress().await?, None);
++    recorder.persist().await?;
++    let session_meta_progress = recorder.progress().await?.expect("session meta progress");
++    assert_eq!(session_meta_progress.end_ordinal_exclusive, 1);
++    assert_eq!(
++        session_meta_progress.end_byte_offset,
++        fs::metadata(&rollout_path)?.len()
++    );
++
++    recorder
++        .record_canonical_items(&[agent_message_item("durable record")])
++        .await?;
++    recorder.flush().await?;
++    let appended_progress = recorder.progress().await?.expect("appended progress");
++    assert_eq!(appended_progress.end_ordinal_exclusive, 2);
++    assert_eq!(
++        appended_progress.end_byte_offset,
++        fs::metadata(&rollout_path)?.len()
++    );
++    recorder.shutdown().await?;
++
++    let resumed =
++        RolloutRecorder::new(&config, RolloutRecorderParams::resume(rollout_path.clone())).await?;
++    assert_eq!(resumed.progress().await?, Some(appended_progress));
++    resumed.shutdown().await
++}
++
+ #[tokio::test]
+ async fn referenced_paginated_rollout_starts_at_history_cutoff_and_resumes() -> std::io::Result<()>
+ {
+@@ -1693,6 +1741,7 @@ async fn resume_candidate_matches_cwd_reads_latest_turn_context() -> std::io::Re
+         ordinal: None,
+         item: RolloutItem::TurnContext(TurnContextItem {
+             turn_id: Some("turn-1".to_string()),
++            execution_account: None,
+             cwd: serde_json::from_value(serde_json::json!(&latest_cwd))
+                 .expect("absolute latest cwd"),
+             workspace_roots: None,
+diff --git a/codex-rs/state/migrations/0050_thread_execution_account_bindings.sql b/codex-rs/state/migrations/0050_thread_execution_account_bindings.sql
+new file mode 100644
+index 0000000..44dae5c
+--- /dev/null
++++ b/codex-rs/state/migrations/0050_thread_execution_account_bindings.sql
+@@ -0,0 +1,13 @@
++CREATE TABLE thread_execution_account_bindings (
++    thread_id TEXT PRIMARY KEY NOT NULL,
++    slot_id TEXT NOT NULL,
++    generation INTEGER NOT NULL CHECK (generation >= 1)
++);
++
++CREATE TABLE thread_turn_execution_accounts (
++    thread_id TEXT NOT NULL,
++    turn_id TEXT NOT NULL,
++    slot_id TEXT NOT NULL,
++    generation INTEGER NOT NULL CHECK (generation >= 1),
++    PRIMARY KEY (thread_id, turn_id)
++);
+diff --git a/codex-rs/state/src/extract.rs b/codex-rs/state/src/extract.rs
+index f8a2abf..4636c09 100644
+--- a/codex-rs/state/src/extract.rs
++++ b/codex-rs/state/src/extract.rs
+@@ -421,6 +421,7 @@ mod tests {
+             &mut metadata,
+             &RolloutItem::TurnContext(TurnContextItem {
+                 turn_id: Some("turn-1".to_string()),
++                execution_account: None,
+                 cwd: serde_json::from_value(serde_json::json!(
+                     std::env::current_dir()
+                         .expect("current directory")
+@@ -467,6 +468,7 @@ mod tests {
+             &mut metadata,
+             &RolloutItem::TurnContext(TurnContextItem {
+                 turn_id: Some("turn-1".to_string()),
++                execution_account: None,
+                 cwd: serde_json::from_value(serde_json::json!(
+                     std::env::current_dir()
+                         .expect("current directory")
+@@ -513,6 +515,7 @@ mod tests {
+             &mut metadata,
+             &RolloutItem::TurnContext(TurnContextItem {
+                 turn_id: Some("turn-1".to_string()),
++                execution_account: None,
+                 cwd: serde_json::from_value(serde_json::json!(&fallback_cwd))
+                     .expect("absolute fallback cwd"),
+                 workspace_roots: None,
+@@ -548,6 +551,7 @@ mod tests {
+             &mut metadata,
+             &RolloutItem::TurnContext(TurnContextItem {
+                 turn_id: Some("turn-1".to_string()),
++                execution_account: None,
+                 cwd: serde_json::from_value(serde_json::json!(
+                     std::env::current_dir()
+                         .expect("current directory")
+diff --git a/codex-rs/state/src/runtime.rs b/codex-rs/state/src/runtime.rs
+index df52deb..53fa499 100644
+--- a/codex-rs/state/src/runtime.rs
++++ b/codex-rs/state/src/runtime.rs
+@@ -40,6 +40,7 @@ use std::time::Instant;
+ use tracing::warn;
+ 
+ mod backfill;
++mod execution_account;
+ mod external_agent_config_imports;
+ mod goals;
+ mod logs;
+diff --git a/codex-rs/state/src/runtime/execution_account.rs b/codex-rs/state/src/runtime/execution_account.rs
+new file mode 100644
+index 0000000..89c0955
+--- /dev/null
++++ b/codex-rs/state/src/runtime/execution_account.rs
+@@ -0,0 +1,139 @@
++use anyhow::Context;
++use codex_protocol::ThreadId;
++use codex_protocol::protocol::ExecutionAccountBinding;
++use sqlx::Row;
++
++use super::StateRuntime;
++
++impl StateRuntime {
++    /// Read the current durable execution account binding for a thread.
++    pub async fn execution_account_binding(
++        &self,
++        thread_id: ThreadId,
++    ) -> anyhow::Result<Option<ExecutionAccountBinding>> {
++        let row = sqlx::query(
++            "SELECT slot_id, generation FROM thread_execution_account_bindings WHERE thread_id = ?",
++        )
++        .bind(thread_id.to_string())
++        .fetch_optional(self.pool.as_ref())
++        .await?;
++        row.map(binding_from_row).transpose()
++    }
++
++    /// Return an existing binding or initialize a legacy thread to default generation one.
++    pub async fn initialize_execution_account_binding(
++        &self,
++        thread_id: ThreadId,
++        initial: &ExecutionAccountBinding,
++    ) -> anyhow::Result<ExecutionAccountBinding> {
++        let mut transaction = self.pool.begin().await?;
++        sqlx::query(
++            "INSERT INTO thread_execution_account_bindings (thread_id, slot_id, generation) \
++             VALUES (?, ?, ?) ON CONFLICT(thread_id) DO NOTHING",
++        )
++        .bind(thread_id.to_string())
++        .bind(&initial.slot_id)
++        .bind(i64::try_from(initial.generation)?)
++        .execute(&mut *transaction)
++        .await?;
++        let row = sqlx::query(
++            "SELECT slot_id, generation FROM thread_execution_account_bindings WHERE thread_id = ?",
++        )
++        .bind(thread_id.to_string())
++        .fetch_one(&mut *transaction)
++        .await?;
++        transaction.commit().await?;
++        binding_from_row(row)
++    }
++
++    /// Replace a current binding only when both the slot and generation still match.
++    pub async fn compare_and_swap_execution_account_binding(
++        &self,
++        thread_id: ThreadId,
++        expected: &ExecutionAccountBinding,
++        next_slot_id: &str,
++    ) -> anyhow::Result<Option<ExecutionAccountBinding>> {
++        let generation = i64::try_from(expected.generation)?
++            .checked_add(1)
++            .context("execution account generation overflow")?;
++        let result = sqlx::query(
++            "UPDATE thread_execution_account_bindings SET slot_id = ?, generation = ? \
++             WHERE thread_id = ? AND slot_id = ? AND generation = ?",
++        )
++        .bind(next_slot_id)
++        .bind(generation)
++        .bind(thread_id.to_string())
++        .bind(&expected.slot_id)
++        .bind(i64::try_from(expected.generation)?)
++        .execute(self.pool.as_ref())
++        .await?;
++        if result.rows_affected() == 0 {
++            return Ok(None);
++        }
++        Ok(Some(ExecutionAccountBinding {
++            slot_id: next_slot_id.to_string(),
++            generation: u64::try_from(generation)?,
++        }))
++    }
++
++    /// Persist immutable per-turn provenance. Reinserting the same value is idempotent.
++    pub async fn record_turn_execution_account(
++        &self,
++        thread_id: ThreadId,
++        turn_id: &str,
++        binding: &ExecutionAccountBinding,
++    ) -> anyhow::Result<()> {
++        let result = sqlx::query(
++            "INSERT INTO thread_turn_execution_accounts (thread_id, turn_id, slot_id, generation) \
++             VALUES (?, ?, ?, ?) ON CONFLICT(thread_id, turn_id) DO NOTHING",
++        )
++        .bind(thread_id.to_string())
++        .bind(turn_id)
++        .bind(&binding.slot_id)
++        .bind(i64::try_from(binding.generation)?)
++        .execute(self.pool.as_ref())
++        .await?;
++        if result.rows_affected() == 1 {
++            return Ok(());
++        }
++        let existing = self
++            .turn_execution_account(thread_id, turn_id)
++            .await?
++            .context("turn execution account disappeared after conflict")?;
++        if existing == *binding {
++            Ok(())
++        } else {
++            anyhow::bail!(
++                "turn {turn_id} for thread {thread_id} already has a different execution account"
++            )
++        }
++    }
++
++    /// Read immutable execution account provenance for a turn.
++    pub async fn turn_execution_account(
++        &self,
++        thread_id: ThreadId,
++        turn_id: &str,
++    ) -> anyhow::Result<Option<ExecutionAccountBinding>> {
++        let row = sqlx::query(
++            "SELECT slot_id, generation FROM thread_turn_execution_accounts \
++             WHERE thread_id = ? AND turn_id = ?",
++        )
++        .bind(thread_id.to_string())
++        .bind(turn_id)
++        .fetch_optional(self.pool.as_ref())
++        .await?;
++        row.map(binding_from_row).transpose()
++    }
++}
++
++fn binding_from_row(row: sqlx::sqlite::SqliteRow) -> anyhow::Result<ExecutionAccountBinding> {
++    Ok(ExecutionAccountBinding {
++        slot_id: row.try_get("slot_id")?,
++        generation: u64::try_from(row.try_get::<i64, _>("generation")?)?,
++    })
++}
++
++#[cfg(test)]
++#[path = "execution_account_tests.rs"]
++mod tests;
+diff --git a/codex-rs/state/src/runtime/execution_account_tests.rs b/codex-rs/state/src/runtime/execution_account_tests.rs
+new file mode 100644
+index 0000000..51d4462
+--- /dev/null
++++ b/codex-rs/state/src/runtime/execution_account_tests.rs
+@@ -0,0 +1,96 @@
++use codex_protocol::ThreadId;
++use codex_protocol::protocol::ExecutionAccountBinding;
++use codex_utils_absolute_path::test_support::PathExt;
++use pretty_assertions::assert_eq;
++
++use crate::SqliteConfig;
++use crate::StateRuntime;
++
++#[tokio::test]
++async fn legacy_binding_cas_and_turn_provenance_are_durable() {
++    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
++    tokio::fs::create_dir_all(&sqlite_home)
++        .await
++        .expect("create sqlite home");
++    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
++        let _ = std::fs::remove_dir_all(sqlite_home);
++    });
++    let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
++    let thread_id = ThreadId::default();
++    let runtime = StateRuntime::init(sqlite, "test-provider".to_string())
++        .await
++        .expect("initialize runtime");
++
++    let initial = runtime
++        .initialize_execution_account_binding(
++            thread_id,
++            &ExecutionAccountBinding {
++                slot_id: "default".to_string(),
++                generation: 1,
++            },
++        )
++        .await
++        .expect("initialize legacy binding");
++    assert_eq!(
++        initial,
++        ExecutionAccountBinding {
++            slot_id: "default".to_string(),
++            generation: 1,
++        }
++    );
++    assert_eq!(
++        runtime
++            .initialize_execution_account_binding(
++                thread_id,
++                &ExecutionAccountBinding {
++                    slot_id: "ignored".to_string(),
++                    generation: 9,
++                },
++            )
++            .await
++            .expect("idempotent initialize"),
++        initial
++    );
++
++    let next = runtime
++        .compare_and_swap_execution_account_binding(thread_id, &initial, "secondary")
++        .await
++        .expect("compare and swap")
++        .expect("matching generation");
++    assert_eq!(
++        next,
++        ExecutionAccountBinding {
++            slot_id: "secondary".to_string(),
++            generation: 2,
++        }
++    );
++    assert_eq!(
++        runtime
++            .compare_and_swap_execution_account_binding(thread_id, &initial, "stale")
++            .await
++            .expect("stale compare and swap"),
++        None
++    );
++
++    runtime
++        .record_turn_execution_account(thread_id, "turn-1", &next)
++        .await
++        .expect("record provenance");
++    runtime
++        .record_turn_execution_account(thread_id, "turn-1", &next)
++        .await
++        .expect("idempotent provenance");
++    assert_eq!(
++        runtime
++            .turn_execution_account(thread_id, "turn-1")
++            .await
++            .expect("read provenance"),
++        Some(next.clone())
++    );
++    let err = runtime
++        .record_turn_execution_account(thread_id, "turn-1", &initial)
++        .await
++        .expect_err("different provenance must not overwrite");
++    assert!(err.to_string().contains("different execution account"));
++    runtime.close().await;
++}
+diff --git a/codex-rs/state/src/runtime/threads.rs b/codex-rs/state/src/runtime/threads.rs
+index 31d414a..6bceb4d 100644
+--- a/codex-rs/state/src/runtime/threads.rs
++++ b/codex-rs/state/src/runtime/threads.rs
+@@ -1021,6 +1021,17 @@ ON CONFLICT(id) DO UPDATE SET
+             self.upsert_thread(&metadata).await
+         };
+         upsert_result?;
++        for item in items {
++            if let RolloutItem::TurnContext(context) = item
++                && let (Some(turn_id), Some(binding)) = (
++                    context.turn_id.as_deref(),
++                    context.execution_account.as_ref(),
++                )
++            {
++                self.record_turn_execution_account(builder.id, turn_id, binding)
++                    .await?;
++            }
++        }
+         if let Some(memory_mode) = extract_memory_mode(items)
+             && let Err(err) = self
+                 .set_thread_memory_mode(builder.id, memory_mode.as_str())
+@@ -1113,6 +1124,16 @@ ON CONFLICT(id) DO UPDATE SET
+                 .execute(&mut *tx)
+                 .await?;
+         }
++        for thread_id_string in &thread_id_strings {
++            sqlx::query("DELETE FROM thread_turn_execution_accounts WHERE thread_id = ?")
++                .bind(thread_id_string)
++                .execute(&mut *tx)
++                .await?;
++            sqlx::query("DELETE FROM thread_execution_account_bindings WHERE thread_id = ?")
++                .bind(thread_id_string)
++                .execute(&mut *tx)
++                .await?;
++        }
+         for thread_id_string in &thread_id_strings {
+             sqlx::query(
+                 "DELETE FROM thread_spawn_edges WHERE parent_thread_id = ? OR child_thread_id = ?",
+diff --git a/codex-rs/thread-store/src/in_memory.rs b/codex-rs/thread-store/src/in_memory.rs
+index 6993e55..4bb2ecc 100644
+--- a/codex-rs/thread-store/src/in_memory.rs
++++ b/codex-rs/thread-store/src/in_memory.rs
+@@ -13,6 +13,7 @@ use chrono::Utc;
+ use codex_protocol::ThreadId;
+ use codex_protocol::models::PermissionProfile;
+ use codex_protocol::protocol::AskForApproval;
++use codex_protocol::protocol::ExecutionAccountBinding;
+ use codex_protocol::protocol::SessionContextWindow;
+ use codex_protocol::protocol::SessionMeta;
+ use codex_protocol::protocol::SessionMetaLine;
+@@ -32,6 +33,8 @@ use crate::PersistContext;
+ use crate::ReadThreadByRolloutPathParams;
+ use crate::ReadThreadParams;
+ use crate::ResumeThreadParams;
++use crate::RuntimePersistenceHealth;
++use crate::RuntimeWriterOwnership;
+ use crate::StoredModelContext;
+ use crate::StoredThread;
+ use crate::StoredThreadHistory;
+@@ -43,6 +46,7 @@ use crate::ThreadStore;
+ use crate::ThreadStoreError;
+ use crate::ThreadStoreFuture;
+ use crate::ThreadStoreResult;
++use crate::ThreadStoreRuntimeSnapshot;
+ use crate::UpdateThreadMetadataParams;
+ use crate::error::reject_paginated_history_mode;
+ 
+@@ -110,6 +114,51 @@ mod tests {
+         ));
+     }
+ 
++    #[tokio::test]
++    async fn execution_account_binding_uses_exact_cas_semantics() {
++        let store = InMemoryThreadStore::default();
++        let thread_id = ThreadId::default();
++        let initial = ExecutionAccountBinding {
++            slot_id: "default".to_string(),
++            generation: 1,
++        };
++
++        assert_eq!(
++            store
++                .initialize_execution_account_binding(thread_id, initial.clone())
++                .await
++                .expect("initialize binding"),
++            initial
++        );
++        let next = store
++            .compare_and_swap_execution_account_binding(
++                thread_id,
++                initial.clone(),
++                "secondary".to_string(),
++            )
++            .await
++            .expect("compare and swap")
++            .expect("matching binding");
++        assert_eq!(
++            next,
++            ExecutionAccountBinding {
++                slot_id: "secondary".to_string(),
++                generation: 2,
++            }
++        );
++        assert_eq!(
++            store
++                .compare_and_swap_execution_account_binding(
++                    thread_id,
++                    initial,
++                    "stale".to_string(),
++                )
++                .await
++                .expect("stale compare and swap"),
++            None
++        );
++    }
++
+     #[tokio::test]
+     async fn list_threads_filters_by_spawn_relationship() {
+         let store = InMemoryThreadStore::default();
+@@ -412,6 +461,41 @@ mod tests {
+         assert_eq!(updated.name.as_deref(), Some("renamed"));
+     }
+ 
++    #[tokio::test]
++    async fn runtime_snapshot_reports_live_writer_without_fake_durable_positions() {
++        let store = InMemoryThreadStore::default();
++        let thread_id = ThreadId::default();
++        store
++            .create_thread(create_thread_params(thread_id, ThreadHistoryMode::Legacy))
++            .await
++            .expect("create thread");
++
++        assert_eq!(
++            store
++                .runtime_snapshot(thread_id)
++                .await
++                .expect("runtime snapshot"),
++            ThreadStoreRuntimeSnapshot {
++                writer_ownership: RuntimeWriterOwnership::OwnedHere,
++                writer_store_id: None,
++                writer_generation: None,
++                writer_deny_reason: Some(
++                    "persistent writer control requires the state database".to_string(),
++                ),
++                jsonl: None,
++                sqlite: None,
++                lag: None,
++                flush_health: RuntimePersistenceHealth::Healthy,
++                materialize_health: RuntimePersistenceHealth::Healthy,
++                flushed_at: None,
++                materialized_at: None,
++                persistence_deny_reason: Some(
++                    "in-memory store has no durable position authority".to_string(),
++                ),
++            }
++        );
++    }
++
+     fn create_thread_params(
+         thread_id: ThreadId,
+         history_mode: ThreadHistoryMode,
+@@ -489,12 +573,20 @@ pub struct InMemoryThreadStoreCalls {
+ /// Test and debug configs can select this store by id, letting tests exercise
+ /// config-driven non-local persistence without requiring the real remote gRPC
+ /// service.
+-#[derive(Default)]
+ pub struct InMemoryThreadStore {
+     state: tokio::sync::Mutex<InMemoryThreadStoreState>,
+     omit_metadata_update_result: AtomicBool,
+ }
+ 
++impl Default for InMemoryThreadStore {
++    fn default() -> Self {
++        Self {
++            state: tokio::sync::Mutex::new(InMemoryThreadStoreState::default()),
++            omit_metadata_update_result: AtomicBool::new(false),
++        }
++    }
++}
++
+ #[derive(Default)]
+ struct InMemoryThreadStoreState {
+     calls: InMemoryThreadStoreCalls,
+@@ -506,6 +598,9 @@ struct InMemoryThreadStoreState {
+     section_entered_at: HashMap<ThreadId, DateTime<Utc>>,
+     names: HashMap<ThreadId, Option<String>>,
+     rollout_paths: HashMap<PathBuf, ThreadId>,
++    execution_accounts: HashMap<ThreadId, ExecutionAccountBinding>,
++    turn_execution_accounts: HashMap<(ThreadId, String), ExecutionAccountBinding>,
++    live_threads: HashSet<ThreadId>,
+ }
+ 
+ impl InMemoryThreadStore {
+@@ -539,6 +634,7 @@ impl InMemoryThreadStore {
+         reject_paginated_history_mode(params.history_mode)?;
+         let mut state = self.state.lock().await;
+         state.calls.create_thread += 1;
++        let thread_id = params.thread_id;
+         let session_meta = SessionMeta {
+             session_id: params.session_id,
+             id: params.thread_id,
+@@ -573,6 +669,7 @@ impl InMemoryThreadStore {
+                 git: None,
+             }));
+         state.created_threads.insert(params.thread_id, params);
++        state.live_threads.insert(thread_id);
+         Ok(())
+     }
+ 
+@@ -589,6 +686,7 @@ impl InMemoryThreadStore {
+         if let Some(rollout_path) = params.rollout_path {
+             state.rollout_paths.insert(rollout_path, params.thread_id);
+         }
++        state.live_threads.insert(params.thread_id);
+         Ok(())
+     }
+ 
+@@ -607,7 +705,25 @@ impl InMemoryThreadStore {
+             .histories
+             .entry(params.thread_id)
+             .or_default()
+-            .extend(persisted_items);
++            .extend(persisted_items.clone());
++        for item in persisted_items {
++            if let RolloutItem::TurnContext(context) = item
++                && let (Some(turn_id), Some(binding)) = (context.turn_id, context.execution_account)
++            {
++                let key = (params.thread_id, turn_id);
++                match state.turn_execution_accounts.get(&key) {
++                    Some(existing) if existing != &binding => {
++                        return Err(ThreadStoreError::Conflict {
++                            message: "turn execution account provenance is immutable".to_string(),
++                        });
++                    }
++                    Some(_) => {}
++                    None => {
++                        state.turn_execution_accounts.insert(key, binding);
++                    }
++                }
++            }
++        }
+         Ok(())
+     }
+ 
+@@ -821,6 +937,10 @@ impl InMemoryThreadStore {
+         state.names.remove(&params.thread_id);
+         state.metadata_updates.remove(&params.thread_id);
+         state.sections.remove(&params.thread_id);
++        state.execution_accounts.remove(&params.thread_id);
++        state
++            .turn_execution_accounts
++            .retain(|(thread_id, _), _| *thread_id != params.thread_id);
+         state.section_positions.remove(&params.thread_id);
+         state.section_entered_at.remove(&params.thread_id);
+         state
+@@ -841,6 +961,118 @@ impl ThreadStore for InMemoryThreadStore {
+         self
+     }
+ 
++    fn runtime_snapshot(
++        &self,
++        thread_id: ThreadId,
++    ) -> ThreadStoreFuture<'_, ThreadStoreRuntimeSnapshot> {
++        Box::pin(async move {
++            let state = self.state.lock().await;
++            let persisted = state.histories.contains_key(&thread_id);
++            Ok(ThreadStoreRuntimeSnapshot {
++                writer_ownership: if state.live_threads.contains(&thread_id) {
++                    RuntimeWriterOwnership::OwnedHere
++                } else {
++                    RuntimeWriterOwnership::None
++                },
++                writer_store_id: None,
++                writer_generation: None,
++                writer_deny_reason: Some(
++                    "persistent writer control requires the state database".to_string(),
++                ),
++                jsonl: None,
++                sqlite: None,
++                lag: None,
++                flush_health: if persisted {
++                    RuntimePersistenceHealth::Healthy
++                } else {
++                    RuntimePersistenceHealth::Unknown
++                },
++                materialize_health: if persisted {
++                    RuntimePersistenceHealth::Healthy
++                } else {
++                    RuntimePersistenceHealth::Unknown
++                },
++                flushed_at: None,
++                materialized_at: None,
++                persistence_deny_reason: persisted
++                    .then(|| "in-memory store has no durable position authority".to_string()),
++            })
++        })
++    }
++
++    fn execution_account_binding(
++        &self,
++        thread_id: ThreadId,
++    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
++        Box::pin(async move {
++            Ok(self
++                .state
++                .lock()
++                .await
++                .execution_accounts
++                .get(&thread_id)
++                .cloned())
++        })
++    }
++
++    fn initialize_execution_account_binding(
++        &self,
++        thread_id: ThreadId,
++        initial: ExecutionAccountBinding,
++    ) -> ThreadStoreFuture<'_, ExecutionAccountBinding> {
++        Box::pin(async move {
++            let mut state = self.state.lock().await;
++            Ok(state
++                .execution_accounts
++                .entry(thread_id)
++                .or_insert(initial)
++                .clone())
++        })
++    }
++
++    fn compare_and_swap_execution_account_binding(
++        &self,
++        thread_id: ThreadId,
++        expected: ExecutionAccountBinding,
++        next_slot_id: String,
++    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
++        Box::pin(async move {
++            let mut state = self.state.lock().await;
++            let Some(current) = state.execution_accounts.get_mut(&thread_id) else {
++                return Ok(None);
++            };
++            if current != &expected {
++                return Ok(None);
++            }
++            let Some(generation) = current.generation.checked_add(1) else {
++                return Err(ThreadStoreError::Internal {
++                    message: "execution account generation overflow".to_string(),
++                });
++            };
++            *current = ExecutionAccountBinding {
++                slot_id: next_slot_id,
++                generation,
++            };
++            Ok(Some(current.clone()))
++        })
++    }
++
++    fn turn_execution_account(
++        &self,
++        thread_id: ThreadId,
++        turn_id: String,
++    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
++        Box::pin(async move {
++            Ok(self
++                .state
++                .lock()
++                .await
++                .turn_execution_accounts
++                .get(&(thread_id, turn_id))
++                .cloned())
++        })
++    }
++
+     fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreFuture<'_, ()> {
+         Box::pin(InMemoryThreadStore::create_thread(self, params))
+     }
+@@ -871,16 +1103,31 @@ impl ThreadStore for InMemoryThreadStore {
+         })
+     }
+ 
+-    fn shutdown_thread(&self, _thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
++    fn shutdown_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+         Box::pin(async move {
+-            self.state.lock().await.calls.shutdown_thread += 1;
++            let mut state = self.state.lock().await;
++            state.calls.shutdown_thread += 1;
++            state.live_threads.remove(&thread_id);
+             Ok(())
+         })
+     }
+ 
+-    fn discard_thread(&self, _thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
++    fn relinquish_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+         Box::pin(async move {
+-            self.state.lock().await.calls.discard_thread += 1;
++            let mut state = self.state.lock().await;
++            state.calls.shutdown_thread += 1;
++            if !state.live_threads.remove(&thread_id) {
++                return Err(ThreadStoreError::ThreadNotFound { thread_id });
++            }
++            Ok(())
++        })
++    }
++
++    fn discard_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
++        Box::pin(async move {
++            let mut state = self.state.lock().await;
++            state.calls.discard_thread += 1;
++            state.live_threads.remove(&thread_id);
+             Ok(())
+         })
+     }
+diff --git a/codex-rs/thread-store/src/lib.rs b/codex-rs/thread-store/src/lib.rs
+index 93ca53c..7705758 100644
+--- a/codex-rs/thread-store/src/lib.rs
++++ b/codex-rs/thread-store/src/lib.rs
+@@ -36,8 +36,12 @@ pub use local::WriterControlCapability;
+ pub use queue_store::LocalQueueStore;
+ pub use queue_store::QueueStore;
+ pub use store::PersistContext;
++pub use store::RuntimePersistenceHealth;
++pub use store::RuntimePersistencePosition;
++pub use store::RuntimeWriterOwnership;
+ pub use store::ThreadStore;
+ pub use store::ThreadStoreFuture;
++pub use store::ThreadStoreRuntimeSnapshot;
+ pub use thread_sections::CreateThreadSectionParams;
+ pub use thread_sections::DeleteThreadSectionParams;
+ pub use thread_sections::ListThreadSectionsParams;
+diff --git a/codex-rs/thread-store/src/live_thread.rs b/codex-rs/thread-store/src/live_thread.rs
+index 2f04380..5b9d45f 100644
+--- a/codex-rs/thread-store/src/live_thread.rs
++++ b/codex-rs/thread-store/src/live_thread.rs
+@@ -287,6 +287,13 @@ impl LiveThread {
+         }
+     }
+ 
++    /// Durably release this thread's writer for an explicit cross-process handoff.
++    pub async fn relinquish(&self) -> ThreadStoreResult<()> {
++        self.flush_pending_metadata_update_for_existing_history()
++            .await?;
++        self.thread_store.relinquish_thread(self.thread_id).await
++    }
++
+     pub async fn discard(&self) -> ThreadStoreResult<()> {
+         self.thread_store.discard_thread(self.thread_id).await
+     }
+diff --git a/codex-rs/thread-store/src/local/live_writer.rs b/codex-rs/thread-store/src/local/live_writer.rs
+index 14660d7..64c1afe 100644
+--- a/codex-rs/thread-store/src/local/live_writer.rs
++++ b/codex-rs/thread-store/src/local/live_writer.rs
+@@ -110,6 +110,8 @@ pub(super) async fn resume_thread(
+         .map_err(|err| ThreadStoreError::Internal {
+             message: format!("failed to resume local thread recorder: {err}"),
+         })?;
++    let progress = recorder.progress().await.map_err(thread_store_io_error)?;
++    store.note_runtime_flush(params.thread_id, progress).await;
+     store
+         .insert_live_recorder(
+             params.thread_id,
+@@ -160,16 +162,27 @@ pub(super) async fn shutdown_thread(
+     let (recorder, rollout_id, history_mode) = live_writer_parts(store, thread_id).await?;
+     let rollout_path = recorder.rollout_path().to_path_buf();
+     if matches!(history_mode, ThreadHistoryMode::Legacy) {
+-        recorder.shutdown().await.map_err(thread_store_io_error)?;
++        let progress = recorder
++            .shutdown_with_progress()
++            .await
++            .map_err(thread_store_io_error)?;
++        store.note_runtime_flush(thread_id, progress).await;
+     } else {
+-        recorder.shutdown().await.map_err(thread_store_io_error)?;
+-        if let Err(err) = super::thread_history_materialization::materialize_to_sqlite(
++        let progress = recorder
++            .shutdown_with_progress()
++            .await
++            .map_err(thread_store_io_error)?;
++        store.note_runtime_flush(thread_id, progress).await;
++        let materialized = super::thread_history_materialization::materialize_to_sqlite(
+             store,
+             rollout_id,
+             rollout_path.as_path(),
+         )
+-        .await
+-        {
++        .await;
++        store
++            .note_runtime_materialization(thread_id, materialized.is_ok())
++            .await;
++        if let Err(err) = materialized {
+             warn!("failed to project durable rollout during shutdown for {thread_id}: {err}");
+         }
+     }
+@@ -184,6 +197,92 @@ pub(super) async fn shutdown_thread(
+     Ok(())
+ }
+ 
++pub(super) async fn relinquish_thread(
++    store: &LocalThreadStore,
++    thread_id: ThreadId,
++) -> ThreadStoreResult<()> {
++    let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
++    let (recorder, rollout_id, history_mode) = live_writer_parts(store, thread_id).await?;
++    let rollout_path = recorder.rollout_path().to_path_buf();
++
++    let progress = match recorder.flush().await {
++        Ok(()) => match recorder.progress().await {
++            Ok(progress) => progress,
++            Err(err) => {
++                store
++                    .note_runtime_failure(
++                        thread_id,
++                        super::RuntimeFailureStage::Flush,
++                        "strict_flush_progress_failed",
++                    )
++                    .await;
++                return Err(thread_store_io_error(err));
++            }
++        },
++        Err(err) => {
++            store
++                .note_runtime_failure(
++                    thread_id,
++                    super::RuntimeFailureStage::Flush,
++                    "strict_flush_failed",
++                )
++                .await;
++            return Err(thread_store_io_error(err));
++        }
++    };
++    store.note_runtime_flush(thread_id, progress).await;
++
++    if !matches!(history_mode, ThreadHistoryMode::Legacy) {
++        if let Err(err) = super::thread_history_materialization::materialize_to_sqlite(
++            store,
++            rollout_id,
++            rollout_path.as_path(),
++        )
++        .await
++        {
++            store
++                .note_runtime_failure(
++                    thread_id,
++                    super::RuntimeFailureStage::Materialize,
++                    "strict_materialization_failed",
++                )
++                .await;
++            return Err(err);
++        }
++        store.note_runtime_materialization(thread_id, true).await;
++    }
++
++    if let Err(err) =
++        sync_materialized_rollout_path_strict(store, thread_id, rollout_path.as_path()).await
++    {
++        store
++            .note_runtime_failure(
++                thread_id,
++                super::RuntimeFailureStage::PathSync,
++                "strict_path_sync_failed",
++            )
++            .await;
++        return Err(err);
++    }
++
++    let final_progress = match recorder.shutdown_with_progress().await {
++        Ok(progress) => progress,
++        Err(err) => {
++            store
++                .note_runtime_failure(
++                    thread_id,
++                    super::RuntimeFailureStage::RecorderShutdown,
++                    "strict_recorder_shutdown_failed",
++                )
++                .await;
++            return Err(thread_store_io_error(err));
++        }
++    };
++    store.note_runtime_flush(thread_id, final_progress).await;
++    store.live_recorders.lock().await.remove(&thread_id);
++    Ok(())
++}
++
+ pub(super) async fn discard_thread(
+     store: &LocalThreadStore,
+     thread_id: ThreadId,
+@@ -217,6 +316,18 @@ async fn sync_materialized_rollout_path(
+     store: &LocalThreadStore,
+     thread_id: ThreadId,
+     rollout_path: &std::path::Path,
++) -> ThreadStoreResult<()> {
++    let result = sync_materialized_rollout_path_strict(store, thread_id, rollout_path).await;
++    if let Err(err) = result {
++        warn!("failed to sync materialized rollout path for thread {thread_id}: {err}");
++    }
++    Ok(())
++}
++
++async fn sync_materialized_rollout_path_strict(
++    store: &LocalThreadStore,
++    thread_id: ThreadId,
++    rollout_path: &std::path::Path,
+ ) -> ThreadStoreResult<()> {
+     if codex_rollout::existing_rollout_path(rollout_path)
+         .await
+@@ -250,10 +361,7 @@ async fn sync_materialized_rollout_path(
+         Ok(())
+     }
+     .await;
+-    if let Err(err) = result {
+-        warn!("failed to sync materialized rollout path for thread {thread_id}: {err}");
+-    }
+-    Ok(())
++    result
+ }
+ 
+ fn thread_store_io_error(err: std::io::Error) -> ThreadStoreError {
+@@ -310,26 +418,57 @@ async fn write_and_project(
+         RolloutWriteOp::Persist => RolloutWriteOp::Persist,
+         RolloutWriteOp::Flush => RolloutWriteOp::Flush,
+     };
++    let turn_execution_accounts = match &write_op {
++        RolloutWriteOp::AppendItems(items) => items
++            .iter()
++            .filter_map(|item| match item {
++                RolloutItem::TurnContext(context) => context
++                    .turn_id
++                    .as_ref()
++                    .zip(context.execution_account.as_ref())
++                    .map(|(turn_id, binding)| (turn_id.clone(), binding.clone())),
++                _ => None,
++            })
++            .collect::<Vec<_>>(),
++        RolloutWriteOp::Persist | RolloutWriteOp::Flush => Vec::new(),
++    };
+     if matches!(history_mode, ThreadHistoryMode::Legacy) {
+         durable_write(&recorder, write_op).await?;
++        let progress = recorder.progress().await.map_err(thread_store_io_error)?;
++        store.note_runtime_flush(thread_id, progress).await;
+     } else {
+         let rollout_path = recorder.rollout_path();
+         // SQLite is a rebuildable view. The flush barrier must win before projection starts so it
+         // can lag JSONL after failure, but can never get ahead of canonical history.
+         durable_write(&recorder, write_op).await?;
+-        if let Err(err) = super::thread_history_materialization::materialize_to_sqlite(
++        let progress = recorder.progress().await.map_err(thread_store_io_error)?;
++        store.note_runtime_flush(thread_id, progress).await;
++        let materialized = super::thread_history_materialization::materialize_to_sqlite(
+             store,
+             rollout_id,
+             rollout_path,
+         )
+-        .await
+-        {
++        .await;
++        store
++            .note_runtime_materialization(thread_id, materialized.is_ok())
++            .await;
++        if let Err(err) = materialized {
+             warn!("failed to project durable rollout for {thread_id}: {err}");
+         }
+     }
+     if sync_rollout_path {
+         sync_materialized_rollout_path(store, thread_id, recorder.rollout_path()).await?;
+     }
++    if let Some(state_db) = store.state_db.as_ref() {
++        for (turn_id, binding) in turn_execution_accounts {
++            state_db
++                .record_turn_execution_account(thread_id, turn_id.as_str(), &binding)
++                .await
++                .map_err(|err| ThreadStoreError::Internal {
++                    message: format!("failed to project turn execution account: {err}"),
++                })?;
++        }
++    }
+     Ok(())
+ }
+ 
+diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
+index 98a3ea8..7cc3870 100644
+--- a/codex-rs/thread-store/src/local/mod.rs
++++ b/codex-rs/thread-store/src/local/mod.rs
+@@ -26,6 +26,7 @@ mod writer_lock;
+ mod test_support;
+ 
+ use codex_protocol::ThreadId;
++use codex_protocol::protocol::ExecutionAccountBinding;
+ use codex_protocol::protocol::ThreadHistoryMode;
+ use codex_rollout::RolloutRecorder;
+ use codex_rollout::StateDbHandle;
+@@ -41,6 +42,13 @@ use tokio::sync::OwnedRwLockReadGuard;
+ use tokio::sync::OwnedRwLockWriteGuard;
+ use tokio::sync::RwLock;
+ 
++fn unix_timestamp() -> i64 {
++    std::time::SystemTime::now()
++        .duration_since(std::time::UNIX_EPOCH)
++        .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
++        .unwrap_or(0)
++}
++
+ use crate::AppendThreadItemsParams;
+ use crate::ArchiveThreadParams;
+ use crate::ArchiveThreadsParams;
+@@ -64,6 +72,9 @@ use crate::ReadThreadParams;
+ use crate::RenameThreadSectionParams;
+ use crate::ResumeThreadParams;
+ use crate::RevertThreadParams;
++use crate::RuntimePersistenceHealth;
++use crate::RuntimePersistencePosition;
++use crate::RuntimeWriterOwnership;
+ use crate::SearchThreadOccurrencesParams;
+ use crate::SearchThreadsParams;
+ use crate::StoredModelContext;
+@@ -78,6 +89,7 @@ use crate::ThreadStore;
+ use crate::ThreadStoreError;
+ use crate::ThreadStoreFuture;
+ use crate::ThreadStoreResult;
++use crate::ThreadStoreRuntimeSnapshot;
+ use crate::TurnPage;
+ use crate::UpdateThreadMetadataParams;
+ use crate::local::writer_lock::WriterLockCoordinator;
+@@ -125,6 +137,39 @@ pub struct LocalThreadStore {
+     writer_lock_coordinator: Arc<WriterLockCoordinator>,
+     state_db: Option<StateDbHandle>,
+     thread_history_db: Arc<OnceCell<sqlx::SqlitePool>>,
++    runtime_persistence: Arc<Mutex<HashMap<ThreadId, LocalPersistenceRuntime>>>,
++}
++
++#[derive(Clone, Debug)]
++struct LocalPersistenceRuntime {
++    jsonl: Option<RuntimePersistencePosition>,
++    sqlite: Option<RuntimePersistencePosition>,
++    flush_health: RuntimePersistenceHealth,
++    materialize_health: RuntimePersistenceHealth,
++    flushed_at: Option<i64>,
++    materialized_at: Option<i64>,
++    deny_reason: Option<String>,
++}
++
++pub(super) enum RuntimeFailureStage {
++    Flush,
++    Materialize,
++    PathSync,
++    RecorderShutdown,
++}
++
++impl Default for LocalPersistenceRuntime {
++    fn default() -> Self {
++        Self {
++            jsonl: None,
++            sqlite: None,
++            flush_health: RuntimePersistenceHealth::Unknown,
++            materialize_health: RuntimePersistenceHealth::Unknown,
++            flushed_at: None,
++            materialized_at: None,
++            deny_reason: None,
++        }
++    }
+ }
+ 
+ struct LiveRecorderEntry {
+@@ -236,9 +281,58 @@ impl LocalThreadStore {
+             writer_lock_coordinator,
+             state_db,
+             thread_history_db: Arc::new(OnceCell::new()),
++            runtime_persistence: Arc::new(Mutex::new(HashMap::new())),
+         }
+     }
+ 
++    pub(super) async fn note_runtime_flush(
++        &self,
++        thread_id: ThreadId,
++        progress: Option<codex_rollout::RolloutProgress>,
++    ) {
++        let mut states = self.runtime_persistence.lock().await;
++        let state = states.entry(thread_id).or_default();
++        state.jsonl = progress.map(|progress| RuntimePersistencePosition {
++            ordinal: progress.end_ordinal_exclusive,
++            offset: progress.end_byte_offset,
++        });
++        state.flush_health = RuntimePersistenceHealth::Healthy;
++        state.flushed_at = Some(unix_timestamp());
++        state.deny_reason = None;
++    }
++
++    pub(super) async fn note_runtime_materialization(&self, thread_id: ThreadId, succeeded: bool) {
++        let mut states = self.runtime_persistence.lock().await;
++        let state = states.entry(thread_id).or_default();
++        if succeeded {
++            state.sqlite = state.jsonl;
++            state.materialize_health = RuntimePersistenceHealth::Healthy;
++            state.materialized_at = Some(unix_timestamp());
++        } else {
++            state.materialize_health = RuntimePersistenceHealth::Degraded;
++        }
++    }
++
++    pub(super) async fn note_runtime_failure(
++        &self,
++        thread_id: ThreadId,
++        stage: RuntimeFailureStage,
++        reason: &str,
++    ) {
++        let mut states = self.runtime_persistence.lock().await;
++        let state = states.entry(thread_id).or_default();
++        match stage {
++            RuntimeFailureStage::Flush => {
++                state.flush_health = RuntimePersistenceHealth::Failed;
++            }
++            RuntimeFailureStage::Materialize | RuntimeFailureStage::PathSync => {
++                state.materialize_health = RuntimePersistenceHealth::Failed;
++            }
++            RuntimeFailureStage::RecorderShutdown => {}
++        }
++        state.deny_reason = Some(reason.to_string());
++    }
++
+     /// Return the state DB handle used by local rollout writers.
+     pub async fn state_db(&self) -> Option<StateDbHandle> {
+         self.state_db.clone()
+@@ -455,6 +549,195 @@ impl ThreadStore for LocalThreadStore {
+         self
+     }
+ 
++    fn writer_control_capability(&self) -> WriterControlCapability {
++        match self.state_db.as_ref() {
++            Some(state_db) => WriterControlCapability::Enabled {
++                store_id: state_db.writer_store_id().to_string(),
++            },
++            None => WriterControlCapability::Disabled {
++                reason: WRITER_CONTROL_UNAVAILABLE_REASON.to_string(),
++            },
++        }
++    }
++
++    fn runtime_snapshot(
++        &self,
++        thread_id: ThreadId,
++    ) -> ThreadStoreFuture<'_, ThreadStoreRuntimeSnapshot> {
++        Box::pin(async move {
++            let authority = self.probe_writer_authority(thread_id).await?;
++            let persistence = self
++                .runtime_persistence
++                .lock()
++                .await
++                .get(&thread_id)
++                .cloned()
++                .unwrap_or_default();
++            let cold_projection = if persistence.sqlite.is_none() {
++                thread_history::projection_state(self, thread_id).await?
++            } else {
++                None
++            };
++            let sqlite = persistence.sqlite.or_else(|| {
++                cold_projection
++                    .as_ref()
++                    .map(|state| RuntimePersistencePosition {
++                        ordinal: state.next_ordinal,
++                        offset: state.next_byte_offset,
++                    })
++            });
++            let materialize_health = if cold_projection.is_some() {
++                RuntimePersistenceHealth::Healthy
++            } else {
++                persistence.materialize_health
++            };
++            let persistence_deny_reason = if persistence.deny_reason.is_some() {
++                persistence.deny_reason.clone()
++            } else if persistence.jsonl.is_some() {
++                None
++            } else if self.state_db.is_none() {
++                Some(STATE_DB_POSITION_UNAVAILABLE_REASON.to_string())
++            } else if cold_projection.is_some() {
++                Some(COLD_JSONL_POSITION_UNAVAILABLE_REASON.to_string())
++            } else {
++                let state_db =
++                    self.state_db
++                        .as_ref()
++                        .ok_or_else(|| ThreadStoreError::Internal {
++                            message: "state database disappeared during runtime snapshot"
++                                .to_string(),
++                        })?;
++                let history_mode = state_db
++                    .get_thread(thread_id)
++                    .await
++                    .map_err(|err| ThreadStoreError::Internal {
++                        message: format!("failed to read history mode for {thread_id}: {err}"),
++                    })?
++                    .map(|thread| thread.history_mode);
++                Some(
++                    if matches!(history_mode, Some(ThreadHistoryMode::Legacy)) {
++                        LEGACY_POSITION_UNAVAILABLE_REASON
++                    } else {
++                        SQLITE_PROJECTION_UNAVAILABLE_REASON
++                    }
++                    .to_string(),
++                )
++            };
++            let (writer_store_id, writer_deny_reason) = match authority.control {
++                WriterControlCapability::Enabled { store_id } => (Some(store_id), None),
++                WriterControlCapability::Disabled { reason } => (None, Some(reason)),
++            };
++            let lag = persistence
++                .jsonl
++                .zip(sqlite)
++                .map(|(jsonl, sqlite)| jsonl.ordinal.saturating_sub(sqlite.ordinal));
++            Ok(ThreadStoreRuntimeSnapshot {
++                writer_ownership: match authority.ownership {
++                    ThreadWriterOwnership::None => RuntimeWriterOwnership::None,
++                    ThreadWriterOwnership::OwnedHere => RuntimeWriterOwnership::OwnedHere,
++                    ThreadWriterOwnership::OwnedElsewhere => RuntimeWriterOwnership::OwnedElsewhere,
++                },
++                writer_store_id,
++                writer_generation: authority.generation,
++                writer_deny_reason,
++                jsonl: persistence.jsonl,
++                sqlite,
++                lag,
++                flush_health: persistence.flush_health,
++                materialize_health,
++                flushed_at: persistence.flushed_at,
++                materialized_at: persistence.materialized_at,
++                persistence_deny_reason,
++            })
++        })
++    }
++
++    fn execution_account_binding(
++        &self,
++        thread_id: ThreadId,
++    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
++        Box::pin(async move {
++            let Some(state_db) = self.state_db.as_ref() else {
++                return Ok(Some(ExecutionAccountBinding {
++                    slot_id: "default".to_string(),
++                    generation: 1,
++                }));
++            };
++            state_db
++                .execution_account_binding(thread_id)
++                .await
++                .map_err(|err| ThreadStoreError::Internal {
++                    message: format!("failed to read execution account binding: {err}"),
++                })
++        })
++    }
++
++    fn initialize_execution_account_binding(
++        &self,
++        thread_id: ThreadId,
++        initial: ExecutionAccountBinding,
++    ) -> ThreadStoreFuture<'_, ExecutionAccountBinding> {
++        Box::pin(async move {
++            let Some(state_db) = self.state_db.as_ref() else {
++                if initial.slot_id == "default" && initial.generation == 1 {
++                    return Ok(initial);
++                }
++                return Err(ThreadStoreError::Unsupported {
++                    operation: "initialize_non_default_execution_account_binding",
++                });
++            };
++            state_db
++                .initialize_execution_account_binding(thread_id, &initial)
++                .await
++                .map_err(|err| ThreadStoreError::Internal {
++                    message: format!("failed to initialize execution account binding: {err}"),
++                })
++        })
++    }
++
++    fn compare_and_swap_execution_account_binding(
++        &self,
++        thread_id: ThreadId,
++        expected: ExecutionAccountBinding,
++        next_slot_id: String,
++    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
++        Box::pin(async move {
++            let Some(state_db) = self.state_db.as_ref() else {
++                return Err(ThreadStoreError::Unsupported {
++                    operation: "compare_and_swap_execution_account_binding",
++                });
++            };
++            state_db
++                .compare_and_swap_execution_account_binding(
++                    thread_id,
++                    &expected,
++                    next_slot_id.as_str(),
++                )
++                .await
++                .map_err(|err| ThreadStoreError::Internal {
++                    message: format!("failed to compare and swap execution account binding: {err}"),
++                })
++        })
++    }
++
++    fn turn_execution_account(
++        &self,
++        thread_id: ThreadId,
++        turn_id: String,
++    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
++        Box::pin(async move {
++            let Some(state_db) = self.state_db.as_ref() else {
++                return Ok(None);
++            };
++            state_db
++                .turn_execution_account(thread_id, turn_id.as_str())
++                .await
++                .map_err(|err| ThreadStoreError::Internal {
++                    message: format!("failed to read turn execution account: {err}"),
++                })
++        })
++    }
++
+     fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreFuture<'_, ()> {
+         Box::pin(async move { live_writer::create_thread(self, params).await })
+     }
+@@ -483,6 +766,10 @@ impl ThreadStore for LocalThreadStore {
+         Box::pin(async move { live_writer::shutdown_thread(self, thread_id).await })
+     }
+ 
++    fn relinquish_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
++        Box::pin(async move { live_writer::relinquish_thread(self, thread_id).await })
++    }
++
+     fn discard_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+         Box::pin(async move { live_writer::discard_thread(self, thread_id).await })
+     }
+@@ -720,6 +1007,99 @@ mod tests {
+         );
+     }
+ 
++    #[tokio::test]
++    async fn execution_account_binding_uses_exact_cas_semantics() {
++        let home = TempDir::new().expect("temp dir");
++        let config = test_config(home.path());
++        let runtime = codex_state::StateRuntime::init(
++            config.sqlite.clone(),
++            config.default_model_provider_id.clone(),
++        )
++        .await
++        .expect("state db should initialize");
++        let store = LocalThreadStore::new(config, Some(runtime));
++        let thread_id = ThreadId::default();
++        let initial = ExecutionAccountBinding {
++            slot_id: "default".to_string(),
++            generation: 1,
++        };
++
++        assert_eq!(
++            store
++                .initialize_execution_account_binding(thread_id, initial.clone())
++                .await
++                .expect("initialize binding"),
++            initial
++        );
++        let next = store
++            .compare_and_swap_execution_account_binding(
++                thread_id,
++                initial.clone(),
++                "secondary".to_string(),
++            )
++            .await
++            .expect("compare and swap")
++            .expect("matching binding");
++        assert_eq!(
++            next,
++            ExecutionAccountBinding {
++                slot_id: "secondary".to_string(),
++                generation: 2,
++            }
++        );
++        assert_eq!(
++            store
++                .compare_and_swap_execution_account_binding(
++                    thread_id,
++                    initial,
++                    "stale".to_string(),
++                )
++                .await
++                .expect("stale compare and swap"),
++            None
++        );
++    }
++
++    #[tokio::test]
++    async fn sqlite_less_execution_account_is_default_only() {
++        let home = TempDir::new().expect("temp dir");
++        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
++        let thread_id = ThreadId::default();
++        let default = ExecutionAccountBinding {
++            slot_id: "default".to_string(),
++            generation: 1,
++        };
++
++        assert_eq!(
++            store
++                .execution_account_binding(thread_id)
++                .await
++                .expect("read compatibility binding"),
++            Some(default.clone())
++        );
++        assert_eq!(
++            store
++                .initialize_execution_account_binding(thread_id, default.clone())
++                .await
++                .expect("initialize compatibility binding"),
++            default
++        );
++        assert!(matches!(
++            store
++                .initialize_execution_account_binding(
++                    thread_id,
++                    ExecutionAccountBinding {
++                        slot_id: "secondary".to_string(),
++                        generation: 1,
++                    },
++                )
++                .await,
++            Err(ThreadStoreError::Unsupported {
++                operation: "initialize_non_default_execution_account_binding"
++            })
++        ));
++    }
++
+     #[tokio::test]
+     async fn raw_append_items_does_not_update_sqlite_metadata() {
+         // This pins the ThreadStore contract: raw appends are history-only. Callers that need
+@@ -893,6 +1273,7 @@ mod tests {
+         let turn_context = |model: &str, approval_policy| {
+             RolloutItem::TurnContext(TurnContextItem {
+                 turn_id: Some("turn-1".to_string()),
++                execution_account: None,
+                 cwd: serde_json::from_value(serde_json::json!(cwd)).expect("absolute cwd"),
+                 workspace_roots: None,
+                 current_date: None,
+@@ -1350,14 +1731,16 @@ mod tests {
+         let thread_id = ThreadId::default();
+ 
+         let first_store = LocalThreadStore::new(config.clone(), /*state_db*/ None);
++        let mut create_params = create_thread_params(thread_id);
++        create_params.history_mode = ThreadHistoryMode::Paginated;
+         first_store
+-            .create_thread(create_thread_params(thread_id))
++            .create_thread(create_params)
+             .await
+             .expect("create initial thread");
+         first_store
+             .append_items(AppendThreadItemsParams {
+                 thread_id,
+-                items: vec![user_message_item("before resume")],
++                items: vec![turn_complete_item("before-resume")],
+             })
+             .await
+             .expect("append initial item");
+@@ -1382,17 +1765,28 @@ mod tests {
+         resumed_store
+             .resume_thread(ResumeThreadParams {
+                 thread_id,
+-                rollout_path: None,
++                rollout_path: Some(rollout_path.clone()),
+                 history: None,
+                 include_archived: true,
+                 metadata: thread_metadata(),
+             })
+             .await
+             .expect("resume live thread");
++        let resumed_runtime = resumed_store
++            .runtime_snapshot(thread_id)
++            .await
++            .expect("resumed runtime snapshot");
++        assert_eq!(
++            resumed_runtime.writer_ownership,
++            RuntimeWriterOwnership::OwnedHere
++        );
++        let resumed_jsonl = resumed_runtime.jsonl.expect("resumed JSONL position");
++        assert!(resumed_jsonl.ordinal > 0);
++        assert!(resumed_jsonl.offset > 0);
+         resumed_store
+             .append_items(AppendThreadItemsParams {
+                 thread_id,
+-                items: vec![user_message_item("after resume")],
++                items: vec![turn_complete_item("after-resume")],
+             })
+             .await
+             .expect("append resumed item");
+@@ -1400,9 +1794,212 @@ mod tests {
+             .flush_thread(thread_id)
+             .await
+             .expect("flush resumed thread");
++        let flushed_runtime = resumed_store
++            .runtime_snapshot(thread_id)
++            .await
++            .expect("flushed runtime snapshot");
++        assert_eq!(flushed_runtime.jsonl, flushed_runtime.sqlite);
++        assert_eq!(flushed_runtime.lag, Some(0));
+ 
+-        assert_rollout_contains_message(rollout_path.as_path(), "before resume").await;
+-        assert_rollout_contains_message(rollout_path.as_path(), "after resume").await;
++        let rollout = tokio::fs::read_to_string(rollout_path)
++            .await
++            .expect("read paginated rollout");
++        assert!(rollout.contains("before-resume"));
++        assert!(rollout.contains("after-resume"));
++    }
++
++    #[tokio::test]
++    async fn cold_runtime_snapshot_restores_sqlite_projection_without_guessing_jsonl() {
++        let home = TempDir::new().expect("temp dir");
++        let config = test_config(home.path());
++        let runtime = codex_state::StateRuntime::init(
++            config.sqlite.clone(),
++            config.default_model_provider_id.clone(),
++        )
++        .await
++        .expect("state db should initialize");
++        let thread_id = ThreadId::default();
++        let first_store = LocalThreadStore::new(config.clone(), Some(runtime.clone()));
++        let mut create_params = create_thread_params(thread_id);
++        create_params.history_mode = ThreadHistoryMode::Paginated;
++        first_store
++            .create_thread(create_params)
++            .await
++            .expect("create paginated thread");
++        first_store
++            .append_items(AppendThreadItemsParams {
++                thread_id,
++                items: vec![turn_complete_item("cold-position")],
++            })
++            .await
++            .expect("append durable turn");
++        first_store
++            .flush_thread(thread_id)
++            .await
++            .expect("flush durable turn");
++        let hot_sqlite = first_store
++            .runtime_snapshot(thread_id)
++            .await
++            .expect("hot runtime snapshot")
++            .sqlite
++            .expect("hot SQLite position");
++        first_store
++            .shutdown_thread(thread_id)
++            .await
++            .expect("shutdown live writer");
++
++        let cold_store = LocalThreadStore::new(config, Some(runtime));
++        let cold = cold_store
++            .runtime_snapshot(thread_id)
++            .await
++            .expect("cold runtime snapshot");
++
++        assert_eq!(cold.jsonl, None);
++        assert_eq!(cold.sqlite, Some(hot_sqlite));
++        assert_eq!(cold.lag, None);
++        assert_eq!(cold.materialize_health, RuntimePersistenceHealth::Healthy);
++        assert_eq!(
++            cold.persistence_deny_reason.as_deref(),
++            Some(COLD_JSONL_POSITION_UNAVAILABLE_REASON)
++        );
++    }
++
++    #[tokio::test]
++    async fn strict_relinquish_releases_writer_for_second_store_resume() {
++        let home = TempDir::new().expect("temp dir");
++        let config = test_config(home.path());
++        let runtime = codex_state::StateRuntime::init(
++            config.sqlite.clone(),
++            config.default_model_provider_id.clone(),
++        )
++        .await
++        .expect("state db should initialize");
++        let thread_id = ThreadId::default();
++        let first_store = LocalThreadStore::new(config.clone(), Some(runtime.clone()));
++        let mut create_params = create_thread_params(thread_id);
++        create_params.history_mode = ThreadHistoryMode::Paginated;
++        first_store
++            .create_thread(create_params)
++            .await
++            .expect("create paginated thread");
++        first_store
++            .append_items(AppendThreadItemsParams {
++                thread_id,
++                items: vec![turn_complete_item("strict-release")],
++            })
++            .await
++            .expect("append durable turn");
++        let rollout_path = first_store
++            .live_rollout_path(thread_id)
++            .await
++            .expect("load rollout path");
++        let first_generation = first_store
++            .runtime_snapshot(thread_id)
++            .await
++            .expect("first writer snapshot")
++            .writer_generation
++            .expect("first generation");
++
++        first_store
++            .relinquish_thread(thread_id)
++            .await
++            .expect("strictly release writer");
++        assert_eq!(
++            first_store
++                .runtime_snapshot(thread_id)
++                .await
++                .expect("released writer snapshot")
++                .writer_ownership,
++            RuntimeWriterOwnership::None
++        );
++
++        let second_store = LocalThreadStore::new(config, Some(runtime));
++        second_store
++            .resume_thread(ResumeThreadParams {
++                thread_id,
++                rollout_path: Some(rollout_path),
++                history: None,
++                include_archived: true,
++                metadata: thread_metadata(),
++            })
++            .await
++            .expect("second store should acquire released writer");
++        let resumed = second_store
++            .runtime_snapshot(thread_id)
++            .await
++            .expect("second writer snapshot");
++        assert_eq!(resumed.writer_ownership, RuntimeWriterOwnership::OwnedHere);
++        assert!(resumed.writer_generation.expect("second generation") > first_generation);
++    }
++
++    #[tokio::test]
++    async fn strict_relinquish_projection_failure_keeps_writer_owned_and_retryable() {
++        let home = TempDir::new().expect("temp dir");
++        let config = test_config(home.path());
++        let runtime = codex_state::StateRuntime::init(
++            config.sqlite.clone(),
++            config.default_model_provider_id.clone(),
++        )
++        .await
++        .expect("state db should initialize");
++        let thread_id = ThreadId::default();
++        let store = LocalThreadStore::new(config.clone(), Some(runtime.clone()));
++        let mut create_params = create_thread_params(thread_id);
++        create_params.history_mode = ThreadHistoryMode::Paginated;
++        store
++            .create_thread(create_params)
++            .await
++            .expect("create paginated thread");
++        store
++            .append_items(AppendThreadItemsParams {
++                thread_id,
++                items: vec![turn_complete_item("projection-failure")],
++            })
++            .await
++            .expect("append durable turn");
++        store
++            .flush_thread(thread_id)
++            .await
++            .expect("initialize projection pool");
++        store
++            .thread_history_db
++            .get()
++            .expect("projection pool")
++            .close()
++            .await;
++
++        store
++            .relinquish_thread(thread_id)
++            .await
++            .expect_err("closed projection pool should fail strict release");
++        let failed = store
++            .runtime_snapshot(thread_id)
++            .await
++            .expect("failed release snapshot");
++        assert_eq!(failed.writer_ownership, RuntimeWriterOwnership::OwnedHere);
++        assert_eq!(failed.flush_health, RuntimePersistenceHealth::Healthy);
++        assert_eq!(failed.materialize_health, RuntimePersistenceHealth::Failed);
++        assert_eq!(
++            failed.persistence_deny_reason.as_deref(),
++            Some("strict_materialization_failed")
++        );
++
++        let second_store = LocalThreadStore::new(config, Some(runtime));
++        let competing = second_store
++            .resume_thread(ResumeThreadParams {
++                thread_id,
++                rollout_path: Some(
++                    store
++                        .live_rollout_path(thread_id)
++                        .await
++                        .expect("live rollout path"),
++                ),
++                history: None,
++                include_archived: true,
++                metadata: thread_metadata(),
++            })
++            .await;
++        assert!(matches!(competing, Err(ThreadStoreError::Conflict { .. })));
+     }
+ 
+     #[tokio::test]
+@@ -1945,6 +2542,18 @@ mod tests {
+         }))
+     }
+ 
++    fn turn_complete_item(turn_id: &str) -> RolloutItem {
++        RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
++            turn_id: turn_id.to_string(),
++            last_agent_message: None,
++            error: None,
++            started_at: None,
++            completed_at: None,
++            duration_ms: None,
++            time_to_first_token_ms: None,
++        }))
++    }
++
+     async fn assert_rollout_contains_message(path: &std::path::Path, expected: &str) {
+         let (items, _, _) = RolloutRecorder::load_rollout_items(path)
+             .await
+diff --git a/codex-rs/thread-store/src/local/model_context_tests.rs b/codex-rs/thread-store/src/local/model_context_tests.rs
+index 3e43af7..095e78a 100644
+--- a/codex-rs/thread-store/src/local/model_context_tests.rs
++++ b/codex-rs/thread-store/src/local/model_context_tests.rs
+@@ -595,6 +595,7 @@ fn agent_message(message: &str) -> RolloutItem {
+ fn turn_context(root: &Path, turn_id: &str) -> RolloutItem {
+     RolloutItem::TurnContext(TurnContextItem {
+         turn_id: Some(turn_id.to_string()),
++        execution_account: None,
+         cwd: serde_json::from_value(serde_json::json!(root)).expect("absolute cwd"),
+         workspace_roots: None,
+         current_date: None,
+diff --git a/codex-rs/thread-store/src/local/rollout_migration_tests.rs b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
+index 174bdf0..4842dd0 100644
+--- a/codex-rs/thread-store/src/local/rollout_migration_tests.rs
++++ b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
+@@ -1390,6 +1390,7 @@ async fn migration_compacts_subagent_prefix_and_does_not_project_it() {
+             started("child-turn"),
+             RolloutItem::TurnContext(TurnContextItem {
+                 turn_id: Some("child-turn".to_string()),
++                execution_account: None,
+                 cwd: serde_json::from_value(json!(home.path())).expect("absolute cwd"),
+                 workspace_roots: None,
+                 current_date: None,
+diff --git a/codex-rs/thread-store/src/store.rs b/codex-rs/thread-store/src/store.rs
+index 90b53b3..eaa1751 100644
+--- a/codex-rs/thread-store/src/store.rs
++++ b/codex-rs/thread-store/src/store.rs
+@@ -1,4 +1,5 @@
+ use codex_protocol::ThreadId;
++use codex_protocol::protocol::ExecutionAccountBinding;
+ use codex_protocol::protocol::ThreadHistoryMode;
+ use std::any::Any;
+ use std::future::Future;
+@@ -40,6 +41,7 @@ use crate::ThreadStoreError;
+ use crate::ThreadStoreResult;
+ use crate::TurnPage;
+ use crate::UpdateThreadMetadataParams;
++use crate::WriterControlCapability;
+ 
+ /// Future returned by [`ThreadStore`] operations.
+ pub type ThreadStoreFuture<'a, T> = Pin<Box<dyn Future<Output = ThreadStoreResult<T>> + Send + 'a>>;
+@@ -53,6 +55,67 @@ pub enum PersistContext {
+     TurnStart,
+ }
+ 
++/// Storage-neutral writer ownership exposed to runtime observers.
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub enum RuntimeWriterOwnership {
++    None,
++    OwnedHere,
++    OwnedElsewhere,
++    Unavailable,
++}
++
++/// Storage-neutral durable position that never exposes a backing path.
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub struct RuntimePersistencePosition {
++    pub ordinal: u64,
++    pub offset: u64,
++}
++
++/// Health of one runtime persistence stage.
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub enum RuntimePersistenceHealth {
++    Unknown,
++    Healthy,
++    Degraded,
++    Failed,
++}
++
++/// Sanitized store state used by app-server runtime snapshots.
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct ThreadStoreRuntimeSnapshot {
++    pub writer_ownership: RuntimeWriterOwnership,
++    pub writer_store_id: Option<String>,
++    pub writer_generation: Option<u64>,
++    pub writer_deny_reason: Option<String>,
++    pub jsonl: Option<RuntimePersistencePosition>,
++    pub sqlite: Option<RuntimePersistencePosition>,
++    pub lag: Option<u64>,
++    pub flush_health: RuntimePersistenceHealth,
++    pub materialize_health: RuntimePersistenceHealth,
++    pub flushed_at: Option<i64>,
++    pub materialized_at: Option<i64>,
++    pub persistence_deny_reason: Option<String>,
++}
++
++impl ThreadStoreRuntimeSnapshot {
++    pub fn unavailable(reason: impl Into<String>) -> Self {
++        Self {
++            writer_ownership: RuntimeWriterOwnership::Unavailable,
++            writer_store_id: None,
++            writer_generation: None,
++            writer_deny_reason: Some(reason.into()),
++            jsonl: None,
++            sqlite: None,
++            lag: None,
++            flush_health: RuntimePersistenceHealth::Unknown,
++            materialize_health: RuntimePersistenceHealth::Unknown,
++            flushed_at: None,
++            materialized_at: None,
++            persistence_deny_reason: None,
++        }
++    }
++}
++
+ /// Storage-neutral thread persistence boundary.
+ pub trait ThreadStore: Any + Send + Sync {
+     /// Return this store as [`Any`] for implementation-owned escape hatches.
+@@ -66,6 +129,77 @@ pub trait ThreadStore: Any + Send + Sync {
+         ThreadHistoryMode::Legacy
+     }
+ 
++    /// Reports whether this process has persistent writer fencing for strict control operations.
++    fn writer_control_capability(&self) -> WriterControlCapability {
++        WriterControlCapability::Disabled {
++            reason: "persistent writer control requires the state database".to_string(),
++        }
++    }
++
++    /// Read sanitized writer and persistence state without scanning backing files.
++    fn runtime_snapshot(
++        &self,
++        _thread_id: ThreadId,
++    ) -> ThreadStoreFuture<'_, ThreadStoreRuntimeSnapshot> {
++        Box::pin(async {
++            Ok(ThreadStoreRuntimeSnapshot::unavailable(
++                "thread store runtime state is unavailable",
++            ))
++        })
++    }
++
++    /// Read the current account binding for a thread.
++    fn execution_account_binding(
++        &self,
++        _thread_id: ThreadId,
++    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
++        Box::pin(async {
++            Err(ThreadStoreError::Unsupported {
++                operation: "execution_account_binding",
++            })
++        })
++    }
++
++    /// Initialize a legacy thread binding once, returning the existing value on later calls.
++    fn initialize_execution_account_binding(
++        &self,
++        _thread_id: ThreadId,
++        _initial: ExecutionAccountBinding,
++    ) -> ThreadStoreFuture<'_, ExecutionAccountBinding> {
++        Box::pin(async {
++            Err(ThreadStoreError::Unsupported {
++                operation: "initialize_execution_account_binding",
++            })
++        })
++    }
++
++    /// Replace a current binding using slot-and-generation compare-and-swap semantics.
++    fn compare_and_swap_execution_account_binding(
++        &self,
++        _thread_id: ThreadId,
++        _expected: ExecutionAccountBinding,
++        _next_slot_id: String,
++    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
++        Box::pin(async {
++            Err(ThreadStoreError::Unsupported {
++                operation: "compare_and_swap_execution_account_binding",
++            })
++        })
++    }
++
++    /// Read immutable account provenance for a persisted turn.
++    fn turn_execution_account(
++        &self,
++        _thread_id: ThreadId,
++        _turn_id: String,
++    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
++        Box::pin(async {
++            Err(ThreadStoreError::Unsupported {
++                operation: "turn_execution_account",
++            })
++        })
++    }
++
+     /// Creates a new live thread.
+     fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreFuture<'_, ()>;
+ 
+@@ -95,6 +229,12 @@ pub trait ThreadStore: Any + Send + Sync {
+     /// Flushes pending items and closes the live thread writer.
+     fn shutdown_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()>;
+ 
++    /// Strictly durabilizes and releases the live writer for an explicit ownership handoff.
++    ///
++    /// Implementations must leave the writer usable and owned by this process when any durability
++    /// step fails. Only a successful return may release the writer authority.
++    fn relinquish_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()>;
++
+     /// Discards the live thread writer without forcing pending in-memory items to become durable.
+     ///
+     /// Core calls this when session initialization fails after a live writer has been created.
+-- 
+2.50.1 (Apple Git-155)
+

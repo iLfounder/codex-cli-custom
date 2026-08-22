@@ -1,0 +1,1624 @@
+From 7ffef3c0df1e5ce0dfa197720fb07d48787e9a31 Mon Sep 17 00:00:00 2001
+From: patch-verifier <patch-verifier@localhost>
+Date: Fri, 21 Aug 2026 14:30:28 +0900
+Subject: [PATCH] feat(custom): add shared writer authority for 0.149
+
+---
+ codex-rs/state/src/lib.rs                     |   1 +
+ codex-rs/state/src/migrations.rs              | 366 +++++++++++++++++-
+ codex-rs/state/src/migrations_tests.rs        | 343 ++++++++++++++++
+ codex-rs/state/src/runtime.rs                 |  15 +
+ .../state/src/runtime/writer_authority.rs     |  87 +++++
+ .../src/runtime/writer_authority_tests.rs     |  60 +++
+ codex-rs/state/src/sqlite.rs                  |   8 +
+ codex-rs/thread-store/src/lib.rs              |   3 +
+ .../thread-store/src/local/live_writer.rs     |   4 +-
+ codex-rs/thread-store/src/local/mod.rs        |  54 ++-
+ .../thread-store/src/local/revert_thread.rs   |   2 +-
+ .../src/local/rollout_migration.rs            |   4 +-
+ .../src/local/unarchive_thread.rs             |   2 +-
+ .../thread-store/src/local/writer_lock.rs     | 115 +++++-
+ .../src/local/writer_lock_tests.rs            | 194 ++++++++++
+ 15 files changed, 1243 insertions(+), 15 deletions(-)
+ create mode 100644 codex-rs/state/src/runtime/writer_authority.rs
+ create mode 100644 codex-rs/state/src/runtime/writer_authority_tests.rs
+
+diff --git a/codex-rs/state/src/lib.rs b/codex-rs/state/src/lib.rs
+index 0352333a9..64bda434b 100644
+--- a/codex-rs/state/src/lib.rs
++++ b/codex-rs/state/src/lib.rs
+@@ -76,6 +76,7 @@ pub use runtime::RemoteControlEnrollmentRecord;
+ pub use runtime::RuntimeDbBackup;
+ pub use runtime::SqliteQueueStore;
+ pub use runtime::ThreadFilterOptions;
++pub use runtime::WriterGeneration;
+ pub use runtime::backup_runtime_db_for_fresh_start;
+ pub use runtime::is_sqlite_corruption_error;
+ pub use runtime::open_thread_history_db;
+diff --git a/codex-rs/state/src/migrations.rs b/codex-rs/state/src/migrations.rs
+index 07d36588f..9d14b7997 100644
+--- a/codex-rs/state/src/migrations.rs
++++ b/codex-rs/state/src/migrations.rs
+@@ -1,5 +1,6 @@
+ use std::borrow::Cow;
+ 
++use sqlx::SqliteConnection;
+ use sqlx::SqlitePool;
+ use sqlx::migrate::Migrator;
+ 
+@@ -10,12 +11,12 @@ pub(crate) static MEMORIES_MIGRATOR: Migrator = sqlx::migrate!("./memory_migrati
+ pub(crate) static QUEUE_MIGRATOR: Migrator = sqlx::migrate!("./queue_migrations");
+ pub(crate) static THREAD_HISTORY_MIGRATOR: Migrator = sqlx::migrate!("./thread_history_migrations");
+ 
+-/// Allow an older Codex binary to open a database that has already been
+-/// migrated by a newer binary running in parallel.
++/// Allow a Codex binary to ignore migration versions newer than its embedded
++/// migration set.
+ ///
+-/// We intentionally ignore applied migration versions that are newer than the
+-/// embedded migration set. Known migration versions are still validated by
+-/// checksum, so this only relaxes the "database is ahead of me" case.
++/// Known versions are still validated by checksum. This therefore does not
++/// make binaries compatible when they assign different migrations to the same
++/// version number.
+ fn runtime_migrator(base: &'static Migrator) -> Migrator {
+     Migrator {
+         migrations: Cow::Borrowed(base.migrations.as_ref()),
+@@ -35,6 +36,361 @@ pub(crate) fn runtime_logs_migrator() -> Migrator {
+     runtime_migrator(&LOGS_MIGRATOR)
+ }
+ 
++struct CustomSchemaMigration {
++    version: i64,
++    name: &'static str,
++    definition: &'static str,
++    legacy_upstream_version: i64,
++    legacy_description: &'static str,
++    legacy_checksum: &'static str,
++    required_tables: &'static [RequiredCustomTable],
++}
++
++struct RequiredCustomTable {
++    name: &'static str,
++    definition: &'static str,
++}
++
++const WRITER_AUTHORITY_STORE_DEFINITION: &str = r#"CREATE TABLE writer_authority_store (
++    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
++    store_id TEXT NOT NULL UNIQUE
++)"#;
++const THREAD_WRITER_GENERATIONS_DEFINITION: &str = r#"CREATE TABLE thread_writer_generations (
++    thread_id TEXT PRIMARY KEY,
++    generation INTEGER NOT NULL CHECK (generation > 0)
++) WITHOUT ROWID"#;
++const THREAD_EXECUTION_ACCOUNT_BINDINGS_DEFINITION: &str = r#"CREATE TABLE thread_execution_account_bindings (
++    thread_id TEXT PRIMARY KEY NOT NULL,
++    slot_id TEXT NOT NULL,
++    generation INTEGER NOT NULL CHECK (generation >= 1)
++)"#;
++const THREAD_TURN_EXECUTION_ACCOUNTS_DEFINITION: &str = r#"CREATE TABLE thread_turn_execution_accounts (
++    thread_id TEXT NOT NULL,
++    turn_id TEXT NOT NULL,
++    slot_id TEXT NOT NULL,
++    generation INTEGER NOT NULL CHECK (generation >= 1),
++    PRIMARY KEY (thread_id, turn_id)
++)"#;
++
++const CUSTOM_SCHEMA_V1: CustomSchemaMigration = CustomSchemaMigration {
++    version: 1,
++    name: "writer_authority",
++    definition: r#"
++CREATE TABLE writer_authority_store (
++    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
++    store_id TEXT NOT NULL UNIQUE
++);
++
++CREATE TABLE thread_writer_generations (
++    thread_id TEXT PRIMARY KEY,
++    generation INTEGER NOT NULL CHECK (generation > 0)
++) WITHOUT ROWID;
++"#,
++    legacy_upstream_version: 49,
++    legacy_description: "writer authority",
++    legacy_checksum: "1bc0543e5728e0df193ffcbbc214861790304b7cad234378cafdee0cefd02de9e7a94df439d8bb681d20d34e9ef89a40",
++    required_tables: &[
++        RequiredCustomTable {
++            name: "writer_authority_store",
++            definition: WRITER_AUTHORITY_STORE_DEFINITION,
++        },
++        RequiredCustomTable {
++            name: "thread_writer_generations",
++            definition: THREAD_WRITER_GENERATIONS_DEFINITION,
++        },
++    ],
++};
++const CUSTOM_SCHEMA_V2: CustomSchemaMigration = CustomSchemaMigration {
++    version: 2,
++    name: "execution_account_bindings",
++    definition: r#"
++CREATE TABLE thread_execution_account_bindings (
++    thread_id TEXT PRIMARY KEY NOT NULL,
++    slot_id TEXT NOT NULL,
++    generation INTEGER NOT NULL CHECK (generation >= 1)
++);
++
++CREATE TABLE thread_turn_execution_accounts (
++    thread_id TEXT NOT NULL,
++    turn_id TEXT NOT NULL,
++    slot_id TEXT NOT NULL,
++    generation INTEGER NOT NULL CHECK (generation >= 1),
++    PRIMARY KEY (thread_id, turn_id)
++);
++"#,
++    legacy_upstream_version: 50,
++    legacy_description: "thread execution account bindings",
++    legacy_checksum: "35b8f0203829d22c122233012fa066fe6be269395e9e0f7a16848722f8ecd34124097826db94bef9925f88b381c2223b",
++    required_tables: &[
++        RequiredCustomTable {
++            name: "thread_execution_account_bindings",
++            definition: THREAD_EXECUTION_ACCOUNT_BINDINGS_DEFINITION,
++        },
++        RequiredCustomTable {
++            name: "thread_turn_execution_accounts",
++            definition: THREAD_TURN_EXECUTION_ACCOUNTS_DEFINITION,
++        },
++    ],
++};
++
++const ACTIVE_CUSTOM_SCHEMA_MIGRATIONS: &[&CustomSchemaMigration] = &[&CUSTOM_SCHEMA_V1];
++const LEGACY_CUSTOM_SCHEMA_MIGRATIONS: &[&CustomSchemaMigration] =
++    &[&CUSTOM_SCHEMA_V1, &CUSTOM_SCHEMA_V2];
++
++pub(crate) const LEGACY_MIGRATION_CUTOVER_ENV: &str = "CODEX_STATE_LEGACY_MIGRATION_CUTOVER";
++
++pub(crate) enum LegacyMigrationCutover {
++    Disabled,
++    Enabled,
++}
++
++pub(crate) async fn apply_custom_schema_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
++    sqlx::query(
++        r#"
++CREATE TABLE IF NOT EXISTS codex_custom_schema_migrations (
++    version INTEGER PRIMARY KEY,
++    name TEXT NOT NULL,
++    definition TEXT NOT NULL,
++    applied_at INTEGER NOT NULL DEFAULT (unixepoch())
++)
++        "#,
++    )
++    .execute(pool)
++    .await?;
++
++    for migration in ACTIVE_CUSTOM_SCHEMA_MIGRATIONS {
++        let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
++        let applied = sqlx::query_as::<_, (String, String)>(
++            "SELECT name, definition FROM codex_custom_schema_migrations WHERE version = ?",
++        )
++        .bind(migration.version)
++        .fetch_optional(&mut *transaction)
++        .await?;
++        if let Some((name, definition)) = applied {
++            if name != migration.name || definition != migration.definition {
++                anyhow::bail!(
++                    "custom schema migration {} does not match its stored definition",
++                    migration.version
++                );
++            }
++            transaction.commit().await?;
++            continue;
++        }
++
++        sqlx::raw_sql(migration.definition)
++            .execute(&mut *transaction)
++            .await?;
++        sqlx::query(
++            "INSERT INTO codex_custom_schema_migrations (version, name, definition) \
++             VALUES (?, ?, ?)",
++        )
++        .bind(migration.version)
++        .bind(migration.name)
++        .bind(migration.definition)
++        .execute(&mut *transaction)
++        .await?;
++        transaction.commit().await?;
++    }
++    Ok(())
++}
++
++/// Reject legacy custom migrations unless this process was explicitly started
++/// for a one-time cutover after all older writers were stopped.
++pub(crate) async fn migrate_legacy_custom_schema_migrations(
++    pool: &SqlitePool,
++    official_migrator: &Migrator,
++    cutover: LegacyMigrationCutover,
++) -> anyhow::Result<()> {
++    match cutover {
++        LegacyMigrationCutover::Disabled => {
++            let mut connection = pool.acquire().await?;
++            let legacy_to_adopt =
++                legacy_custom_schema_migrations_to_adopt(&mut connection, official_migrator)
++                    .await?;
++            if let Some(migration) = legacy_to_adopt.first() {
++                anyhow::bail!(
++                    "legacy custom state migration {} conflicts with the official migration; \
++                     stop all older Codex app-server and TUI processes sharing this state store, \
++                     then restart once with {LEGACY_MIGRATION_CUTOVER_ENV}=1",
++                    migration.legacy_upstream_version
++                );
++            }
++            return Ok(());
++        }
++        LegacyMigrationCutover::Enabled => {}
++    }
++
++    let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
++    let legacy_to_adopt =
++        legacy_custom_schema_migrations_to_adopt(&mut transaction, official_migrator).await?;
++    if legacy_to_adopt.is_empty() {
++        transaction.commit().await?;
++        return Ok(());
++    }
++
++    sqlx::query(
++        r#"
++CREATE TABLE IF NOT EXISTS codex_custom_schema_migrations (
++    version INTEGER PRIMARY KEY,
++    name TEXT NOT NULL,
++    definition TEXT NOT NULL,
++    applied_at INTEGER NOT NULL DEFAULT (unixepoch())
++)
++        "#,
++    )
++    .execute(&mut *transaction)
++    .await?;
++    for migration in legacy_to_adopt {
++        sqlx::query(
++            "INSERT INTO codex_custom_schema_migrations (version, name, definition) \
++             VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
++        )
++        .bind(migration.version)
++        .bind(migration.name)
++        .bind(migration.definition)
++        .execute(&mut *transaction)
++        .await?;
++        let deleted = sqlx::query(
++            "DELETE FROM _sqlx_migrations WHERE version = ? AND success = TRUE \
++             AND description = ? AND lower(hex(checksum)) = ?",
++        )
++        .bind(migration.legacy_upstream_version)
++        .bind(migration.legacy_description)
++        .bind(migration.legacy_checksum)
++        .execute(&mut *transaction)
++        .await?;
++        if deleted.rows_affected() != 1 {
++            anyhow::bail!(
++                "legacy custom migration {} changed during adoption",
++                migration.legacy_upstream_version
++            );
++        }
++    }
++    transaction.commit().await?;
++    Ok(())
++}
++
++async fn legacy_custom_schema_migrations_to_adopt(
++    connection: &mut SqliteConnection,
++    official_migrator: &Migrator,
++) -> anyhow::Result<Vec<&'static CustomSchemaMigration>> {
++    let upstream_registry_exists = sqlx::query_scalar::<_, i64>(
++        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
++    )
++    .fetch_optional(&mut *connection)
++    .await?
++    .is_some();
++    if !upstream_registry_exists {
++        return Ok(Vec::new());
++    }
++
++    let upstream_rows = sqlx::query_as::<_, (i64, String, bool, String)>(
++        "SELECT version, description, success, lower(hex(checksum)) FROM _sqlx_migrations \
++         WHERE version IN (49, 50) ORDER BY version",
++    )
++    .fetch_all(&mut *connection)
++    .await?;
++    let mut legacy_to_adopt = Vec::new();
++    for migration in LEGACY_CUSTOM_SCHEMA_MIGRATIONS {
++        let Some((_, description, success, checksum)) = upstream_rows
++            .iter()
++            .find(|(version, _, _, _)| *version == migration.legacy_upstream_version)
++        else {
++            continue;
++        };
++        if !success {
++            anyhow::bail!(
++                "state migration {} is not marked successful",
++                migration.legacy_upstream_version
++            );
++        }
++        let official = official_migrator
++            .migrations
++            .iter()
++            .find(|official| official.version == migration.legacy_upstream_version)
++            .ok_or_else(|| {
++                anyhow::anyhow!(
++                    "official state migration {} is unavailable",
++                    migration.legacy_upstream_version
++                )
++            })?;
++        let official_checksum = checksum_hex(official.checksum.as_ref());
++        if checksum == &official_checksum && description == official.description.as_ref() {
++            continue;
++        }
++        if checksum == migration.legacy_checksum && description == migration.legacy_description {
++            legacy_to_adopt.push(*migration);
++            continue;
++        }
++        anyhow::bail!(
++            "state migration {} has an unknown checksum",
++            migration.legacy_upstream_version
++        );
++    }
++
++    for migration in &legacy_to_adopt {
++        for table in migration.required_tables {
++            let definition = sqlx::query_scalar::<_, String>(
++                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
++            )
++            .bind(table.name)
++            .fetch_optional(&mut *connection)
++            .await?;
++            if definition.as_deref() != Some(table.definition) {
++                anyhow::bail!(
++                    "legacy custom migration {} table {} is missing or does not match",
++                    migration.legacy_upstream_version,
++                    table.name
++                );
++            }
++        }
++    }
++
++    let custom_registry_exists = sqlx::query_scalar::<_, i64>(
++        "SELECT 1 FROM sqlite_master WHERE type = 'table' \
++         AND name = 'codex_custom_schema_migrations'",
++    )
++    .fetch_optional(&mut *connection)
++    .await?
++    .is_some();
++    if custom_registry_exists {
++        let custom_rows = sqlx::query_as::<_, (i64, String, String)>(
++            "SELECT version, name, definition FROM codex_custom_schema_migrations \
++             WHERE version IN (1, 2)",
++        )
++        .fetch_all(&mut *connection)
++        .await?;
++        for migration in &legacy_to_adopt {
++            let Some((_, name, definition)) = custom_rows
++                .iter()
++                .find(|(version, _, _)| *version == migration.version)
++            else {
++                continue;
++            };
++            if name != migration.name || definition != migration.definition {
++                anyhow::bail!(
++                    "custom schema migration {} does not match legacy adoption metadata",
++                    migration.version
++                );
++            }
++        }
++    }
++
++    Ok(legacy_to_adopt)
++}
++
++fn checksum_hex(checksum: &[u8]) -> String {
++    use std::fmt::Write;
++
++    checksum.iter().fold(
++        String::with_capacity(checksum.len() * 2),
++        |mut encoded, byte| {
++            let _ = write!(encoded, "{byte:02x}");
++            encoded
++        },
++    )
++}
++
+ pub(crate) fn runtime_goals_migrator() -> Migrator {
+     runtime_migrator(&GOALS_MIGRATOR)
+ }
+diff --git a/codex-rs/state/src/migrations_tests.rs b/codex-rs/state/src/migrations_tests.rs
+index fea8878d3..4b667dd57 100644
+--- a/codex-rs/state/src/migrations_tests.rs
++++ b/codex-rs/state/src/migrations_tests.rs
+@@ -6,9 +6,15 @@ use sqlx::migrate::Migration;
+ use sqlx::migrate::Migrator;
+ use std::borrow::Cow;
+ 
++use super::CUSTOM_SCHEMA_V1;
++use super::CUSTOM_SCHEMA_V2;
++use super::LegacyMigrationCutover;
+ use super::STATE_MIGRATOR;
+ use super::THREAD_HISTORY_MIGRATOR;
++use super::apply_custom_schema_migrations;
++use super::migrate_legacy_custom_schema_migrations;
+ use super::repair_legacy_recency_migration_version;
++use super::runtime_state_migrator;
+ use crate::PINNED_THREAD_SECTION_ID;
+ use crate::PINNED_THREAD_SECTION_NAME;
+ 
+@@ -32,6 +38,343 @@ fn migrator_through(version: i64) -> Migrator {
+     }
+ }
+ 
++fn decode_checksum(checksum: &str) -> Vec<u8> {
++    (0..checksum.len())
++        .step_by(2)
++        .map(|offset| {
++            u8::from_str_radix(&checksum[offset..offset + 2], 16)
++                .expect("checksum should be hexadecimal")
++        })
++        .collect()
++}
++
++async fn insert_legacy_custom_migration(
++    pool: &sqlx::SqlitePool,
++    migration: &super::CustomSchemaMigration,
++    checksum: &str,
++) {
++    sqlx::query(
++        "INSERT INTO _sqlx_migrations \
++         (version, description, installed_on, success, checksum, execution_time) \
++         VALUES (?, ?, CURRENT_TIMESTAMP, TRUE, ?, 0)",
++    )
++    .bind(migration.legacy_upstream_version)
++    .bind(migration.legacy_description)
++    .bind(decode_checksum(checksum))
++    .execute(pool)
++    .await
++    .expect("legacy migration row should insert");
++}
++
++#[tokio::test]
++async fn custom_schema_bootstrap_serializes_concurrent_callers() {
++    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
++    tokio::fs::create_dir_all(&sqlite_home)
++        .await
++        .expect("sqlite home should be created");
++    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
++        let _ = std::fs::remove_dir_all(sqlite_home);
++    });
++    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
++    let pool = sqlite
++        .open_read_write_pool(&sqlite.state_db_path())
++        .await
++        .expect("database should open");
++
++    let (first, second) = tokio::join!(
++        apply_custom_schema_migrations(&pool),
++        apply_custom_schema_migrations(&pool)
++    );
++    first.expect("first custom bootstrap should apply");
++    second.expect("second custom bootstrap should observe the applied schema");
++
++    let applied = sqlx::query_as::<_, (i64, String, String)>(
++        "SELECT version, name, definition FROM codex_custom_schema_migrations",
++    )
++    .fetch_all(&pool)
++    .await
++    .expect("custom migration record should load");
++    assert_eq!(
++        applied,
++        vec![(
++            1,
++            "writer_authority".to_string(),
++            CUSTOM_SCHEMA_V1.definition.to_string(),
++        )]
++    );
++    let custom_tables = sqlx::query_scalar::<_, String>(
++        "SELECT name FROM sqlite_master WHERE type = 'table' \
++         AND name IN ('writer_authority_store', 'thread_writer_generations') ORDER BY name",
++    )
++    .fetch_all(&pool)
++    .await
++    .expect("custom tables should load");
++    assert_eq!(
++        custom_tables,
++        vec![
++            "thread_writer_generations".to_string(),
++            "writer_authority_store".to_string(),
++        ]
++    );
++
++    pool.close().await;
++}
++
++#[tokio::test]
++async fn legacy_v49_and_v50_require_opt_in_then_cut_over_without_losing_data() {
++    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
++    tokio::fs::create_dir_all(&sqlite_home)
++        .await
++        .expect("sqlite home should be created");
++    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
++        let _ = std::fs::remove_dir_all(sqlite_home);
++    });
++    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
++    let state_path = sqlite.state_db_path();
++    let pool = sqlite
++        .open_read_write_pool(&state_path)
++        .await
++        .expect("database should open");
++    migrator_through(/*version*/ 48)
++        .run(&pool)
++        .await
++        .expect("upstream migrations through 48 should apply");
++    sqlx::raw_sql(CUSTOM_SCHEMA_V1.definition)
++        .execute(&pool)
++        .await
++        .expect("legacy writer schema should apply");
++    sqlx::raw_sql(CUSTOM_SCHEMA_V2.definition)
++        .execute(&pool)
++        .await
++        .expect("legacy execution binding schema should apply");
++    insert_legacy_custom_migration(&pool, &CUSTOM_SCHEMA_V1, CUSTOM_SCHEMA_V1.legacy_checksum)
++        .await;
++    insert_legacy_custom_migration(&pool, &CUSTOM_SCHEMA_V2, CUSTOM_SCHEMA_V2.legacy_checksum)
++        .await;
++    sqlx::query("INSERT INTO writer_authority_store (singleton, store_id) VALUES (1, ?)")
++        .bind("legacy-store")
++        .execute(&pool)
++        .await
++        .expect("legacy store identity should insert");
++    sqlx::query("INSERT INTO thread_writer_generations (thread_id, generation) VALUES (?, ?)")
++        .bind("00000000-0000-0000-0000-000000000049")
++        .bind(7_i64)
++        .execute(&pool)
++        .await
++        .expect("legacy writer generation should insert");
++    sqlx::query(
++        "INSERT INTO thread_execution_account_bindings \
++         (thread_id, slot_id, generation) VALUES (?, ?, ?)",
++    )
++    .bind("00000000-0000-0000-0000-000000000049")
++    .bind("account-a")
++    .bind(3_i64)
++    .execute(&pool)
++    .await
++    .expect("legacy execution binding should insert");
++    sqlx::query(
++        "INSERT INTO thread_turn_execution_accounts \
++         (thread_id, turn_id, slot_id, generation) VALUES (?, ?, ?, ?)",
++    )
++    .bind("00000000-0000-0000-0000-000000000049")
++    .bind("turn-1")
++    .bind("account-a")
++    .bind(3_i64)
++    .execute(&pool)
++    .await
++    .expect("legacy turn provenance should insert");
++    let state_migrator = runtime_state_migrator();
++    let error = migrate_legacy_custom_schema_migrations(
++        &pool,
++        &state_migrator,
++        LegacyMigrationCutover::Disabled,
++    )
++    .await
++    .expect_err("legacy migration versions should require an exclusive cutover");
++    let error = error.to_string();
++    assert!(error.contains("stop all older Codex app-server and TUI processes"));
++    assert!(error.contains("CODEX_STATE_LEGACY_MIGRATION_CUTOVER=1"));
++
++    assert_eq!(
++        sqlx::query_as::<_, (i64, String)>(
++            "SELECT version, lower(hex(checksum)) FROM _sqlx_migrations \
++             WHERE version IN (49, 50) ORDER BY version",
++        )
++        .fetch_all(&pool)
++        .await
++        .expect("legacy rows should remain unchanged"),
++        vec![
++            (49, CUSTOM_SCHEMA_V1.legacy_checksum.to_string()),
++            (50, CUSTOM_SCHEMA_V2.legacy_checksum.to_string()),
++        ]
++    );
++    assert_eq!(
++        sqlx::query_scalar::<_, i64>(
++            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' \
++             AND name = 'codex_custom_schema_migrations'",
++        )
++        .fetch_one(&pool)
++        .await
++        .expect("custom registry absence should load"),
++        0
++    );
++
++    migrate_legacy_custom_schema_migrations(
++        &pool,
++        &state_migrator,
++        LegacyMigrationCutover::Enabled,
++    )
++    .await
++    .expect("explicit cutover should adopt validated legacy migrations");
++    STATE_MIGRATOR
++        .run(&pool)
++        .await
++        .expect("official migrations should apply after explicit cutover");
++    assert_eq!(
++        sqlx::query_as::<_, (i64, Vec<u8>)>(
++            "SELECT version, checksum FROM _sqlx_migrations \
++             WHERE version IN (49, 50) ORDER BY version",
++        )
++        .fetch_all(&pool)
++        .await
++        .expect("official migration rows should load"),
++        STATE_MIGRATOR
++            .migrations
++            .iter()
++            .filter(|migration| matches!(migration.version, 49 | 50))
++            .map(|migration| (migration.version, migration.checksum.to_vec()))
++            .collect::<Vec<_>>()
++    );
++    assert_eq!(
++        sqlx::query_as::<_, (i64, String, String)>(
++            "SELECT version, name, definition FROM codex_custom_schema_migrations ORDER BY version",
++        )
++        .fetch_all(&pool)
++        .await
++        .expect("adopted custom rows should load"),
++        vec![
++            (
++                1,
++                CUSTOM_SCHEMA_V1.name.to_string(),
++                CUSTOM_SCHEMA_V1.definition.to_string(),
++            ),
++            (
++                2,
++                CUSTOM_SCHEMA_V2.name.to_string(),
++                CUSTOM_SCHEMA_V2.definition.to_string(),
++            ),
++        ]
++    );
++    assert_eq!(
++        sqlx::query_as::<_, (String, i64)>(
++            "SELECT thread_id, generation FROM thread_writer_generations",
++        )
++        .fetch_all(&pool)
++        .await
++        .expect("legacy writer generations should load"),
++        vec![("00000000-0000-0000-0000-000000000049".to_string(), 7,)]
++    );
++    assert_eq!(
++        sqlx::query_scalar::<_, String>(
++            "SELECT store_id FROM writer_authority_store WHERE singleton = 1",
++        )
++        .fetch_one(&pool)
++        .await
++        .expect("legacy store identity should load"),
++        "legacy-store"
++    );
++    assert_eq!(
++        sqlx::query_as::<_, (String, i64)>(
++            "SELECT slot_id, generation FROM thread_execution_account_bindings",
++        )
++        .fetch_one(&pool)
++        .await
++        .expect("legacy execution binding should load"),
++        ("account-a".to_string(), 3)
++    );
++    assert_eq!(
++        sqlx::query_as::<_, (String, String, i64)>(
++            "SELECT turn_id, slot_id, generation FROM thread_turn_execution_accounts",
++        )
++        .fetch_one(&pool)
++        .await
++        .expect("legacy turn provenance should load"),
++        ("turn-1".to_string(), "account-a".to_string(), 3)
++    );
++    pool.close().await;
++}
++
++#[tokio::test]
++async fn unknown_v50_fails_without_mutation() {
++    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
++    tokio::fs::create_dir_all(&sqlite_home)
++        .await
++        .expect("sqlite home should be created");
++    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
++        let _ = std::fs::remove_dir_all(sqlite_home);
++    });
++    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
++    let state_path = sqlite.state_db_path();
++    let pool = sqlite
++        .open_read_write_pool(&state_path)
++        .await
++        .expect("database should open");
++    migrator_through(/*version*/ 48)
++        .run(&pool)
++        .await
++        .expect("upstream migrations through 48 should apply");
++    sqlx::raw_sql(CUSTOM_SCHEMA_V1.definition)
++        .execute(&pool)
++        .await
++        .expect("legacy writer schema should apply");
++    insert_legacy_custom_migration(&pool, &CUSTOM_SCHEMA_V1, CUSTOM_SCHEMA_V1.legacy_checksum)
++        .await;
++    insert_legacy_custom_migration(
++        &pool,
++        &CUSTOM_SCHEMA_V2,
++        "05b8f0203829d22c122233012fa066fe6be269395e9e0f7a16848722f8ecd34124097826db94bef9925f88b381c2223b",
++    )
++    .await;
++    let state_migrator = runtime_state_migrator();
++    let error = migrate_legacy_custom_schema_migrations(
++        &pool,
++        &state_migrator,
++        LegacyMigrationCutover::Enabled,
++    )
++    .await
++    .expect_err("unknown v50 should fail before changing v49");
++    assert!(error.to_string().contains("unknown checksum"));
++
++    assert_eq!(
++        sqlx::query_as::<_, (i64, String)>(
++            "SELECT version, lower(hex(checksum)) FROM _sqlx_migrations \
++             WHERE version IN (49, 50) ORDER BY version",
++        )
++        .fetch_all(&pool)
++        .await
++        .expect("legacy rows should remain unchanged"),
++        vec![
++            (49, CUSTOM_SCHEMA_V1.legacy_checksum.to_string()),
++            (
++                50,
++                "05b8f0203829d22c122233012fa066fe6be269395e9e0f7a16848722f8ecd34124097826db94bef9925f88b381c2223b"
++                    .to_string(),
++            ),
++        ]
++    );
++    assert_eq!(
++        sqlx::query_scalar::<_, i64>(
++            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' \
++             AND name = 'codex_custom_schema_migrations'",
++        )
++        .fetch_one(&pool)
++        .await
++        .expect("custom registry absence should load"),
++        0
++    );
++    pool.close().await;
++}
++
+ #[tokio::test]
+ async fn thread_section_migration_preserves_legacy_pin_compatibility() {
+     let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+diff --git a/codex-rs/state/src/runtime.rs b/codex-rs/state/src/runtime.rs
+index 95765f98f..ca80e9b3f 100644
+--- a/codex-rs/state/src/runtime.rs
++++ b/codex-rs/state/src/runtime.rs
+@@ -7,6 +7,7 @@ use crate::ThreadMetadata;
+ use crate::ThreadMetadataBuilder;
+ use crate::ThreadsPage;
+ use crate::apply_rollout_item;
++use crate::migrations::apply_custom_schema_migrations;
+ use crate::migrations::runtime_goals_migrator;
+ use crate::migrations::runtime_logs_migrator;
+ use crate::migrations::runtime_memories_migrator;
+@@ -54,6 +55,7 @@ pub(crate) mod test_support;
+ mod thread_section_order;
+ mod thread_sections;
+ mod threads;
++mod writer_authority;
+ 
+ pub use external_agent_config_imports::ExternalAgentConfigImportDetailsRecord;
+ pub use external_agent_config_imports::ExternalAgentConfigImportFailureRecord;
+@@ -74,6 +76,7 @@ pub use recovery::sqlite_error_detail_is_corruption;
+ pub use recovery::sqlite_error_detail_is_lock;
+ pub use remote_control::RemoteControlEnrollmentRecord;
+ pub use threads::ThreadFilterOptions;
++pub use writer_authority::WriterGeneration;
+ 
+ // "Partition" is the retained-log-content bucket we cap at 10 MiB:
+ // - one bucket per non-null thread_id
+@@ -93,6 +96,7 @@ pub struct StateRuntime {
+     thread_goals: GoalStore,
+     memories: MemoryStore,
+     thread_queue: SqliteQueueStore,
++    writer_store_id: String,
+     thread_updated_at_millis: Arc<AtomicI64>,
+     thread_recency_at_millis: Arc<AtomicI64>,
+ }
+@@ -143,6 +147,14 @@ impl StateRuntime {
+                 return Err(err);
+             }
+         };
++        if let Err(err) = apply_custom_schema_migrations(pool.as_ref()).await {
++            warn!(
++                "failed to migrate custom schema in state db at {}: {err}",
++                state_path.display()
++            );
++            pool.close().await;
++            return Err(err);
++        }
+         let logs_pool = match sqlite
+             .open_logs_db(&logs_migrator, telemetry_override)
+             .await
+@@ -216,6 +228,8 @@ impl StateRuntime {
+             .await;
+             return Err(err);
+         }
++        let writer_store_id =
++            writer_authority::load_or_create_writer_store_id(pool.as_ref()).await?;
+         let started = Instant::now();
+         let thread_timestamp_millis_result: anyhow::Result<(Option<i64>, Option<i64>)> =
+             sqlx::query_as(
+@@ -252,6 +266,7 @@ impl StateRuntime {
+             thread_goals: GoalStore::new(Arc::clone(&goals_pool)),
+             memories: MemoryStore::new(Arc::clone(&memories_pool), Arc::clone(&pool)),
+             thread_queue: SqliteQueueStore::new(queue_pool),
++            writer_store_id,
+             pool,
+             logs_pool,
+             sqlite,
+diff --git a/codex-rs/state/src/runtime/writer_authority.rs b/codex-rs/state/src/runtime/writer_authority.rs
+new file mode 100644
+index 000000000..76ed271fa
+--- /dev/null
++++ b/codex-rs/state/src/runtime/writer_authority.rs
+@@ -0,0 +1,87 @@
++use codex_protocol::ThreadId;
++use sqlx::SqlitePool;
++use uuid::Uuid;
++
++use super::StateRuntime;
++
++/// Durable identity and generation allocated to one thread writer.
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct WriterGeneration {
++    pub store_id: String,
++    pub generation: u64,
++}
++
++pub(super) async fn load_or_create_writer_store_id(pool: &SqlitePool) -> anyhow::Result<String> {
++    let candidate = Uuid::new_v4().to_string();
++    sqlx::query(
++        "INSERT INTO writer_authority_store (singleton, store_id) VALUES (1, ?) \
++         ON CONFLICT(singleton) DO NOTHING",
++    )
++    .bind(candidate)
++    .execute(pool)
++    .await?;
++
++    sqlx::query_scalar("SELECT store_id FROM writer_authority_store WHERE singleton = 1")
++        .fetch_one(pool)
++        .await
++        .map_err(anyhow::Error::from)
++}
++
++impl StateRuntime {
++    /// Return the opaque identity persisted by this state store.
++    pub fn writer_store_id(&self) -> &str {
++        &self.writer_store_id
++    }
++
++    /// Allocate the next durable writer generation for `thread_id`.
++    ///
++    /// The existing state pool owns this transaction so callers never reopen the
++    /// database or extend a filesystem coordination-lock critical section.
++    pub async fn next_writer_generation(
++        &self,
++        thread_id: ThreadId,
++    ) -> anyhow::Result<WriterGeneration> {
++        let mut transaction = self.pool.begin().await?;
++        let generation = sqlx::query_scalar::<_, i64>(
++            r#"
++INSERT INTO thread_writer_generations (thread_id, generation)
++VALUES (?, 1)
++ON CONFLICT(thread_id) DO UPDATE SET generation = generation + 1
++RETURNING generation
++            "#,
++        )
++        .bind(thread_id.to_string())
++        .fetch_one(&mut *transaction)
++        .await?;
++        transaction.commit().await?;
++        Ok(WriterGeneration {
++            store_id: self.writer_store_id.clone(),
++            generation: u64::try_from(generation)?,
++        })
++    }
++
++    /// Read the latest durable generation without acquiring writer ownership.
++    pub async fn writer_generation(
++        &self,
++        thread_id: ThreadId,
++    ) -> anyhow::Result<Option<WriterGeneration>> {
++        let generation = sqlx::query_scalar::<_, i64>(
++            "SELECT generation FROM thread_writer_generations WHERE thread_id = ?",
++        )
++        .bind(thread_id.to_string())
++        .fetch_optional(self.pool.as_ref())
++        .await?;
++        generation
++            .map(|generation| {
++                Ok(WriterGeneration {
++                    store_id: self.writer_store_id.clone(),
++                    generation: u64::try_from(generation)?,
++                })
++            })
++            .transpose()
++    }
++}
++
++#[cfg(test)]
++#[path = "writer_authority_tests.rs"]
++mod tests;
+diff --git a/codex-rs/state/src/runtime/writer_authority_tests.rs b/codex-rs/state/src/runtime/writer_authority_tests.rs
+new file mode 100644
+index 000000000..3d4b357f1
+--- /dev/null
++++ b/codex-rs/state/src/runtime/writer_authority_tests.rs
+@@ -0,0 +1,60 @@
++use codex_protocol::ThreadId;
++use codex_utils_absolute_path::test_support::PathExt;
++use pretty_assertions::assert_eq;
++
++use crate::SqliteConfig;
++use crate::StateRuntime;
++
++#[tokio::test]
++async fn writer_store_identity_and_generation_survive_runtime_restart() {
++    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
++    tokio::fs::create_dir_all(&sqlite_home)
++        .await
++        .expect("create sqlite home");
++    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
++        let _ = std::fs::remove_dir_all(sqlite_home);
++    });
++    let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
++    let thread_id = ThreadId::default();
++
++    let first = StateRuntime::init(sqlite.clone(), "test-provider".to_string())
++        .await
++        .expect("initialize first runtime");
++    let custom_schema_versions = sqlx::query_scalar::<_, i64>(
++        "SELECT version FROM codex_custom_schema_migrations ORDER BY version",
++    )
++    .fetch_all(first.pool.as_ref())
++    .await
++    .expect("read custom schema versions");
++    assert_eq!(custom_schema_versions, vec![1]);
++    let first_generation = first
++        .next_writer_generation(thread_id)
++        .await
++        .expect("allocate first generation");
++    assert_eq!(first_generation.generation, 1);
++    first.close().await;
++    drop(first);
++
++    let restarted = StateRuntime::init(sqlite, "test-provider".to_string())
++        .await
++        .expect("initialize restarted runtime");
++    assert_eq!(restarted.writer_store_id(), first_generation.store_id);
++    assert_eq!(
++        restarted
++            .writer_generation(thread_id)
++            .await
++            .expect("read persisted generation"),
++        Some(first_generation.clone())
++    );
++    assert_eq!(
++        restarted
++            .next_writer_generation(thread_id)
++            .await
++            .expect("allocate next generation"),
++        super::WriterGeneration {
++            store_id: first_generation.store_id,
++            generation: 2,
++        }
++    );
++    restarted.close().await;
++}
+diff --git a/codex-rs/state/src/sqlite.rs b/codex-rs/state/src/sqlite.rs
+index 4bb65c6e3..52b402845 100644
+--- a/codex-rs/state/src/sqlite.rs
++++ b/codex-rs/state/src/sqlite.rs
+@@ -6,6 +6,9 @@
+ )]
+ 
+ use crate::DbTelemetry;
++use crate::migrations::LEGACY_MIGRATION_CUTOVER_ENV;
++use crate::migrations::LegacyMigrationCutover;
++use crate::migrations::migrate_legacy_custom_schema_migrations;
+ use crate::migrations::repair_legacy_recency_migration_version;
+ use crate::runtime::RuntimeDbInitError;
+ use crate::telemetry;
+@@ -253,6 +256,11 @@ impl SqliteConfig {
+         let started = Instant::now();
+         let migrate_result = async {
+             if matches!(spec.kind, DbKind::State) {
++                let cutover = match std::env::var(LEGACY_MIGRATION_CUTOVER_ENV).as_deref() {
++                    Ok("1") => LegacyMigrationCutover::Enabled,
++                    _ => LegacyMigrationCutover::Disabled,
++                };
++                migrate_legacy_custom_schema_migrations(&pool, migrator, cutover).await?;
+                 repair_legacy_recency_migration_version(&pool, migrator).await?;
+             }
+             migrator.run(&pool).await.map_err(anyhow::Error::from)
+diff --git a/codex-rs/thread-store/src/lib.rs b/codex-rs/thread-store/src/lib.rs
+index 75253e054..f63f60b99 100644
+--- a/codex-rs/thread-store/src/lib.rs
++++ b/codex-rs/thread-store/src/lib.rs
+@@ -31,6 +31,9 @@ pub use local::RolloutMigrationOutcome;
+ pub use local::RolloutMigrationProgress;
+ pub use local::RolloutMigrationReport;
+ pub use local::RolloutMigrationStatus;
++pub use local::ThreadWriterAuthority;
++pub use local::ThreadWriterOwnership;
++pub use local::WriterControlCapability;
+ pub use projects::CreateProjectParams;
+ pub use projects::CreatedProject;
+ pub use projects::DeletedProject;
+diff --git a/codex-rs/thread-store/src/local/live_writer.rs b/codex-rs/thread-store/src/local/live_writer.rs
+index 3c4813627..7bebf3d89 100644
+--- a/codex-rs/thread-store/src/local/live_writer.rs
++++ b/codex-rs/thread-store/src/local/live_writer.rs
+@@ -30,7 +30,7 @@ pub(super) async fn create_thread(
+     let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
+     let history_mode = params.history_mode;
+     store.ensure_live_recorder_absent(thread_id).await?;
+-    let writer_lock = store.writer_lock_coordinator.acquire(thread_id)?;
++    let writer_lock = store.acquire_writer_lock(thread_id).await?;
+     let recorder = create_thread::create_thread(store, params).await?;
+     store
+         .insert_live_recorder(thread_id, recorder, thread_id, history_mode, writer_lock)
+@@ -43,7 +43,7 @@ pub(super) async fn resume_thread(
+ ) -> ThreadStoreResult<()> {
+     let _live_writer_guard = store.live_writer_locks.lock(params.thread_id).await;
+     store.ensure_live_recorder_absent(params.thread_id).await?;
+-    let writer_lock = store.writer_lock_coordinator.acquire(params.thread_id)?;
++    let writer_lock = store.acquire_writer_lock(params.thread_id).await?;
+     let history_mode = if let Some(history) = params.history.as_deref() {
+         canonical_history_mode_from_rollout_items(history)
+     } else if let Some(rollout_path) = params.rollout_path.as_ref() {
+diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
+index d3d820914..238b4a80a 100644
+--- a/codex-rs/thread-store/src/local/mod.rs
++++ b/codex-rs/thread-store/src/local/mod.rs
+@@ -105,6 +105,12 @@ pub use rollout_migration::RolloutMigrationOutcome;
+ pub use rollout_migration::RolloutMigrationProgress;
+ pub use rollout_migration::RolloutMigrationReport;
+ pub use rollout_migration::RolloutMigrationStatus;
++pub use writer_lock::ThreadWriterAuthority;
++pub use writer_lock::ThreadWriterOwnership;
++pub use writer_lock::WriterControlCapability;
++
++const WRITER_CONTROL_UNAVAILABLE_REASON: &str =
++    "persistent writer control requires the state database";
+ 
+ /// Local filesystem/SQLite-backed implementation of [`ThreadStore`].
+ ///
+@@ -231,7 +237,7 @@ impl std::fmt::Debug for LocalThreadStore {
+ impl LocalThreadStore {
+     /// Create a local store using an already initialized state DB handle.
+     pub fn new(config: LocalThreadStoreConfig, state_db: Option<StateDbHandle>) -> Self {
+-        let writer_lock_coordinator = Arc::new(WriterLockCoordinator::new(&config.codex_home));
++        let writer_lock_coordinator = Arc::new(WriterLockCoordinator::new(config.sqlite.home()));
+         Self {
+             config,
+             live_recorders: Arc::new(Mutex::new(HashMap::new())),
+@@ -249,6 +255,36 @@ impl LocalThreadStore {
+         self.state_db.clone()
+     }
+ 
++    /// Probe current writer ownership and persistent control metadata without
++    /// creating, deleting, or taking ownership of a thread lock.
++    pub async fn probe_writer_authority(
++        &self,
++        thread_id: ThreadId,
++    ) -> ThreadStoreResult<ThreadWriterAuthority> {
++        let ownership = self.writer_lock_coordinator.probe(thread_id)?;
++        let Some(state_db) = self.state_db.as_ref() else {
++            return Ok(ThreadWriterAuthority {
++                ownership,
++                generation: None,
++                control: WriterControlCapability::Disabled {
++                    reason: WRITER_CONTROL_UNAVAILABLE_REASON.to_string(),
++                },
++            });
++        };
++        let generation = state_db.writer_generation(thread_id).await.map_err(|err| {
++            ThreadStoreError::Internal {
++                message: format!("failed to read writer generation for {thread_id}: {err}"),
++            }
++        })?;
++        Ok(ThreadWriterAuthority {
++            ownership,
++            generation: generation.as_ref().map(|generation| generation.generation),
++            control: WriterControlCapability::Enabled {
++                store_id: state_db.writer_store_id().to_string(),
++            },
++        })
++    }
++
+     async fn thread_history_db(&self) -> ThreadStoreResult<&sqlx::SqlitePool> {
+         if self.state_db.is_none() {
+             return Err(ThreadStoreError::Unsupported {
+@@ -298,6 +334,20 @@ impl LocalThreadStore {
+         Ok(())
+     }
+ 
++    async fn acquire_writer_lock(&self, thread_id: ThreadId) -> ThreadStoreResult<WriterLockGuard> {
++        let writer_lock = self.writer_lock_coordinator.acquire(thread_id)?;
++        let Some(state_db) = self.state_db.as_ref() else {
++            return Ok(writer_lock);
++        };
++        let generation = state_db
++            .next_writer_generation(thread_id)
++            .await
++            .map_err(|err| ThreadStoreError::Internal {
++                message: format!("failed to advance writer generation for {thread_id}: {err}"),
++            })?;
++        Ok(writer_lock.with_generation(generation))
++    }
++
+     async fn acquire_writer_locks(
+         &self,
+         thread_ids: &[ThreadId],
+@@ -307,7 +357,7 @@ impl LocalThreadStore {
+             if self.live_recorders.lock().await.contains_key(&thread_id) {
+                 continue;
+             }
+-            writer_locks.push(self.writer_lock_coordinator.acquire(thread_id)?);
++            writer_locks.push(self.acquire_writer_lock(thread_id).await?);
+         }
+         Ok(writer_locks)
+     }
+diff --git a/codex-rs/thread-store/src/local/revert_thread.rs b/codex-rs/thread-store/src/local/revert_thread.rs
+index 1bb40be40..24944292e 100644
+--- a/codex-rs/thread-store/src/local/revert_thread.rs
++++ b/codex-rs/thread-store/src/local/revert_thread.rs
+@@ -33,7 +33,7 @@ pub(super) async fn revert(
+     let _lifecycle_guard = store.live_writer_locks.lock_lifecycle(thread_id).await;
+     let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
+     store.ensure_live_recorder_absent(thread_id).await?;
+-    let _writer_lock = store.writer_lock_coordinator.acquire(thread_id)?;
++    let _writer_lock = store.acquire_writer_lock(thread_id).await?;
+ 
+     // Resolution may return a compressed sibling. Keep SQLite's exact stored path for the CAS.
+     let expected_sqlite_path = state_db
+diff --git a/codex-rs/thread-store/src/local/rollout_migration.rs b/codex-rs/thread-store/src/local/rollout_migration.rs
+index 666e626f7..5766c1c4c 100644
+--- a/codex-rs/thread-store/src/local/rollout_migration.rs
++++ b/codex-rs/thread-store/src/local/rollout_migration.rs
+@@ -444,7 +444,7 @@ impl LocalThreadStore {
+         }
+ 
+         let _live_writer_guard = self.live_writer_locks.lock(thread_id).await;
+-        let _writer_guard = match self.writer_lock_coordinator.acquire(thread_id) {
++        let _writer_guard = match self.acquire_writer_lock(thread_id).await {
+             Ok(guard) => guard,
+             Err(ThreadStoreError::Conflict { message }) => {
+                 return Ok(Some(skipped_busy_outcome(
+@@ -826,7 +826,7 @@ impl LocalThreadStore {
+         legacy_names: &HashMap<ThreadId, String>,
+         limiter: &mut RolloutMigrationRateLimiter,
+     ) -> ThreadStoreResult<PathBuf> {
+-        let _writer_guard = self.writer_lock_coordinator.acquire(thread_id)?;
++        let _writer_guard = self.acquire_writer_lock(thread_id).await?;
+         let decompressed_path = rollout_path_is_compressed(rollout_path)
+             .then(|| decompressed_staged_rollout_path(rollout_path))
+             .transpose()?;
+diff --git a/codex-rs/thread-store/src/local/unarchive_thread.rs b/codex-rs/thread-store/src/local/unarchive_thread.rs
+index 4ef1bdb0a..e4d270848 100644
+--- a/codex-rs/thread-store/src/local/unarchive_thread.rs
++++ b/codex-rs/thread-store/src/local/unarchive_thread.rs
+@@ -23,7 +23,7 @@ pub(super) async fn unarchive_thread(
+     let _lifecycle_guard = store.live_writer_locks.lock_lifecycle(thread_id).await;
+     // Archive, delete, and revert use the same cross-process lock while moving or selecting
+     // rollout files. Unarchive must participate before it moves those files back.
+-    let _writer_lock = store.writer_lock_coordinator.acquire(thread_id)?;
++    let _writer_lock = store.acquire_writer_lock(thread_id).await?;
+     let state_db_ctx = store.state_db().await;
+     let selected_archived_path =
+         thread_rollout_resolver::resolve_current_including_archived(store, thread_id)
+diff --git a/codex-rs/thread-store/src/local/writer_lock.rs b/codex-rs/thread-store/src/local/writer_lock.rs
+index f6b2c8564..fa08b6b32 100644
+--- a/codex-rs/thread-store/src/local/writer_lock.rs
++++ b/codex-rs/thread-store/src/local/writer_lock.rs
+@@ -1,3 +1,4 @@
++use std::collections::HashSet;
+ use std::fs;
+ use std::fs::File;
+ use std::fs::OpenOptions;
+@@ -5,10 +6,12 @@ use std::io;
+ use std::path::Path;
+ use std::path::PathBuf;
+ use std::sync::Arc;
++use std::sync::Mutex;
+ use std::sync::atomic::AtomicBool;
+ use std::sync::atomic::Ordering;
+ 
+ use codex_protocol::ThreadId;
++use codex_state::WriterGeneration;
+ use tracing::warn;
+ 
+ use crate::ThreadStoreError;
+@@ -20,19 +23,46 @@ const COORDINATION_LOCK_FILE: &str = ".coordination.lock";
+ pub(super) struct WriterLockCoordinator {
+     directory: PathBuf,
+     cleanup_attempted: AtomicBool,
++    owned_threads: Mutex<HashSet<ThreadId>>,
+ }
+ 
+ pub(super) struct WriterLockGuard {
+     coordinator: Arc<WriterLockCoordinator>,
++    thread_id: ThreadId,
+     path: PathBuf,
+     file: Option<File>,
++    _generation: Option<WriterGeneration>,
++}
++
++/// Filesystem ownership observed for one exact thread UUID.
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub enum ThreadWriterOwnership {
++    None,
++    OwnedHere,
++    OwnedElsewhere,
++}
++
++/// Whether persistent writer control metadata is available.
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub enum WriterControlCapability {
++    Enabled { store_id: String },
++    Disabled { reason: String },
++}
++
++/// Non-mutating writer authority snapshot for one exact thread UUID.
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct ThreadWriterAuthority {
++    pub ownership: ThreadWriterOwnership,
++    pub generation: Option<u64>,
++    pub control: WriterControlCapability,
+ }
+ 
+ impl WriterLockCoordinator {
+-    pub(super) fn new(codex_home: &Path) -> Self {
++    pub(super) fn new(sqlite_home: &Path) -> Self {
+         Self {
+-            directory: codex_home.join(WRITER_LOCK_DIR),
++            directory: sqlite_home.join(WRITER_LOCK_DIR),
+             cleanup_attempted: AtomicBool::new(false),
++            owned_threads: Mutex::new(HashSet::new()),
+         }
+     }
+ 
+@@ -78,14 +108,80 @@ impl WriterLockCoordinator {
+             }
+         }
+ 
++        self.owned_threads().insert(thread_id);
+         drop(coordination_lock);
+         Ok(WriterLockGuard {
+             coordinator: Arc::clone(self),
++            thread_id,
+             path,
+             file: Some(file),
++            _generation: None,
+         })
+     }
+ 
++    pub(super) fn probe(&self, thread_id: ThreadId) -> ThreadStoreResult<ThreadWriterOwnership> {
++        if self.owned_threads().contains(&thread_id) {
++            return Ok(ThreadWriterOwnership::OwnedHere);
++        }
++
++        let coordination_path = self.directory.join(COORDINATION_LOCK_FILE);
++        let coordination_lock = match OpenOptions::new()
++            .read(true)
++            .write(true)
++            .open(&coordination_path)
++        {
++            Ok(file) => Some(file),
++            Err(err) if err.kind() == io::ErrorKind::NotFound => None,
++            Err(err) => {
++                return Err(ThreadStoreError::Internal {
++                    message: format!(
++                        "failed to inspect thread writer coordination lock {}: {err}",
++                        coordination_path.display()
++                    ),
++                });
++            }
++        };
++        if let Some(coordination_lock) = coordination_lock.as_ref() {
++            coordination_lock
++                .lock()
++                .map_err(|err| ThreadStoreError::Internal {
++                    message: format!(
++                        "failed to acquire thread writer coordination lock {}: {err}",
++                        coordination_path.display()
++                    ),
++                })?;
++            if self.owned_threads().contains(&thread_id) {
++                return Ok(ThreadWriterOwnership::OwnedHere);
++            }
++        }
++
++        let path = self.directory.join(format!("{thread_id}.lock"));
++        let file = match OpenOptions::new().read(true).write(true).open(&path) {
++            Ok(file) => file,
++            Err(err) if err.kind() == io::ErrorKind::NotFound => {
++                return Ok(ThreadWriterOwnership::None);
++            }
++            Err(err) => {
++                return Err(ThreadStoreError::Internal {
++                    message: format!(
++                        "failed to inspect thread writer lock {}: {err}",
++                        path.display()
++                    ),
++                });
++            }
++        };
++        match file.try_lock() {
++            Ok(()) => Ok(ThreadWriterOwnership::None),
++            Err(std::fs::TryLockError::WouldBlock) => Ok(ThreadWriterOwnership::OwnedElsewhere),
++            Err(std::fs::TryLockError::Error(err)) => Err(ThreadStoreError::Internal {
++                message: format!(
++                    "failed to inspect thread writer lock {}: {err}",
++                    path.display()
++                ),
++            }),
++        }
++    }
++
+     fn lock_coordination(&self) -> ThreadStoreResult<File> {
+         fs::create_dir_all(&self.directory).map_err(|err| ThreadStoreError::Internal {
+             message: format!(
+@@ -115,6 +211,13 @@ impl WriterLockCoordinator {
+         Ok(file)
+     }
+ 
++    fn owned_threads(&self) -> std::sync::MutexGuard<'_, HashSet<ThreadId>> {
++        match self.owned_threads.lock() {
++            Ok(owned_threads) => owned_threads,
++            Err(poisoned) => poisoned.into_inner(),
++        }
++    }
++
+     fn remove_stale_thread_locks(&self) -> io::Result<()> {
+         for entry in fs::read_dir(&self.directory)? {
+             let entry = entry?;
+@@ -165,8 +268,16 @@ impl WriterLockCoordinator {
+     }
+ }
+ 
++impl WriterLockGuard {
++    pub(super) fn with_generation(mut self, generation: WriterGeneration) -> Self {
++        self._generation = Some(generation);
++        self
++    }
++}
++
+ impl Drop for WriterLockGuard {
+     fn drop(&mut self) {
++        self.coordinator.owned_threads().remove(&self.thread_id);
+         let coordination_lock = match self.coordinator.lock_coordination() {
+             Ok(lock) => lock,
+             Err(err) => {
+diff --git a/codex-rs/thread-store/src/local/writer_lock_tests.rs b/codex-rs/thread-store/src/local/writer_lock_tests.rs
+index 640631422..16771092f 100644
+--- a/codex-rs/thread-store/src/local/writer_lock_tests.rs
++++ b/codex-rs/thread-store/src/local/writer_lock_tests.rs
+@@ -1,13 +1,28 @@
+ use std::fs;
++use std::path::Path;
+ use std::sync::Arc;
+ 
+ use codex_protocol::ThreadId;
++use codex_utils_absolute_path::test_support::PathExt;
++use pretty_assertions::assert_eq;
+ use tempfile::TempDir;
+ 
+ use super::COORDINATION_LOCK_FILE;
++use super::ThreadWriterOwnership;
+ use super::WRITER_LOCK_DIR;
++use super::WriterControlCapability;
+ use super::WriterLockCoordinator;
+ use crate::ThreadStoreError;
++use crate::local::LocalThreadStore;
++use crate::local::LocalThreadStoreConfig;
++
++fn store_config(codex_home: &Path, sqlite_home: &Path) -> LocalThreadStoreConfig {
++    LocalThreadStoreConfig {
++        codex_home: codex_home.to_path_buf(),
++        sqlite: codex_state::SqliteConfig::new_for_testing(sqlite_home.abs()),
++        default_model_provider_id: "test-provider".to_string(),
++    }
++}
+ 
+ #[test]
+ fn writer_locks_reject_competing_owners_and_release_their_files() {
+@@ -79,3 +94,182 @@ fn first_acquisition_removes_stale_locks_without_removing_active_locks() {
+     drop(secondary_owner);
+     drop(active_owner);
+ }
++
++#[tokio::test]
++async fn different_account_homes_share_writer_authority_through_sqlite_home() {
++    let root = TempDir::new().expect("temp dir");
++    let sqlite_home = root.path().join("shared-sqlite");
++    let first_home = root.path().join("account-a");
++    let second_home = root.path().join("account-b");
++    fs::create_dir_all(&first_home).expect("create first account home");
++    fs::create_dir_all(&second_home).expect("create second account home");
++    let runtime = codex_state::StateRuntime::init(
++        codex_state::SqliteConfig::new_for_testing(sqlite_home.as_path().abs()),
++        "test-provider".to_string(),
++    )
++    .await
++    .expect("initialize state runtime");
++    let primary = LocalThreadStore::new(
++        store_config(&first_home, &sqlite_home),
++        Some(runtime.clone()),
++    );
++    let secondary = LocalThreadStore::new(
++        store_config(&second_home, &sqlite_home),
++        Some(runtime.clone()),
++    );
++    let thread_id = ThreadId::default();
++
++    let first_guard = primary
++        .acquire_writer_lock(thread_id)
++        .await
++        .expect("acquire first writer");
++    assert!(matches!(
++        secondary.acquire_writer_lock(thread_id).await,
++        Err(ThreadStoreError::Conflict { .. })
++    ));
++    assert_eq!(
++        primary
++            .probe_writer_authority(thread_id)
++            .await
++            .expect("probe primary authority"),
++        super::ThreadWriterAuthority {
++            ownership: ThreadWriterOwnership::OwnedHere,
++            generation: Some(1),
++            control: WriterControlCapability::Enabled {
++                store_id: runtime.writer_store_id().to_string(),
++            },
++        }
++    );
++    assert_eq!(
++        secondary
++            .probe_writer_authority(thread_id)
++            .await
++            .expect("probe secondary authority")
++            .ownership,
++        ThreadWriterOwnership::OwnedElsewhere
++    );
++
++    drop(first_guard);
++    let second_guard = secondary
++        .acquire_writer_lock(thread_id)
++        .await
++        .expect("acquire next writer");
++    assert_eq!(
++        secondary
++            .probe_writer_authority(thread_id)
++            .await
++            .expect("probe next authority")
++            .generation,
++        Some(2)
++    );
++    drop(second_guard);
++    runtime.close().await;
++}
++
++#[tokio::test]
++async fn missing_state_db_keeps_shared_filesystem_authority_but_disables_control() {
++    let root = TempDir::new().expect("temp dir");
++    let sqlite_home = root.path().join("shared-sqlite");
++    let primary = LocalThreadStore::new(
++        store_config(&root.path().join("account-a"), &sqlite_home),
++        /*state_db*/ None,
++    );
++    let secondary = LocalThreadStore::new(
++        store_config(&root.path().join("account-b"), &sqlite_home),
++        /*state_db*/ None,
++    );
++    let thread_id = ThreadId::default();
++
++    let owner = primary
++        .acquire_writer_lock(thread_id)
++        .await
++        .expect("acquire filesystem writer");
++    assert!(matches!(
++        secondary.acquire_writer_lock(thread_id).await,
++        Err(ThreadStoreError::Conflict { .. })
++    ));
++    let authority = secondary
++        .probe_writer_authority(thread_id)
++        .await
++        .expect("probe sqlite-less authority");
++    assert_eq!(authority.ownership, ThreadWriterOwnership::OwnedElsewhere);
++    assert_eq!(authority.generation, None);
++    assert!(matches!(
++        authority.control,
++        WriterControlCapability::Disabled { reason }
++            if reason == "persistent writer control requires the state database"
++    ));
++    drop(owner);
++}
++
++#[tokio::test]
++async fn authority_probe_does_not_create_lock_storage() {
++    let root = TempDir::new().expect("temp dir");
++    let sqlite_home = root.path().join("shared-sqlite");
++    let store = LocalThreadStore::new(
++        store_config(&root.path().join("account-a"), &sqlite_home),
++        /*state_db*/ None,
++    );
++
++    let authority = store
++        .probe_writer_authority(ThreadId::default())
++        .await
++        .expect("probe absent writer");
++
++    assert_eq!(authority.ownership, ThreadWriterOwnership::None);
++    assert!(!sqlite_home.join(WRITER_LOCK_DIR).exists());
++}
++
++#[tokio::test]
++async fn different_sqlite_homes_have_independent_writer_authority() {
++    let root = TempDir::new().expect("temp dir");
++    let primary = LocalThreadStore::new(
++        store_config(
++            &root.path().join("account-a"),
++            &root.path().join("sqlite-a"),
++        ),
++        /*state_db*/ None,
++    );
++    let secondary = LocalThreadStore::new(
++        store_config(
++            &root.path().join("account-b"),
++            &root.path().join("sqlite-b"),
++        ),
++        /*state_db*/ None,
++    );
++    let thread_id = ThreadId::default();
++
++    let primary_owner = primary
++        .acquire_writer_lock(thread_id)
++        .await
++        .expect("acquire first sqlite authority");
++    let secondary_owner = secondary
++        .acquire_writer_lock(thread_id)
++        .await
++        .expect("acquire independent sqlite authority");
++
++    drop(secondary_owner);
++    drop(primary_owner);
++}
++
++#[tokio::test]
++async fn single_home_keeps_the_existing_writer_lock_path() {
++    let home = TempDir::new().expect("temp dir");
++    let store = LocalThreadStore::new(
++        store_config(home.path(), home.path()),
++        /*state_db*/ None,
++    );
++    let thread_id = ThreadId::default();
++
++    let owner = store
++        .acquire_writer_lock(thread_id)
++        .await
++        .expect("acquire single-home writer");
++    let lock_path = home
++        .path()
++        .join(WRITER_LOCK_DIR)
++        .join(format!("{thread_id}.lock"));
++    assert!(lock_path.exists());
++    drop(owner);
++    assert!(!lock_path.exists());
++}
+-- 
+2.50.1 (Apple Git-155)
+
