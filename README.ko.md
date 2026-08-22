@@ -33,8 +33,8 @@ Stock Codex는 인증과 runtime 소유권의 많은 부분을 process 단위로
 | 순서형 0.149 patch export와 clean-apply 검증 | 완료; 11개 patch가 tree `b5dd645e42e146aba3d1a0f87177c063cc73390c`를 재현함 |
 | focused check와 격리 실세션 smoke | 완료; continuity 24/24, Goal 15/15 PASS, product failure·skip 0 |
 | 최종 독립 review | 내부 Codex reviewer 2명이 동일 범위를 서로 다른 fresh context에서 독립 검토; 확인된 지적만 소스 실검 후 수정함 |
-| macOS arm64 release build와 artifact | corrected tree 대상 GitHub Actions build 대기; local full build는 release 근거로 사용하지 않음 |
-| 0.149 publication | GitHub build 준비가 끝난 candidate이며 아직 release하지 않음 |
+| macOS arm64 release build와 artifact | 완료; [run 32578266792](https://github.com/iLfounder/codex-cli-custom/actions/runs/32578266792), artifact `9478459844` |
+| 0.149 publication | 완료 |
 
 현재 candidate는 [`custom-patches/rust-v0.149.0`](custom-patches/rust-v0.149.0/)이다. [`custom-patches/rust-v0.148.0`](custom-patches/rust-v0.148.0/)은 이전 release series로만 보존한다.
 
@@ -143,7 +143,7 @@ Applier는 dirty 또는 잘못된 base worktree를 거절하고, 각 patch diges
 
 Corrected candidate는 정확히 P001–P011로 clean-apply되어 tree `b5dd645e42e146aba3d1a0f87177c063cc73390c`를 만든다. Focused source check와 격리된 live TUI/app-server smoke는 완료했다. 내부 Codex reviewer 2명이 동일한 고정 predecessor 범위를 서로 다른 fresh context에서 독립 검토했고, lead는 finding을 source와 call chain으로 실검해 확인된 결함만 통합했다.
 
-Full clean-applied macOS arm64 release build는 의도적으로 GitHub Actions에서만 수행한다. 이 exact tree의 workflow가 성공하고 matching artifact를 발행하기 전에는 과거 run과 artifact를 이 candidate의 release 근거로 취급하지 않는다.
+[Actions run 32578266792](https://github.com/iLfounder/codex-cli-custom/actions/runs/32578266792)는 P001–P011을 clean-apply하고 macOS arm64에서 두 release binary를 build했다. Artifact `9478459844`에는 patched tree `b5dd645e42e146aba3d1a0f87177c063cc73390c`가 기록되어 있다. 결정론적 Cargo.lock normalization 뒤 compiled tree는 `6f614d7d15daf509e8599dbd196145fbf0e13471`, lock SHA-256은 `598546764c876b93c6a59edcd5879b8c1b17cdf7c8df023fb051bcfb755a81f4`다. GitHub artifact digest는 `sha256:d98ae8bfcdd893efceb05423e11e0fbecc465263366bf5d05470b296f99c4578`다.
 
 ## 과거 작업 참고자료
 

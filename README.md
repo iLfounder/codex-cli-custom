@@ -33,8 +33,8 @@ The target is upstream [`rust-v0.149.0`](https://github.com/openai/codex/release
 | Ordered 0.149 patch export and clean-apply verification | Complete; 11 patches reproduce tree `b5dd645e42e146aba3d1a0f87177c063cc73390c` |
 | Focused checks and isolated live smoke | Complete; continuity 24/24 and Goal 15/15 passed with no product failures or skips |
 | Final independent reviews | Two internal Codex reviewers inspected the same frozen scope in separate fresh contexts; confirmed findings were source-checked and corrected |
-| macOS arm64 release build and artifacts | Pending GitHub Actions build for the corrected tree; no local full build is used as release evidence |
-| 0.149 publication | Candidate ready for GitHub build; not yet released |
+| macOS arm64 release build and artifacts | Complete; [run 32578266792](https://github.com/iLfounder/codex-cli-custom/actions/runs/32578266792), artifact `9478459844` |
+| 0.149 publication | Complete |
 
 The current candidate is [`custom-patches/rust-v0.149.0`](custom-patches/rust-v0.149.0/). The files under [`custom-patches/rust-v0.148.0`](custom-patches/rust-v0.148.0/) are retained only as the previous release series.
 
@@ -143,7 +143,7 @@ The older custom series used migration numbers that official 0.149 later claimed
 
 The corrected candidate clean-applies as exactly P001–P011 to tree `b5dd645e42e146aba3d1a0f87177c063cc73390c`. Focused source checks and isolated live TUI/app-server smoke are complete. Two internal Codex reviewers independently inspected the same frozen predecessor scope in fresh contexts; the lead verified findings against source and call chains and integrated only confirmed defects.
 
-The full clean-applied macOS arm64 release build intentionally runs only in GitHub Actions. Until that workflow succeeds for this exact tree and publishes a matching artifact, earlier runs and artifacts are historical evidence for earlier trees, not release proof for this candidate.
+[Actions run 32578266792](https://github.com/iLfounder/codex-cli-custom/actions/runs/32578266792) clean-applied P001–P011 and built both release binaries on macOS arm64. Artifact `9478459844` records patched tree `b5dd645e42e146aba3d1a0f87177c063cc73390c`; deterministic Cargo.lock normalization produced compiled tree `6f614d7d15daf509e8599dbd196145fbf0e13471` and lock SHA-256 `598546764c876b93c6a59edcd5879b8c1b17cdf7c8df023fb051bcfb755a81f4`. The GitHub artifact digest is `sha256:d98ae8bfcdd893efceb05423e11e0fbecc465263366bf5d05470b296f99c4578`.
 
 ## Historical working notes
 
