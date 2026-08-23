@@ -58,22 +58,39 @@ Build locally from `codex-rs`:
 perl -0pi -e 's/version = "0\.0\.0"/version = "0.149.0"/g' Cargo.lock
 cargo build --locked --release -p codex-cli --bin codex
 cargo build --locked --release -p codex-app-server --bin codex-app-server
+cargo build --locked --release -p codex-code-mode-host --bin codex-code-mode-host
+cargo build --locked --release -p codex-responses-api-proxy --bin codex-responses-api-proxy
+CODEX_REPO_ROOT="$(cd .. && pwd)" python3 ../scripts/build_codex_package.py \
+  --target aarch64-apple-darwin --variant codex --package-version 0.149.0 \
+  --entrypoint-bin target/release/codex \
+  --code-mode-host-bin target/release/codex-code-mode-host
+CODEX_REPO_ROOT="$(cd .. && pwd)" python3 ../scripts/build_codex_package.py \
+  --target aarch64-apple-darwin --variant codex-app-server --package-version 0.149.0 \
+  --entrypoint-bin target/release/codex-app-server \
+  --code-mode-host-bin target/release/codex-code-mode-host
 ```
 
 The tagged upstream source keeps workspace-package versions as `0.0.0` placeholders in
 `Cargo.lock`. The first command normalizes only those exact placeholders, matching the GitHub
 Actions build, before Cargo performs locked dependency resolution.
+The package builder requires Python 3.10 or newer. It also fetches and verifies the
+target-specific ripgrep and patched zsh resources defined by the upstream source.
 
 The manual GitHub Actions workflow uses a standard macOS arm64 runner and produces:
 
-- `codex`
-- `codex-app-server`
+- `codex-package-aarch64-apple-darwin.tar.gz`: the TUI/CLI, its matching Code Mode host,
+  ripgrep, patched zsh, and package metadata
+- `codex-app-server-package-aarch64-apple-darwin.tar.gz`: app-server, the same matching
+  Code Mode host, ripgrep, patched zsh, and package metadata
+- `codex-responses-api-proxy`: an optional standalone proxy; it is not required by the TUI
+  or app-server at runtime
 - `SHA256SUMS`
 - `BUILD-METADATA.txt`
 - `LICENSE`
 - `NOTICE`
 
-The uploaded artifact contains a compressed archive and its SHA-256 checksum.
+The workflow checks both package layouts, verifies that they contain the exact same built
+Code Mode host, and records SHA-256 digests and source-tree provenance before upload.
 
 ## Upgrading a 0.148 custom state store
 

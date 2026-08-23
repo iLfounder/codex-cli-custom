@@ -58,22 +58,39 @@ Applier는 clean tree를 요구하고 각 patch digest를 검증한 뒤 P001–P
 perl -0pi -e 's/version = "0\.0\.0"/version = "0.149.0"/g' Cargo.lock
 cargo build --locked --release -p codex-cli --bin codex
 cargo build --locked --release -p codex-app-server --bin codex-app-server
+cargo build --locked --release -p codex-code-mode-host --bin codex-code-mode-host
+cargo build --locked --release -p codex-responses-api-proxy --bin codex-responses-api-proxy
+CODEX_REPO_ROOT="$(cd .. && pwd)" python3 ../scripts/build_codex_package.py \
+  --target aarch64-apple-darwin --variant codex --package-version 0.149.0 \
+  --entrypoint-bin target/release/codex \
+  --code-mode-host-bin target/release/codex-code-mode-host
+CODEX_REPO_ROOT="$(cd .. && pwd)" python3 ../scripts/build_codex_package.py \
+  --target aarch64-apple-darwin --variant codex-app-server --package-version 0.149.0 \
+  --entrypoint-bin target/release/codex-app-server \
+  --code-mode-host-bin target/release/codex-code-mode-host
 ```
 
 upstream release tag의 `Cargo.lock`에는 workspace package version이 `0.0.0` placeholder로
 남아 있다. 첫 명령은 GitHub Actions build와 동일하게 이 정확한 placeholder만 `0.149.0`으로
 정규화한 뒤 Cargo가 locked dependency resolution을 수행하게 한다.
+Package builder는 Python 3.10 이상이 필요하다. 또한 upstream source에 고정된 target별
+ripgrep과 patched zsh resource를 다운로드하고 digest를 검증한다.
 
 수동 GitHub Actions workflow는 표준 macOS arm64 runner에서 다음 산출물을 만든다.
 
-- `codex`
-- `codex-app-server`
+- `codex-package-aarch64-apple-darwin.tar.gz`: TUI/CLI, 같은 source의 Code Mode host,
+  ripgrep, patched zsh, package metadata
+- `codex-app-server-package-aarch64-apple-darwin.tar.gz`: app-server, 같은 Code Mode
+  host, ripgrep, patched zsh, package metadata
+- `codex-responses-api-proxy`: TUI와 app-server runtime에는 필요하지 않은 선택형
+  standalone proxy
 - `SHA256SUMS`
 - `BUILD-METADATA.txt`
 - `LICENSE`
 - `NOTICE`
 
-업로드 artifact에는 압축 archive와 SHA-256 checksum이 들어간다.
+Workflow는 두 package layout을 검사하고, 양쪽에 동일한 build의 Code Mode host가
+들어갔는지 비교한 뒤 SHA-256 digest와 source-tree provenance를 기록해 업로드한다.
 
 ## 기존 0.148 custom state store 업그레이드
 
