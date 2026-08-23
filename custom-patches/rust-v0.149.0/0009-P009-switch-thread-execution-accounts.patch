@@ -1,4 +1,4 @@
-From d93c50915777e049722683d8414022833cc9d7b4 Mon Sep 17 00:00:00 2001
+From e3bc09873c1e972a8102459824b8fcdf1ccb4024 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 19:13:43 +0900
 Subject: [PATCH] feat(custom): switch thread accounts without restart for
@@ -286,7 +286,7 @@ index 43f1a06c2..94df2ca4f 100644
      }
  }
 diff --git a/codex-rs/app-server/src/account_registry/live_registration.rs b/codex-rs/app-server/src/account_registry/live_registration.rs
-index 07e7308bf..763bfbef1 100644
+index c610f96df..471d0ecec 100644
 --- a/codex-rs/app-server/src/account_registry/live_registration.rs
 +++ b/codex-rs/app-server/src/account_registry/live_registration.rs
 @@ -84,6 +84,10 @@ impl AccountRegistry {
@@ -332,7 +332,7 @@ index 07e7308bf..763bfbef1 100644
                  slot.manifest.updated_at = now;
                  slot.active_login_operation_id = None;
                  slot.completed_login_operation_id = None;
-@@ -499,6 +507,22 @@ impl AccountRegistry {
+@@ -599,6 +607,22 @@ impl AccountRegistry {
          prepared: &PreparedSlotLogin,
          error_code: &'static str,
      ) -> Result<Option<AccountSlotChangedNotification>, JSONRPCErrorError> {
@@ -356,10 +356,10 @@ index 07e7308bf..763bfbef1 100644
          let (revision, mut slots) = {
              let state = self
 diff --git a/codex-rs/app-server/src/account_registry_tests.rs b/codex-rs/app-server/src/account_registry_tests.rs
-index f3a1c75a6..11fc3c3c1 100644
+index f81e1b863..3ae9e85a4 100644
 --- a/codex-rs/app-server/src/account_registry_tests.rs
 +++ b/codex-rs/app-server/src/account_registry_tests.rs
-@@ -505,3 +505,45 @@ async fn logout_reservation_blocks_only_the_target_slot_resolver() {
+@@ -543,3 +543,45 @@ async fn logout_reservation_blocks_only_the_target_slot_resolver() {
          .await
          .expect("clear reservation");
  }

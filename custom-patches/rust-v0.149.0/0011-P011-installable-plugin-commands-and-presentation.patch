@@ -1,4 +1,4 @@
-From 2fbf9bdd2e602b7ebb6fe29e0bfea261f3b894e0 Mon Sep 17 00:00:00 2001
+From 1829183f5b049d17a8861372b3b7f548731d32a1 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 20:14:51 +0900
 Subject: [PATCH] feat(custom): add structured plugin commands and TUI

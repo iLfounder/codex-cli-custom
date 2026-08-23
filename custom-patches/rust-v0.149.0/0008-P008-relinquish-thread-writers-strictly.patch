@@ -1,4 +1,4 @@
-From 81bdd2b15346281c3df5bcd84cd8109aa34716e7 Mon Sep 17 00:00:00 2001
+From d65aabde53a4753ecbf8b0ecb319a7fcdec7d7ae Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 18:06:29 +0900
 Subject: [PATCH] feat(custom): relinquish thread writers strictly for 0.149

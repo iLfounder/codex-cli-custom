@@ -1,4 +1,4 @@
-From b49963b54c0762951aeca6d7e2be84f40a34e527 Mon Sep 17 00:00:00 2001
+From 1b3f8ec43aa8fe03ee54b1c407e95687d8474784 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 19:45:26 +0900
 Subject: [PATCH] feat(custom): add release-aware TUI controls for 0.149
@@ -11,8 +11,8 @@ Subject: [PATCH] feat(custom): add release-aware TUI controls for 0.149
  .../src/protocol/v2/thread.rs                 | 198 ++++
  codex-rs/app-server/README.md                 |   4 +-
  codex-rs/app-server/src/account_registry.rs   | 144 ++-
- .../src/account_registry/live_registration.rs | 223 ++++-
- .../app-server/src/account_registry_tests.rs  | 288 +++++-
+ .../src/account_registry/live_registration.rs | 147 ++-
+ .../app-server/src/account_registry_tests.rs  | 286 +++++-
  .../request_processors/thread_processor.rs    | 846 +++++++++++++++++-
  .../thread_processor_tests.rs                 | 164 ++++
  .../app-server/src/session_runtime/mod.rs     | 305 +++++--
@@ -78,7 +78,7 @@ Subject: [PATCH] feat(custom): add release-aware TUI controls for 0.149
  codex-rs/tui/src/chatwidget/user_messages.rs  | 107 ++-
  codex-rs/tui/src/goal_display.rs              |   2 +
  codex-rs/tui/src/slash_command.rs             |   3 +
- 74 files changed, 7175 insertions(+), 581 deletions(-)
+ 74 files changed, 7097 insertions(+), 581 deletions(-)
  create mode 100644 codex-rs/tui/src/app/account_controls.rs
  create mode 100644 codex-rs/tui/src/app/account_login.rs
  create mode 100644 codex-rs/tui/src/app/account_picker.rs
@@ -5603,7 +5603,7 @@ index 94df2ca4f..45f282129 100644
              )));
          }
 diff --git a/codex-rs/app-server/src/account_registry/live_registration.rs b/codex-rs/app-server/src/account_registry/live_registration.rs
-index 763bfbef1..b24e4efbd 100644
+index 471d0ecec..3d93150e6 100644
 --- a/codex-rs/app-server/src/account_registry/live_registration.rs
 +++ b/codex-rs/app-server/src/account_registry/live_registration.rs
 @@ -1,4 +1,6 @@
@@ -5815,7 +5815,7 @@ index 763bfbef1..b24e4efbd 100644
          {
              let mut state = self
                  .state
-@@ -316,11 +394,91 @@ impl AccountRegistry {
+@@ -316,6 +394,10 @@ impl AccountRegistry {
                  .map_err(|_| internal_error("account slot registry is unavailable"))?;
              state.revision = next_revision;
              state.slots = slots;
@@ -5826,88 +5826,7 @@ index 763bfbef1..b24e4efbd 100644
          }
          drop(mutation);
          self.changed_notification(&changed_slot_id).await.map(Some)
-     }
- 
-+    async fn retry_manifest_projection(&self) {
-+        let mutation = self.mutation_lock.lock().await;
-+        let (revision, slots, dirty) = match self.state.read() {
-+            Ok(state) => (state.revision, state.slots.clone(), state.projection_dirty),
-+            Err(_) => return,
-+        };
-+        if !dirty {
-+            return;
-+        }
-+        if let Err(error) = self.persist_slots(revision, &slots) {
-+            tracing::warn!(
-+                "account-slots.toml recovery projection remains pending: {}",
-+                error.message
-+            );
-+            return;
-+        }
-+        if let Ok(mut state) = self.state.write()
-+            && state.revision == revision
-+        {
-+            state.projection_dirty = false;
-+        }
-+        drop(mutation);
-+    }
-+
-+    async fn sync_durable_runtime_projection(&self) {
-+        let slots = match self.state.read() {
-+            Ok(state) => state.slots.clone(),
-+            Err(_) => return,
-+        };
-+        let mut durable = Vec::new();
-+        for slot in slots.iter().filter(|slot| !slot.manifest.is_default) {
-+            match self
-+                .thread_store
-+                .execution_account_slot_runtime_state(slot.manifest.account_slot_id.clone())
-+                .await
-+            {
-+                Ok((runtime_version, _)) if runtime_version > 0 => durable.push((
-+                    slot.manifest.account_slot_id.clone(),
-+                    self.runtime_home(&slot.manifest.account_slot_id, runtime_version),
-+                )),
-+                Ok(_) => {}
-+                Err(error) => tracing::warn!(
-+                    account_slot_id = %slot.manifest.account_slot_id,
-+                    "failed to reconcile durable account runtime projection: {error}"
-+                ),
-+            }
-+        }
-+        if durable.is_empty() {
-+            return;
-+        }
-+        let _mutation = self.mutation_lock.lock().await;
-+        let mut state = match self.state.write() {
-+            Ok(state) => state,
-+            Err(_) => return,
-+        };
-+        let mut changed = false;
-+        for (slot_id, auth_home) in durable {
-+            if let Some(slot) = state
-+                .slots
-+                .iter_mut()
-+                .find(|slot| slot.manifest.account_slot_id == slot_id)
-+                && (slot.manifest.auth_home != auth_home
-+                    || slot.manifest.status != ManifestSlotStatus::Ready)
-+            {
-+                slot.manifest.auth_home = auth_home;
-+                slot.manifest.status = ManifestSlotStatus::Ready;
-+                slot.manifest.error_code = None;
-+                changed = true;
-+            }
-+        }
-+        if changed {
-+            state.revision = state.revision.saturating_add(1);
-+            state.projection_dirty = true;
-+        }
-+    }
-+
-     #[cfg(test)]
-     pub(crate) async fn logout_secondary(
-         &self,
-@@ -632,7 +790,7 @@ impl AccountRegistry {
+@@ -732,7 +814,7 @@ impl AccountRegistry {
  }
  
  pub(super) fn available_actions(
@@ -5916,7 +5835,7 @@ index 763bfbef1..b24e4efbd 100644
      capability: &AccountSlotCapability,
      is_default: bool,
      active_operation: bool,
-@@ -650,17 +808,6 @@ pub(super) fn available_actions(
+@@ -750,17 +832,6 @@ pub(super) fn available_actions(
              unavailable(AccountSlotAction::Logout, reason),
          ];
      }
@@ -5934,7 +5853,7 @@ index 763bfbef1..b24e4efbd 100644
      if active_operation {
          return vec![
              unavailable(AccountSlotAction::Login, ERROR_LOGIN_BUSY),
-@@ -669,29 +816,43 @@ pub(super) fn available_actions(
+@@ -769,29 +840,43 @@ pub(super) fn available_actions(
              unavailable(AccountSlotAction::Logout, ERROR_LOGIN_BUSY),
          ];
      }
@@ -5987,7 +5906,7 @@ index 763bfbef1..b24e4efbd 100644
      ]
  }
 diff --git a/codex-rs/app-server/src/account_registry_tests.rs b/codex-rs/app-server/src/account_registry_tests.rs
-index 11fc3c3c1..dfba749ee 100644
+index 3ae9e85a4..f5ef341ed 100644
 --- a/codex-rs/app-server/src/account_registry_tests.rs
 +++ b/codex-rs/app-server/src/account_registry_tests.rs
 @@ -2,15 +2,47 @@ use super::*;
@@ -6255,23 +6174,7 @@ index 11fc3c3c1..dfba749ee 100644
  }
  
  #[tokio::test]
-@@ -253,6 +446,7 @@ async fn secondary_logout_revokes_exact_ready_slot_and_bumps_generation() {
-     let process_home = tempdir().expect("temp process home");
-     let mut slots = manifest(process_home.path(), 7);
-     slots.slots[1].status = ManifestSlotStatus::Ready;
-+    persist_api_key_auth(&slots.slots[1].auth_home);
-     slots
-         .persist(&process_home.path().join(MANIFEST_FILE))
-         .expect("persist manifest");
-@@ -263,6 +457,7 @@ async fn secondary_logout_revokes_exact_ready_slot_and_bumps_generation() {
-     );
-     let slot_models = codex_core::build_models_manager(registry.config.as_ref(), slot_auth.clone());
-     let runtime = Arc::new(AccountRuntimeBundle {
-+        runtime_version: AtomicU64::new(0),
-         auth_manager: slot_auth,
-         models_manager: slot_models,
-     });
-@@ -288,8 +483,8 @@ async fn secondary_logout_revokes_exact_ready_slot_and_bumps_generation() {
+@@ -308,8 +501,8 @@ async fn secondary_logout_revokes_exact_ready_slot_and_bumps_generation() {
              .find(|action| action.action == AccountSlotAction::SwitchTo),
          Some(&AccountSlotActionAvailability {
              action: AccountSlotAction::SwitchTo,
@@ -6282,7 +6185,7 @@ index 11fc3c3c1..dfba749ee 100644
          })
      );
  
-@@ -325,7 +520,11 @@ async fn secondary_logout_rejects_default_stale_and_active_login() {
+@@ -363,7 +556,11 @@ async fn secondary_logout_rejects_default_stale_and_active_login() {
              .is_err()
      );
      let prepared = registry
@@ -6295,7 +6198,7 @@ index 11fc3c3c1..dfba749ee 100644
          .await
          .expect("prepare slot");
      let snapshot = registry
-@@ -368,6 +567,7 @@ async fn logout_reservation_is_exact_and_allows_other_slot_mutation() {
+@@ -406,6 +603,7 @@ async fn logout_reservation_is_exact_and_allows_other_slot_mutation() {
      let process_home = tempdir().expect("temp process home");
      let mut slots = manifest(process_home.path(), 7);
      slots.slots[1].status = ManifestSlotStatus::Ready;
@@ -6303,7 +6206,7 @@ index 11fc3c3c1..dfba749ee 100644
      slots.slots.push(AccountSlotManifest {
          account_slot_id: THIRD_SLOT_ID.to_string(),
          label: "Third account".to_string(),
-@@ -408,20 +608,18 @@ async fn logout_reservation_is_exact_and_allows_other_slot_mutation() {
+@@ -446,20 +644,18 @@ async fn logout_reservation_is_exact_and_allows_other_slot_mutation() {
          .clear_logout_reservation(&first)
          .await
          .expect("clear first reservation");
@@ -6326,7 +6229,7 @@ index 11fc3c3c1..dfba749ee 100644
          )
          .await
          .expect("other slot mutation proceeds");
-@@ -448,6 +646,7 @@ async fn logout_reservation_blocks_only_the_target_slot_resolver() {
+@@ -486,6 +682,7 @@ async fn logout_reservation_blocks_only_the_target_slot_resolver() {
      let process_home = tempdir().expect("temp process home");
      let mut slots = manifest(process_home.path(), 7);
      slots.slots[1].status = ManifestSlotStatus::Ready;
@@ -6334,7 +6237,7 @@ index 11fc3c3c1..dfba749ee 100644
      slots
          .persist(&process_home.path().join(MANIFEST_FILE))
          .expect("persist manifest");
-@@ -458,6 +657,7 @@ async fn logout_reservation_blocks_only_the_target_slot_resolver() {
+@@ -496,6 +693,7 @@ async fn logout_reservation_blocks_only_the_target_slot_resolver() {
      );
      let slot_models = codex_core::build_models_manager(registry.config.as_ref(), slot_auth.clone());
      let runtime = Arc::new(AccountRuntimeBundle {
@@ -6342,7 +6245,7 @@ index 11fc3c3c1..dfba749ee 100644
          auth_manager: slot_auth,
          models_manager: slot_models,
      });
-@@ -511,6 +711,7 @@ async fn transition_resolution_holds_target_readiness_lease() {
+@@ -549,6 +747,7 @@ async fn transition_resolution_holds_target_readiness_lease() {
      let process_home = tempdir().expect("temp process home");
      let mut slots = manifest(process_home.path(), 7);
      slots.slots[1].status = ManifestSlotStatus::Ready;
@@ -6350,7 +6253,7 @@ index 11fc3c3c1..dfba749ee 100644
      slots
          .persist(&process_home.path().join(MANIFEST_FILE))
          .expect("persist manifest");
-@@ -521,6 +722,7 @@ async fn transition_resolution_holds_target_readiness_lease() {
+@@ -559,6 +758,7 @@ async fn transition_resolution_holds_target_readiness_lease() {
      );
      let slot_models = codex_core::build_models_manager(registry.config.as_ref(), slot_auth.clone());
      let runtime = Arc::new(AccountRuntimeBundle {
@@ -6358,7 +6261,7 @@ index 11fc3c3c1..dfba749ee 100644
          auth_manager: slot_auth,
          models_manager: slot_models,
      });
-@@ -547,3 +749,57 @@ async fn transition_resolution_holds_target_readiness_lease() {
+@@ -585,3 +785,57 @@ async fn transition_resolution_holds_target_readiness_lease() {
      drop(transition);
      assert!(binding_transition.try_lock_owned().is_ok());
  }

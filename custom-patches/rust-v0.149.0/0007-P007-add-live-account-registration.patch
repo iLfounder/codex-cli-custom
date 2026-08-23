@@ -1,4 +1,4 @@
-From e4195d4e6bffaeff5a9214b68a7e6e0399e55d6a Mon Sep 17 00:00:00 2001
+From 17e1c59e3d15bed15c4c55849e9772cf3e24061a Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 21 Aug 2026 17:31:24 +0900
 Subject: [PATCH] feat(custom): add live account registration for 0.149
@@ -12,7 +12,7 @@ Subject: [PATCH] feat(custom): add live account registration for 0.149
  .../json/v2/AccountSlotListResponse.json      |   3 +-
  .../v2/AccountSlotLoginStartResponse.json     |   3 +-
  .../json/v2/AccountSlotLogoutParams.json      |  26 +
- .../json/v2/AccountSlotLogoutResponse.json    | 178 +++++
+ .../json/v2/AccountSlotLogoutResponse.json    | 178 ++++
  .../app-server-exports-experimental.json.zst  | Bin 148222 -> 148238 bytes
  .../app-server-exports-stable.json.zst        | Bin 142730 -> 143169 bytes
  .../schema/typescript/ClientRequest.ts        |   3 +-
@@ -24,25 +24,25 @@ Subject: [PATCH] feat(custom): add live account registration for 0.149
  .../src/protocol/v2/account.rs                |  45 +-
  codex-rs/app-server/README.md                 |  19 +
  codex-rs/app-server/src/account_registry.rs   | 110 ++-
- .../src/account_registry/live_registration.rs | 679 +++++++++++++++++
- .../app-server/src/account_registry_tests.rs  | 346 +++++++++
+ .../src/account_registry/live_registration.rs | 779 ++++++++++++++++++
+ .../app-server/src/account_registry_tests.rs  | 384 +++++++++
  codex-rs/app-server/src/external_auth.rs      |  50 +-
  codex-rs/app-server/src/in_process.rs         |   6 +-
  codex-rs/app-server/src/lib.rs                |   4 +-
  codex-rs/app-server/src/message_processor.rs  |  40 +-
- codex-rs/app-server/src/outgoing_message.rs   | 127 +++-
+ codex-rs/app-server/src/outgoing_message.rs   | 127 ++-
  codex-rs/app-server/src/request_processors.rs |   2 +-
- .../request_processors/account_processor.rs   |  84 ++-
- .../account_processor/slot_login.rs           | 683 ++++++++++++++++++
- .../account_processor/slot_login/transport.rs | 210 ++++++
+ .../request_processors/account_processor.rs   |  84 +-
+ .../account_processor/slot_login.rs           | 683 +++++++++++++++
+ .../account_processor/slot_login/transport.rs | 210 +++++
  .../account_processor/slot_logout.rs          |  67 ++
  .../app-server/src/session_runtime/mod.rs     |  37 +
- .../app-server/tests/suite/v2/account_slot.rs | 455 ++++++++++++
+ .../app-server/tests/suite/v2/account_slot.rs | 455 ++++++++++
  codex-rs/app-server/tests/suite/v2/mod.rs     |   1 +
  codex-rs/core/src/thread_manager.rs           |  15 +
  codex-rs/login/src/lib.rs                     |   1 +
  codex-rs/login/src/server.rs                  |  70 +-
- 38 files changed, 3406 insertions(+), 68 deletions(-)
+ 38 files changed, 3544 insertions(+), 68 deletions(-)
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/AccountSlotLogoutParams.json
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/AccountSlotLogoutResponse.json
  create mode 100644 codex-rs/app-server-protocol/schema/typescript/v2/AccountSlotLogoutParams.ts
@@ -12236,10 +12236,10 @@ index 49e71a17a..43f1a06c2 100644
                  binding,
 diff --git a/codex-rs/app-server/src/account_registry/live_registration.rs b/codex-rs/app-server/src/account_registry/live_registration.rs
 new file mode 100644
-index 000000000..07e7308bf
+index 000000000..c610f96df
 --- /dev/null
 +++ b/codex-rs/app-server/src/account_registry/live_registration.rs
-@@ -0,0 +1,679 @@
+@@ -0,0 +1,779 @@
 +use std::sync::Arc;
 +
 +use chrono::Utc;
@@ -12553,6 +12553,106 @@ index 000000000..07e7308bf
 +        }
 +        drop(mutation);
 +        self.changed_notification(&changed_slot_id).await.map(Some)
++    }
++
++    async fn retry_manifest_projection(&self) {
++        let mutation = self.mutation_lock.lock().await;
++        let (revision, slots, dirty) = match self.state.read() {
++            Ok(state) => (state.revision, state.slots.clone(), state.projection_dirty),
++            Err(_) => return,
++        };
++        if !dirty {
++            return;
++        }
++        if let Err(error) = self.persist_slots(revision, &slots) {
++            tracing::warn!(
++                "account-slots.toml recovery projection remains pending: {}",
++                error.message
++            );
++            return;
++        }
++        if let Ok(mut state) = self.state.write()
++            && state.revision == revision
++        {
++            state.projection_dirty = false;
++        }
++        drop(mutation);
++    }
++
++    async fn sync_durable_runtime_projection(&self) {
++        let slots = match self.state.read() {
++            Ok(state) => state.slots.clone(),
++            Err(_) => return,
++        };
++        let mut durable = Vec::new();
++        for slot in slots.iter().filter(|slot| !slot.manifest.is_default) {
++            match self
++                .thread_store
++                .execution_account_slot_runtime_state(slot.manifest.account_slot_id.clone())
++                .await
++            {
++                Ok((runtime_version, _)) if runtime_version > 0 => {
++                    let auth_home =
++                        self.runtime_home(&slot.manifest.account_slot_id, runtime_version);
++                    if slot.manifest.auth_home == auth_home {
++                        continue;
++                    }
++                    let Ok(binding_transition) =
++                        Arc::clone(&slot.binding_transition).try_lock_owned()
++                    else {
++                        continue;
++                    };
++                    let runtime = self.runtime(slot).await;
++                    runtime.auth_manager.reload().await;
++                    durable.push((
++                        binding_transition,
++                        slot.manifest.account_slot_id.clone(),
++                        auth_home,
++                        runtime.auth_manager.auth_cached().is_some(),
++                    ));
++                }
++                Ok(_) => {}
++                Err(error) => tracing::warn!(
++                    account_slot_id = %slot.manifest.account_slot_id,
++                    "failed to reconcile durable account runtime projection: {error}"
++                ),
++            }
++        }
++        if durable.is_empty() {
++            return;
++        }
++        let _mutation = self.mutation_lock.lock().await;
++        let mut state = match self.state.write() {
++            Ok(state) => state,
++            Err(_) => return,
++        };
++        let mut changed = false;
++        for (_binding_transition, slot_id, auth_home, has_auth) in durable {
++            if let Some(slot) = state
++                .slots
++                .iter_mut()
++                .find(|slot| slot.manifest.account_slot_id == slot_id)
++                && slot.manifest.auth_home != auth_home
++            {
++                slot.manifest.auth_home = auth_home;
++                match (slot.manifest.status, has_auth) {
++                    (_, true) => {
++                        slot.manifest.status = ManifestSlotStatus::Ready;
++                        slot.manifest.error_code = None;
++                    }
++                    (ManifestSlotStatus::Ready, false) => {
++                        slot.manifest.status = ManifestSlotStatus::Failed;
++                        slot.manifest.error_code = Some(ERROR_AUTH_UNAVAILABLE.to_string());
++                    }
++                    _ => {}
++                }
++                changed = true;
++            }
++        }
++        if changed {
++            state.revision = state.revision.saturating_add(1);
++            state.projection_dirty = true;
++        }
 +    }
 +
 +    #[cfg(test)]
@@ -12920,7 +13020,7 @@ index 000000000..07e7308bf
 +    error
 +}
 diff --git a/codex-rs/app-server/src/account_registry_tests.rs b/codex-rs/app-server/src/account_registry_tests.rs
-index af7c65276..f3a1c75a6 100644
+index af7c65276..f81e1b863 100644
 --- a/codex-rs/app-server/src/account_registry_tests.rs
 +++ b/codex-rs/app-server/src/account_registry_tests.rs
 @@ -1,10 +1,14 @@
@@ -12938,7 +13038,7 @@ index af7c65276..f3a1c75a6 100644
  
  async fn registry_for_home(process_home: &Path) -> AccountRegistry {
      let config = Arc::new(
-@@ -159,3 +163,345 @@ async fn slot_snapshot_releases_registry_guard_before_capability_lookup() {
+@@ -159,3 +163,383 @@ async fn slot_snapshot_releases_registry_guard_before_capability_lookup() {
      assert_eq!(snapshot.account_slot_id, DEFAULT_SLOT_ID);
      assert!(snapshot.is_default);
  }
@@ -13032,16 +13132,36 @@ index af7c65276..f3a1c75a6 100644
 +    let process_home = tempdir().expect("temp process home");
 +    let mut slots = manifest(process_home.path(), 7);
 +    slots.slots[1].status = ManifestSlotStatus::Ready;
++    slots.slots[1].auth_home = process_home
++        .path()
++        .join(PRIVATE_HOMES_DIR)
++        .join(SECOND_SLOT_ID)
++        .join("runtime-1");
++    persist_api_key_auth(&slots.slots[1].auth_home);
 +    slots
 +        .persist(&process_home.path().join(MANIFEST_FILE))
 +        .expect("persist manifest");
-+    let registry = registry_for_home(process_home.path()).await;
++    let thread_store: Arc<dyn codex_thread_store::ThreadStore> =
++        Arc::new(codex_thread_store::InMemoryThreadStore::default());
++    assert_eq!(
++        thread_store
++            .compare_and_swap_execution_account_slot_runtime(
++                SECOND_SLOT_ID.to_string(),
++                /*expected_runtime_version*/ 0,
++                Vec::new(),
++            )
++            .await
++            .expect("commit runtime version"),
++        Some((1, Vec::new()))
++    );
++    let registry = registry_for_home_and_store(process_home.path(), thread_store).await;
 +    let slot_auth = AuthManager::from_auth_for_testing_with_home(
 +        CodexAuth::from_api_key("slot-key"),
 +        slots.slots[1].auth_home.clone(),
 +    );
 +    let slot_models = codex_core::build_models_manager(registry.config.as_ref(), slot_auth.clone());
 +    let runtime = Arc::new(AccountRuntimeBundle {
++        runtime_version: AtomicU64::new(1),
 +        auth_manager: slot_auth,
 +        models_manager: slot_models,
 +    });
@@ -13087,6 +13207,24 @@ index af7c65276..f3a1c75a6 100644
 +    );
 +    assert_eq!(logged_out.response.slot.attempt_generation, 3);
 +    assert_eq!(logged_out.response.slot.registry_revision, 8);
++
++    let binding_transition = registry
++        .lock_slot_binding_transition(SECOND_SLOT_ID)
++        .await
++        .expect("hold slot transition lease");
++    let listed = registry
++        .list(AccountSlotListParams {
++            cursor: None,
++            limit: None,
++        })
++        .await
++        .expect("list logged-out slot")
++        .data
++        .into_iter()
++        .find(|slot| slot.account_slot_id == SECOND_SLOT_ID)
++        .expect("secondary slot");
++    assert_eq!(listed, logged_out.response.slot);
++    drop(binding_transition);
 +}
 +
 +#[tokio::test]
