@@ -55,9 +55,14 @@ Applier는 clean tree를 요구하고 각 patch digest를 검증한 뒤 P001–P
 `codex-rs`에서 로컬 build:
 
 ```sh
+perl -0pi -e 's/version = "0\.0\.0"/version = "0.149.0"/g' Cargo.lock
 cargo build --locked --release -p codex-cli --bin codex
 cargo build --locked --release -p codex-app-server --bin codex-app-server
 ```
+
+upstream release tag의 `Cargo.lock`에는 workspace package version이 `0.0.0` placeholder로
+남아 있다. 첫 명령은 GitHub Actions build와 동일하게 이 정확한 placeholder만 `0.149.0`으로
+정규화한 뒤 Cargo가 locked dependency resolution을 수행하게 한다.
 
 수동 GitHub Actions workflow는 표준 macOS arm64 runner에서 다음 산출물을 만든다.
 

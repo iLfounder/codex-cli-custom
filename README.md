@@ -55,9 +55,14 @@ The applier requires a clean tree, verifies every patch digest, applies P001–P
 Build locally from `codex-rs`:
 
 ```sh
+perl -0pi -e 's/version = "0\.0\.0"/version = "0.149.0"/g' Cargo.lock
 cargo build --locked --release -p codex-cli --bin codex
 cargo build --locked --release -p codex-app-server --bin codex-app-server
 ```
+
+The tagged upstream source keeps workspace-package versions as `0.0.0` placeholders in
+`Cargo.lock`. The first command normalizes only those exact placeholders, matching the GitHub
+Actions build, before Cargo performs locked dependency resolution.
 
 The manual GitHub Actions workflow uses a standard macOS arm64 runner and produces:
 
