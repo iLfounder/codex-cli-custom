@@ -64,7 +64,7 @@ jobs:
           ./custom-patches/apply-series.sh upstream-codex
           test "$(git -C upstream-codex rev-parse HEAD^{tree})" = "$PATCH_TREE"
 
-      - name: Build release binaries
+      - name: Prepare locked source provenance
         working-directory: upstream-codex/codex-rs
         shell: bash
         run: |
@@ -77,6 +77,50 @@ jobs:
           compiled_tree=$(git -C .. write-tree)
           printf 'COMPILED_LOCK_SHA256=%s\n' "$compiled_lock_sha256" >> "$GITHUB_ENV"
           printf 'COMPILED_TREE=%s\n' "$compiled_tree" >> "$GITHUB_ENV"
+
+      - name: Resolve the checksum-verified Codex V8 pair
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CODEX_REPO_ROOT="$GITHUB_WORKSPACE/upstream-codex"
+          export PYTHONPATH="$CODEX_REPO_ROOT/scripts"
+          python3 - "$GITHUB_ENV" <<'PY'
+          import hashlib
+          import sys
+
+          from codex_package.targets import TARGET_SPECS
+          from codex_package.v8 import resolve_codex_v8_cargo_env
+          from codex_package.v8 import resolved_v8_crate_version
+
+          def sha256(path):
+              digest = hashlib.sha256()
+              with open(path, "rb") as artifact:
+                  for chunk in iter(lambda: artifact.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              return digest.hexdigest()
+
+          cargo_env = resolve_codex_v8_cargo_env(
+              TARGET_SPECS["aarch64-apple-darwin"]
+          )
+          values = {
+              **cargo_env,
+              "CODEX_V8_VERSION": resolved_v8_crate_version(),
+              "CODEX_V8_ARCHIVE_SHA256": sha256(cargo_env["RUSTY_V8_ARCHIVE"]),
+              "CODEX_V8_BINDING_SHA256": sha256(
+                  cargo_env["RUSTY_V8_SRC_BINDING_PATH"]
+              ),
+          }
+          with open(sys.argv[1], "a", encoding="utf-8") as github_env:
+              for name, value in values.items():
+                  assert "\n" not in value
+                  github_env.write(f"{name}={value}\n")
+          PY
+
+      - name: Build release binaries
+        working-directory: upstream-codex/codex-rs
+        shell: bash
+        run: |
+          set -euo pipefail
           cargo build --locked --release \
             -p codex-cli --bin codex \
             -p codex-app-server --bin codex-app-server \
@@ -120,6 +164,9 @@ jobs:
             printf 'patched_tree=%s\n' "$PATCH_TREE"
             printf 'compiled_tree=%s\n' "$COMPILED_TREE"
             printf 'compiled_cargo_lock_sha256=%s\n' "$COMPILED_LOCK_SHA256"
+            printf 'rusty_v8_version=%s\n' "$CODEX_V8_VERSION"
+            printf 'rusty_v8_archive_sha256=%s\n' "$CODEX_V8_ARCHIVE_SHA256"
+            printf 'rusty_v8_binding_sha256=%s\n' "$CODEX_V8_BINDING_SHA256"
             printf 'runner_arch=%s\n' "$(uname -m)"
             rustc --version
             cargo --version
