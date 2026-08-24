@@ -1,7 +1,7 @@
 schema_version = 1
 applies_to = "rust-v0.149.1"
 base_commit = "ff29a44391deccde0aba0f8390337d7f3c319ea4"
-final_tree = "dae3759de7b19409e888f531367a1ca41b36fe08"
+final_tree = "7280a306be4de78131b137aa81d57feb565cf664"
 
 [[patches]]
 number = "P001"
@@ -57,3 +57,8 @@ sha256 = "5c6d15078356d6ae633b18ba65d55c734aa267f8c7ca0785b9ab4bb4bc731e0c"
 number = "P011"
 file = "../rust-v0.149.0/0011-P011-installable-plugin-commands-and-presentation.patch"
 sha256 = "62ff7a693cd75b7e10f430675bf406f650e0f9c0004c30fa7329930b026b0792"
+
+[[patches]]
+number = "P012"
+file = "0012-P012-fix-session-runtime-active-turn-projection.patch"
+sha256 = "151224b514946f18f5ea2dcfdb3a9227381077e36374ae6984599e4b20920805"

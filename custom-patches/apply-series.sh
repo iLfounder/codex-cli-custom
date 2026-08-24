@@ -30,8 +30,8 @@ test "$current_commit" = "$base_commit" \
     || die "expected base $base_commit, found $current_commit"
 
 patch_files=$(sed -n 's/^file = "\([^"]*\)"$/\1/p' "$manifest")
-test "$(printf '%s\n' "$patch_files" | sed '/^$/d' | wc -l | tr -d ' ')" = "11" \
-    || die "manifest must contain exactly 11 patches"
+patch_count=$(printf '%s\n' "$patch_files" | sed '/^$/d' | wc -l | tr -d ' ')
+test "$patch_count" -gt 0 || die "manifest must contain at least one patch"
 
 set --
 for patch_file in $patch_files; do
@@ -64,4 +64,4 @@ applied_tree=$(git -C "$target_repo" rev-parse 'HEAD^{tree}')
 test "$applied_tree" = "$final_tree" \
     || die "applied tree mismatch: expected $final_tree, found $applied_tree"
 
-printf 'Applied P001-P011; final tree %s\n' "$applied_tree"
+printf 'Applied %s patches; final tree %s\n' "$patch_count" "$applied_tree"

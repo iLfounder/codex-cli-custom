@@ -1,0 +1,80 @@
+From bb43bd8fe888a618d60c9a86e60433782aa997a2 Mon Sep 17 00:00:00 2001
+From: patch-verifier <patch-verifier@localhost>
+Date: Mon, 24 Aug 2026 19:35:46 +0900
+Subject: [PATCH] fix(custom): report only running turns in session runtime
+
+---
+ codex-rs/app-server/src/thread_state.rs | 44 ++++++++++++++++++++++---
+ 1 file changed, 40 insertions(+), 4 deletions(-)
+
+diff --git a/codex-rs/app-server/src/thread_state.rs b/codex-rs/app-server/src/thread_state.rs
+index 7831f05e226c3c7ae0002935a33f9b1818580e10..dd62bd3f9018cde0ca60a568d812379601649836 100644
+--- a/codex-rs/app-server/src/thread_state.rs
++++ b/codex-rs/app-server/src/thread_state.rs
+@@ -162,10 +162,12 @@ struct StoredThreadTransitionReservation {
+ 
+ impl ThreadState {
+     fn runtime_snapshot(&self) -> (Option<String>, Option<ThreadSettings>) {
+-        (
+-            self.active_turn_snapshot().map(|turn| turn.id),
+-            self.last_thread_settings.clone(),
+-        )
++        let active_turn_id = if self.current_turn_history.has_active_turn() {
++            self.active_turn_snapshot().map(|turn| turn.id)
++        } else {
++            None
++        };
++        (active_turn_id, self.last_thread_settings.clone())
+     }
+ 
+     pub(crate) fn listener_matches(&self, conversation: &Arc<CodexThread>) -> bool {
+@@ -300,6 +302,8 @@ mod tests {
+     use codex_protocol::config_types::CollaborationMode;
+     use codex_protocol::config_types::ModeKind;
+     use codex_protocol::config_types::Settings;
++    use codex_protocol::protocol::TurnCompleteEvent;
++    use codex_protocol::protocol::TurnStartedEvent;
+     use codex_utils_absolute_path::AbsolutePathBuf;
+     use pretty_assertions::assert_eq;
+ 
+@@ -319,6 +323,38 @@ mod tests {
+         assert_eq!(results, vec![true, false, true, false]);
+     }
+ 
++    #[test]
++    fn runtime_snapshot_omits_the_last_completed_turn() {
++        let mut state = ThreadState::default();
++        let turn_id = "turn-1";
++
++        state.track_current_turn_event(
++            turn_id,
++            &EventMsg::TurnStarted(TurnStartedEvent {
++                turn_id: turn_id.to_string(),
++                trace_id: None,
++                started_at: None,
++                model_context_window: None,
++                collaboration_mode_kind: Default::default(),
++            }),
++        );
++        assert_eq!(state.runtime_snapshot().0, Some(turn_id.to_string()));
++
++        state.track_current_turn_event(
++            turn_id,
++            &EventMsg::TurnComplete(TurnCompleteEvent {
++                turn_id: turn_id.to_string(),
++                last_agent_message: None,
++                error: None,
++                started_at: None,
++                completed_at: None,
++                duration_ms: None,
++                time_to_first_token_ms: None,
++            }),
++        );
++        assert_eq!(state.runtime_snapshot().0, None);
++    }
++
+     #[tokio::test]
+     async fn unload_target_updates_and_clears_in_runtime_snapshot() {
+         let manager = ThreadStateManager::new();
+-- 
+2.50.1 (Apple Git-155)

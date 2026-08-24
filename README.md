@@ -29,6 +29,7 @@ session, account, Goal, continuity, and plugin contracts remain unchanged from t
 | P009 | Idle-thread account switching while keeping the same thread ID. |
 | P010 | TUI `/account`, `/logout`, `/exit`, `/clear`, `/new`, and `/goal` controls, including typed agent-requested clear/new. |
 | P011 | Installable `/namespace:name` plugin commands and ephemeral card, notice, and progress presentation. |
+| P012 | Accurate live-turn projection: completed turns no longer keep idle sessions falsely marked active. |
 
 The app-server exposes opaque account references and sanitized session state. It never stores external workflow roles, group IDs, or user handles.
 
@@ -47,14 +48,14 @@ Generated Rust, JSON Schema, and TypeScript definitions are included by the patc
 
 ## Apply and build
 
-Apply the eleven patches only to the exact upstream commit:
+Apply the twelve patches only to the exact upstream commit:
 
 ```sh
 git checkout ff29a44391deccde0aba0f8390337d7f3c319ea4
 /path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD"
 ```
 
-The applier requires a clean tree, verifies every patch digest, applies P001–P011 in order, and verifies the final Git tree. It needs a POSIX shell, Git, `sed`, `awk`, and either `shasum` or `sha256sum`.
+The applier requires a clean tree, verifies every patch digest, applies P001–P012 in order, and verifies the final Git tree. It needs a POSIX shell, Git, `sed`, `awk`, and either `shasum` or `sha256sum`.
 
 Build locally from `codex-rs`:
 
@@ -104,7 +105,7 @@ Stop every older TUI and app-server sharing the store. Start the 0.149.x build o
 
 ## Repository layout
 
-- `custom-patches/rust-v0.149.1/`: current manifest reusing the byte-identical 0.149.0 patch payloads
+- `custom-patches/rust-v0.149.1/`: current manifest reusing P001–P011 from 0.149.0 and adding the 0.149.1 live-turn projection fix
 - `custom-patches/rust-v0.149.0/`: previous series retained for reproducibility
 - `custom-patches/rust-v0.148.0/`: previous series retained for reproducibility
 - `custom-patches/apply-series.sh`: clean-tree patch applier

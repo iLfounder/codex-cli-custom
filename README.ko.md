@@ -29,6 +29,7 @@ continuity, plugin 계약은 0.149.0 series와 동일하게 유지된다.
 | P009 | Thread ID를 유지한 채 idle thread의 account를 전환한다. |
 | P010 | TUI `/account`, `/logout`, `/exit`, `/clear`, `/new`, `/goal`과 agent 요청형 clear/new control을 제공한다. |
 | P011 | 설치 가능한 `/namespace:name` plugin command와 ephemeral card, notice, progress presentation을 제공한다. |
+| P012 | 완료 turn이 idle session을 실행 중으로 잘못 표시하지 않도록 live-turn projection을 바로잡는다. |
 
 App-server는 opaque account reference와 sanitize된 session state만 노출한다. 외부 workflow role, group ID, 사용자 handle은 저장하지 않는다.
 
@@ -47,14 +48,14 @@ Patch에는 생성된 Rust, JSON Schema, TypeScript 정의가 `codex-rs/app-serv
 
 ## 적용과 build
 
-정확한 upstream commit에만 열한 개 patch를 적용한다.
+정확한 upstream commit에만 열두 개 patch를 적용한다.
 
 ```sh
 git checkout ff29a44391deccde0aba0f8390337d7f3c319ea4
 /path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD"
 ```
 
-Applier는 clean tree를 요구하고 각 patch digest를 검증한 뒤 P001–P011을 순서대로 적용하고 최종 Git tree를 확인한다. POSIX shell, Git, `sed`, `awk`, `shasum` 또는 `sha256sum`이 필요하다.
+Applier는 clean tree를 요구하고 각 patch digest를 검증한 뒤 P001–P012를 순서대로 적용하고 최종 Git tree를 확인한다. POSIX shell, Git, `sed`, `awk`, `shasum` 또는 `sha256sum`이 필요하다.
 
 `codex-rs`에서 로컬 build:
 
@@ -104,7 +105,7 @@ Workflow는 두 package layout을 검사하고, 양쪽에 동일한 build의 Cod
 
 ## 저장소 구성
 
-- `custom-patches/rust-v0.149.1/`: byte-identical 0.149.0 patch payload를 재사용하는 현재 manifest
+- `custom-patches/rust-v0.149.1/`: 0.149.0의 P001–P011을 재사용하고 0.149.1 live-turn projection fix를 추가한 현재 manifest
 - `custom-patches/rust-v0.149.0/`: 재현성을 위해 보존한 이전 series
 - `custom-patches/rust-v0.148.0/`: 재현성을 위해 보존한 이전 series
 - `custom-patches/apply-series.sh`: clean-tree patch applier
