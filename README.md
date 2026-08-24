@@ -12,7 +12,8 @@ The fork makes account selection, thread ownership, session handoff, and externa
 
 Upstream 0.149.1 adds explicit source labels for new `codex exec` threads, identifies detached
 memory consolidation work, and provides opt-in image-aware remote compaction budgeting. The custom
-session, account, Goal, continuity, and plugin contracts remain unchanged from the 0.149.0 series.
+wire interfaces remain compatible while this series also improves resumed-session delivery and
+startup responsiveness.
 
 ## What the patch series adds
 
@@ -30,6 +31,7 @@ session, account, Goal, continuity, and plugin contracts remain unchanged from t
 | P010 | TUI `/account`, `/logout`, `/exit`, `/clear`, `/new`, and `/goal` controls, including typed agent-requested clear/new. |
 | P011 | Installable `/namespace:name` plugin commands and ephemeral card, notice, and progress presentation. |
 | P012 | Accurate live-turn projection: completed turns no longer keep idle sessions falsely marked active. |
+| P013 | Reliable event delivery after resume or direct turn submission, quieter plugin refreshes, and responsive macOS startup even when file watching is slow. |
 
 The app-server exposes opaque account references and sanitized session state. It never stores external workflow roles, group IDs, or user handles.
 
@@ -48,14 +50,14 @@ Generated Rust, JSON Schema, and TypeScript definitions are included by the patc
 
 ## Apply and build
 
-Apply the twelve patches only to the exact upstream commit:
+Apply the thirteen patches only to the exact upstream commit:
 
 ```sh
 git checkout ff29a44391deccde0aba0f8390337d7f3c319ea4
 /path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD"
 ```
 
-The applier requires a clean tree, verifies every patch digest, applies P001–P012 in order, and verifies the final Git tree. It needs a POSIX shell, Git, `sed`, `awk`, and either `shasum` or `sha256sum`.
+The applier requires a clean tree, verifies every patch digest, applies P001–P013 in order, and verifies the final Git tree. It needs a POSIX shell, Git, `sed`, `awk`, and either `shasum` or `sha256sum`.
 
 Build locally from `codex-rs`:
 
@@ -105,7 +107,7 @@ Stop every older TUI and app-server sharing the store. Start the 0.149.x build o
 
 ## Repository layout
 
-- `custom-patches/rust-v0.149.1/`: current manifest reusing P001–P011 from 0.149.0 and adding the 0.149.1 live-turn projection fix
+- `custom-patches/rust-v0.149.1/`: current manifest reusing P001–P011 from 0.149.0 and adding the 0.149.1 runtime projection and session-delivery fixes
 - `custom-patches/rust-v0.149.0/`: previous series retained for reproducibility
 - `custom-patches/rust-v0.148.0/`: previous series retained for reproducibility
 - `custom-patches/apply-series.sh`: clean-tree patch applier
