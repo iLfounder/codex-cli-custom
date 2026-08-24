@@ -8,7 +8,11 @@
 
 이 fork는 계정 선택, thread 소유권, session 인계, 외부 session 제어를 명시적인 계약으로 제공한다. Credential과 로컬 경로, 외부 workflow 고유 식별자는 비공개로 유지하면서 typed Goal action과 설치 가능한 plugin command도 추가한다.
 
-> 공식 OpenAI 배포물이 아니다. 현재 series는 upstream [`rust-v0.149.0`](https://github.com/openai/codex/releases/tag/rust-v0.149.0), commit `758ef40f50c1a458425c7cfbf1eb12cbc07af0b0`을 대상으로 한다.
+> 공식 OpenAI 배포물이 아니다. 현재 series는 upstream [`rust-v0.149.1`](https://github.com/openai/codex/releases/tag/rust-v0.149.1), commit `ff29a44391deccde0aba0f8390337d7f3c319ea4`를 대상으로 한다.
+
+Upstream 0.149.1은 새 `codex exec` thread의 source label, detached memory consolidation 식별,
+opt-in 이미지 인식 remote compaction budget을 추가한다. Custom session, account, Goal,
+continuity, plugin 계약은 0.149.0 series와 동일하게 유지된다.
 
 ## Patch series가 추가하는 기능
 
@@ -46,7 +50,7 @@ Patch에는 생성된 Rust, JSON Schema, TypeScript 정의가 `codex-rs/app-serv
 정확한 upstream commit에만 열한 개 patch를 적용한다.
 
 ```sh
-git checkout 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
+git checkout ff29a44391deccde0aba0f8390337d7f3c319ea4
 /path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD"
 ```
 
@@ -55,23 +59,23 @@ Applier는 clean tree를 요구하고 각 patch digest를 검증한 뒤 P001–P
 `codex-rs`에서 로컬 build:
 
 ```sh
-perl -0pi -e 's/version = "0\.0\.0"/version = "0.149.0"/g' Cargo.lock
+perl -0pi -e 's/version = "0\.0\.0"/version = "0.149.1"/g' Cargo.lock
 cargo build --locked --release -p codex-cli --bin codex
 cargo build --locked --release -p codex-app-server --bin codex-app-server
 cargo build --locked --release -p codex-code-mode-host --bin codex-code-mode-host
 cargo build --locked --release -p codex-responses-api-proxy --bin codex-responses-api-proxy
 CODEX_REPO_ROOT="$(cd .. && pwd)" python3 ../scripts/build_codex_package.py \
-  --target aarch64-apple-darwin --variant codex --package-version 0.149.0 \
+  --target aarch64-apple-darwin --variant codex --package-version 0.149.1 \
   --entrypoint-bin target/release/codex \
   --code-mode-host-bin target/release/codex-code-mode-host
 CODEX_REPO_ROOT="$(cd .. && pwd)" python3 ../scripts/build_codex_package.py \
-  --target aarch64-apple-darwin --variant codex-app-server --package-version 0.149.0 \
+  --target aarch64-apple-darwin --variant codex-app-server --package-version 0.149.1 \
   --entrypoint-bin target/release/codex-app-server \
   --code-mode-host-bin target/release/codex-code-mode-host
 ```
 
 upstream release tag의 `Cargo.lock`에는 workspace package version이 `0.0.0` placeholder로
-남아 있다. 첫 명령은 GitHub Actions build와 동일하게 이 정확한 placeholder만 `0.149.0`으로
+남아 있다. 첫 명령은 GitHub Actions build와 동일하게 이 정확한 placeholder만 `0.149.1`로
 정규화한 뒤 Cargo가 locked dependency resolution을 수행하게 한다.
 Package builder는 Python 3.10 이상이 필요하다. 또한 upstream source에 고정된 target별
 ripgrep과 patched zsh resource를 다운로드하고 digest를 검증한다.
@@ -96,11 +100,12 @@ Workflow는 두 package layout을 검사하고, 양쪽에 동일한 build의 Cod
 
 ## 기존 0.148 custom state store 업그레이드
 
-같은 store를 공유하는 구버전 TUI와 app-server를 모두 종료한다. 0.149 build를 `CODEX_STATE_LEGACY_MIGRATION_CUTOVER=1`로 한 번만 시작한 뒤 변수를 제거한다. Migration은 알려진 legacy schema를 검증한 후에만 적용하며 unknown 또는 partial schema는 거절한다. Migration이 끝난 store를 구버전 binary로 다시 열지 않는다.
+같은 store를 공유하는 구버전 TUI와 app-server를 모두 종료한다. 0.149.x build를 `CODEX_STATE_LEGACY_MIGRATION_CUTOVER=1`로 한 번만 시작한 뒤 변수를 제거한다. Migration은 알려진 legacy schema를 검증한 후에만 적용하며 unknown 또는 partial schema는 거절한다. Migration이 끝난 store를 구버전 binary로 다시 열지 않는다.
 
 ## 저장소 구성
 
-- `custom-patches/rust-v0.149.0/`: 현재 ordered series와 digest manifest
+- `custom-patches/rust-v0.149.1/`: byte-identical 0.149.0 patch payload를 재사용하는 현재 manifest
+- `custom-patches/rust-v0.149.0/`: 재현성을 위해 보존한 이전 series
 - `custom-patches/rust-v0.148.0/`: 재현성을 위해 보존한 이전 series
 - `custom-patches/apply-series.sh`: clean-tree patch applier
 - `.github/workflows/build-custom-macos-arm64.yml`: 수동 macOS arm64 build

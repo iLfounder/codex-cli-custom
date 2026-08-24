@@ -1,0 +1,59 @@
+schema_version = 1
+applies_to = "rust-v0.149.1"
+base_commit = "ff29a44391deccde0aba0f8390337d7f3c319ea4"
+final_tree = "dae3759de7b19409e888f531367a1ca41b36fe08"
+
+[[patches]]
+number = "P001"
+file = "../rust-v0.149.0/0001-P001-shared-writer-authority.patch"
+sha256 = "50bc0985e1b4cb45b12d69a65fea52c84471cf28e933fbeb817647ae7096a100"
+
+[[patches]]
+number = "P002"
+file = "../rust-v0.149.0/0002-P002-session-runtime-protocol.patch"
+sha256 = "92dbc1f7ccb854a4c79481f0493d4ee374aae8e27693c3460b1497cad263927c"
+
+[[patches]]
+number = "P003"
+file = "../rust-v0.149.0/0003-P003-multi-account-registry.patch"
+sha256 = "2940edc9c081e2fb71bbc37b8dfde8ad29c2bb9d3a517aafa4df81474b0bf7e7"
+
+[[patches]]
+number = "P004"
+file = "../rust-v0.149.0/0004-P004-durable-execution-binding-and-history.patch"
+sha256 = "dfd2a831f74bbf82af9b396b6b13ad045d8c1500c795ea6f0fe180109a0815f3"
+
+[[patches]]
+number = "P005"
+file = "../rust-v0.149.0/0005-P005-propagate-execution-account-to-auth-consumers.patch"
+sha256 = "810f4444c58beba3313559545dce20b03b90702c565f2b2dc9232393336bd59f"
+
+[[patches]]
+number = "P006"
+file = "../rust-v0.149.0/0006-P006-publish-session-runtime-state.patch"
+sha256 = "3f21b870084c262b39eb1680872f3dc202b6900f61dc0152f03466a688bcd3a1"
+
+[[patches]]
+number = "P007"
+file = "../rust-v0.149.0/0007-P007-add-live-account-registration.patch"
+sha256 = "dfd2ccce589dcfe53d513e5bc855369ca2acbe408f9a4a8f053d34638870d398"
+
+[[patches]]
+number = "P008"
+file = "../rust-v0.149.0/0008-P008-relinquish-thread-writers-strictly.patch"
+sha256 = "a66ec993c17c5b58957c674a2d45626280acf635db55657ed433ab767713bf70"
+
+[[patches]]
+number = "P009"
+file = "../rust-v0.149.0/0009-P009-switch-thread-execution-accounts.patch"
+sha256 = "7ae9e6a4b0b3f5e247898c6e4097a1ba59251709a4f1ca03545a2faa2f54bcf0"
+
+[[patches]]
+number = "P010"
+file = "../rust-v0.149.0/0010-P010-add-TUI-session-and-account-controls.patch"
+sha256 = "5c6d15078356d6ae633b18ba65d55c734aa267f8c7ca0785b9ab4bb4bc731e0c"
+
+[[patches]]
+number = "P011"
+file = "../rust-v0.149.0/0011-P011-installable-plugin-commands-and-presentation.patch"
+sha256 = "62ff7a693cd75b7e10f430675bf406f650e0f9c0004c30fa7329930b026b0792"

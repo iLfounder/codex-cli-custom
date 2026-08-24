@@ -8,7 +8,11 @@ An experimental fork of OpenAI Codex for people who keep several accounts and lo
 
 The fork makes account selection, thread ownership, session handoff, and external session control explicit. It also adds typed Goal actions and installable plugin commands while keeping credentials, local paths, and workflow-specific identities private.
 
-> This is an unofficial distribution. The current series targets upstream [`rust-v0.149.0`](https://github.com/openai/codex/releases/tag/rust-v0.149.0), commit `758ef40f50c1a458425c7cfbf1eb12cbc07af0b0`.
+> This is an unofficial distribution. The current series targets upstream [`rust-v0.149.1`](https://github.com/openai/codex/releases/tag/rust-v0.149.1), commit `ff29a44391deccde0aba0f8390337d7f3c319ea4`.
+
+Upstream 0.149.1 adds explicit source labels for new `codex exec` threads, identifies detached
+memory consolidation work, and provides opt-in image-aware remote compaction budgeting. The custom
+session, account, Goal, continuity, and plugin contracts remain unchanged from the 0.149.0 series.
 
 ## What the patch series adds
 
@@ -46,7 +50,7 @@ Generated Rust, JSON Schema, and TypeScript definitions are included by the patc
 Apply the eleven patches only to the exact upstream commit:
 
 ```sh
-git checkout 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
+git checkout ff29a44391deccde0aba0f8390337d7f3c319ea4
 /path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD"
 ```
 
@@ -55,23 +59,23 @@ The applier requires a clean tree, verifies every patch digest, applies P001–P
 Build locally from `codex-rs`:
 
 ```sh
-perl -0pi -e 's/version = "0\.0\.0"/version = "0.149.0"/g' Cargo.lock
+perl -0pi -e 's/version = "0\.0\.0"/version = "0.149.1"/g' Cargo.lock
 cargo build --locked --release -p codex-cli --bin codex
 cargo build --locked --release -p codex-app-server --bin codex-app-server
 cargo build --locked --release -p codex-code-mode-host --bin codex-code-mode-host
 cargo build --locked --release -p codex-responses-api-proxy --bin codex-responses-api-proxy
 CODEX_REPO_ROOT="$(cd .. && pwd)" python3 ../scripts/build_codex_package.py \
-  --target aarch64-apple-darwin --variant codex --package-version 0.149.0 \
+  --target aarch64-apple-darwin --variant codex --package-version 0.149.1 \
   --entrypoint-bin target/release/codex \
   --code-mode-host-bin target/release/codex-code-mode-host
 CODEX_REPO_ROOT="$(cd .. && pwd)" python3 ../scripts/build_codex_package.py \
-  --target aarch64-apple-darwin --variant codex-app-server --package-version 0.149.0 \
+  --target aarch64-apple-darwin --variant codex-app-server --package-version 0.149.1 \
   --entrypoint-bin target/release/codex-app-server \
   --code-mode-host-bin target/release/codex-code-mode-host
 ```
 
 The tagged upstream source keeps workspace-package versions as `0.0.0` placeholders in
-`Cargo.lock`. The first command normalizes only those exact placeholders, matching the GitHub
+`Cargo.lock`. The first command normalizes only those exact placeholders to `0.149.1`, matching the GitHub
 Actions build, before Cargo performs locked dependency resolution.
 The package builder requires Python 3.10 or newer. It also fetches and verifies the
 target-specific ripgrep and patched zsh resources defined by the upstream source.
@@ -96,11 +100,12 @@ Code Mode host, and records SHA-256 digests and source-tree provenance before up
 
 ## Upgrading a 0.148 custom state store
 
-Stop every older TUI and app-server sharing the store. Start the 0.149 build once with `CODEX_STATE_LEGACY_MIGRATION_CUTOVER=1`, then remove the variable. The migration validates the known legacy schema before adoption and rejects unknown or partial schemas. Do not reopen the migrated store with an older binary.
+Stop every older TUI and app-server sharing the store. Start the 0.149.x build once with `CODEX_STATE_LEGACY_MIGRATION_CUTOVER=1`, then remove the variable. The migration validates the known legacy schema before adoption and rejects unknown or partial schemas. Do not reopen the migrated store with an older binary.
 
 ## Repository layout
 
-- `custom-patches/rust-v0.149.0/`: current ordered series and digest manifest
+- `custom-patches/rust-v0.149.1/`: current manifest reusing the byte-identical 0.149.0 patch payloads
+- `custom-patches/rust-v0.149.0/`: previous series retained for reproducibility
 - `custom-patches/rust-v0.148.0/`: previous series retained for reproducibility
 - `custom-patches/apply-series.sh`: clean-tree patch applier
 - `.github/workflows/build-custom-macos-arm64.yml`: manual macOS arm64 build

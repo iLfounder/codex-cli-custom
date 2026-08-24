@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   build:
-    name: rust-v0.149.0 / macOS arm64
+    name: rust-v0.149.1 / macOS arm64
     runs-on: macos-15
     timeout-minutes: 330
     env:
@@ -22,8 +22,8 @@ jobs:
       CARGO_PROFILE_RELEASE_LTO: "false"
       CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
       CARGO_TERM_COLOR: always
-      SOURCE_COMMIT: 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
-      PATCH_TREE: 93e7206d677cc256d7b16c30e0d4863c69ee5f14
+      SOURCE_COMMIT: ff29a44391deccde0aba0f8390337d7f3c319ea4
+      PATCH_TREE: dae3759de7b19409e888f531367a1ca41b36fe08
 
     steps:
       - name: Check out patch repository
@@ -40,9 +40,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-rust-v0.149.0-${{ hashFiles('custom-patches/rust-v0.149.0/**') }}
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-rust-v0.149.1-${{ hashFiles('custom-patches/rust-v0.149.1/**', 'custom-patches/rust-v0.149.0/*.patch', 'custom-patches/apply-series.sh') }}
           restore-keys: |
-            cargo-${{ runner.os }}-${{ runner.arch }}-rust-v0.149.0-
+            cargo-${{ runner.os }}-${{ runner.arch }}-rust-v0.149.1-
 
       - name: Fetch the exact upstream source
         shell: bash
@@ -61,7 +61,7 @@ jobs:
           set -euo pipefail
           git -C upstream-codex config user.name github-actions
           git -C upstream-codex config user.email github-actions@users.noreply.github.com
-          ./custom-patches/apply-series.sh upstream-codex
+          ./custom-patches/apply-series.sh upstream-codex rust-v0.149.1
           test "$(git -C upstream-codex rev-parse HEAD^{tree})" = "$PATCH_TREE"
 
       - name: Prepare locked source provenance
@@ -71,7 +71,7 @@ jobs:
           set -euo pipefail
           # The release tag carries placeholder versions for workspace packages in Cargo.lock.
           # Normalize only those exact placeholders, then keep dependency resolution locked.
-          perl -0pi -e 's/version = "0\.0\.0"/version = "0.149.0"/g' Cargo.lock
+          perl -0pi -e 's/version = "0\.0\.0"/version = "0.149.1"/g' Cargo.lock
           compiled_lock_sha256=$(shasum -a 256 Cargo.lock | awk '{print $1}')
           git -C .. add codex-rs/Cargo.lock
           compiled_tree=$(git -C .. write-tree)
@@ -142,7 +142,7 @@ jobs:
           python3 upstream-codex/scripts/build_codex_package.py \
             --target aarch64-apple-darwin \
             --variant codex \
-            --package-version 0.149.0 \
+            --package-version 0.149.1 \
             --package-dir "$RUNNER_TEMP/codex-package-aarch64-apple-darwin" \
             --archive-output "$GITHUB_WORKSPACE/dist/codex-package-aarch64-apple-darwin.tar.gz" \
             --entrypoint-bin "$CARGO_TARGET_DIR/release/codex" \
@@ -150,7 +150,7 @@ jobs:
           python3 upstream-codex/scripts/build_codex_package.py \
             --target aarch64-apple-darwin \
             --variant codex-app-server \
-            --package-version 0.149.0 \
+            --package-version 0.149.1 \
             --package-dir "$RUNNER_TEMP/codex-app-server-package-aarch64-apple-darwin" \
             --archive-output "$GITHUB_WORKSPACE/dist/codex-app-server-package-aarch64-apple-darwin.tar.gz" \
             --entrypoint-bin "$CARGO_TARGET_DIR/release/codex-app-server" \
@@ -202,7 +202,7 @@ jobs:
                   package = json.load(package_file)
               assert package == {
                   "layoutVersion": 1,
-                  "version": "0.149.0",
+                  "version": "0.149.1",
                   "target": "aarch64-apple-darwin",
                   "variant": variant,
                   "entrypoint": entrypoint,
@@ -210,6 +210,8 @@ jobs:
                   "pathDir": "codex-path",
               }
           PY
+          test "$("$primary_dir/bin/codex" --version)" = "codex-cli 0.149.1"
+          "$primary_dir/bin/codex" exec --help | grep -F -- "--thread-source"
           (
             cd dist
             shasum -a 256 \
@@ -227,7 +229,7 @@ jobs:
       - name: Upload macOS arm64 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: codex-custom-rust-v0.149.0-macos-arm64
+          name: codex-custom-rust-v0.149.1-macos-arm64
           path: dist/
           if-no-files-found: error
           retention-days: 14
