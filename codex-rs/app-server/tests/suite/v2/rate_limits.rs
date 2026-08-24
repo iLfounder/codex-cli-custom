@@ -237,6 +237,8 @@ async fn get_account_rate_limits_returns_snapshot(
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
 
     let expected = GetAccountRateLimitsResponse {
+        thread_id: None,
+        execution_account: None,
         rate_limits: RateLimitSnapshot {
             limit_id: Some("codex".to_string()),
             limit_name: None,

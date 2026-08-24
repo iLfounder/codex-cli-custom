@@ -86,6 +86,35 @@ impl App {
                 ..Default::default()
             });
 
+            let reauth = slot
+                .actions
+                .iter()
+                .find(|action| action.action == AccountSlotAction::RetryLogin);
+            if !slot.is_default && slot.status == AccountSlotStatus::Ready {
+                let reauth_allowed = reauth.is_some_and(|action| action.allowed);
+                let reauth_slot_id = slot.account_slot_id.clone();
+                items.push(SelectionItem {
+                    name: format!("Sign in again to {}", slot.label),
+                    description: Some(
+                        "Replace credentials for every idle bound session".to_string(),
+                    ),
+                    is_disabled: !reauth_allowed,
+                    disabled_reason: reauth.and_then(|action| action.deny_reason.clone()),
+                    actions: reauth_allowed
+                        .then(|| {
+                            Box::new(move |tx: &AppEventSender| {
+                                tx.send(AppEvent::OpenAccountLoginMethods {
+                                    slot_id: Some(reauth_slot_id.clone()),
+                                });
+                            }) as crate::bottom_pane::SelectionAction
+                        })
+                        .into_iter()
+                        .collect(),
+                    dismiss_on_select: true,
+                    ..Default::default()
+                });
+            }
+
             let logout = slot
                 .actions
                 .iter()

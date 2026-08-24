@@ -8,6 +8,8 @@ use std::borrow::Cow;
 
 use super::CUSTOM_SCHEMA_V1;
 use super::CUSTOM_SCHEMA_V2;
+use super::CUSTOM_SCHEMA_V3;
+use super::CUSTOM_SCHEMA_V4;
 use super::LegacyMigrationCutover;
 use super::STATE_MIGRATOR;
 use super::THREAD_HISTORY_MIGRATOR;
@@ -67,7 +69,8 @@ async fn insert_legacy_custom_migration(
 }
 
 #[tokio::test]
-async fn custom_schema_bootstrap_serializes_concurrent_callers() {
+async fn custom_schema_bootstrap_with_account_slot_runtime_versions_serializes_concurrent_callers()
+{
     let sqlite_home = crate::runtime::test_support::unique_temp_dir();
     tokio::fs::create_dir_all(&sqlite_home)
         .await
@@ -107,12 +110,23 @@ async fn custom_schema_bootstrap_serializes_concurrent_callers() {
                 "execution_account_bindings".to_string(),
                 CUSTOM_SCHEMA_V2.definition.to_string(),
             ),
+            (
+                3,
+                "account_slot_runtime_versions".to_string(),
+                CUSTOM_SCHEMA_V3.definition.to_string(),
+            ),
+            (
+                4,
+                "thread_transitions".to_string(),
+                CUSTOM_SCHEMA_V4.definition.to_string(),
+            ),
         ]
     );
     let custom_tables = sqlx::query_scalar::<_, String>(
         "SELECT name FROM sqlite_master WHERE type = 'table' \
          AND name IN ('writer_authority_store', 'thread_writer_generations', \
-         'thread_execution_account_bindings', 'thread_turn_execution_accounts') ORDER BY name",
+         'thread_execution_account_bindings', 'thread_turn_execution_accounts', \
+         'account_slot_runtime_versions', 'thread_transitions') ORDER BY name",
     )
     .fetch_all(&pool)
     .await
@@ -120,7 +134,9 @@ async fn custom_schema_bootstrap_serializes_concurrent_callers() {
     assert_eq!(
         custom_tables,
         vec![
+            "account_slot_runtime_versions".to_string(),
             "thread_execution_account_bindings".to_string(),
+            "thread_transitions".to_string(),
             "thread_turn_execution_accounts".to_string(),
             "thread_writer_generations".to_string(),
             "writer_authority_store".to_string(),

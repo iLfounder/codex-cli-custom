@@ -32,6 +32,9 @@ mod pending_thread_metadata_tests;
 mod runtime_snapshot_tests;
 #[cfg(test)]
 mod test_support;
+#[cfg(test)]
+#[path = "thread_transition_tests.rs"]
+mod thread_transition_tests;
 
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::ExecutionAccountBinding;
@@ -50,9 +53,12 @@ use tokio::sync::OwnedRwLockReadGuard;
 use tokio::sync::OwnedRwLockWriteGuard;
 use tokio::sync::RwLock;
 
+use crate::AbortThreadTransition;
 use crate::AppendThreadItemsParams;
 use crate::ArchiveThreadParams;
 use crate::ArchiveThreadsParams;
+use crate::CommitThreadTransition;
+use crate::CommittedThreadTransitions;
 use crate::CreateProjectParams;
 use crate::CreateThreadParams;
 use crate::CreateThreadSectionParams;
@@ -68,6 +74,7 @@ use crate::ListThreadSectionsParams;
 use crate::ListThreadsParams;
 use crate::ListTurnsParams;
 use crate::LoadThreadHistoryParams;
+use crate::MarkThreadTransitionPrepared;
 use crate::MoveProjectParams;
 use crate::MoveThreadToSectionParams;
 use crate::PersistContext;
@@ -100,6 +107,13 @@ use crate::ThreadStoreError;
 use crate::ThreadStoreFuture;
 use crate::ThreadStoreResult;
 use crate::ThreadStoreRuntimeSnapshot;
+use crate::ThreadTransitionAbortOutcome;
+use crate::ThreadTransitionClaimOutcome;
+use crate::ThreadTransitionCommitOutcome;
+use crate::ThreadTransitionIntent;
+use crate::ThreadTransitionPreparation;
+use crate::ThreadTransitionRecord;
+use crate::ThreadWriterEvidence;
 use crate::TurnPage;
 use crate::UpdateProjectParams;
 use crate::UpdateThreadMetadataParams;
@@ -686,6 +700,218 @@ impl ThreadStore for LocalThreadStore {
         })
     }
 
+    fn execution_account_slot_runtime_state(
+        &self,
+        slot_id: String,
+    ) -> ThreadStoreFuture<'_, (u64, Vec<(ThreadId, ExecutionAccountBinding)>)> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "execution_account_slot_runtime_state",
+                });
+            };
+            state_db
+                .execution_account_slot_runtime_state(slot_id.as_str())
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!("failed to read execution account slot runtime: {err}"),
+                })
+        })
+    }
+
+    fn compare_and_swap_execution_account_slot_runtime(
+        &self,
+        slot_id: String,
+        expected_runtime_version: u64,
+        expected_bindings: Vec<(ThreadId, ExecutionAccountBinding)>,
+    ) -> ThreadStoreFuture<'_, Option<(u64, Vec<(ThreadId, ExecutionAccountBinding)>)>> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "compare_and_swap_execution_account_slot_runtime",
+                });
+            };
+            state_db
+                .compare_and_swap_execution_account_slot_runtime(
+                    slot_id.as_str(),
+                    expected_runtime_version,
+                    &expected_bindings,
+                )
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!(
+                        "failed to compare and swap execution account slot runtime: {err}"
+                    ),
+                })
+        })
+    }
+
+    fn claim_thread_transition(
+        &self,
+        intent: ThreadTransitionIntent,
+        reserved_current_thread_id: ThreadId,
+        origin_instance_epoch: String,
+        initiator_client_incarnation: String,
+        previous_writer: ThreadWriterEvidence,
+    ) -> ThreadStoreFuture<'_, ThreadTransitionClaimOutcome> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "claim_thread_transition",
+                });
+            };
+            state_db
+                .claim_thread_transition(
+                    &intent,
+                    reserved_current_thread_id,
+                    &origin_instance_epoch,
+                    &initiator_client_incarnation,
+                    &previous_writer,
+                )
+                .await
+                .map_err(|error| {
+                    match error.downcast_ref::<codex_state::ThreadTransitionConflict>() {
+                        Some(conflict) => ThreadStoreError::Conflict {
+                            message: conflict.reason().to_string(),
+                        },
+                        None => ThreadStoreError::Internal {
+                            message: format!("thread transition storage failed: {error}"),
+                        },
+                    }
+                })
+        })
+    }
+
+    fn mark_thread_transition_prepared(
+        &self,
+        request: MarkThreadTransitionPrepared,
+    ) -> ThreadStoreFuture<'_, ThreadTransitionPreparation> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "mark_thread_transition_prepared",
+                });
+            };
+            state_db
+                .mark_thread_transition_prepared(&request)
+                .await
+                .map_err(|error| {
+                    match error.downcast_ref::<codex_state::ThreadTransitionConflict>() {
+                        Some(conflict) => ThreadStoreError::Conflict {
+                            message: conflict.reason().to_string(),
+                        },
+                        None => ThreadStoreError::Internal {
+                            message: format!("thread transition storage failed: {error}"),
+                        },
+                    }
+                })
+        })
+    }
+
+    fn abort_thread_transition(
+        &self,
+        request: AbortThreadTransition,
+    ) -> ThreadStoreFuture<'_, ThreadTransitionAbortOutcome> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "abort_thread_transition",
+                });
+            };
+            state_db
+                .abort_thread_transition(&request)
+                .await
+                .map_err(|error| {
+                    match error.downcast_ref::<codex_state::ThreadTransitionConflict>() {
+                        Some(conflict) => ThreadStoreError::Conflict {
+                            message: conflict.reason().to_string(),
+                        },
+                        None => ThreadStoreError::Internal {
+                            message: format!("thread transition storage failed: {error}"),
+                        },
+                    }
+                })
+        })
+    }
+
+    fn commit_thread_transition(
+        &self,
+        request: CommitThreadTransition,
+    ) -> ThreadStoreFuture<'_, ThreadTransitionCommitOutcome> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "commit_thread_transition",
+                });
+            };
+            state_db
+                .commit_thread_transition(&request)
+                .await
+                .map_err(|error| {
+                    match error.downcast_ref::<codex_state::ThreadTransitionConflict>() {
+                        Some(conflict) => ThreadStoreError::Conflict {
+                            message: conflict.reason().to_string(),
+                        },
+                        None => ThreadStoreError::Internal {
+                            message: format!("thread transition storage failed: {error}"),
+                        },
+                    }
+                })
+        })
+    }
+
+    fn thread_transition_by_id(
+        &self,
+        transition_id: String,
+    ) -> ThreadStoreFuture<'_, Option<ThreadTransitionRecord>> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "thread_transition_by_id",
+                });
+            };
+            state_db
+                .thread_transition_by_id(&transition_id)
+                .await
+                .map_err(|error| {
+                    match error.downcast_ref::<codex_state::ThreadTransitionConflict>() {
+                        Some(conflict) => ThreadStoreError::Conflict {
+                            message: conflict.reason().to_string(),
+                        },
+                        None => ThreadStoreError::Internal {
+                            message: format!("thread transition storage failed: {error}"),
+                        },
+                    }
+                })
+        })
+    }
+
+    fn committed_thread_transitions_for_threads(
+        &self,
+        thread_ids: Vec<ThreadId>,
+    ) -> ThreadStoreFuture<'_, HashMap<ThreadId, CommittedThreadTransitions>> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "committed_thread_transitions_for_threads",
+                });
+            };
+            state_db
+                .committed_thread_transitions_for_threads(&thread_ids)
+                .await
+                .map_err(|error| {
+                    match error.downcast_ref::<codex_state::ThreadTransitionConflict>() {
+                        Some(conflict) => ThreadStoreError::Conflict {
+                            message: conflict.reason().to_string(),
+                        },
+                        None => ThreadStoreError::Internal {
+                            message: format!("thread transition storage failed: {error}"),
+                        },
+                    }
+                })
+        })
+    }
+
     fn turn_execution_account(
         &self,
         thread_id: ThreadId,
@@ -1193,6 +1419,56 @@ mod tests {
                 .durable_execution_account_slot_in_use("unused")
                 .await
                 .expect("scan durable bindings")
+        );
+    }
+
+    #[tokio::test]
+    async fn execution_account_slot_runtime_batch_cas_uses_state_authority() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = LocalThreadStore::new(config, Some(runtime));
+        let thread_id = ThreadId::default();
+        store
+            .initialize_execution_account_binding(
+                thread_id,
+                ExecutionAccountBinding {
+                    slot_id: "secondary".to_string(),
+                    generation: 4,
+                },
+            )
+            .await
+            .expect("initialize durable binding");
+
+        let legacy = store
+            .execution_account_slot_runtime_state("secondary".to_string())
+            .await
+            .expect("read legacy runtime state");
+        assert_eq!(legacy.0, 0);
+        assert_eq!(
+            store
+                .compare_and_swap_execution_account_slot_runtime(
+                    "secondary".to_string(),
+                    legacy.0,
+                    legacy.1,
+                )
+                .await
+                .expect("commit runtime state"),
+            Some((
+                1,
+                vec![(
+                    thread_id,
+                    ExecutionAccountBinding {
+                        slot_id: "secondary".to_string(),
+                        generation: 5,
+                    },
+                )],
+            ))
         );
     }
 
@@ -2130,7 +2406,12 @@ mod tests {
             })
             .await
             .expect_err("active-only read should reject archived live thread");
-        assert!(matches!(err, ThreadStoreError::InvalidRequest { .. }));
+        assert!(matches!(
+            err,
+            ThreadStoreError::ThreadNotFound {
+                thread_id: missing_thread_id
+            } if missing_thread_id == thread_id
+        ));
 
         let err = store
             .load_history(LoadThreadHistoryParams {
@@ -2139,7 +2420,10 @@ mod tests {
             })
             .await
             .expect_err("active-only history should reject archived live thread");
-        assert!(matches!(err, ThreadStoreError::InvalidRequest { .. }));
+        assert!(
+            matches!(err, ThreadStoreError::InvalidRequest { .. }),
+            "unexpected active-only history error: {err:?}"
+        );
         assert!(err.to_string().contains("archived"));
 
         let history = store

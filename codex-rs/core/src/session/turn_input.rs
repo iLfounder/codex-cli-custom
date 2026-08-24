@@ -154,6 +154,17 @@ pub(super) async fn handle(
             "thread runtime is closing".to_string(),
         ));
     }
+    if let Some(expected) = request.expected_execution_account.as_ref() {
+        let actual = &session.execution_account().binding;
+        if expected != actual {
+            return Ok(TurnInputSubmission::NotSubmitted {
+                reason: NotSubmittedReason::ExpectedExecutionAccountMismatch {
+                    expected: expected.clone(),
+                    actual: actual.clone(),
+                },
+            });
+        }
+    }
     match mode {
         TurnInputMode::StartOrSteer => start_or_steer(session, request, submission_id).await,
         TurnInputMode::StartIfIdle => {

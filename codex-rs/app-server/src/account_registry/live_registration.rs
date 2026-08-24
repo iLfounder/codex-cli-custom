@@ -1,4 +1,7 @@
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU8;
+use std::sync::atomic::Ordering;
 
 use chrono::Utc;
 use codex_app_server_protocol::AccountSlotAction;
@@ -8,9 +11,9 @@ use codex_app_server_protocol::AccountSlotChangedNotification;
 use codex_app_server_protocol::AccountSlotLogoutParams;
 use codex_app_server_protocol::AccountSlotLogoutResponse;
 use codex_app_server_protocol::AccountSlotSnapshot;
+use codex_app_server_protocol::AccountSlotStatus;
 use codex_app_server_protocol::JSONRPCErrorError;
 use tokio::sync::Mutex;
-use tokio::sync::OnceCell;
 use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
 
@@ -36,6 +39,10 @@ pub(crate) const ERROR_LOGIN_FAILED: &str = "loginFailed";
 pub(crate) const ERROR_LOGOUT_BUSY: &str = "accountSlotLogoutBusy";
 pub(crate) const ERROR_REFRESH_UNAVAILABLE: &str = "refreshUnavailable";
 
+const SLOT_LOGIN_TERMINAL_PENDING: u8 = 0;
+const SLOT_LOGIN_TERMINAL_SUCCESS: u8 = 1;
+const SLOT_LOGIN_TERMINAL_FAILURE: u8 = 2;
+
 #[derive(Clone)]
 pub(crate) struct PreparedSlotLogin {
     pub(crate) account_slot_id: String,
@@ -43,6 +50,30 @@ pub(crate) struct PreparedSlotLogin {
     pub(crate) operation_id: String,
     pub(crate) auth_home: std::path::PathBuf,
     pub(crate) runtime: Arc<AccountRuntimeBundle>,
+    prior_status: ManifestSlotStatus,
+    prior_error_code: Option<String>,
+    terminal: Arc<AtomicU8>,
+}
+
+impl PreparedSlotLogin {
+    fn try_claim_terminal(&self, terminal: u8) -> bool {
+        self.terminal
+            .compare_exchange(
+                SLOT_LOGIN_TERMINAL_PENDING,
+                terminal,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    pub(crate) fn try_claim_success(&self) -> bool {
+        self.try_claim_terminal(SLOT_LOGIN_TERMINAL_SUCCESS)
+    }
+
+    pub(crate) fn try_claim_failure(&self) -> bool {
+        self.try_claim_terminal(SLOT_LOGIN_TERMINAL_FAILURE)
+    }
 }
 
 pub(crate) struct LoggedOutSlot {
@@ -61,6 +92,8 @@ pub(crate) struct ReservedSlotLogout {
 
 impl AccountRegistry {
     pub(crate) async fn reconcile(&self) -> Result<(), JSONRPCErrorError> {
+        let reprojected_slots = self.sync_durable_runtime_projection().await;
+        self.retry_manifest_projection().await;
         let (revision, slots, manifest_error, manifest_present) = {
             let state = self
                 .state
@@ -79,7 +112,10 @@ impl AccountRegistry {
 
         let mut changed = Vec::new();
         for slot in &slots {
-            if slot.manifest.status == ManifestSlotStatus::Failed
+            if (slot.manifest.status == ManifestSlotStatus::Failed
+                && slot.manifest.error_code.as_deref() != Some(ERROR_AUTH_UNAVAILABLE)
+                && !reprojected_slots.contains(&slot.manifest.account_slot_id))
+                || slot.active_login_operation_id.is_some()
                 || slot.active_logout_operation_id.is_some()
             {
                 continue;
@@ -89,7 +125,8 @@ impl AccountRegistry {
                 continue;
             };
             let runtime = self.runtime(slot).await;
-            let has_auth = runtime.auth_manager.auth().await.is_some();
+            runtime.auth_manager.reload().await;
+            let has_auth = runtime.auth_manager.auth_cached().is_some();
             let next = match (slot.manifest.status, has_auth) {
                 (ManifestSlotStatus::Ready, false) => Some((
                     ManifestSlotStatus::Failed,
@@ -98,6 +135,7 @@ impl AccountRegistry {
                 (ManifestSlotStatus::LoginRequired, true) => {
                     Some((ManifestSlotStatus::Ready, None))
                 }
+                (ManifestSlotStatus::Failed, true) => Some((ManifestSlotStatus::Ready, None)),
                 _ => None,
             };
             if let Some(next) = next {
@@ -130,6 +168,7 @@ impl AccountRegistry {
             if let Some(slot) = next_slots
                 .iter_mut()
                 .find(|slot| slot.manifest.account_slot_id == *slot_id)
+                && slot.active_login_operation_id.is_none()
                 && slot.active_logout_operation_id.is_none()
             {
                 slot.manifest.status = *status;
@@ -157,6 +196,7 @@ impl AccountRegistry {
         &self,
         requested_slot_id: Option<String>,
         operation_id: String,
+        candidate_runtime_version: u64,
     ) -> Result<PreparedSlotLogin, JSONRPCErrorError> {
         if requested_slot_id.is_none()
             && self
@@ -207,8 +247,11 @@ impl AccountRegistry {
                         "account slot logout is active",
                     ));
                 }
-                if slot.manifest.status == ManifestSlotStatus::Ready {
-                    return Err(invalid_request("account slot is already ready"));
+                if slot.active_login_operation_id.is_some() {
+                    return Err(structured_invalid_request(
+                        ERROR_LOGIN_BUSY,
+                        "account slot login is active",
+                    ));
                 }
                 index
             }
@@ -238,7 +281,7 @@ impl AccountRegistry {
                         updated_at: 0,
                         error_code: None,
                     },
-                    runtime: Arc::new(OnceCell::new()),
+                    runtime: Arc::new(super::AccountRuntimeCell::default()),
                     binding_transition: Arc::new(Mutex::new(())),
                     active_login_operation_id: None,
                     active_logout_operation_id: None,
@@ -250,7 +293,11 @@ impl AccountRegistry {
 
         let slot = &mut slots[slot_index];
         slot.manifest.attempt_generation = slot.manifest.attempt_generation.saturating_add(1);
-        slot.manifest.status = ManifestSlotStatus::LoginRequired;
+        let prior_status = slot.manifest.status;
+        let prior_error_code = slot.manifest.error_code.clone();
+        if prior_status != ManifestSlotStatus::Ready {
+            slot.manifest.status = ManifestSlotStatus::LoginRequired;
+        }
         slot.manifest.error_code = None;
         slot.manifest.updated_at = Utc::now().timestamp();
         slot.active_login_operation_id = Some(operation_id.clone());
@@ -269,13 +316,22 @@ impl AccountRegistry {
             state.manifest_present = true;
         }
         drop(_mutation);
-        let runtime = self.runtime(&prepared_record).await;
+        let auth_home = self.runtime_home(
+            &prepared_record.manifest.account_slot_id,
+            candidate_runtime_version,
+        );
+        let runtime = self
+            .build_runtime(auth_home.clone(), candidate_runtime_version)
+            .await;
         Ok(PreparedSlotLogin {
             account_slot_id: prepared_record.manifest.account_slot_id,
             attempt_generation: prepared_record.manifest.attempt_generation,
             operation_id,
-            auth_home: prepared_record.manifest.auth_home,
+            auth_home,
             runtime,
+            prior_status,
+            prior_error_code,
+            terminal: Arc::new(AtomicU8::new(SLOT_LOGIN_TERMINAL_PENDING)),
         })
     }
 
@@ -300,15 +356,41 @@ impl AccountRegistry {
         }) else {
             return Ok(None);
         };
-        slot.manifest.status = status;
-        slot.manifest.error_code = error_code.map(str::to_string);
+        let published_runtime = if status == ManifestSlotStatus::Ready {
+            slot.manifest.status = status;
+            slot.manifest.auth_home = prepared.auth_home.clone();
+            slot.manifest.error_code = None;
+            Some((Arc::clone(&slot.runtime), Arc::clone(&prepared.runtime)))
+        } else if prepared.prior_status == ManifestSlotStatus::Ready {
+            slot.manifest.status = prepared.prior_status;
+            slot.manifest.error_code = prepared.prior_error_code.clone();
+            None
+        } else {
+            slot.manifest.status = status;
+            slot.manifest.error_code = error_code.map(str::to_string);
+            None
+        };
         slot.manifest.updated_at = Utc::now().timestamp();
         slot.completed_login_operation_id =
             (status == ManifestSlotStatus::Ready).then(|| prepared.operation_id.clone());
         slot.active_login_operation_id = None;
         let changed_slot_id = slot.manifest.account_slot_id.clone();
         let next_revision = revision.saturating_add(1);
-        self.persist_slots(next_revision, &slots)?;
+        let projection_error = self.persist_slots(next_revision, &slots).err();
+        if let Some(error) = projection_error.as_ref() {
+            if status != ManifestSlotStatus::Ready {
+                return Err(internal_error(format!(
+                    "failed to persist account slot projection: {}",
+                    error.message
+                )));
+            }
+            tracing::warn!(
+                account_slot_id = %prepared.account_slot_id,
+                runtime_version = prepared.runtime.runtime_version.load(std::sync::atomic::Ordering::Acquire),
+                "durable account runtime committed; account-slots.toml projection will be retried: {}",
+                error.message
+            );
+        }
         {
             let mut state = self
                 .state
@@ -316,9 +398,89 @@ impl AccountRegistry {
                 .map_err(|_| internal_error("account slot registry is unavailable"))?;
             state.revision = next_revision;
             state.slots = slots;
+            state.projection_dirty = projection_error.is_some();
+        }
+        if let Some((runtime_cell, runtime)) = published_runtime {
+            runtime_cell.replace(runtime);
         }
         drop(mutation);
         self.changed_notification(&changed_slot_id).await.map(Some)
+    }
+
+    async fn retry_manifest_projection(&self) {
+        let mutation = self.mutation_lock.lock().await;
+        let (revision, slots, dirty) = match self.state.read() {
+            Ok(state) => (state.revision, state.slots.clone(), state.projection_dirty),
+            Err(_) => return,
+        };
+        if !dirty {
+            return;
+        }
+        if let Err(error) = self.persist_slots(revision, &slots) {
+            tracing::warn!(
+                "account-slots.toml recovery projection remains pending: {}",
+                error.message
+            );
+            return;
+        }
+        if let Ok(mut state) = self.state.write()
+            && state.revision == revision
+        {
+            state.projection_dirty = false;
+        }
+        drop(mutation);
+    }
+
+    async fn sync_durable_runtime_projection(&self) -> HashSet<String> {
+        let slots = match self.state.read() {
+            Ok(state) => state.slots.clone(),
+            Err(_) => return HashSet::new(),
+        };
+        let mut durable = Vec::new();
+        for slot in slots.iter().filter(|slot| !slot.manifest.is_default) {
+            match self
+                .thread_store
+                .execution_account_slot_runtime_state(slot.manifest.account_slot_id.clone())
+                .await
+            {
+                Ok((runtime_version, _)) if runtime_version > 0 => durable.push((
+                    slot.manifest.account_slot_id.clone(),
+                    self.runtime_home(&slot.manifest.account_slot_id, runtime_version),
+                )),
+                Ok(_) => {}
+                Err(error) => tracing::warn!(
+                    account_slot_id = %slot.manifest.account_slot_id,
+                    "failed to reconcile durable account runtime projection: {error}"
+                ),
+            }
+        }
+        if durable.is_empty() {
+            return HashSet::new();
+        }
+        let _mutation = self.mutation_lock.lock().await;
+        let mut state = match self.state.write() {
+            Ok(state) => state,
+            Err(_) => return HashSet::new(),
+        };
+        let mut changed = false;
+        let mut reprojected_slots = HashSet::new();
+        for (slot_id, auth_home) in durable {
+            if let Some(slot) = state
+                .slots
+                .iter_mut()
+                .find(|slot| slot.manifest.account_slot_id == slot_id)
+                && slot.manifest.auth_home != auth_home
+            {
+                slot.manifest.auth_home = auth_home;
+                reprojected_slots.insert(slot_id);
+                changed = true;
+            }
+        }
+        if changed {
+            state.revision = state.revision.saturating_add(1);
+            state.projection_dirty = true;
+        }
+        reprojected_slots
     }
 
     #[cfg(test)]
@@ -632,7 +794,7 @@ impl AccountRegistry {
 }
 
 pub(super) fn available_actions(
-    status: ManifestSlotStatus,
+    status: AccountSlotStatus,
     capability: &AccountSlotCapability,
     is_default: bool,
     active_operation: bool,
@@ -650,17 +812,6 @@ pub(super) fn available_actions(
             unavailable(AccountSlotAction::Logout, reason),
         ];
     }
-    if is_default {
-        return vec![
-            unavailable(AccountSlotAction::Login, DENY_LOGIN_NOT_AVAILABLE),
-            unavailable(AccountSlotAction::RetryLogin, DENY_LOGIN_NOT_AVAILABLE),
-            unavailable(
-                AccountSlotAction::SwitchTo,
-                super::DENY_SWITCH_NOT_AVAILABLE,
-            ),
-            unavailable(AccountSlotAction::Logout, DENY_LOGIN_NOT_AVAILABLE),
-        ];
-    }
     if active_operation {
         return vec![
             unavailable(AccountSlotAction::Login, ERROR_LOGIN_BUSY),
@@ -669,29 +820,43 @@ pub(super) fn available_actions(
             unavailable(AccountSlotAction::Logout, ERROR_LOGIN_BUSY),
         ];
     }
+    if is_default {
+        return vec![
+            unavailable(AccountSlotAction::Login, DENY_LOGIN_NOT_AVAILABLE),
+            unavailable(AccountSlotAction::RetryLogin, DENY_LOGIN_NOT_AVAILABLE),
+            AccountSlotActionAvailability {
+                action: AccountSlotAction::SwitchTo,
+                allowed: status == AccountSlotStatus::Ready,
+                deny_reason: (status != AccountSlotStatus::Ready)
+                    .then(|| super::DENY_SWITCH_NOT_AVAILABLE.to_string()),
+            },
+            unavailable(AccountSlotAction::Logout, DENY_LOGIN_NOT_AVAILABLE),
+        ];
+    }
     vec![
         AccountSlotActionAvailability {
             action: AccountSlotAction::Login,
-            allowed: status == ManifestSlotStatus::LoginRequired,
-            deny_reason: (status != ManifestSlotStatus::LoginRequired)
+            allowed: status == AccountSlotStatus::LoginRequired,
+            deny_reason: (status != AccountSlotStatus::LoginRequired)
                 .then(|| DENY_LOGIN_NOT_AVAILABLE.to_string()),
         },
         AccountSlotActionAvailability {
             action: AccountSlotAction::Logout,
-            allowed: status == ManifestSlotStatus::Ready,
-            deny_reason: (status != ManifestSlotStatus::Ready)
+            allowed: status == AccountSlotStatus::Ready,
+            deny_reason: (status != AccountSlotStatus::Ready)
                 .then(|| DENY_LOGIN_NOT_AVAILABLE.to_string()),
         },
         AccountSlotActionAvailability {
             action: AccountSlotAction::RetryLogin,
-            allowed: status == ManifestSlotStatus::Failed,
-            deny_reason: (status != ManifestSlotStatus::Failed)
+            allowed: matches!(status, AccountSlotStatus::Ready | AccountSlotStatus::Failed),
+            deny_reason: (!matches!(status, AccountSlotStatus::Ready | AccountSlotStatus::Failed))
                 .then(|| DENY_LOGIN_NOT_AVAILABLE.to_string()),
         },
         AccountSlotActionAvailability {
             action: AccountSlotAction::SwitchTo,
-            allowed: false,
-            deny_reason: Some(super::DENY_SWITCH_NOT_AVAILABLE.to_string()),
+            allowed: status == AccountSlotStatus::Ready,
+            deny_reason: (status != AccountSlotStatus::Ready)
+                .then(|| super::DENY_SWITCH_NOT_AVAILABLE.to_string()),
         },
     ]
 }

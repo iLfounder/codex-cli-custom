@@ -41,6 +41,11 @@ impl SessionRuntimeEngine {
             .acquire()
             .await
             .map_err(|_| internal_error("thread lifecycle coordinator is unavailable"))?;
+        let _transition_admission_permit = self
+            .thread_state_manager
+            .acquire_thread_mutation_permit(thread_id)
+            .await
+            .map_err(|reason| invalid_params(reason.replace('_', " ")))?;
         let operation = self.begin_operation(relinquish_operation(&params)).await?;
         if operation.status != SessionRuntimeOperationStatus::Accepted {
             return Ok(ThreadRelinquishResponse { operation });

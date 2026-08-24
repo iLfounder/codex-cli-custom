@@ -40,6 +40,22 @@ impl ThreadRequestProcessor {
 
         self.validate_root_thread_delete(thread_id, thread_ids.len() > 1)
             .await?;
+        let mut _transition_admission_permits = Vec::new();
+        for thread_id_to_delete in thread_ids.iter().copied() {
+            match self
+                .thread_state_manager
+                .acquire_thread_mutation_permit(thread_id_to_delete)
+                .await
+            {
+                Ok(permit) => _transition_admission_permits.push(permit),
+                Err("transition_thread_unavailable") => {}
+                Err(reason) => {
+                    return Err(super::thread_processor::thread_transition_invalid_request(
+                        reason,
+                    ));
+                }
+            }
+        }
         for thread_id_to_delete in thread_ids.iter().copied() {
             self.prepare_thread_for_delete(thread_id_to_delete).await;
         }

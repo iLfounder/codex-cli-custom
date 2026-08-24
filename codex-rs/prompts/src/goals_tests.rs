@@ -6,6 +6,8 @@ use codex_protocol::protocol::ThreadGoalStatus;
 fn continuation_prompt_allows_complete_and_strict_blocked_updates() {
     let prompt = continuation_prompt(&ThreadGoal {
         thread_id: ThreadId::new(),
+        goal_id: "goal-1".to_string(),
+        revision: 1,
         objective: "finish the stack".to_string(),
         status: ThreadGoalStatus::Active,
         token_budget: Some(10_000),
@@ -33,6 +35,8 @@ fn continuation_prompt_allows_complete_and_strict_blocked_updates() {
 fn budget_limit_prompt_steers_model_to_wrap_up_without_pausing() {
     let prompt = budget_limit_prompt(&ThreadGoal {
         thread_id: ThreadId::new(),
+        goal_id: "goal-1".to_string(),
+        revision: 1,
         objective: "finish the stack".to_string(),
         status: ThreadGoalStatus::BudgetLimited,
         token_budget: Some(10_000),
@@ -55,6 +59,8 @@ fn budget_limit_prompt_steers_model_to_wrap_up_without_pausing() {
 fn objective_updated_prompt_supersedes_previous_goal_context() {
     let prompt = objective_updated_prompt(&ThreadGoal {
         thread_id: ThreadId::new(),
+        goal_id: "goal-1".to_string(),
+        revision: 1,
         objective: "finish the revised stack".to_string(),
         status: ThreadGoalStatus::Active,
         token_budget: Some(10_000),
@@ -84,6 +90,8 @@ fn goal_prompts_escape_objective_delimiters() {
 
     let continuation = continuation_prompt(&ThreadGoal {
         thread_id: ThreadId::new(),
+        goal_id: "goal-1".to_string(),
+        revision: 1,
         objective: objective.to_string(),
         status: ThreadGoalStatus::Active,
         token_budget: None,
@@ -94,6 +102,8 @@ fn goal_prompts_escape_objective_delimiters() {
     });
     let budget_limit = budget_limit_prompt(&ThreadGoal {
         thread_id: ThreadId::new(),
+        goal_id: "goal-1".to_string(),
+        revision: 1,
         objective: objective.to_string(),
         status: ThreadGoalStatus::BudgetLimited,
         token_budget: Some(10_000),
@@ -104,6 +114,8 @@ fn goal_prompts_escape_objective_delimiters() {
     });
     let objective_updated = objective_updated_prompt(&ThreadGoal {
         thread_id: ThreadId::new(),
+        goal_id: "goal-1".to_string(),
+        revision: 1,
         objective: objective.to_string(),
         status: ThreadGoalStatus::Active,
         token_budget: Some(10_000),

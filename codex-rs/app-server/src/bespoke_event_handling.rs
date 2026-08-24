@@ -53,6 +53,7 @@ use codex_app_server_protocol::RawResponseItemCompletedNotification;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequestPayload;
+use codex_app_server_protocol::SessionRuntimeAccountRef;
 use codex_app_server_protocol::StrictReviewRequiredNotification;
 use codex_app_server_protocol::ThreadGoalUpdatedNotification;
 use codex_app_server_protocol::ThreadItem;
@@ -115,6 +116,7 @@ use codex_protocol::request_user_input::RequestUserInputAnswer as CoreRequestUse
 use codex_protocol::request_user_input::RequestUserInputResponse as CoreRequestUserInputResponse;
 use codex_sandboxing::policy_transforms::intersect_permission_profiles;
 use codex_shell_command::parse_command::shlex_join;
+use codex_thread_store::ThreadStore;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::LegacyAppPathString;
 use std::collections::HashMap;
@@ -145,6 +147,7 @@ pub(crate) async fn apply_bespoke_event_handling(
     conversation_id: ThreadId,
     conversation: Arc<CodexThread>,
     thread_manager: Arc<ThreadManager>,
+    thread_store: Arc<dyn ThreadStore>,
     outgoing: ThreadScopedOutgoingMessageSender,
     thread_state: Arc<tokio::sync::Mutex<ThreadState>>,
     thread_watch_manager: ThreadWatchManager,
@@ -931,8 +934,14 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .await;
         }
         EventMsg::TokenCount(token_count_event) => {
-            handle_token_count_event(conversation_id, event_turn_id, token_count_event, &outgoing)
-                .await;
+            handle_token_count_event(
+                conversation_id,
+                event_turn_id,
+                token_count_event,
+                thread_store.as_ref(),
+                &outgoing,
+            )
+            .await;
         }
         EventMsg::Error(ev) => {
             thread_watch_manager
@@ -1596,9 +1605,32 @@ async fn handle_token_count_event(
     conversation_id: ThreadId,
     turn_id: String,
     token_count_event: TokenCountEvent,
+    thread_store: &dyn ThreadStore,
     outgoing: &ThreadScopedOutgoingMessageSender,
 ) {
     let TokenCountEvent { info, rate_limits } = token_count_event;
+    let execution_account = if rate_limits.is_some() {
+        match thread_store
+            .turn_execution_account(conversation_id, turn_id.clone())
+            .await
+        {
+            Ok(Some(binding)) => Some(SessionRuntimeAccountRef {
+                account_slot_id: binding.slot_id,
+                execution_generation: binding.generation,
+            }),
+            Ok(None) => None,
+            Err(err) => {
+                tracing::warn!(
+                    thread_id = %conversation_id,
+                    turn_id,
+                    "failed to read persisted execution account for rate-limit update: {err}"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
     if let Some(token_usage) = info.map(ThreadTokenUsage::from) {
         let notification = ThreadTokenUsageUpdatedNotification {
             thread_id: conversation_id.to_string(),
@@ -1609,10 +1641,12 @@ async fn handle_token_count_event(
             .send_server_notification(ServerNotification::ThreadTokenUsageUpdated(notification))
             .await;
     }
-    if let Some(rate_limits) = rate_limits {
+    if let (Some(rate_limits), Some(execution_account)) = (rate_limits, execution_account) {
         outgoing
             .send_server_notification(ServerNotification::AccountRateLimitsUpdated(
                 AccountRateLimitsUpdatedNotification {
+                    thread_id: Some(conversation_id.to_string()),
+                    execution_account: Some(execution_account),
                     rate_limits: rate_limits.into(),
                 },
             ))
@@ -2166,6 +2200,8 @@ mod tests {
     use codex_protocol::protocol::TokenUsageInfo;
     use codex_protocol::protocol::UserMessageEvent;
     use codex_rollout::RolloutItem;
+    use codex_thread_store::AppendThreadItemsParams;
+    use codex_thread_store::InMemoryThreadStore;
     use codex_thread_store::StoredThread;
     use codex_thread_store::StoredThreadHistory;
     use codex_utils_absolute_path::AbsolutePathBuf;
@@ -2180,6 +2216,10 @@ mod tests {
 
     fn new_thread_state() -> Arc<Mutex<ThreadState>> {
         Arc::new(Mutex::new(ThreadState::default()))
+    }
+
+    fn test_thread_store() -> Arc<dyn ThreadStore> {
+        Arc::new(InMemoryThreadStore::default())
     }
 
     const TEST_TURN_COMPLETED_AT: i64 = 1_716_000_456;
@@ -2390,6 +2430,7 @@ mod tests {
                 self.conversation_id,
                 self.conversation.clone(),
                 self.thread_manager.clone(),
+                test_thread_store(),
                 self.outgoing.clone(),
                 self.thread_state.clone(),
                 self.thread_watch_manager.clone(),
@@ -3391,6 +3432,7 @@ mod tests {
             conversation_id,
             conversation,
             thread_manager,
+            test_thread_store(),
             outgoing,
             thread_state,
             thread_watch_manager,
@@ -3468,6 +3510,7 @@ mod tests {
             conversation_id,
             conversation,
             thread_manager,
+            test_thread_store(),
             outgoing,
             new_thread_state(),
             thread_watch_manager.clone(),
@@ -3557,6 +3600,7 @@ mod tests {
             conversation_id,
             conversation,
             thread_manager,
+            test_thread_store(),
             outgoing,
             new_thread_state(),
             ThreadWatchManager::new(),
@@ -3852,6 +3896,26 @@ mod tests {
     async fn test_handle_token_count_event_emits_usage_and_rate_limits() -> Result<()> {
         let conversation_id = ThreadId::new();
         let turn_id = "turn-123".to_string();
+        let thread_store = Arc::new(InMemoryThreadStore::default());
+        let execution_account = codex_protocol::protocol::ExecutionAccountBinding {
+            slot_id: "secondary".to_string(),
+            generation: 7,
+        };
+        let turn_context = serde_json::from_value(json!({
+            "turn_id": turn_id,
+            "execution_account": execution_account,
+            "cwd": std::env::current_dir()?,
+            "approval_policy": "never",
+            "sandbox_policy": {"type": "danger-full-access"},
+            "model": "test-model",
+            "summary": "auto"
+        }))?;
+        thread_store
+            .append_items(AppendThreadItemsParams {
+                thread_id: conversation_id,
+                items: vec![RolloutItem::TurnContext(turn_context)],
+            })
+            .await?;
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
         let outgoing = Arc::new(OutgoingMessageSender::new(
             tx,
@@ -3909,8 +3973,9 @@ mod tests {
             turn_id.clone(),
             TokenCountEvent {
                 info: Some(info),
-                rate_limits: Some(rate_limits),
+                rate_limits: Some(rate_limits.clone()),
             },
+            thread_store.as_ref(),
             &outgoing,
         )
         .await;
@@ -3932,6 +3997,14 @@ mod tests {
         let second = recv_broadcast_notification(&mut rx).await?;
         match second {
             ServerNotification::AccountRateLimitsUpdated(payload) => {
+                assert_eq!(payload.thread_id, Some(conversation_id.to_string()));
+                assert_eq!(
+                    payload.execution_account,
+                    Some(SessionRuntimeAccountRef {
+                        account_slot_id: "secondary".to_string(),
+                        execution_generation: 7,
+                    })
+                );
                 assert_eq!(payload.rate_limits.limit_id.as_deref(), Some("codex"));
                 assert_eq!(payload.rate_limits.limit_name, None);
                 assert!(payload.rate_limits.primary.is_some());
@@ -3939,6 +4012,21 @@ mod tests {
             }
             other => bail!("unexpected notification: {other:?}"),
         }
+        handle_token_count_event(
+            conversation_id,
+            "turn-without-persisted-binding".to_string(),
+            TokenCountEvent {
+                info: None,
+                rate_limits: Some(rate_limits),
+            },
+            thread_store.as_ref(),
+            &outgoing,
+        )
+        .await;
+        assert!(
+            rx.try_recv().is_err(),
+            "missing persisted turn binding must omit the rate-limit notification"
+        );
         Ok(())
     }
 
@@ -3956,6 +4044,7 @@ mod tests {
             vec![ConnectionId(1)],
             ThreadId::new(),
         );
+        let thread_store = test_thread_store();
 
         handle_token_count_event(
             conversation_id,
@@ -3964,6 +4053,7 @@ mod tests {
                 info: None,
                 rate_limits: None,
             },
+            thread_store.as_ref(),
             &outgoing,
         )
         .await;

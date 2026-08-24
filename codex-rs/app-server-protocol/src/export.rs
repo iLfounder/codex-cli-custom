@@ -2152,7 +2152,12 @@ mod tests {
             "{ \"method\": \"account/usage/read\", id: RequestId, ",
             "params?: GetAccountTokenUsageParams | undefined, }"
         );
+        const LEGACY_ACCOUNT_RATE_LIMITS_REQUEST: &str = concat!(
+            "{ \"method\": \"account/rateLimits/read\", id: RequestId, ",
+            "params?: GetAccountRateLimitsParams | undefined, }"
+        );
         assert!(client_request_ts.contains(LEGACY_ACCOUNT_USAGE_REQUEST));
+        assert!(client_request_ts.contains(LEGACY_ACCOUNT_RATE_LIMITS_REQUEST));
         let account_usage_response_ts = std::str::from_utf8(
             fixture_tree
                 .get(Path::new("v2/GetAccountTokenUsageResponse.ts"))
@@ -2233,10 +2238,11 @@ mod tests {
             let contents = std::str::from_utf8(contents)?;
             // The stable usage RPC originally required `params: undefined`. Keep that exact
             // legacy value accepted while extending the same method with optional thread params.
-            let legacy_account_usage_undefined = path == Path::new("ClientRequest.ts")
-                && contents.matches("| undefined").count() == 1
-                && contents.contains(LEGACY_ACCOUNT_USAGE_REQUEST);
-            if contents.contains("| undefined") && !legacy_account_usage_undefined {
+            let legacy_optional_account_params = path == Path::new("ClientRequest.ts")
+                && contents.matches("| undefined").count() == 2
+                && contents.contains(LEGACY_ACCOUNT_USAGE_REQUEST)
+                && contents.contains(LEGACY_ACCOUNT_RATE_LIMITS_REQUEST);
+            if contents.contains("| undefined") && !legacy_optional_account_params {
                 undefined_offenders.push(path.clone());
             }
 

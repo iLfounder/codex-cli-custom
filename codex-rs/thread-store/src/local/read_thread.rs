@@ -83,12 +83,9 @@ pub(super) async fn read_thread(
     } else {
         thread_rollout_resolver::resolve_current(store, thread_id).await?
     };
-    let path =
-        resolved
-            .map(|resolved| resolved.path)
-            .ok_or_else(|| ThreadStoreError::InvalidRequest {
-                message: format!("no rollout found for thread id {thread_id}"),
-            })?;
+    let path = resolved
+        .map(|resolved| resolved.path)
+        .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
 
     let mut thread = read_thread_from_rollout_path(store, path).await?;
     if !params.include_archived && thread.archived_at.is_some() {
@@ -698,13 +695,12 @@ mod tests {
             })
             .await
             .expect_err("active-only read should fail for archived rollout");
-        let ThreadStoreError::InvalidRequest { message } = active_only_err else {
-            panic!("expected invalid request error");
-        };
-        assert_eq!(
-            message,
-            format!("no rollout found for thread id {thread_id}")
-        );
+        assert!(matches!(
+            active_only_err,
+            ThreadStoreError::ThreadNotFound {
+                thread_id: missing_thread_id
+            } if missing_thread_id == thread_id
+        ));
 
         let thread = store
             .read_thread(ReadThreadParams {
@@ -1487,13 +1483,12 @@ mod tests {
             })
             .await
             .expect_err("active-only read should fail for archived metadata");
-        let ThreadStoreError::InvalidRequest { message } = active_only_err else {
-            panic!("expected invalid request error");
-        };
-        assert_eq!(
-            message,
-            format!("no rollout found for thread id {thread_id}")
-        );
+        assert!(matches!(
+            active_only_err,
+            ThreadStoreError::ThreadNotFound {
+                thread_id: missing_thread_id
+            } if missing_thread_id == thread_id
+        ));
 
         let thread = store
             .read_thread(ReadThreadParams {
@@ -1572,12 +1567,11 @@ mod tests {
             .await
             .expect_err("read should fail without rollout");
 
-        let ThreadStoreError::InvalidRequest { message } = err else {
-            panic!("expected invalid request error");
-        };
-        assert_eq!(
-            message,
-            format!("no rollout found for thread id {thread_id}")
-        );
+        assert!(matches!(
+            err,
+            ThreadStoreError::ThreadNotFound {
+                thread_id: missing_thread_id
+            } if missing_thread_id == thread_id
+        ));
     }
 }

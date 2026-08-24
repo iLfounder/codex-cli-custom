@@ -214,6 +214,8 @@ mod tests {
         GoalStatusState::new(
             AppThreadGoal {
                 thread_id: "thread".to_string(),
+                goal_id: "goal-test".to_string(),
+                revision: 1,
                 objective: "do the thing".to_string(),
                 status: AppThreadGoalStatus::Active,
                 token_budget: None,

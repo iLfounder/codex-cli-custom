@@ -39,10 +39,28 @@
       "type": "object"
     },
     "AccountRateLimitsUpdatedNotification": {
-      "description": "Sparse rolling rate-limit update.\n\nClients should merge available values into the most recent `account/rateLimits/read` response or refetch that snapshot. Nullable account metadata may be unavailable in a rolling update and does not clear a previously observed value.",
+      "description": "Sparse rolling rate-limit update.\n\nClients should merge available values into the most recent matching `account/rateLimits/read` response or refetch that snapshot. New producers omit the notification when persisted account provenance is unavailable; nullable fields preserve wire compatibility with older producers.",
       "properties": {
+        "executionAccount": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionRuntimeAccountRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Persisted account binding for that turn. Older producers may leave this `null`."
+        },
         "rateLimits": {
           "$ref": "#/definitions/RateLimitSnapshot"
+        },
+        "threadId": {
+          "description": "Thread whose persisted turn binding produced this update.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -3776,6 +3794,31 @@
       ],
       "type": "object"
     },
+    "SessionRuntimeContinuity": {
+      "properties": {
+        "lastIncoming": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadTransitionReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lastOutgoing": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadTransitionReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
     "SessionRuntimeIdentity": {
       "description": "Sanitized identity and settings that remain useful outside the Codex process.",
       "properties": {
@@ -4140,6 +4183,17 @@
             "$ref": "#/definitions/SessionRuntimeActionAvailability"
           },
           "type": "array"
+        },
+        "continuity": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/SessionRuntimeContinuity"
+            }
+          ],
+          "default": {
+            "lastIncoming": null,
+            "lastOutgoing": null
+          }
         },
         "identity": {
           "$ref": "#/definitions/SessionRuntimeIdentity"
@@ -4749,8 +4803,19 @@
           "format": "int64",
           "type": "integer"
         },
+        "goalId": {
+          "default": "",
+          "description": "Missing values decode as the legacy sentinel for stock-server compatibility.",
+          "type": "string"
+        },
         "objective": {
           "type": "string"
+        },
+        "revision": {
+          "default": 0,
+          "description": "Missing values decode as the legacy sentinel for stock-server compatibility.",
+          "format": "int64",
+          "type": "integer"
         },
         "status": {
           "$ref": "#/definitions/ThreadGoalStatus"
@@ -4791,8 +4856,29 @@
     },
     "ThreadGoalClearedNotification": {
       "properties": {
+        "previousGoal": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadGoal"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revision": {
+          "default": 0,
+          "format": "int64",
+          "type": "integer"
+        },
         "threadId": {
           "type": "string"
+        },
+        "turnId": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -6294,6 +6380,108 @@
       ],
       "type": "object"
     },
+    "ThreadTransitionEndpointEvidence": {
+      "properties": {
+        "stateRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "writer": {
+          "$ref": "#/definitions/ThreadWriterEvidence"
+        }
+      },
+      "required": [
+        "stateRevision",
+        "threadId",
+        "writer"
+      ],
+      "type": "object"
+    },
+    "ThreadTransitionReason": {
+      "enum": [
+        "clear",
+        "new"
+      ],
+      "type": "string"
+    },
+    "ThreadTransitionReceipt": {
+      "properties": {
+        "committedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "current": {
+          "$ref": "#/definitions/ThreadTransitionEndpointEvidence"
+        },
+        "initiatorClientIncarnation": {
+          "type": "string"
+        },
+        "originInstanceEpoch": {
+          "type": "string"
+        },
+        "previous": {
+          "$ref": "#/definitions/ThreadTransitionEndpointEvidence"
+        },
+        "reason": {
+          "$ref": "#/definitions/ThreadTransitionReason"
+        },
+        "status": {
+          "$ref": "#/definitions/ThreadTransitionStatus"
+        },
+        "transitionId": {
+          "type": "string"
+        },
+        "transitionRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "committedAt",
+        "current",
+        "initiatorClientIncarnation",
+        "originInstanceEpoch",
+        "previous",
+        "reason",
+        "status",
+        "transitionId",
+        "transitionRevision"
+      ],
+      "type": "object"
+    },
+    "ThreadTransitionStatus": {
+      "enum": [
+        "prepared",
+        "committed"
+      ],
+      "type": "string"
+    },
+    "ThreadTransitionedNotification": {
+      "properties": {
+        "instanceEpoch": {
+          "type": "string"
+        },
+        "sequence": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "transition": {
+          "$ref": "#/definitions/ThreadTransitionReceipt"
+        }
+      },
+      "required": [
+        "instanceEpoch",
+        "sequence",
+        "transition"
+      ],
+      "type": "object"
+    },
     "ThreadUnarchivedNotification": {
       "properties": {
         "threadId": {
@@ -6302,6 +6490,23 @@
       },
       "required": [
         "threadId"
+      ],
+      "type": "object"
+    },
+    "ThreadWriterEvidence": {
+      "properties": {
+        "storeId": {
+          "type": "string"
+        },
+        "writerGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "storeId",
+        "writerGeneration"
       ],
       "type": "object"
     },
@@ -7186,6 +7391,26 @@
         "params"
       ],
       "title": "Thread/goal/clearedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "thread/transitioned"
+          ],
+          "title": "Thread/transitionedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadTransitionedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Thread/transitionedNotification",
       "type": "object"
     },
     {

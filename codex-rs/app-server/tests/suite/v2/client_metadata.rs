@@ -450,6 +450,7 @@ async fn turn_steer_updates_client_metadata_on_follow_up_responses_request_v2() 
     let steer_req = mcp
         .send_turn_steer_request(TurnSteerParams {
             thread_id: thread.id.clone(),
+            expected_execution_account: None,
             client_user_message_id: None,
             input: vec![V2UserInput::Text {
                 text: "Focus on the failure".to_string(),

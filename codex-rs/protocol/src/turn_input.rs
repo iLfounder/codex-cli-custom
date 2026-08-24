@@ -2,6 +2,7 @@
 
 use crate::models::ResponseItem;
 use crate::protocol::AdditionalContextEntry;
+use crate::protocol::ExecutionAccountBinding;
 use crate::protocol::InterAgentCommunication;
 use crate::protocol::NonSteerableTurnKind;
 use crate::protocol::ThreadSettingsOverrides;
@@ -31,6 +32,7 @@ pub enum TurnInput {
 #[derive(Clone, Debug)]
 pub struct TurnInputRequest {
     pub input: TurnInput,
+    pub expected_execution_account: Option<ExecutionAccountBinding>,
     pub thread_settings: ThreadSettingsOverrides,
     pub start: TurnStartOptions,
     pub additional_context: BTreeMap<String, AdditionalContextEntry>,
@@ -54,12 +56,22 @@ impl TurnInputRequest {
     pub fn new(input: TurnInput) -> Self {
         Self {
             input,
+            expected_execution_account: None,
             thread_settings: ThreadSettingsOverrides::default(),
             start: TurnStartOptions::default(),
             additional_context: BTreeMap::new(),
             responsesapi_client_metadata: None,
             trace: None,
         }
+    }
+
+    /// Requires Core to admit this input under the exact captured execution account.
+    pub fn with_expected_execution_account(
+        mut self,
+        expected_execution_account: ExecutionAccountBinding,
+    ) -> Self {
+        self.expected_execution_account = Some(expected_execution_account);
+        self
     }
 
     /// Creates ordinary user input without a client-provided message id.
@@ -180,6 +192,12 @@ pub enum SteerSubmission {
 /// Why Core did not accept submitted turn input for turn processing.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NotSubmittedReason {
+    /// The execution account changed after the caller captured its prompt.
+    ExpectedExecutionAccountMismatch {
+        expected: ExecutionAccountBinding,
+        actual: ExecutionAccountBinding,
+    },
+
     /// `start_turn_if_idle` found an active turn.
     NotIdle,
 

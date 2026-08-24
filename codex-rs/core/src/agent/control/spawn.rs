@@ -775,6 +775,7 @@ impl AgentControl {
                             EventMsg::ItemCompleted(_)
                                 | EventMsg::TokenCount(_)
                                 | EventMsg::ThreadGoalUpdated(_)
+                                | EventMsg::ThreadGoalCleared(_)
                                 | EventMsg::ThreadSettingsApplied(_),
                         )
                     )

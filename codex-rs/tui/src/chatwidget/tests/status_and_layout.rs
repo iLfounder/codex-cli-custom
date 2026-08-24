@@ -4342,6 +4342,8 @@ fn test_thread_goal(
 ) -> codex_app_server_protocol::ThreadGoal {
     codex_app_server_protocol::ThreadGoal {
         thread_id: "thread-1".to_string(),
+        goal_id: "goal-test".to_string(),
+        revision: 1,
         objective: "Keep improving the benchmark".to_string(),
         status,
         token_budget,

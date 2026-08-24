@@ -7,8 +7,19 @@
           "format": "int64",
           "type": "integer"
         },
+        "goalId": {
+          "default": "",
+          "description": "Missing values decode as the legacy sentinel for stock-server compatibility.",
+          "type": "string"
+        },
         "objective": {
           "type": "string"
+        },
+        "revision": {
+          "default": 0,
+          "description": "Missing values decode as the legacy sentinel for stock-server compatibility.",
+          "format": "int64",
+          "type": "integer"
         },
         "status": {
           "$ref": "#/definitions/ThreadGoalStatus"
@@ -69,6 +80,12 @@
           "type": "null"
         }
       ]
+    },
+    "revision": {
+      "default": 0,
+      "description": "Missing values decode as the legacy sentinel for stock-server compatibility.",
+      "format": "int64",
+      "type": "integer"
     }
   },
   "title": "ThreadGoalGetResponse",

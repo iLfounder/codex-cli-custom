@@ -23,6 +23,10 @@ use crate::tool::validate_goal_budget;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GoalServiceError {
     InvalidRequest(String),
+    RevisionConflict {
+        current_goal_id: Option<String>,
+        current_revision: i64,
+    },
     Internal(String),
 }
 
@@ -30,6 +34,7 @@ impl fmt::Display for GoalServiceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidRequest(message) | Self::Internal(message) => f.write_str(message),
+            Self::RevisionConflict { .. } => f.write_str("goal revision conflict"),
         }
     }
 }
@@ -60,11 +65,61 @@ pub struct GoalSetRequest<'a> {
 #[derive(Clone, Debug)]
 pub struct GoalSetOutcome {
     pub goal: ThreadGoal,
-    state_goal: codex_state::ThreadGoal,
-    previous_goal: Option<PreviousGoalSnapshot>,
+    pub(crate) state_goal: codex_state::ThreadGoal,
+    pub(crate) previous_goal: Option<PreviousGoalSnapshot>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExpectedGoalVersion {
+    pub goal_id: String,
+    pub revision: i64,
+}
+
+impl From<&codex_state::ThreadGoal> for ExpectedGoalVersion {
+    fn from(goal: &codex_state::ThreadGoal) -> Self {
+        Self {
+            goal_id: goal.goal_id.clone(),
+            revision: goal.revision,
+        }
+    }
+}
+
+impl From<&ExpectedGoalVersion> for codex_state::GoalVersion {
+    fn from(version: &ExpectedGoalVersion) -> Self {
+        Self {
+            goal_id: version.goal_id.clone(),
+            revision: version.revision,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct GoalClearOutcome {
+    pub previous_goal: ThreadGoal,
+    pub previous_goal_version: ExpectedGoalVersion,
+    pub revision: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct GoalReplaceOutcome {
+    pub previous_goal: ThreadGoal,
+    pub previous_goal_version: ExpectedGoalVersion,
+    pub goal: ThreadGoal,
+    pub goal_version: ExpectedGoalVersion,
+}
+
+#[derive(Clone, Debug)]
+pub struct GoalReadOutcome {
+    pub goal: Option<ThreadGoal>,
+    pub goal_id: Option<String>,
+    pub revision: i64,
 }
 
 impl GoalSetOutcome {
+    pub fn version(&self) -> ExpectedGoalVersion {
+        ExpectedGoalVersion::from(&self.state_goal)
+    }
+
     pub fn thread_goal_updated_item(&self) -> RolloutItem {
         RolloutItem::EventMsg(EventMsg::ThreadGoalUpdated(ThreadGoalUpdatedEvent {
             thread_id: self.goal.thread_id,
@@ -123,8 +178,9 @@ impl GoalService {
             .await
             .map_err(GoalServiceError::Internal)?;
         runtime
-            .prepare_external_goal_mutation()
+            .prepare_external_goal_mutation_while_goal_state_locked()
             .await
+            .map(|_| ())
             .map_err(GoalServiceError::Internal)
     }
 
@@ -139,6 +195,37 @@ impl GoalService {
             .await
             .map(|goal| goal.map(protocol_goal_from_state))
             .map_err(|err| GoalServiceError::Internal(format!("failed to read thread goal: {err}")))
+    }
+
+    pub async fn get_thread_goal_state(
+        &self,
+        state_db: &codex_state::StateRuntime,
+        thread_id: ThreadId,
+    ) -> Result<GoalReadOutcome, GoalServiceError> {
+        let goal = state_db
+            .thread_goals()
+            .get_thread_goal(thread_id)
+            .await
+            .map_err(|err| {
+                GoalServiceError::Internal(format!("failed to read thread goal: {err}"))
+            })?;
+        let revision = match goal.as_ref() {
+            Some(goal) => goal.revision,
+            None => state_db
+                .thread_goals()
+                .get_thread_goal_revision(thread_id)
+                .await
+                .map_err(|err| {
+                    GoalServiceError::Internal(format!(
+                        "failed to read thread goal revision: {err}"
+                    ))
+                })?,
+        };
+        Ok(GoalReadOutcome {
+            goal_id: goal.as_ref().map(|goal| goal.goal_id.clone()),
+            goal: goal.map(protocol_goal_from_state),
+            revision,
+        })
     }
 
     pub async fn set_thread_goal(
@@ -185,10 +272,11 @@ impl GoalService {
             ),
             None => None,
         };
-        if let Some(runtime) = runtime.as_ref()
-            && let Err(err) = runtime.prepare_external_goal_mutation().await
-        {
-            tracing::warn!("failed to prepare external goal mutation: {err}");
+        if let Some(runtime) = runtime.as_ref() {
+            runtime
+                .prepare_external_goal_mutation_while_goal_state_locked()
+                .await
+                .map_err(GoalServiceError::Internal)?;
         }
 
         let (goal, previous_goal) = if let Some(objective) = objective {
@@ -203,8 +291,9 @@ impl GoalService {
                 let previous_goal = PreviousGoalSnapshot::from(existing_goal);
                 state_db
                     .thread_goals()
-                    .update_thread_goal(
+                    .update_thread_goal_exact(
                         thread_id,
+                        &codex_state::GoalVersion::from(existing_goal),
                         codex_state::GoalUpdate {
                             objective: Some(objective.to_string()),
                             status,
@@ -225,8 +314,17 @@ impl GoalService {
             } else {
                 state_db
                     .thread_goals()
-                    .replace_thread_goal(
+                    .create_thread_goal_exact(
                         thread_id,
+                        state_db
+                            .thread_goals()
+                            .get_thread_goal_revision(thread_id)
+                            .await
+                            .map_err(|err| {
+                                GoalServiceError::Internal(format!(
+                                    "failed to read thread goal revision: {err}"
+                                ))
+                            })?,
                         objective,
                         status.unwrap_or(codex_state::ThreadGoalStatus::Active),
                         token_budget.flatten().or(max_goal_token_budget),
@@ -234,6 +332,13 @@ impl GoalService {
                     .await
                     .map_err(|err| {
                         GoalServiceError::Internal(format!("failed to replace thread goal: {err}"))
+                    })
+                    .and_then(|goal| {
+                        goal.ok_or_else(|| {
+                            GoalServiceError::InvalidRequest(format!(
+                                "cannot create goal for thread {thread_id}: goal state changed"
+                            ))
+                        })
                     })
                     .map(|goal| (goal, None))?
             }
@@ -254,8 +359,9 @@ impl GoalService {
             let expected_goal_id = existing_goal.goal_id.clone();
             state_db
                 .thread_goals()
-                .update_thread_goal(
+                .update_thread_goal_exact(
                     thread_id,
+                    &codex_state::GoalVersion::from(&existing_goal),
                     codex_state::GoalUpdate {
                         objective: None,
                         status,
@@ -302,10 +408,11 @@ impl GoalService {
             ),
             None => None,
         };
-        if let Some(runtime) = runtime.as_ref()
-            && let Err(err) = runtime.prepare_external_goal_mutation().await
-        {
-            tracing::warn!("failed to prepare external goal mutation: {err}");
+        if let Some(runtime) = runtime.as_ref() {
+            runtime
+                .prepare_external_goal_mutation_while_goal_state_locked()
+                .await
+                .map_err(GoalServiceError::Internal)?;
         }
 
         let cleared_goal = state_db
@@ -345,7 +452,7 @@ impl GoalService {
         }
     }
 
-    fn runtime_for_thread(&self, thread_id: ThreadId) -> Option<Arc<GoalRuntimeHandle>> {
+    pub(crate) fn runtime_for_thread(&self, thread_id: ThreadId) -> Option<Arc<GoalRuntimeHandle>> {
         let key = thread_id.to_string();
         let mut runtimes = self.runtimes();
         let runtime = runtimes.get(&key).and_then(Weak::upgrade);

@@ -171,8 +171,32 @@ impl AccountRequestProcessor {
 
     pub(crate) async fn get_account_rate_limits(
         &self,
+        params: Option<GetAccountRateLimitsParams>,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        self.get_account_rate_limits_response()
+        let thread_id = params.and_then(|params| params.thread_id);
+        let (auth_manager, thread_id, execution_account) = match thread_id {
+            Some(thread_id) => {
+                let parsed_thread_id = ThreadId::from_string(&thread_id)
+                    .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
+                let thread = self
+                    .thread_manager
+                    .get_thread(parsed_thread_id)
+                    .await
+                    .map_err(|_| invalid_request(format!("thread {thread_id} is not loaded")))?;
+                let execution_account = thread.execution_account();
+                let execution_account_ref = SessionRuntimeAccountRef {
+                    account_slot_id: execution_account.binding.slot_id.clone(),
+                    execution_generation: execution_account.binding.generation,
+                };
+                (
+                    Arc::clone(&execution_account.auth_manager),
+                    Some(thread_id),
+                    Some(execution_account_ref),
+                )
+            }
+            None => (Arc::clone(&self.auth_manager), None, None),
+        };
+        self.get_account_rate_limits_response(auth_manager, thread_id, execution_account)
             .await
             .map(|response| Some(response.into()))
     }
@@ -1111,8 +1135,11 @@ impl AccountRequestProcessor {
 
     async fn get_account_rate_limits_response(
         &self,
+        auth_manager: Arc<AuthManager>,
+        thread_id: Option<String>,
+        execution_account: Option<SessionRuntimeAccountRef>,
     ) -> Result<GetAccountRateLimitsResponse, JSONRPCErrorError> {
-        let Some(auth) = self.auth_manager.auth().await else {
+        let Some(auth) = auth_manager.auth().await else {
             return Err(invalid_request(
                 "codex account authentication required to read rate limits",
             ));
@@ -1171,6 +1198,8 @@ impl AccountRequestProcessor {
         });
 
         Ok(GetAccountRateLimitsResponse {
+            thread_id,
+            execution_account,
             rate_limits: rate_limits.into(),
             rate_limits_by_limit_id: Some(
                 rate_limits_by_limit_id

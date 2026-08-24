@@ -1,6 +1,7 @@
 use anyhow::Context;
 use anyhow::Result;
 use app_test_support::ChatGptAuthFixture;
+use app_test_support::MockResponsesConfig;
 use app_test_support::PathBufExt;
 use app_test_support::TestAppServer;
 use app_test_support::create_mock_responses_server_repeating_assistant;
@@ -23,6 +24,8 @@ use codex_app_server_protocol::SandboxMode;
 #[cfg(not(windows))]
 use codex_app_server_protocol::SandboxPolicy;
 use codex_app_server_protocol::ServerNotification;
+use codex_app_server_protocol::SessionRuntimeListParams;
+use codex_app_server_protocol::SessionRuntimeListResponse;
 use codex_app_server_protocol::TextPosition;
 use codex_app_server_protocol::TextRange;
 use codex_app_server_protocol::ThreadHistoryMode;
@@ -32,6 +35,9 @@ use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::ThreadStartedNotification;
 use codex_app_server_protocol::ThreadStatus;
 use codex_app_server_protocol::ThreadStatusChangedNotification;
+use codex_app_server_protocol::ThreadTransitionIntent;
+use codex_app_server_protocol::ThreadTransitionReason;
+use codex_app_server_protocol::ThreadWriterEvidence;
 use codex_app_server_protocol::TurnEnvironmentParams;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::UserInput as V2UserInput;
@@ -39,16 +45,19 @@ use codex_config::loader::project_trust_key;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_core::config::set_project_trust_level;
 use codex_exec_server::LOCAL_FS;
+use codex_features::Feature;
 use codex_git_utils::resolve_root_git_project_for_trust;
 use codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::config_types::TrustLevel;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_utils_absolute_path::test_support::PathExt;
 use core_test_support::stdio_server_bin;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -91,6 +100,42 @@ async fn start_thread_with_model(
         ..Default::default()
     })
     .await
+}
+
+async fn transition_intent(
+    app: &mut TestAppServer,
+    previous_thread_id: &str,
+    transition_id: &str,
+) -> Result<ThreadTransitionIntent> {
+    let runtime: SessionRuntimeListResponse = app
+        .request(|request_id| ClientRequest::SessionRuntimeList {
+            request_id,
+            params: SessionRuntimeListParams {
+                cursor: None,
+                limit: None,
+                thread_id: Some(previous_thread_id.to_string()),
+            },
+        })
+        .await?;
+    let snapshot = runtime
+        .data
+        .into_iter()
+        .next()
+        .context("runtime snapshot")?;
+    Ok(ThreadTransitionIntent {
+        transition_id: transition_id.to_string(),
+        reason: ThreadTransitionReason::New,
+        previous_thread_id: previous_thread_id.to_string(),
+        expected_instance_epoch: runtime.instance_epoch,
+        expected_state_revision: snapshot.state_revision,
+        expected_writer: ThreadWriterEvidence {
+            store_id: snapshot.writer.store_id.context("writer store id")?,
+            writer_generation: snapshot
+                .writer
+                .writer_generation
+                .context("writer generation")?,
+        },
+    })
 }
 
 #[tokio::test]
@@ -1149,6 +1194,181 @@ async fn thread_start_fails_when_required_mcp_server_fails_to_initialize() -> Re
         err.error.message
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn transition_start_failures_abort_exact_claim_and_allow_retry() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("unused").await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri())
+        .enable_feature(Feature::Sqlite)
+        .write(codex_home.path())?;
+    let sqlite_home = codex_home.path().to_string_lossy();
+    let mut app = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .with_env_overrides(&[("CODEX_SQLITE_HOME", Some(sqlite_home.as_ref()))])
+        .build_initialized()
+        .await?;
+    let state_db = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
+        "mock_provider".to_string(),
+    )
+    .await?;
+
+    let first_previous = app.start_thread(ThreadStartParams::default()).await?.thread;
+    let first_intent = transition_intent(
+        &mut app,
+        &first_previous.id,
+        "00000000-0000-0000-0000-000000000101",
+    )
+    .await?;
+    std::fs::write(
+        codex_home.path().join("requirements.toml"),
+        r#"[hooks]
+
+[[hooks.PreToolUse]]
+matcher = "["
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "echo managed"
+"#,
+    )?;
+    let first_params = ThreadStartParams {
+        transition: Some(first_intent.clone()),
+        ..Default::default()
+    };
+    let request_id = app
+        .send_thread_start_request_with_auto_env(first_params.clone())
+        .await?;
+    let _: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        app.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    assert_eq!(
+        state_db
+            .thread_transition_by_id(&first_intent.transition_id)
+            .await?,
+        None
+    );
+
+    std::fs::remove_file(codex_home.path().join("requirements.toml"))?;
+    let first_retry = app.start_thread(first_params).await?;
+    assert_eq!(
+        first_retry
+            .transition
+            .as_ref()
+            .context("retry transition preparation")?
+            .transition_id,
+        first_intent.transition_id
+    );
+
+    let second_previous = app.start_thread(ThreadStartParams::default()).await?.thread;
+    let second_intent = transition_intent(
+        &mut app,
+        &second_previous.id,
+        "00000000-0000-0000-0000-000000000102",
+    )
+    .await?;
+    let initialize_barrier = codex_home.path().join("allow-transition-mcp-initialize");
+    std::fs::write(&initialize_barrier, "ready")?;
+    let mut config = std::fs::OpenOptions::new()
+        .append(true)
+        .open(codex_home.path().join("config.toml"))?;
+    writeln!(
+        config,
+        r#"
+[mcp_servers.transition-stall]
+command = {}
+required = true
+startup_timeout_sec = 60
+
+[mcp_servers.transition-stall.env]
+MCP_TEST_INITIALIZE_BARRIER_FILE = {}
+"#,
+        toml::Value::String(stdio_server_bin()?),
+        toml::Value::String(initialize_barrier.to_string_lossy().into_owned()),
+    )?;
+    drop(config);
+    std::fs::remove_file(&initialize_barrier)?;
+
+    let second_params = ThreadStartParams {
+        transition: Some(second_intent.clone()),
+        ..Default::default()
+    };
+    let request_id = app
+        .send_thread_start_request_with_auto_env(second_params.clone())
+        .await?;
+    let preparing = timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            if let Some(codex_state::ThreadTransitionRecord::Preparing(preparing)) = state_db
+                .thread_transition_by_id(&second_intent.transition_id)
+                .await?
+            {
+                return Ok::<_, anyhow::Error>(preparing);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .context("timed out waiting for durable transition claim")??;
+    state_db
+        .mark_thread_transition_prepared(&codex_state::MarkThreadTransitionPrepared {
+            transition_id: preparing.transition_id.clone(),
+            expected_request_fingerprint: preparing.request_fingerprint.clone(),
+            expected_origin_instance_epoch: preparing.origin_instance_epoch.clone(),
+            expected_initiator_client_incarnation: preparing.initiator_client_incarnation.clone(),
+            current_writer: codex_state::ThreadWriterEvidence {
+                store_id: "forced-stale-writer".to_string(),
+                writer_generation: 1,
+            },
+        })
+        .await?;
+    std::fs::write(&initialize_barrier, "ready")?;
+    let _: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        app.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    assert_eq!(
+        state_db
+            .thread_transition_by_id(&second_intent.transition_id)
+            .await?,
+        None
+    );
+    let rolled_back: SessionRuntimeListResponse = app
+        .request(|request_id| ClientRequest::SessionRuntimeList {
+            request_id,
+            params: SessionRuntimeListParams {
+                cursor: None,
+                limit: None,
+                thread_id: Some(preparing.current_thread_id.to_string()),
+            },
+        })
+        .await?;
+    assert!(
+        rolled_back.data.is_empty(),
+        "rolled back replacement runtime must not remain listed"
+    );
+
+    let refreshed_second_intent =
+        transition_intent(&mut app, &second_previous.id, &second_intent.transition_id).await?;
+    let second_retry = app
+        .start_thread(ThreadStartParams {
+            transition: Some(refreshed_second_intent),
+            ..Default::default()
+        })
+        .await?;
+    assert_eq!(
+        second_retry
+            .transition
+            .as_ref()
+            .context("post-create retry transition preparation")?
+            .transition_id,
+        second_intent.transition_id
+    );
     Ok(())
 }
 

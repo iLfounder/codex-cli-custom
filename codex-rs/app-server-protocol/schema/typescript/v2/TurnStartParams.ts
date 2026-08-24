@@ -8,9 +8,13 @@ import type { JsonValue } from "../serde_json/JsonValue";
 import type { ApprovalsReviewer } from "./ApprovalsReviewer";
 import type { AskForApproval } from "./AskForApproval";
 import type { SandboxPolicy } from "./SandboxPolicy";
+import type { SessionRuntimeAccountRef } from "./SessionRuntimeAccountRef";
 import type { UserInput } from "./UserInput";
 
-export type TurnStartParams = {threadId: string, clientUserMessageId?: string | null, input: Array<UserInput>, /**
+export type TurnStartParams = {threadId: string, /**
+ * Exact execution account expected by the client that produced this input.
+ */
+expectedExecutionAccount?: SessionRuntimeAccountRef | null, clientUserMessageId?: string | null, input: Array<UserInput>, /**
  * Override the working directory for this turn and subsequent turns.
  */
 cwd?: string | null, /**

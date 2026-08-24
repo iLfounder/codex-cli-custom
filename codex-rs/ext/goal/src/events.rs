@@ -4,6 +4,7 @@ use codex_extension_api::ExtensionEventSink;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ThreadGoal;
+use codex_protocol::protocol::ThreadGoalClearedEvent;
 use codex_protocol::protocol::ThreadGoalUpdatedEvent;
 
 #[derive(Clone)]
@@ -29,6 +30,17 @@ impl GoalEventEmitter {
                 turn_id,
                 goal,
             }),
+        });
+    }
+
+    pub(crate) fn thread_goal_cleared(
+        &self,
+        event_id: impl Into<String>,
+        event: ThreadGoalClearedEvent,
+    ) {
+        self.sink.emit(Event {
+            id: event_id.into(),
+            msg: EventMsg::ThreadGoalCleared(event),
         });
     }
 }

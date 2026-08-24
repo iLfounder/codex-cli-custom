@@ -2062,6 +2062,8 @@ async fn active_goal_without_follow_up_suppresses_agent_turn_complete_notificati
                 turn_id: None,
                 goal: codex_app_server_protocol::ThreadGoal {
                     thread_id: "thread-1".to_string(),
+                    goal_id: "goal-test".to_string(),
+                    revision: 1,
                     objective: "finish the benchmark".to_string(),
                     status: codex_app_server_protocol::ThreadGoalStatus::Active,
                     token_budget: None,

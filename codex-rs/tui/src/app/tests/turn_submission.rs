@@ -77,6 +77,7 @@ async fn misalignment_policy_blocks_queued_turns_and_goal_resumption() -> Result
             Some("Do not restart this stopped goal".to_string()),
             Some(ThreadGoalStatus::Blocked),
             /*token_budget*/ None,
+            /*expected_goal*/ None,
         )
         .await?;
     app.chat_widget

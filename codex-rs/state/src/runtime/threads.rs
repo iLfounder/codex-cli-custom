@@ -1140,7 +1140,7 @@ ON CONFLICT(id) DO UPDATE SET
                 .await?;
             self.thread_queue.delete_thread_queue(*thread_id).await?;
             self.memories.delete_thread_memory(*thread_id).await?;
-            self.thread_goals.delete_thread_goal(*thread_id).await?;
+            self.thread_goals.purge_thread_goal(*thread_id).await?;
         }
 
         let mut tx = self.pool.begin().await?;

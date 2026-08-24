@@ -864,6 +864,7 @@ async fn thread_fork_defers_inherited_active_goal_until_next_turn() -> Result<()
         assert_eq!(forked_thread.turns.len(), expected_turn_count);
         let mut expected_goal = source_goal.clone();
         expected_goal.thread_id = forked_thread_id;
+        expected_goal.revision = 1;
         assert_eq!(
             state_db
                 .thread_goals()

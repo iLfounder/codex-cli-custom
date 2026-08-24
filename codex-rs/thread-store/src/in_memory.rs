@@ -22,12 +22,16 @@ use codex_protocol::protocol::ThreadMemoryMode;
 use codex_rollout::RolloutItem;
 use codex_rollout::persisted_rollout_items;
 
+use crate::AbortThreadTransition;
 use crate::AppendThreadItemsParams;
 use crate::ArchiveThreadParams;
+use crate::CommitThreadTransition;
+use crate::CommittedThreadTransitions;
 use crate::CreateThreadParams;
 use crate::DeleteThreadParams;
 use crate::ListThreadsParams;
 use crate::LoadThreadHistoryParams;
+use crate::MarkThreadTransitionPrepared;
 use crate::MoveThreadToSectionParams;
 use crate::PersistContext;
 use crate::ReadThreadByRolloutPathParams;
@@ -47,11 +51,20 @@ use crate::ThreadStoreError;
 use crate::ThreadStoreFuture;
 use crate::ThreadStoreResult;
 use crate::ThreadStoreRuntimeSnapshot;
+use crate::ThreadTransitionAbortOutcome;
+use crate::ThreadTransitionClaimOutcome;
+use crate::ThreadTransitionCommitOutcome;
+use crate::ThreadTransitionIntent;
+use crate::ThreadTransitionPreparation;
+use crate::ThreadTransitionRecord;
+use crate::ThreadWriterEvidence;
 use crate::UpdateThreadMetadataParams;
 use crate::error::reject_paginated_history_mode;
 
 static IN_MEMORY_THREAD_STORES: OnceLock<Mutex<HashMap<String, Arc<InMemoryThreadStore>>>> =
     OnceLock::new();
+
+mod thread_transition;
 
 fn stores() -> &'static Mutex<HashMap<String, Arc<InMemoryThreadStore>>> {
     IN_MEMORY_THREAD_STORES.get_or_init(|| Mutex::new(HashMap::new()))
@@ -110,6 +123,112 @@ mod tests {
                 .await
                 .expect("stale compare and swap"),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn execution_account_slot_runtime_batch_cas_is_atomic() {
+        let store = InMemoryThreadStore::default();
+        let first_thread =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000001").expect("thread id");
+        let second_thread =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000002").expect("thread id");
+        let phantom_thread =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000003").expect("thread id");
+        for (thread_id, generation) in [(first_thread, 1), (second_thread, 3)] {
+            store
+                .initialize_execution_account_binding(
+                    thread_id,
+                    ExecutionAccountBinding {
+                        slot_id: "secondary".to_string(),
+                        generation,
+                    },
+                )
+                .await
+                .expect("initialize binding");
+        }
+
+        let legacy = store
+            .execution_account_slot_runtime_state("secondary".to_string())
+            .await
+            .expect("read legacy slot runtime");
+        assert_eq!(legacy.0, 0);
+        let committed = store
+            .compare_and_swap_execution_account_slot_runtime(
+                "secondary".to_string(),
+                legacy.0,
+                legacy.1.clone(),
+            )
+            .await
+            .expect("commit slot runtime")
+            .expect("exact snapshot should commit");
+        assert_eq!(committed.0, 1);
+        assert_eq!(
+            committed
+                .1
+                .iter()
+                .map(|(_, binding)| binding.generation)
+                .collect::<Vec<_>>(),
+            vec![2, 4]
+        );
+
+        store
+            .initialize_execution_account_binding(
+                phantom_thread,
+                ExecutionAccountBinding {
+                    slot_id: "secondary".to_string(),
+                    generation: 1,
+                },
+            )
+            .await
+            .expect("insert phantom binding");
+        let before_stale = store
+            .execution_account_slot_runtime_state("secondary".to_string())
+            .await
+            .expect("read state with phantom");
+        assert_eq!(
+            store
+                .compare_and_swap_execution_account_slot_runtime(
+                    "secondary".to_string(),
+                    committed.0,
+                    committed.1,
+                )
+                .await
+                .expect("phantom commit should not fail"),
+            None
+        );
+        assert_eq!(
+            store
+                .execution_account_slot_runtime_state("secondary".to_string())
+                .await
+                .expect("read state after phantom rejection"),
+            before_stale
+        );
+
+        {
+            let mut state = store.state.lock().await;
+            state
+                .account_slot_runtime_versions
+                .insert("secondary".to_string(), u64::MAX);
+        }
+        let overflow_state = store
+            .execution_account_slot_runtime_state("secondary".to_string())
+            .await
+            .expect("read overflow state");
+        store
+            .compare_and_swap_execution_account_slot_runtime(
+                "secondary".to_string(),
+                overflow_state.0,
+                overflow_state.1.clone(),
+            )
+            .await
+            .expect_err("runtime version overflow should reject the whole batch");
+        assert_eq!(
+            store
+                .execution_account_slot_runtime_state("secondary".to_string())
+                .await
+                .expect("read state after overflow"),
+            overflow_state
         );
     }
 
@@ -506,6 +625,10 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+#[path = "in_memory_thread_transition_tests.rs"]
+mod thread_transition_tests;
+
 fn stores_guard() -> MutexGuard<'static, HashMap<String, Arc<InMemoryThreadStore>>> {
     match stores().lock() {
         Ok(guard) => guard,
@@ -558,7 +681,18 @@ struct InMemoryThreadStoreState {
     names: HashMap<ThreadId, Option<String>>,
     rollout_paths: HashMap<PathBuf, ThreadId>,
     execution_accounts: HashMap<ThreadId, ExecutionAccountBinding>,
+    account_slot_runtime_versions: HashMap<String, u64>,
     turn_execution_accounts: HashMap<(ThreadId, String), ExecutionAccountBinding>,
+    thread_transitions: HashMap<String, InMemoryThreadTransition>,
+    next_thread_transition_revision: u64,
+}
+
+#[derive(Clone)]
+struct InMemoryThreadTransition {
+    revision: u64,
+    request_fingerprint: String,
+    previous_precondition_state_revision: u64,
+    record: ThreadTransitionRecord,
 }
 
 impl InMemoryThreadStore {
@@ -1015,6 +1149,139 @@ impl ThreadStore for InMemoryThreadStore {
             };
             Ok(Some(current.clone()))
         })
+    }
+
+    fn execution_account_slot_runtime_state(
+        &self,
+        slot_id: String,
+    ) -> ThreadStoreFuture<'_, (u64, Vec<(ThreadId, ExecutionAccountBinding)>)> {
+        Box::pin(async move {
+            let state = self.state.lock().await;
+            let runtime_version = state
+                .account_slot_runtime_versions
+                .get(&slot_id)
+                .copied()
+                .unwrap_or_default();
+            let mut bindings = state
+                .execution_accounts
+                .iter()
+                .filter(|(_, binding)| binding.slot_id == slot_id)
+                .map(|(thread_id, binding)| (*thread_id, binding.clone()))
+                .collect::<Vec<_>>();
+            bindings.sort_by_key(|(thread_id, _)| thread_id.to_string());
+            Ok((runtime_version, bindings))
+        })
+    }
+
+    fn compare_and_swap_execution_account_slot_runtime(
+        &self,
+        slot_id: String,
+        expected_runtime_version: u64,
+        mut expected_bindings: Vec<(ThreadId, ExecutionAccountBinding)>,
+    ) -> ThreadStoreFuture<'_, Option<(u64, Vec<(ThreadId, ExecutionAccountBinding)>)>> {
+        Box::pin(async move {
+            let mut state = self.state.lock().await;
+            let current_runtime_version = state
+                .account_slot_runtime_versions
+                .get(&slot_id)
+                .copied()
+                .unwrap_or_default();
+            let mut current_bindings = state
+                .execution_accounts
+                .iter()
+                .filter(|(_, binding)| binding.slot_id == slot_id)
+                .map(|(thread_id, binding)| (*thread_id, binding.clone()))
+                .collect::<Vec<_>>();
+            current_bindings.sort_by_key(|(thread_id, _)| thread_id.to_string());
+            expected_bindings.sort_by_key(|(thread_id, _)| thread_id.to_string());
+            if current_runtime_version != expected_runtime_version
+                || current_bindings != expected_bindings
+            {
+                return Ok(None);
+            }
+
+            let Some(next_runtime_version) = expected_runtime_version.checked_add(1) else {
+                return Err(ThreadStoreError::Internal {
+                    message: "execution account runtime version overflow".to_string(),
+                });
+            };
+            let mut next_bindings = Vec::with_capacity(expected_bindings.len());
+            for (thread_id, binding) in &expected_bindings {
+                let Some(generation) = binding.generation.checked_add(1) else {
+                    return Err(ThreadStoreError::Internal {
+                        message: "execution account generation overflow".to_string(),
+                    });
+                };
+                next_bindings.push((
+                    *thread_id,
+                    ExecutionAccountBinding {
+                        slot_id: slot_id.clone(),
+                        generation,
+                    },
+                ));
+            }
+
+            state
+                .account_slot_runtime_versions
+                .insert(slot_id, next_runtime_version);
+            for (thread_id, binding) in &next_bindings {
+                state.execution_accounts.insert(*thread_id, binding.clone());
+            }
+            Ok(Some((next_runtime_version, next_bindings)))
+        })
+    }
+
+    fn claim_thread_transition(
+        &self,
+        intent: ThreadTransitionIntent,
+        reserved_current_thread_id: ThreadId,
+        origin_instance_epoch: String,
+        initiator_client_incarnation: String,
+        previous_writer: ThreadWriterEvidence,
+    ) -> ThreadStoreFuture<'_, ThreadTransitionClaimOutcome> {
+        Box::pin(thread_transition::claim(
+            self,
+            intent,
+            reserved_current_thread_id,
+            origin_instance_epoch,
+            initiator_client_incarnation,
+            previous_writer,
+        ))
+    }
+
+    fn mark_thread_transition_prepared(
+        &self,
+        request: MarkThreadTransitionPrepared,
+    ) -> ThreadStoreFuture<'_, ThreadTransitionPreparation> {
+        Box::pin(thread_transition::mark_prepared(self, request))
+    }
+
+    fn abort_thread_transition(
+        &self,
+        request: AbortThreadTransition,
+    ) -> ThreadStoreFuture<'_, ThreadTransitionAbortOutcome> {
+        Box::pin(thread_transition::abort(self, request))
+    }
+
+    fn commit_thread_transition(
+        &self,
+        request: CommitThreadTransition,
+    ) -> ThreadStoreFuture<'_, ThreadTransitionCommitOutcome> {
+        Box::pin(thread_transition::commit(self, request))
+    }
+
+    fn thread_transition_by_id(
+        &self,
+        transition_id: String,
+    ) -> ThreadStoreFuture<'_, Option<ThreadTransitionRecord>> {
+        Box::pin(thread_transition::by_id(self, transition_id))
+    }
+
+    fn committed_thread_transitions_for_threads(
+        &self,
+        thread_ids: Vec<ThreadId>,
+    ) -> ThreadStoreFuture<'_, HashMap<ThreadId, CommittedThreadTransitions>> {
+        Box::pin(thread_transition::committed_for_threads(self, thread_ids))
     }
 
     fn turn_execution_account(

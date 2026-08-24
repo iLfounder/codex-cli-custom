@@ -24,6 +24,7 @@ use codex_app_server_protocol::CommandExecutionApprovalDecision;
 use codex_app_server_protocol::CommandExecutionRequestApprovalResponse;
 use codex_app_server_protocol::FileChangeApprovalDecision;
 use codex_app_server_protocol::FileChangeRequestApprovalResponse;
+use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCResponse;
@@ -63,9 +64,11 @@ use codex_app_server_protocol::ThreadStatusChangedNotification;
 use codex_app_server_protocol::ThreadTurnsListParams;
 use codex_app_server_protocol::ThreadTurnsListResponse;
 use codex_app_server_protocol::ThreadUnsubscribeParams;
+use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnItemsView;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
+use codex_app_server_protocol::TurnStartedNotification;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
 use codex_config::types::AuthCredentialsStoreMode;
@@ -145,6 +148,107 @@ const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 #[cfg(not(windows))]
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const CODEX_5_2_INSTRUCTIONS_TEMPLATE_DEFAULT: &str = "You are Codex, a coding agent based on GPT-5. You and the user share the same workspace and collaborate to achieve the user's goals.";
+
+#[tokio::test]
+async fn cold_and_running_resume_share_idempotent_turn_lifecycle_attachment() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("resume attached").await;
+    let codex_home = TempDir::new()?;
+    let rollout = setup_rollout_fixture(codex_home.path(), &server.uri()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+
+    let cold_resume_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: rollout.conversation_id.clone(),
+            ..Default::default()
+        })
+        .await?;
+    let ThreadResumeResponse { thread, .. } =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(cold_resume_id)).await??;
+    let running_resume_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: thread.id.clone(),
+            ..Default::default()
+        })
+        .await?;
+    let ThreadResumeResponse {
+        thread: resumed_again,
+        ..
+    } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(running_resume_id)).await??;
+    assert_eq!(resumed_again.id, thread.id);
+    mcp.clear_message_buffer();
+
+    let TurnStartResponse { turn } = mcp
+        .request(
+            |request_id| codex_app_server_protocol::ClientRequest::TurnStart {
+                request_id,
+                params: TurnStartParams {
+                    thread_id: thread.id.clone(),
+                    input: vec![UserInput::Text {
+                        text: "prove listener parity".to_string(),
+                        text_elements: Vec::new(),
+                    }],
+                    ..Default::default()
+                },
+            },
+        )
+        .await?;
+    let started: TurnStartedNotification =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_notification("turn/started")).await??;
+    assert_eq!(
+        (started.thread_id, started.turn.id),
+        (thread.id.clone(), turn.id.clone())
+    );
+    let assistant: ItemCompletedNotification = loop {
+        let completed: ItemCompletedNotification = timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_notification("item/completed"),
+        )
+        .await??;
+        if matches!(&completed.item, ThreadItem::AgentMessage { .. }) {
+            break completed;
+        }
+    };
+    assert_eq!(assistant.thread_id, thread.id);
+    let completed: TurnCompletedNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_notification("turn/completed"),
+    )
+    .await??;
+    assert_eq!(
+        (
+            completed.thread_id,
+            completed.turn.id,
+            completed.turn.status
+        ),
+        (thread.id, turn.id, TurnStatus::Completed)
+    );
+    assert!(
+        !mcp.pending_notification_methods()
+            .iter()
+            .any(|method| method == "turn/started" || method == "turn/completed"),
+        "duplicate turn lifecycle notification remained buffered"
+    );
+    loop {
+        match timeout(Duration::from_millis(100), mcp.read_next_message()).await {
+            Err(_) => break,
+            Ok(Ok(codex_app_server_protocol::JSONRPCMessage::Notification(notification)))
+                if notification.method == "turn/started"
+                    || notification.method == "turn/completed" =>
+            {
+                panic!(
+                    "duplicate turn lifecycle notification: {}",
+                    notification.method
+                );
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => return Err(error),
+        }
+    }
+    Ok(())
+}
 
 #[tokio::test]
 async fn thread_resume_paginated_model_context_preserves_original_metadata() -> Result<()> {
@@ -281,9 +385,12 @@ async fn assert_thread_resume_rejects_writer_owned_by_another_process(
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     mock_responses_config(&server.uri()).write(codex_home.path())?;
+    let shared_sqlite_home = TempDir::new()?;
+    let shared_sqlite_home_path = shared_sqlite_home.path().to_string_lossy();
 
     let mut primary = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_env_overrides(&[("CODEX_SQLITE_HOME", Some(shared_sqlite_home_path.as_ref()))])
         .build_initialized()
         .await?;
     let ThreadStartResponse { thread, .. } = primary
@@ -306,14 +413,9 @@ async fn assert_thread_resume_rejects_writer_owned_by_another_process(
     )
     .await??;
 
-    let secondary_sqlite_home = TempDir::new()?;
-    let secondary_sqlite_home_path = secondary_sqlite_home.path().to_string_lossy();
     let mut secondary = TestAppServer::builder()
         .with_codex_home(codex_home.path())
-        .with_env_overrides(&[(
-            "CODEX_SQLITE_HOME",
-            Some(secondary_sqlite_home_path.as_ref()),
-        )])
+        .with_env_overrides(&[("CODEX_SQLITE_HOME", Some(shared_sqlite_home_path.as_ref()))])
         .build_initialized()
         .await?;
     let resume_id = secondary

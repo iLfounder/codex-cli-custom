@@ -114,6 +114,194 @@ fn default_execution_account_runtime(
         guardian_review_session: Arc::new(crate::guardian::GuardianReviewSessionManager::default()),
     })
 }
+
+struct ControlledExecutionAccountContributor {
+    quiesce_started: async_channel::Sender<()>,
+    quiesce_result: async_channel::Receiver<Result<(), String>>,
+}
+
+struct ControlledPreparedExecutionAccountRuntime {
+    quiesce_started: async_channel::Sender<()>,
+    quiesce_result: async_channel::Receiver<Result<(), String>>,
+}
+
+impl codex_extension_api::PreparedExecutionAccountRuntime
+    for ControlledPreparedExecutionAccountRuntime
+{
+    fn quiesce(&self) -> codex_extension_api::ExtensionFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            self.quiesce_started
+                .send(())
+                .await
+                .map_err(|err| err.to_string())?;
+            self.quiesce_result
+                .recv()
+                .await
+                .map_err(|err| err.to_string())?
+        })
+    }
+
+    fn publish(
+        &self,
+        _session_store: &codex_extension_api::ExtensionData,
+        _thread_store: &codex_extension_api::ExtensionData,
+    ) {
+    }
+}
+
+impl codex_extension_api::ExecutionAccountRuntimeContributor<crate::config::Config>
+    for ControlledExecutionAccountContributor
+{
+    fn prepare<'a>(
+        &'a self,
+        _input: codex_extension_api::ExecutionAccountRuntimePrepareInput<'a, crate::config::Config>,
+    ) -> codex_extension_api::ExtensionFuture<
+        'a,
+        Result<Arc<dyn codex_extension_api::PreparedExecutionAccountRuntime>, String>,
+    > {
+        Box::pin(async move {
+            let prepared: Arc<dyn codex_extension_api::PreparedExecutionAccountRuntime> =
+                Arc::new(ControlledPreparedExecutionAccountRuntime {
+                    quiesce_started: self.quiesce_started.clone(),
+                    quiesce_result: self.quiesce_result.clone(),
+                });
+            Ok(prepared)
+        })
+    }
+}
+
+async fn execution_account_quiesce_test_session() -> (
+    Arc<Session>,
+    codex_protocol::protocol::ExecutionAccountBinding,
+    Arc<crate::execution_account::ExecutionAccountContext>,
+    crate::execution_account::ExecutionAccountServices,
+    async_channel::Receiver<()>,
+    async_channel::Sender<Result<(), String>>,
+) {
+    let (mut session, _turn_context) = make_session_and_context().await;
+    let store = attach_in_memory_thread_store(&mut session).await;
+    let expected = session.execution_account().binding.clone();
+    store
+        .initialize_execution_account_binding(session.thread_id(), expected.clone())
+        .await
+        .expect("initialize execution account binding");
+
+    let (quiesce_started_tx, quiesce_started_rx) = async_channel::bounded(1);
+    let (quiesce_result_tx, quiesce_result_rx) = async_channel::bounded(1);
+    let mut extensions =
+        codex_extension_api::ExtensionRegistryBuilder::<crate::config::Config>::new();
+    extensions.execution_account_runtime_contributor(Arc::new(
+        ControlledExecutionAccountContributor {
+            quiesce_started: quiesce_started_tx,
+            quiesce_result: quiesce_result_rx,
+        },
+    ));
+    session.services.extensions = Arc::new(extensions.build());
+
+    let config = session.get_config().await;
+    let target_auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Target Test API Key"));
+    let target_models_manager = models_manager_with_provider(
+        config.codex_home.to_path_buf(),
+        Arc::clone(&target_auth_manager),
+        config.model_provider.clone(),
+    );
+    let target_plugins_manager = Arc::new(plugins_manager_for_config(
+        &config,
+        Arc::clone(&target_auth_manager),
+    ));
+    let target_services = crate::execution_account::ExecutionAccountServices {
+        plugins_manager: Arc::clone(&target_plugins_manager),
+        mcp_manager: Arc::new(McpManager::new(target_plugins_manager)),
+    };
+    let target = Arc::new(crate::execution_account::ExecutionAccountContext {
+        binding: codex_protocol::protocol::ExecutionAccountBinding {
+            slot_id: "target".to_string(),
+            generation: expected.generation + 1,
+        },
+        auth_manager: target_auth_manager,
+        models_manager: target_models_manager,
+    });
+
+    (
+        Arc::new(session),
+        expected,
+        target,
+        target_services,
+        quiesce_started_rx,
+        quiesce_result_tx,
+    )
+}
+
+#[tokio::test]
+async fn execution_account_quiesce_error_restores_idle_admission() {
+    let (session, expected, target, services, quiesce_started, quiesce_result) =
+        execution_account_quiesce_test_session().await;
+    let previous = session.execution_account_runtime();
+    quiesce_result
+        .send(Err("test quiesce failure".to_string()))
+        .await
+        .expect("quiesce receiver open");
+
+    let result = session
+        .switch_execution_account(expected.clone(), target, services)
+        .await;
+
+    assert_eq!(
+        result,
+        Err(crate::execution_account::ExecutionAccountSwitchError::PreparationFailed)
+    );
+    quiesce_started
+        .recv()
+        .await
+        .expect("quiesce should have started");
+    assert!(!session.execution_control_is_closing());
+    assert!(Arc::ptr_eq(&previous, &session.execution_account_runtime()));
+    assert_eq!(session.execution_account().binding, expected);
+}
+
+#[tokio::test]
+async fn execution_account_quiesce_cancellation_restores_idle_admission() {
+    let (session, expected, target, services, quiesce_started, _quiesce_result) =
+        execution_account_quiesce_test_session().await;
+    let previous = session.execution_account_runtime();
+    let switch = tokio::spawn({
+        let session = Arc::clone(&session);
+        async move {
+            session
+                .switch_execution_account(expected.clone(), target, services)
+                .await
+        }
+    });
+    timeout(StdDuration::from_secs(2), quiesce_started.recv())
+        .await
+        .expect("quiesce should start")
+        .expect("quiesce sender open");
+    assert!(session.execution_control_is_closing());
+
+    switch.abort();
+    assert!(
+        switch
+            .await
+            .expect_err("switch caller should be cancelled")
+            .is_cancelled()
+    );
+    timeout(StdDuration::from_secs(2), async {
+        while session.execution_control_is_closing() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled transition should reopen admission");
+
+    assert!(Arc::ptr_eq(&previous, &session.execution_account_runtime()));
+    let _transition = session.execution_runtime_transition_lock.lock().await;
+    session
+        .begin_execution_control_transition()
+        .await
+        .expect("idle admission should remain usable");
+    session.end_execution_control_transition();
+}
 use codex_tools::ToolSpec;
 use codex_utils_path_uri::PathUri;
 use std::collections::BTreeMap;

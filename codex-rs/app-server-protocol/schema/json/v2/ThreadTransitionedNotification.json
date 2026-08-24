@@ -1,0 +1,123 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ThreadTransitionEndpointEvidence": {
+      "properties": {
+        "stateRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "writer": {
+          "$ref": "#/definitions/ThreadWriterEvidence"
+        }
+      },
+      "required": [
+        "stateRevision",
+        "threadId",
+        "writer"
+      ],
+      "type": "object"
+    },
+    "ThreadTransitionReason": {
+      "enum": [
+        "clear",
+        "new"
+      ],
+      "type": "string"
+    },
+    "ThreadTransitionReceipt": {
+      "properties": {
+        "committedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "current": {
+          "$ref": "#/definitions/ThreadTransitionEndpointEvidence"
+        },
+        "initiatorClientIncarnation": {
+          "type": "string"
+        },
+        "originInstanceEpoch": {
+          "type": "string"
+        },
+        "previous": {
+          "$ref": "#/definitions/ThreadTransitionEndpointEvidence"
+        },
+        "reason": {
+          "$ref": "#/definitions/ThreadTransitionReason"
+        },
+        "status": {
+          "$ref": "#/definitions/ThreadTransitionStatus"
+        },
+        "transitionId": {
+          "type": "string"
+        },
+        "transitionRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "committedAt",
+        "current",
+        "initiatorClientIncarnation",
+        "originInstanceEpoch",
+        "previous",
+        "reason",
+        "status",
+        "transitionId",
+        "transitionRevision"
+      ],
+      "type": "object"
+    },
+    "ThreadTransitionStatus": {
+      "enum": [
+        "prepared",
+        "committed"
+      ],
+      "type": "string"
+    },
+    "ThreadWriterEvidence": {
+      "properties": {
+        "storeId": {
+          "type": "string"
+        },
+        "writerGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "storeId",
+        "writerGeneration"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "instanceEpoch": {
+      "type": "string"
+    },
+    "sequence": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "transition": {
+      "$ref": "#/definitions/ThreadTransitionReceipt"
+    }
+  },
+  "required": [
+    "instanceEpoch",
+    "sequence",
+    "transition"
+  ],
+  "title": "ThreadTransitionedNotification",
+  "type": "object"
+}

@@ -163,6 +163,7 @@ async fn exit_interrupts_before_requesting_shutdown() -> Result<()> {
             Some("test goal".to_string()),
             Some(codex_app_server_protocol::ThreadGoalStatus::Paused),
             /*token_budget*/ None,
+            /*expected_goal*/ None,
         )
         .await?
         .goal;

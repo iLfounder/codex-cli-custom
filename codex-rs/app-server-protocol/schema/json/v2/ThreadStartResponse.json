@@ -2223,6 +2223,80 @@
         }
       ]
     },
+    "ThreadTransitionPreparation": {
+      "properties": {
+        "currentThreadId": {
+          "type": "string"
+        },
+        "currentWriter": {
+          "$ref": "#/definitions/ThreadWriterEvidence"
+        },
+        "initiatorClientIncarnation": {
+          "type": "string"
+        },
+        "originInstanceEpoch": {
+          "type": "string"
+        },
+        "previousThreadId": {
+          "type": "string"
+        },
+        "previousWriter": {
+          "$ref": "#/definitions/ThreadWriterEvidence"
+        },
+        "reason": {
+          "$ref": "#/definitions/ThreadTransitionReason"
+        },
+        "status": {
+          "$ref": "#/definitions/ThreadTransitionStatus"
+        },
+        "transitionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "currentThreadId",
+        "currentWriter",
+        "initiatorClientIncarnation",
+        "originInstanceEpoch",
+        "previousThreadId",
+        "previousWriter",
+        "reason",
+        "status",
+        "transitionId"
+      ],
+      "type": "object"
+    },
+    "ThreadTransitionReason": {
+      "enum": [
+        "clear",
+        "new"
+      ],
+      "type": "string"
+    },
+    "ThreadTransitionStatus": {
+      "enum": [
+        "prepared",
+        "committed"
+      ],
+      "type": "string"
+    },
+    "ThreadWriterEvidence": {
+      "properties": {
+        "storeId": {
+          "type": "string"
+        },
+        "writerGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "storeId",
+        "writerGeneration"
+      ],
+      "type": "object"
+    },
     "Turn": {
       "properties": {
         "completedAt": {

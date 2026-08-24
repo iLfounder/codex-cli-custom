@@ -3,8 +3,7 @@ use pretty_assertions::assert_eq;
 use super::*;
 
 fn resolved(namespace: &str, name: &str) -> ResolvedCommand {
-    resolved_command(
-        namespace,
+    resolved_contribution(
         namespace,
         PluginCommandContribution {
             id: name.to_string(),
@@ -14,9 +13,39 @@ fn resolved(namespace: &str, name: &str) -> ResolvedCommand {
                 prompt: "fixed".to_string(),
             },
         },
+    )
+}
+
+fn resolved_contribution(
+    namespace: &str,
+    contribution: PluginCommandContribution,
+) -> ResolvedCommand {
+    match resolved_command(
+        namespace,
+        namespace,
+        contribution,
         true,
         None,
-    )
+        account_ref(),
+    ) {
+        Ok(command) => command,
+        Err(error) => panic!(
+            "failed to resolve fixture plugin command: {}",
+            error.message
+        ),
+    }
+}
+
+fn account_ref() -> SessionRuntimeAccountRef {
+    SessionRuntimeAccountRef {
+        account_slot_id: "slot-1".to_string(),
+        execution_generation: 7,
+    }
+}
+
+#[test]
+fn resolved_prompt_keeps_the_catalog_account_capture() {
+    assert_eq!(resolved("alpha", "deploy").execution_account, account_ref());
 }
 
 #[test]
@@ -59,8 +88,7 @@ fn suppresses_builtin_and_builtin_alias_short_names() {
 #[test]
 fn command_id_changes_with_resolved_target() {
     let original = resolved("alpha", "deploy");
-    let changed = resolved_command(
-        "alpha",
+    let changed = resolved_contribution(
         "alpha",
         PluginCommandContribution {
             id: "deploy".to_string(),
@@ -70,8 +98,6 @@ fn command_id_changes_with_resolved_target() {
                 prompt: "changed".to_string(),
             },
         },
-        true,
-        None,
     );
 
     assert_ne!(original.api.id, changed.api.id);
@@ -89,20 +115,9 @@ fn command_id_normalizes_mcp_argument_object_order() {
             arguments: Some(arguments),
         },
     };
-    let first = resolved_command(
-        "alpha",
-        "alpha",
-        contribution(serde_json::from_str(r#"{"b":2,"a":1}"#).expect("arguments")),
-        true,
-        None,
-    );
-    let reordered = resolved_command(
-        "alpha",
-        "alpha",
-        contribution(serde_json::from_str(r#"{"a":1,"b":2}"#).expect("arguments")),
-        true,
-        None,
-    );
+    let first = resolved_contribution("alpha", contribution(serde_json::json!({"b": 2, "a": 1})));
+    let reordered =
+        resolved_contribution("alpha", contribution(serde_json::json!({"a": 1, "b": 2})));
 
     assert_eq!(first.api.id, reordered.api.id);
 }

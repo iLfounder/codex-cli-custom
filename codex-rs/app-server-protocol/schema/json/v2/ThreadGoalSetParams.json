@@ -14,6 +14,19 @@
     }
   },
   "properties": {
+    "expectedGoalId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "expectedRevision": {
+      "format": "int64",
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
     "objective": {
       "type": [
         "string",

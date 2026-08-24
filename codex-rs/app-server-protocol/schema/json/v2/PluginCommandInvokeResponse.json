@@ -21,14 +21,42 @@
       ],
       "type": "object"
     },
+    "SessionRuntimeAccountRef": {
+      "properties": {
+        "accountSlotId": {
+          "type": "string"
+        },
+        "executionGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "accountSlotId",
+        "executionGeneration"
+      ],
+      "type": "object"
+    },
     "ThreadGoal": {
       "properties": {
         "createdAt": {
           "format": "int64",
           "type": "integer"
         },
+        "goalId": {
+          "default": "",
+          "description": "Missing values decode as the legacy sentinel for stock-server compatibility.",
+          "type": "string"
+        },
         "objective": {
           "type": "string"
+        },
+        "revision": {
+          "default": 0,
+          "description": "Missing values decode as the legacy sentinel for stock-server compatibility.",
+          "format": "int64",
+          "type": "integer"
         },
         "status": {
           "$ref": "#/definitions/ThreadGoalStatus"
@@ -82,6 +110,16 @@
   "oneOf": [
     {
       "properties": {
+        "executionAccount": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionRuntimeAccountRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "prompt": {
           "type": "string"
         },

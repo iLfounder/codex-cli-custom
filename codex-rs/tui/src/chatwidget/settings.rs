@@ -652,6 +652,10 @@ impl ChatWidget {
         {
             return;
         }
+        if goal.revision < self.current_goal_revision {
+            return;
+        }
+        self.current_goal_revision = goal.revision;
         if !self.config.features.enabled(Feature::Goals) {
             self.current_goal_status_indicator = None;
             self.current_goal_status = None;

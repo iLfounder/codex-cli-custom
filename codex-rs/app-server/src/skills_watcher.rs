@@ -26,9 +26,10 @@ use tracing::warn;
 const WATCHER_THROTTLE_INTERVAL: Duration = Duration::from_secs(10);
 #[cfg(test)]
 const WATCHER_THROTTLE_INTERVAL: Duration = Duration::from_millis(50);
+const WATCH_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(crate) struct SkillsWatcher {
-    subscriber: FileWatcherSubscriber,
+    subscriber: Arc<FileWatcherSubscriber>,
     runtime_extra_roots_registration: Mutex<WatchRegistration>,
     shutdown_token: CancellationToken,
     _shutdown_drop_guard: DropGuard,
@@ -59,7 +60,7 @@ impl SkillsWatcher {
             shutdown_token.child_token(),
         );
         Arc::new(Self {
-            subscriber,
+            subscriber: Arc::new(subscriber),
             runtime_extra_roots_registration: Mutex::new(WatchRegistration::default()),
             shutdown_token,
             _shutdown_drop_guard: shutdown_drop_guard,
@@ -127,7 +128,19 @@ impl SkillsWatcher {
                 recursive: true,
             })
             .collect();
-        self.subscriber.register_paths(roots)
+        let subscriber = Arc::clone(&self.subscriber);
+        let registration = tokio::task::spawn_blocking(move || subscriber.register_paths(roots));
+        match tokio::time::timeout(WATCH_REGISTRATION_TIMEOUT, registration).await {
+            Ok(Ok(registration)) => registration,
+            Ok(Err(err)) => {
+                warn!("skills watcher registration task failed; hot reload disabled: {err}");
+                WatchRegistration::default()
+            }
+            Err(_) => {
+                warn!("skills watcher registration timed out; hot reload disabled");
+                WatchRegistration::default()
+            }
+        }
     }
 
     fn spawn_event_loop(

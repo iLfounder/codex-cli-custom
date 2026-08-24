@@ -1,5 +1,6 @@
 use super::GitInfo;
 use super::ThreadSettings;
+use super::ThreadTransitionReceipt;
 use crate::JsonSchema;
 use crate::TS;
 use serde::Deserialize;
@@ -67,6 +68,16 @@ pub struct SessionRuntimeSnapshot {
     pub persistence: SessionRuntimePersistence,
     pub account: SessionRuntimeAccountBinding,
     pub actions: Vec<SessionRuntimeActionAvailability>,
+    #[serde(default)]
+    pub continuity: SessionRuntimeContinuity,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct SessionRuntimeContinuity {
+    pub last_incoming: Option<ThreadTransitionReceipt>,
+    pub last_outgoing: Option<ThreadTransitionReceipt>,
 }
 
 /// Sanitized identity and settings that remain useful outside the Codex process.

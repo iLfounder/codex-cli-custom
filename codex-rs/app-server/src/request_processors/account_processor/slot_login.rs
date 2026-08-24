@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::atomic::Ordering;
 
 use codex_app_server_protocol::AccountSlotLoginChallenge;
@@ -43,7 +44,6 @@ use crate::error_code::internal_error;
 use crate::external_auth::ExternalAuthBridge;
 
 const SLOT_RETRY_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
-const ERROR_SLOT_BOUND: &str = "accountSlotBound";
 
 mod transport;
 
@@ -143,12 +143,6 @@ impl AccountRequestProcessor {
                 .account_registry
                 .lock_slot_binding_transition(slot_id)
                 .await?;
-            if self.session_runtime.account_slot_in_use(slot_id).await? {
-                return Err(structured_invalid_request(
-                    ERROR_SLOT_BOUND,
-                    "account slot is bound to a thread",
-                ));
-            }
             Some(binding_transition)
         } else {
             None
@@ -160,9 +154,19 @@ impl AccountRequestProcessor {
         );
 
         let operation_id = Uuid::new_v4().to_string();
+        let candidate_runtime_version = match requested_slot.as_ref() {
+            Some(slot_id) => self
+                .thread_manager
+                .execution_account_slot_runtime_version(slot_id.clone())
+                .await
+                .map_err(|error| internal_error(error.to_string()))?
+                .checked_add(1)
+                .ok_or_else(|| internal_error("account slot runtime version overflow"))?,
+            None => 1,
+        };
         let prepared = self
             .account_registry
-            .prepare_slot_login(requested_slot, operation_id)
+            .prepare_slot_login(requested_slot, operation_id, candidate_runtime_version)
             .await?;
         drop(binding_transition);
         if let Err(error) = self
@@ -320,6 +324,17 @@ impl AccountRequestProcessor {
         &self,
         prepared: &PreparedSlotLogin,
     ) -> Result<bool, JSONRPCErrorError> {
+        let processor = self.clone();
+        let prepared = prepared.clone();
+        tokio::spawn(async move { processor.finish_slot_success_owned(&prepared).await })
+            .await
+            .map_err(|_| internal_error("account slot commit task failed"))?
+    }
+
+    async fn finish_slot_success_owned(
+        &self,
+        prepared: &PreparedSlotLogin,
+    ) -> Result<bool, JSONRPCErrorError> {
         prepared.runtime.auth_manager.reload().await;
         if prepared.runtime.auth_manager.auth().await.is_none() {
             self.finish_slot_failure(prepared, ERROR_AUTH_UNAVAILABLE)
@@ -337,33 +352,83 @@ impl AccountRequestProcessor {
                 .list_models(RefreshStrategy::Online, self.config.http_client_factory()),
         )
         .await;
+        if !prepared.try_claim_success() {
+            return Ok(false);
+        }
+        let manager = Arc::clone(&self.thread_manager);
+        let slot_id = prepared.account_slot_id.clone();
+        let auth_manager = Arc::clone(&prepared.runtime.auth_manager);
+        let models_manager = Arc::clone(&prepared.runtime.models_manager);
+        let replacement = tokio::spawn(async move {
+            manager
+                .replace_slot_execution_account_runtime(slot_id, auth_manager, models_manager)
+                .await
+        })
+        .await
+        .map_err(|_| internal_error("account slot runtime replacement task failed"));
+        let (runtime_version, affected) = match replacement {
+            Ok(Ok(replacement)) => replacement,
+            Ok(Err(error)) => {
+                self.finish_claimed_slot_failure(prepared, ERROR_LOGIN_FAILED)
+                    .await;
+                return Err(structured_invalid_request(
+                    ERROR_LOGIN_FAILED,
+                    &error.to_string(),
+                ));
+            }
+            Err(error) => {
+                self.finish_claimed_slot_failure(prepared, ERROR_LOGIN_FAILED)
+                    .await;
+                return Err(error);
+            }
+        };
+        prepared
+            .runtime
+            .runtime_version
+            .store(runtime_version, AtomicOrdering::Release);
         let notification = match self
             .account_registry
             .finish_slot_login(prepared, ManifestSlotStatus::Ready, None)
             .await
         {
             Ok(Some(notification)) => notification,
-            Ok(None) => {
-                self.finish_slot_failure(prepared, ERROR_LOGIN_CANCELED)
-                    .await;
-                return Ok(false);
-            }
-            Err(error) => {
-                self.finish_slot_failure(prepared, ERROR_LOGIN_FAILED).await;
-                return Err(error);
-            }
+            Ok(None) => return Ok(false),
+            Err(error) => return Err(error),
         };
         self.thread_manager
             .clear_account_plugin_cache(&prepared.account_slot_id, &prepared.runtime.auth_manager);
         self.outgoing
             .send_server_notification(ServerNotification::AccountSlotChanged(notification))
             .await;
+        for (thread_id, _) in affected {
+            self.session_runtime.publish_thread(thread_id).await;
+        }
         self.publish_slot_operation(prepared, SessionRuntimeOperationStatus::Ready, None)
             .await;
         Ok(true)
     }
 
     async fn finish_slot_failure(&self, prepared: &PreparedSlotLogin, error_code: &'static str) {
+        if !prepared.try_claim_failure() {
+            return;
+        }
+        self.finish_claimed_slot_failure(prepared, error_code).await;
+    }
+
+    async fn finish_claimed_slot_failure(
+        &self,
+        prepared: &PreparedSlotLogin,
+        error_code: &'static str,
+    ) {
+        let _ = prepared.runtime.auth_manager.logout().await;
+        if let Err(error) = tokio::fs::remove_dir_all(&prepared.auth_home).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                auth_home = %prepared.auth_home.display(),
+                "failed to remove candidate account credential home: {error}"
+            );
+        }
         let pending_failure = self
             .account_registry
             .finish_slot_login(prepared, ManifestSlotStatus::Failed, Some(error_code))

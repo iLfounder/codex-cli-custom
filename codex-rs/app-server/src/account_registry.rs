@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::RwLock;
+use std::sync::atomic::AtomicU64;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -28,10 +29,10 @@ use codex_model_provider::create_model_provider;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_protocol::error::CodexErr;
 use codex_protocol::protocol::ExecutionAccountBinding;
+use codex_thread_store::ThreadStore;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::Mutex;
-use tokio::sync::OnceCell;
 use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
 
@@ -187,7 +188,10 @@ fn validate_private_auth_home(
     account_slot_id: &str,
     auth_home: &Path,
 ) -> io::Result<()> {
-    if auth_home != private_homes_root.join(account_slot_id) {
+    let slot_root = private_homes_root.join(account_slot_id);
+    if auth_home != slot_root
+        && (auth_home.parent() != Some(slot_root.as_path()) || auth_home.file_name().is_none())
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "invalid private account home",
@@ -195,6 +199,7 @@ fn validate_private_auth_home(
     }
 
     reject_symlink(private_homes_root)?;
+    reject_symlink(&slot_root)?;
     reject_symlink(auth_home)?;
 
     let canonical_private_root = match private_homes_root.canonicalize() {
@@ -215,8 +220,11 @@ fn validate_private_auth_home(
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     };
-    if canonical_auth_home.parent() != Some(canonical_private_root.as_path())
-        || canonical_auth_home.file_name() != Some(std::ffi::OsStr::new(account_slot_id))
+    let canonical_slot_root = slot_root.canonicalize()?;
+    if canonical_slot_root.parent() != Some(canonical_private_root.as_path())
+        || canonical_slot_root.file_name() != Some(std::ffi::OsStr::new(account_slot_id))
+        || (canonical_auth_home != canonical_slot_root
+            && canonical_auth_home.parent() != Some(canonical_slot_root.as_path()))
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -249,7 +257,7 @@ fn valid_manifest_token(value: &str) -> bool {
 #[derive(Clone)]
 struct AccountSlotRecord {
     manifest: AccountSlotManifest,
-    runtime: Arc<OnceCell<Arc<AccountRuntimeBundle>>>,
+    runtime: Arc<AccountRuntimeCell>,
     binding_transition: Arc<Mutex<()>>,
     active_login_operation_id: Option<String>,
     active_logout_operation_id: Option<String>,
@@ -257,8 +265,40 @@ struct AccountSlotRecord {
 }
 
 pub(crate) struct AccountRuntimeBundle {
+    pub(crate) runtime_version: AtomicU64,
     pub(crate) auth_manager: Arc<AuthManager>,
     pub(crate) models_manager: SharedModelsManager,
+}
+
+#[derive(Default)]
+struct AccountRuntimeCell(StdMutex<Option<Arc<AccountRuntimeBundle>>>);
+
+impl AccountRuntimeCell {
+    fn get(&self) -> Option<Arc<AccountRuntimeBundle>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn set(&self, runtime: Arc<AccountRuntimeBundle>) -> Result<(), Arc<AccountRuntimeBundle>> {
+        let mut current = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if current.is_some() {
+            return Err(runtime);
+        }
+        *current = Some(runtime);
+        Ok(())
+    }
+
+    fn replace(&self, runtime: Arc<AccountRuntimeBundle>) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(runtime);
+    }
 }
 
 struct AccountRegistryState {
@@ -266,11 +306,13 @@ struct AccountRegistryState {
     slots: Vec<AccountSlotRecord>,
     manifest_error: Option<&'static str>,
     manifest_present: bool,
+    projection_dirty: bool,
 }
 
 pub(crate) struct AccountRegistry {
     config: Arc<Config>,
     auth_config_template: AuthConfig,
+    thread_store: Arc<dyn ThreadStore>,
     state: RwLock<AccountRegistryState>,
     mutation_lock: Mutex<()>,
     browser_login: StdMutex<Option<BrowserLoginOwner>>,
@@ -287,6 +329,7 @@ impl AccountRegistry {
         config: Arc<Config>,
         default_auth_manager: Arc<AuthManager>,
         default_models_manager: SharedModelsManager,
+        thread_store: Arc<dyn ThreadStore>,
     ) -> Self {
         let manifest_path = config.codex_home.join(MANIFEST_FILE);
         let (manifest, manifest_error, manifest_present) =
@@ -300,6 +343,7 @@ impl AccountRegistry {
                 ),
             };
         let default_runtime = Arc::new(AccountRuntimeBundle {
+            runtime_version: AtomicU64::new(0),
             auth_manager: default_auth_manager,
             models_manager: default_models_manager,
         });
@@ -307,7 +351,7 @@ impl AccountRegistry {
             .slots
             .into_iter()
             .map(|manifest| {
-                let runtime = Arc::new(OnceCell::new());
+                let runtime = Arc::new(AccountRuntimeCell::default());
                 if manifest.is_default {
                     let _ = runtime.set(Arc::clone(&default_runtime));
                 }
@@ -329,12 +373,14 @@ impl AccountRegistry {
 
         Self {
             auth_config_template: config.auth_config(),
+            thread_store,
             config,
             state: RwLock::new(AccountRegistryState {
                 revision: manifest.revision,
                 slots,
                 manifest_error,
                 manifest_present,
+                projection_dirty: false,
             }),
             mutation_lock: Mutex::new(()),
             browser_login: StdMutex::new(None),
@@ -452,7 +498,7 @@ impl AccountRegistry {
             active_login_operation_id: slot.active_login_operation_id.clone(),
             error_code,
             actions: live_registration::available_actions(
-                slot.manifest.status,
+                status,
                 capability,
                 slot.manifest.is_default,
                 slot.active_login_operation_id.is_some()
@@ -463,26 +509,61 @@ impl AccountRegistry {
     }
 
     async fn runtime(&self, slot: &AccountSlotRecord) -> Arc<AccountRuntimeBundle> {
-        slot.runtime
-            .get_or_init(|| async {
-                let mut auth_config = self.auth_config_template.clone();
-                auth_config.codex_home = slot.manifest.auth_home.clone();
-                let auth_manager = AuthManager::shared_from_managed_auth_config(auth_config).await;
-                let provider = create_model_provider(
-                    self.config.model_provider.clone(),
-                    Some(Arc::clone(&auth_manager)),
-                );
-                let models_manager = provider.models_manager(
-                    slot.manifest.auth_home.clone(),
-                    self.config.model_catalog.clone(),
-                );
-                Arc::new(AccountRuntimeBundle {
-                    auth_manager,
-                    models_manager,
-                })
-            })
+        if let Some(runtime) = slot.runtime.get() {
+            return runtime;
+        }
+        let runtime_version = match self
+            .thread_store
+            .execution_account_slot_runtime_state(slot.manifest.account_slot_id.clone())
             .await
-            .clone()
+        {
+            Ok((runtime_version, _)) => runtime_version,
+            Err(error) => {
+                tracing::warn!(
+                    account_slot_id = %slot.manifest.account_slot_id,
+                    "failed to read account runtime version; using manifest recovery projection: {error}"
+                );
+                0
+            }
+        };
+        let auth_home = if runtime_version == 0 || slot.manifest.is_default {
+            slot.manifest.auth_home.clone()
+        } else {
+            self.runtime_home(&slot.manifest.account_slot_id, runtime_version)
+        };
+        let runtime = self.build_runtime(auth_home, runtime_version).await;
+        let _ = slot.runtime.set(Arc::clone(&runtime));
+        slot.runtime.get().unwrap_or(runtime)
+    }
+
+    async fn build_runtime(
+        &self,
+        auth_home: PathBuf,
+        runtime_version: u64,
+    ) -> Arc<AccountRuntimeBundle> {
+        let mut auth_config = self.auth_config_template.clone();
+        auth_config.codex_home = auth_home.clone();
+        let auth_manager = AuthManager::shared_from_managed_auth_config(auth_config).await;
+        let provider = create_model_provider(
+            self.config.model_provider.clone(),
+            Some(Arc::clone(&auth_manager)),
+        );
+        let models_manager =
+            provider.models_manager(auth_home.clone(), self.config.model_catalog.clone());
+        Arc::new(AccountRuntimeBundle {
+            runtime_version: AtomicU64::new(runtime_version),
+            auth_manager,
+            models_manager,
+        })
+    }
+
+    pub(crate) fn runtime_home(&self, slot_id: &str, runtime_version: u64) -> PathBuf {
+        self.config
+            .codex_home
+            .join(PRIVATE_HOMES_DIR)
+            .join(slot_id)
+            .join(format!("runtime-{runtime_version}"))
+            .to_path_buf()
     }
 
     fn capability(&self, manifest_error: Option<&'static str>) -> AccountSlotCapability {
@@ -513,7 +594,7 @@ impl AccountRegistry {
                     .find(|slot| slot.manifest.is_default)
                     .cloned()
             })
-            .and_then(|slot| slot.runtime.get().cloned())
+            .and_then(|slot| slot.runtime.get())
             .map(|runtime| runtime.auth_manager.auth_source_kind())
             .unwrap_or(AuthSourceKind::External)
     }
@@ -559,9 +640,10 @@ impl AccountRegistry {
                         binding.slot_id
                     ))
                 })?;
-            if slot.active_logout_operation_id.is_some() {
+            if slot.active_login_operation_id.is_some() || slot.active_logout_operation_id.is_some()
+            {
                 return Err(CodexErr::InvalidRequest(format!(
-                    "execution account slot `{}` is being logged out",
+                    "execution account slot `{}` is changing credentials",
                     binding.slot_id
                 )));
             }
@@ -605,9 +687,9 @@ impl AccountRegistry {
                 binding.slot_id
             )));
         }
-        if slot.active_logout_operation_id.is_some() {
+        if slot.active_login_operation_id.is_some() || slot.active_logout_operation_id.is_some() {
             return Err(CodexErr::InvalidRequest(format!(
-                "execution account slot `{}` is being logged out",
+                "execution account slot `{}` is changing credentials",
                 binding.slot_id
             )));
         }

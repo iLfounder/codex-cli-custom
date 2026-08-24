@@ -2231,7 +2231,14 @@
               "type": "string"
             },
             "params": {
-              "type": "null"
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/v2/GetAccountRateLimitsParams"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -4797,6 +4804,26 @@
           "properties": {
             "method": {
               "enum": [
+                "thread/transitioned"
+              ],
+              "title": "Thread/transitionedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ThreadTransitionedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Thread/transitionedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
                 "thread/queue/changed"
               ],
               "title": "Thread/queue/changedNotificationMethod",
@@ -6660,10 +6687,28 @@
       },
       "AccountRateLimitsUpdatedNotification": {
         "$schema": "http://json-schema.org/draft-07/schema#",
-        "description": "Sparse rolling rate-limit update.\n\nClients should merge available values into the most recent `account/rateLimits/read` response or refetch that snapshot. Nullable account metadata may be unavailable in a rolling update and does not clear a previously observed value.",
+        "description": "Sparse rolling rate-limit update.\n\nClients should merge available values into the most recent matching `account/rateLimits/read` response or refetch that snapshot. New producers omit the notification when persisted account provenance is unavailable; nullable fields preserve wire compatibility with older producers.",
         "properties": {
+          "executionAccount": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/SessionRuntimeAccountRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Persisted account binding for that turn. Older producers may leave this `null`."
+          },
           "rateLimits": {
             "$ref": "#/definitions/v2/RateLimitSnapshot"
+          },
+          "threadId": {
+            "description": "Thread whose persisted turn binding produced this update.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -12214,9 +12259,31 @@
         "title": "GetAccountParams",
         "type": "object"
       },
+      "GetAccountRateLimitsParams": {
+        "properties": {
+          "threadId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "GetAccountRateLimitsResponse": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
+          "executionAccount": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/SessionRuntimeAccountRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The account runtime captured for `thread_id`, or `null` for process-default reads."
+          },
           "rateLimitResetCredits": {
             "anyOf": [
               {
@@ -12242,6 +12309,13 @@
             "description": "Multi-bucket view keyed by metered `limit_id` (for example, `codex`).",
             "type": [
               "object",
+              "null"
+            ]
+          },
+          "threadId": {
+            "description": "The exact thread subject used for this read, or `null` for legacy process-default reads.",
+            "type": [
+              "string",
               "null"
             ]
           }
@@ -15262,6 +15336,18 @@
         ],
         "type": "string"
       },
+      "NullableGetAccountRateLimitsParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "anyOf": [
+          {
+            "$ref": "#/definitions/v2/GetAccountRateLimitsParams"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Nullable_GetAccountRateLimitsParams"
+      },
       "NullableGetAccountTokenUsageParams": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "anyOf": [
@@ -15591,6 +15677,16 @@
         "oneOf": [
           {
             "properties": {
+              "executionAccount": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/v2/SessionRuntimeAccountRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "prompt": {
                 "type": "string"
               },
@@ -19618,6 +19714,31 @@
         "title": "SessionRuntimeChangedNotification",
         "type": "object"
       },
+      "SessionRuntimeContinuity": {
+        "properties": {
+          "lastIncoming": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ThreadTransitionReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lastOutgoing": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ThreadTransitionReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
       "SessionRuntimeIdentity": {
         "description": "Sanitized identity and settings that remain useful outside the Codex process.",
         "properties": {
@@ -20059,6 +20180,17 @@
               "$ref": "#/definitions/v2/SessionRuntimeActionAvailability"
             },
             "type": "array"
+          },
+          "continuity": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/v2/SessionRuntimeContinuity"
+              }
+            ],
+            "default": {
+              "lastIncoming": null,
+              "lastOutgoing": null
+            }
           },
           "identity": {
             "$ref": "#/definitions/v2/SessionRuntimeIdentity"
@@ -21387,8 +21519,19 @@
             "format": "int64",
             "type": "integer"
           },
+          "goalId": {
+            "default": "",
+            "description": "Missing values decode as the legacy sentinel for stock-server compatibility.",
+            "type": "string"
+          },
           "objective": {
             "type": "string"
+          },
+          "revision": {
+            "default": 0,
+            "description": "Missing values decode as the legacy sentinel for stock-server compatibility.",
+            "format": "int64",
+            "type": "integer"
           },
           "status": {
             "$ref": "#/definitions/v2/ThreadGoalStatus"
@@ -21430,6 +21573,19 @@
       "ThreadGoalClearParams": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
+          "expectedGoalId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expectedRevision": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "threadId": {
             "type": "string"
           }
@@ -21445,6 +21601,23 @@
         "properties": {
           "cleared": {
             "type": "boolean"
+          },
+          "previousGoal": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ThreadGoal"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "revision": {
+            "default": 0,
+            "description": "Missing values decode as the legacy sentinel for stock-server compatibility.",
+            "format": "int64",
+            "type": "integer"
           }
         },
         "required": [
@@ -21456,8 +21629,29 @@
       "ThreadGoalClearedNotification": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
+          "previousGoal": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ThreadGoal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revision": {
+            "default": 0,
+            "format": "int64",
+            "type": "integer"
+          },
           "threadId": {
             "type": "string"
+          },
+          "turnId": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -21491,6 +21685,12 @@
                 "type": "null"
               }
             ]
+          },
+          "revision": {
+            "default": 0,
+            "description": "Missing values decode as the legacy sentinel for stock-server compatibility.",
+            "format": "int64",
+            "type": "integer"
           }
         },
         "title": "ThreadGoalGetResponse",
@@ -21499,6 +21699,19 @@
       "ThreadGoalSetParams": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
+          "expectedGoalId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expectedRevision": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "objective": {
             "type": [
               "string",
@@ -24271,6 +24484,186 @@
         "title": "ThreadTokenUsageUpdatedNotification",
         "type": "object"
       },
+      "ThreadTransitionEndpointEvidence": {
+        "properties": {
+          "stateRevision": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "threadId": {
+            "type": "string"
+          },
+          "writer": {
+            "$ref": "#/definitions/v2/ThreadWriterEvidence"
+          }
+        },
+        "required": [
+          "stateRevision",
+          "threadId",
+          "writer"
+        ],
+        "type": "object"
+      },
+      "ThreadTransitionIntent": {
+        "properties": {
+          "expectedInstanceEpoch": {
+            "type": "string"
+          },
+          "expectedStateRevision": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "expectedWriter": {
+            "$ref": "#/definitions/v2/ThreadWriterEvidence"
+          },
+          "previousThreadId": {
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/definitions/v2/ThreadTransitionReason"
+          },
+          "transitionId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "expectedInstanceEpoch",
+          "expectedStateRevision",
+          "expectedWriter",
+          "previousThreadId",
+          "reason",
+          "transitionId"
+        ],
+        "type": "object"
+      },
+      "ThreadTransitionPreparation": {
+        "properties": {
+          "currentThreadId": {
+            "type": "string"
+          },
+          "currentWriter": {
+            "$ref": "#/definitions/v2/ThreadWriterEvidence"
+          },
+          "initiatorClientIncarnation": {
+            "type": "string"
+          },
+          "originInstanceEpoch": {
+            "type": "string"
+          },
+          "previousThreadId": {
+            "type": "string"
+          },
+          "previousWriter": {
+            "$ref": "#/definitions/v2/ThreadWriterEvidence"
+          },
+          "reason": {
+            "$ref": "#/definitions/v2/ThreadTransitionReason"
+          },
+          "status": {
+            "$ref": "#/definitions/v2/ThreadTransitionStatus"
+          },
+          "transitionId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "currentThreadId",
+          "currentWriter",
+          "initiatorClientIncarnation",
+          "originInstanceEpoch",
+          "previousThreadId",
+          "previousWriter",
+          "reason",
+          "status",
+          "transitionId"
+        ],
+        "type": "object"
+      },
+      "ThreadTransitionReason": {
+        "enum": [
+          "clear",
+          "new"
+        ],
+        "type": "string"
+      },
+      "ThreadTransitionReceipt": {
+        "properties": {
+          "committedAt": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "current": {
+            "$ref": "#/definitions/v2/ThreadTransitionEndpointEvidence"
+          },
+          "initiatorClientIncarnation": {
+            "type": "string"
+          },
+          "originInstanceEpoch": {
+            "type": "string"
+          },
+          "previous": {
+            "$ref": "#/definitions/v2/ThreadTransitionEndpointEvidence"
+          },
+          "reason": {
+            "$ref": "#/definitions/v2/ThreadTransitionReason"
+          },
+          "status": {
+            "$ref": "#/definitions/v2/ThreadTransitionStatus"
+          },
+          "transitionId": {
+            "type": "string"
+          },
+          "transitionRevision": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "committedAt",
+          "current",
+          "initiatorClientIncarnation",
+          "originInstanceEpoch",
+          "previous",
+          "reason",
+          "status",
+          "transitionId",
+          "transitionRevision"
+        ],
+        "type": "object"
+      },
+      "ThreadTransitionStatus": {
+        "enum": [
+          "prepared",
+          "committed"
+        ],
+        "type": "string"
+      },
+      "ThreadTransitionedNotification": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "instanceEpoch": {
+            "type": "string"
+          },
+          "sequence": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "transition": {
+            "$ref": "#/definitions/v2/ThreadTransitionReceipt"
+          }
+        },
+        "required": [
+          "instanceEpoch",
+          "sequence",
+          "transition"
+        ],
+        "title": "ThreadTransitionedNotification",
+        "type": "object"
+      },
       "ThreadUnarchiveParams": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
@@ -24436,6 +24829,23 @@
         },
         "required": [
           "estimatedUsageCreditsMicros"
+        ],
+        "type": "object"
+      },
+      "ThreadWriterEvidence": {
+        "properties": {
+          "storeId": {
+            "type": "string"
+          },
+          "writerGeneration": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "storeId",
+          "writerGeneration"
         ],
         "type": "object"
       },
@@ -24855,6 +25265,17 @@
             ],
             "description": "Override the reasoning effort for this turn and subsequent turns."
           },
+          "expectedExecutionAccount": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/SessionRuntimeAccountRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Exact execution account expected by the client that produced this input."
+          },
           "input": {
             "items": {
               "$ref": "#/definitions/v2/UserInput"
@@ -24969,6 +25390,17 @@
               "string",
               "null"
             ]
+          },
+          "expectedExecutionAccount": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/SessionRuntimeAccountRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Exact execution account expected by the client that produced this input."
           },
           "expectedTurnId": {
             "description": "Required active turn id precondition. The request fails when it does not match the currently active turn.",

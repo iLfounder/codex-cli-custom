@@ -1,8 +1,95 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ThreadGoal": {
+      "properties": {
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "goalId": {
+          "default": "",
+          "description": "Missing values decode as the legacy sentinel for stock-server compatibility.",
+          "type": "string"
+        },
+        "objective": {
+          "type": "string"
+        },
+        "revision": {
+          "default": 0,
+          "description": "Missing values decode as the legacy sentinel for stock-server compatibility.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/definitions/ThreadGoalStatus"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "timeUsedSeconds": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "tokenBudget": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "tokensUsed": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "updatedAt": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "createdAt",
+        "objective",
+        "status",
+        "threadId",
+        "timeUsedSeconds",
+        "tokensUsed",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "ThreadGoalStatus": {
+      "enum": [
+        "active",
+        "paused",
+        "blocked",
+        "usageLimited",
+        "budgetLimited",
+        "complete"
+      ],
+      "type": "string"
+    }
+  },
   "properties": {
     "cleared": {
       "type": "boolean"
+    },
+    "previousGoal": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ThreadGoal"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "revision": {
+      "default": 0,
+      "description": "Missing values decode as the legacy sentinel for stock-server compatibility.",
+      "format": "int64",
+      "type": "integer"
     }
   },
   "required": [

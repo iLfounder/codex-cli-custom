@@ -19,6 +19,8 @@ use crate::analytics::GoalEventAttribution;
 use crate::events::GoalEventEmitter;
 use crate::metrics::GoalMetrics;
 use crate::steering::continuation_steering_item;
+use crate::steering::goal_cleared_steering_item;
+use crate::steering::goal_replaced_steering_item;
 use crate::steering::objective_updated_steering_item;
 use crate::tool::protocol_goal_from_state;
 use tokio::sync::OwnedSemaphorePermit;
@@ -159,29 +161,38 @@ impl GoalRuntimeHandle {
             .clone()
     }
 
-    pub async fn prepare_external_goal_mutation(&self) -> Result<(), String> {
+    pub(crate) async fn prepare_external_goal_mutation_while_goal_state_locked(
+        &self,
+    ) -> Result<Option<codex_state::GoalVersion>, String> {
         if !self.is_enabled() {
-            return Ok(());
+            return self.current_goal_version().await;
         }
 
         if let Some(turn_id) = self.inner.accounting_state.current_turn_id() {
-            self.account_active_goal_progress(
+            self.account_active_goal_progress_while_goal_state_locked(
                 turn_id.as_str(),
                 &format!("{turn_id}:external-goal-mutation"),
                 codex_state::GoalAccountingMode::ActiveOnly,
                 BudgetLimitedGoalDisposition::ClearActive,
             )
             .await?;
-            return Ok(());
+            return self.current_goal_version().await;
         }
 
-        self.account_idle_goal_progress(
+        self.account_idle_goal_progress_while_goal_state_locked(
             &format!("{}:external-goal-mutation", self.inner.thread_id),
             codex_state::GoalAccountingMode::ActiveOnly,
             BudgetLimitedGoalDisposition::ClearActive,
         )
         .await?;
-        Ok(())
+        self.current_goal_version().await
+    }
+
+    pub async fn prepare_external_goal_mutation(&self) -> Result<(), String> {
+        let _goal_state_permit = self.goal_state_permit().await?;
+        self.prepare_external_goal_mutation_while_goal_state_locked()
+            .await
+            .map(|_| ())
     }
 
     pub async fn apply_external_goal_set(
@@ -190,6 +201,17 @@ impl GoalRuntimeHandle {
         previous_goal: Option<PreviousGoalSnapshot>,
     ) -> Result<(), String> {
         if !self.is_enabled() {
+            return Ok(());
+        }
+
+        let expected_version = codex_state::GoalVersion::from(&goal);
+        let goal_state_permit = self.goal_state_permit().await?;
+        if self.current_goal_version().await? != Some(expected_version.clone()) {
+            tracing::debug!(
+                goal_id = %expected_version.goal_id,
+                revision = expected_version.revision,
+                "skipping stale external goal set runtime effects"
+            );
             return Ok(());
         }
 
@@ -215,23 +237,26 @@ impl GoalRuntimeHandle {
         let objective_changed = previous_goal.as_ref().is_some_and(|previous_goal| {
             !replaced_existing_goal && previous_goal.objective != goal.objective
         });
+        let should_continue = goal.status == codex_state::ThreadGoalStatus::Active;
         match goal.status {
             codex_state::ThreadGoalStatus::Active => {
                 if self.inner.accounting_state.current_turn_id().is_some() {
                     let _ = self
                         .inner
                         .accounting_state
-                        .mark_current_turn_goal_active(goal.goal_id.clone());
+                        .mark_current_turn_goal_active(codex_state::GoalVersion::from(&goal));
                 } else {
                     self.inner
                         .accounting_state
-                        .mark_idle_goal_active(goal.goal_id.clone());
+                        .mark_idle_goal_active(codex_state::GoalVersion::from(&goal));
                 }
                 if objective_changed {
                     let item = objective_updated_steering_item(&protocol_goal_from_state(goal));
                     self.inject_active_turn_steering(item).await;
+                } else if replaced_existing_goal {
+                    let item = goal_replaced_steering_item(&protocol_goal_from_state(goal.clone()));
+                    self.inject_active_turn_steering(item).await;
                 }
-                self.continue_if_idle().await?;
             }
             codex_state::ThreadGoalStatus::BudgetLimited => {
                 if self.inner.accounting_state.current_turn_id().is_none() {
@@ -245,6 +270,11 @@ impl GoalRuntimeHandle {
                 self.inner.accounting_state.clear_active_goal();
             }
         }
+        drop(goal_state_permit);
+        if should_continue {
+            self.continue_if_idle_for_goal_version(&expected_version)
+                .await?;
+        }
         Ok(())
     }
 
@@ -256,8 +286,42 @@ impl GoalRuntimeHandle {
             return Ok(());
         }
 
+        let revision = goal
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| "cleared goal revision overflowed".to_string())?;
+        let _goal_state_permit = self.goal_state_permit().await?;
+        let current_goal = self
+            .inner
+            .state_dbs
+            .thread_goals()
+            .get_thread_goal(self.thread_id())
+            .await
+            .map_err(|err| err.to_string())?;
+        let current_revision = match current_goal {
+            Some(_) => return Ok(()),
+            None => self
+                .inner
+                .state_dbs
+                .thread_goals()
+                .get_thread_goal_revision(self.thread_id())
+                .await
+                .map_err(|err| err.to_string())?,
+        };
+        if current_revision != revision {
+            tracing::debug!(
+                goal_id = %goal.goal_id,
+                revision,
+                current_revision,
+                "skipping stale external goal clear runtime effects"
+            );
+            return Ok(());
+        }
+
         self.analytics().cleared(&goal);
         self.inner.accounting_state.clear_active_goal();
+        self.inject_active_turn_steering(goal_cleared_steering_item())
+            .await;
         Ok(())
     }
 
@@ -295,7 +359,7 @@ impl GoalRuntimeHandle {
                 ("usage-limit", codex_state::ThreadGoalStatus::UsageLimited)
             }
         };
-        self.account_active_goal_progress(
+        self.account_active_goal_progress_while_goal_state_locked(
             turn_id,
             &format!("{turn_id}:{event_name}-progress"),
             codex_state::GoalAccountingMode::ActiveOnly,
@@ -326,8 +390,9 @@ impl GoalRuntimeHandle {
             .inner
             .state_dbs
             .thread_goals()
-            .update_thread_goal(
+            .update_thread_goal_exact(
                 self.thread_id(),
+                &codex_state::GoalVersion::from(&active_goal),
                 codex_state::GoalUpdate {
                     objective: None,
                     status: Some(status),
@@ -374,7 +439,7 @@ impl GoalRuntimeHandle {
             Some(goal) if goal.status == codex_state::ThreadGoalStatus::Active => {
                 self.inner
                     .accounting_state
-                    .mark_idle_goal_active(goal.goal_id);
+                    .mark_idle_goal_active(codex_state::GoalVersion::from(&goal));
                 self.inner.metrics.record_resumed();
             }
             Some(_) | None => self.inner.accounting_state.clear_active_goal(),
@@ -383,6 +448,22 @@ impl GoalRuntimeHandle {
     }
 
     pub(crate) async fn continue_if_idle(&self) -> Result<(), String> {
+        self.continue_if_idle_for_expected_version(/*expected_version*/ None)
+            .await
+    }
+
+    async fn continue_if_idle_for_goal_version(
+        &self,
+        expected_version: &codex_state::GoalVersion,
+    ) -> Result<(), String> {
+        self.continue_if_idle_for_expected_version(Some(expected_version))
+            .await
+    }
+
+    async fn continue_if_idle_for_expected_version(
+        &self,
+        expected_version: Option<&codex_state::GoalVersion>,
+    ) -> Result<(), String> {
         if !self.tools_visible() {
             self.inner.accounting_state.clear_active_goal();
             return Ok(());
@@ -422,6 +503,11 @@ impl GoalRuntimeHandle {
             self.inner.accounting_state.clear_active_goal();
             return Ok(());
         };
+        if expected_version
+            .is_some_and(|expected| codex_state::GoalVersion::from(&goal) != *expected)
+        {
+            return Ok(());
+        }
         if goal.status != codex_state::ThreadGoalStatus::Active {
             self.inner.accounting_state.clear_active_goal();
             return Ok(());
@@ -483,6 +569,23 @@ impl GoalRuntimeHandle {
         mode: codex_state::GoalAccountingMode,
         budget_limited_goal_disposition: BudgetLimitedGoalDisposition,
     ) -> Result<Option<AccountedGoalProgress>, String> {
+        let _goal_state_permit = self.goal_state_permit().await?;
+        self.account_active_goal_progress_while_goal_state_locked(
+            turn_id,
+            event_id,
+            mode,
+            budget_limited_goal_disposition,
+        )
+        .await
+    }
+
+    async fn account_active_goal_progress_while_goal_state_locked(
+        &self,
+        turn_id: &str,
+        event_id: &str,
+        mode: codex_state::GoalAccountingMode,
+        budget_limited_goal_disposition: BudgetLimitedGoalDisposition,
+    ) -> Result<Option<AccountedGoalProgress>, String> {
         let accounting = self.accounting_state();
         let _accounting_permit = accounting
             .progress_accounting_permit()
@@ -492,24 +595,25 @@ impl GoalRuntimeHandle {
             return Ok(None);
         };
         let previous_status = self
-            .current_goal_status_for_metrics(Some(snapshot.expected_goal_id.as_str()))
+            .current_goal_status_for_metrics(Some(snapshot.expected_version.goal_id.as_str()))
             .await?;
         let outcome = self
             .inner
             .state_dbs
             .thread_goals()
-            .account_thread_goal_usage(
+            .account_thread_goal_usage_exact(
                 self.thread_id(),
                 snapshot.time_delta_seconds,
                 snapshot.token_delta,
                 mode,
-                Some(snapshot.expected_goal_id.as_str()),
+                &snapshot.expected_version,
             )
             .await
             .map_err(|err| err.to_string())?;
         Ok(match outcome {
             codex_state::GoalAccountingOutcome::Updated(goal) => {
                 let goal_id = goal.goal_id.clone();
+                let updated_version = codex_state::GoalVersion::from(&goal);
                 self.inner
                     .metrics
                     .record_terminal_if_status_changed(previous_status, &goal);
@@ -523,6 +627,7 @@ impl GoalRuntimeHandle {
                 accounting.mark_progress_accounted_for_status(
                     turn_id,
                     &snapshot,
+                    updated_version,
                     goal.status,
                     budget_limited_goal_disposition,
                 );
@@ -538,7 +643,7 @@ impl GoalRuntimeHandle {
         })
     }
 
-    async fn account_idle_goal_progress(
+    async fn account_idle_goal_progress_while_goal_state_locked(
         &self,
         event_id: &str,
         mode: codex_state::GoalAccountingMode,
@@ -553,24 +658,25 @@ impl GoalRuntimeHandle {
             return Ok(None);
         };
         let previous_status = self
-            .current_goal_status_for_metrics(Some(snapshot.expected_goal_id.as_str()))
+            .current_goal_status_for_metrics(Some(snapshot.expected_version.goal_id.as_str()))
             .await?;
         let outcome = self
             .inner
             .state_dbs
             .thread_goals()
-            .account_thread_goal_usage(
+            .account_thread_goal_usage_exact(
                 self.thread_id(),
                 snapshot.time_delta_seconds,
                 /*token_delta*/ 0,
                 mode,
-                Some(snapshot.expected_goal_id.as_str()),
+                &snapshot.expected_version,
             )
             .await
             .map_err(|err| err.to_string())?;
         Ok(match outcome {
             codex_state::GoalAccountingOutcome::Updated(goal) => {
                 let goal_id = goal.goal_id.clone();
+                let updated_version = codex_state::GoalVersion::from(&goal);
                 self.inner
                     .metrics
                     .record_terminal_if_status_changed(previous_status, &goal);
@@ -583,6 +689,7 @@ impl GoalRuntimeHandle {
                 );
                 accounting.mark_idle_progress_accounted_for_status(
                     &snapshot,
+                    updated_version,
                     goal.status,
                     budget_limited_goal_disposition,
                 );
@@ -617,5 +724,15 @@ impl GoalRuntimeHandle {
                 .is_none_or(|expected_goal_id| goal.goal_id == expected_goal_id)
                 .then_some(goal.status)
         }))
+    }
+
+    async fn current_goal_version(&self) -> Result<Option<codex_state::GoalVersion>, String> {
+        self.inner
+            .state_dbs
+            .thread_goals()
+            .get_thread_goal(self.thread_id())
+            .await
+            .map(|goal| goal.as_ref().map(codex_state::GoalVersion::from))
+            .map_err(|err| err.to_string())
     }
 }

@@ -5,6 +5,8 @@ use codex_app_server_protocol::PluginCommandInvokeParams;
 use codex_app_server_protocol::PluginCommandInvokeResponse;
 use codex_app_server_protocol::PluginCommandListParams;
 use codex_app_server_protocol::PluginCommandListResponse;
+use codex_app_server_protocol::SessionRuntimeListParams;
+use codex_app_server_protocol::SessionRuntimeListResponse;
 use codex_app_server_protocol::ThreadPresentation;
 use codex_app_server_protocol::ThreadPresentationAppendParams;
 use codex_app_server_protocol::ThreadPresentationAppendResponse;
@@ -67,6 +69,23 @@ enabled = true
     assert_eq!(goal_command.canonical_name, "/fixture:goal");
     assert_eq!(command.canonical_name, "/fixture:review");
     assert_eq!(command.short_name, None);
+    let runtime: SessionRuntimeListResponse = app
+        .request(|request_id| ClientRequest::SessionRuntimeList {
+            request_id,
+            params: SessionRuntimeListParams {
+                cursor: None,
+                limit: None,
+                thread_id: Some(started.thread.id.clone()),
+            },
+        })
+        .await?;
+    let runtime_account = runtime
+        .data
+        .into_iter()
+        .next()
+        .expect("thread runtime snapshot")
+        .account
+        .current;
     let invoked: PluginCommandInvokeResponse = app
         .request(|request_id| ClientRequest::PluginCommandInvoke {
             request_id,
@@ -76,12 +95,16 @@ enabled = true
             },
         })
         .await?;
-    assert_eq!(
-        invoked,
-        PluginCommandInvokeResponse::Prompt {
-            prompt: "Review the current change.".to_string()
-        }
-    );
+    let PluginCommandInvokeResponse::Prompt {
+        prompt,
+        execution_account,
+    } = invoked
+    else {
+        panic!("prompt command must return a prompt response");
+    };
+    assert_eq!(prompt, "Review the current change.");
+    assert_eq!(execution_account, runtime_account);
+    assert!(execution_account.is_some());
     let goal: PluginCommandInvokeResponse = app
         .request(|request_id| ClientRequest::PluginCommandInvoke {
             request_id,

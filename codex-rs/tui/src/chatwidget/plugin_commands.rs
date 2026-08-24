@@ -3,15 +3,24 @@
 use super::*;
 use crate::bottom_pane::slash_commands::PluginSlashCommand;
 use crate::history_cell::PluginCommandResultHistoryCell;
+use codex_app_server_protocol::SessionRuntimeAccountRef;
 
 impl ChatWidget {
     pub(crate) fn set_plugin_commands(&mut self, commands: Vec<PluginSlashCommand>) {
         self.bottom_pane.set_plugin_commands(commands);
     }
 
-    pub(crate) fn submit_plugin_prompt(&mut self, prompt: String) {
-        let _ = self.submit_user_message_with_shell_escape_policy(
+    pub(crate) fn submit_plugin_prompt(
+        &mut self,
+        prompt: String,
+        account: SessionRuntimeAccountRef,
+    ) {
+        let _ = self.submit_user_message_with_history_and_shell_escape_policy(
             prompt.into(),
+            UserMessageHistoryRecord::PluginPrompt {
+                account: Some(account),
+                history: None,
+            },
             ShellEscapePolicy::Disallow,
         );
     }

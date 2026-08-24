@@ -46,6 +46,8 @@ use crate::metrics::GoalMetrics;
 use crate::runtime::ActiveGoalStopReason;
 use crate::runtime::GoalRuntimeConfig;
 use crate::runtime::GoalRuntimeHandle;
+use crate::spec::CLEAR_GOAL_TOOL_NAME;
+use crate::spec::REPLACE_GOAL_TOOL_NAME;
 use crate::spec::UPDATE_GOAL_TOOL_NAME;
 use crate::steering::budget_limit_steering_item;
 use crate::tool::GoalToolExecutor;
@@ -304,7 +306,8 @@ where
                         | codex_state::ThreadGoalStatus::BudgetLimited
                 )
             {
-                accounting.mark_turn_goal_active(input.turn_id, goal.goal_id);
+                accounting
+                    .mark_turn_goal_active(input.turn_id, codex_state::GoalVersion::from(&goal));
             }
         })
     }
@@ -433,7 +436,10 @@ where
             let should_count_for_goal_progress = runtime.is_enabled()
                 && tool_attempt_counts_for_goal_progress(input.outcome)
                 && !(input.tool_name.is_default_namespace()
-                    && input.tool_name.name == UPDATE_GOAL_TOOL_NAME);
+                    && matches!(
+                        input.tool_name.name.as_str(),
+                        UPDATE_GOAL_TOOL_NAME | CLEAR_GOAL_TOOL_NAME | REPLACE_GOAL_TOOL_NAME
+                    ));
             if !should_count_for_goal_progress {
                 return;
             }
@@ -495,32 +501,40 @@ where
             .map(|client| GoalAnalytics::new(client.as_ref().clone()))
             .unwrap_or_else(|| self.analytics.clone());
 
+        let get = GoalToolExecutor::get(
+            runtime.thread_id(),
+            Arc::clone(&self.state_dbs),
+            runtime.accounting_state(),
+            analytics.clone(),
+            self.event_emitter.clone(),
+            self.metrics.clone(),
+            Arc::clone(&self.goal_service),
+        );
+        let create = GoalToolExecutor::create(
+            runtime.thread_id(),
+            Arc::clone(&self.state_dbs),
+            runtime.accounting_state(),
+            analytics.clone(),
+            self.event_emitter.clone(),
+            self.metrics.clone(),
+            max_goal_token_budget,
+            Arc::clone(&self.goal_service),
+        );
+        let update = GoalToolExecutor::update(
+            runtime.thread_id(),
+            Arc::clone(&self.state_dbs),
+            runtime.accounting_state(),
+            analytics,
+            self.event_emitter.clone(),
+            self.metrics.clone(),
+            Arc::clone(&self.goal_service),
+        );
         vec![
-            Arc::new(GoalToolExecutor::get(
-                runtime.thread_id(),
-                Arc::clone(&self.state_dbs),
-                runtime.accounting_state(),
-                analytics.clone(),
-                self.event_emitter.clone(),
-                self.metrics.clone(),
-            )),
-            Arc::new(GoalToolExecutor::create(
-                runtime.thread_id(),
-                Arc::clone(&self.state_dbs),
-                runtime.accounting_state(),
-                analytics.clone(),
-                self.event_emitter.clone(),
-                self.metrics.clone(),
-                max_goal_token_budget,
-            )),
-            Arc::new(GoalToolExecutor::update(
-                runtime.thread_id(),
-                Arc::clone(&self.state_dbs),
-                runtime.accounting_state(),
-                analytics,
-                self.event_emitter.clone(),
-                self.metrics.clone(),
-            )),
+            Arc::new(get.clone()),
+            Arc::new(create.clone()),
+            Arc::new(update),
+            Arc::new(get.clear()),
+            Arc::new(create.replace()),
         ]
     }
 }

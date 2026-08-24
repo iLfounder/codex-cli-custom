@@ -54,7 +54,7 @@ impl ChatWidget {
                 self.on_thread_goal_updated(notification.goal, notification.turn_id);
             }
             ServerNotification::ThreadGoalCleared(notification) => {
-                self.on_thread_goal_cleared(notification.thread_id.as_str());
+                self.on_thread_goal_cleared(notification);
             }
             ServerNotification::ThreadSettingsUpdated(notification) => {
                 self.on_thread_settings_updated(notification);
@@ -252,6 +252,7 @@ impl ChatWidget {
             | ServerNotification::AccountLoginCompleted(_)
             | ServerNotification::ProjectChanged(_)
             | ServerNotification::ThreadProjectUpdated(_) => {}
+            ServerNotification::ThreadTransitioned(_) => {}
             ServerNotification::ContextCompacted(_) => {}
         }
         self.thread_usage.replaying_turn_completion = was_replaying_turn_completion;

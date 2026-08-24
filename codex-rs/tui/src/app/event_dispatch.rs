@@ -689,6 +689,7 @@ impl App {
                                 /*objective*/ None,
                                 Some(codex_app_server_protocol::ThreadGoalStatus::Paused),
                                 /*token_budget*/ None,
+                                /*expected_goal*/ None,
                             )
                             .await
                     {
@@ -1229,9 +1230,39 @@ impl App {
             }
             AppEvent::RateLimitsLoaded {
                 origin,
+                subject,
                 hard_stop_generation,
                 result,
-            } => match result {
+            } => match result.and_then(|response| {
+                let Some(subject) = subject else {
+                    return Err("rate-limit response had no thread subject".to_string());
+                };
+                let response_thread_matches = response
+                    .thread_id
+                    .as_deref()
+                    .is_some_and(|thread_id| thread_id == subject.thread_id.to_string());
+                let Some(response_account) = response.execution_account.as_ref() else {
+                    return Err("rate-limit response had no account provenance".to_string());
+                };
+                let requested_account_matches = subject
+                    .execution_account
+                    .as_ref()
+                    .is_none_or(|account| account == response_account);
+                let current_subject_matches = self
+                    .current_rate_limit_request_subject()
+                    .is_some_and(|current| {
+                        current.thread_id == subject.thread_id
+                            && current.execution_account.as_ref() == Some(response_account)
+                    });
+                if response_thread_matches
+                    && requested_account_matches
+                    && current_subject_matches
+                {
+                    Ok(response)
+                } else {
+                    Err("rate-limit response subject is stale".to_string())
+                }
+            }) {
                 Ok(response) => {
                     let rate_limit_reset_credits = response.rate_limit_reset_credits.clone();
                     let snapshots = if hard_stop_generation == self.rate_limit_hard_stop_generation
@@ -2139,7 +2170,12 @@ impl App {
                 request_generation,
                 result,
             } => {
-                self.handle_plugin_commands_loaded(thread_id, request_generation, result);
+                self.handle_plugin_commands_loaded(
+                    app_server,
+                    thread_id,
+                    request_generation,
+                    result,
+                );
             }
             AppEvent::InvokePluginCommand { command_id } => {
                 self.invoke_plugin_command(app_server, command_id);
@@ -2914,6 +2950,8 @@ impl App {
     }
 
     fn refresh_plugin_mentions_after_config_write(&mut self) {
+        self.invalidate_plugin_command_catalog();
+        self.app_event_tx.send(AppEvent::RefreshPluginCommands);
         self.chat_widget.refresh_plugin_mentions();
         self.chat_widget.submit_op(AppCommand::reload_user_config());
         self.chat_widget

@@ -10,6 +10,7 @@ use codex_protocol::config_types::Settings;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::ExecutionAccountBinding;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::TurnAbortReason;
@@ -61,6 +62,43 @@ fn user_message(text: &str) -> ResponseItem {
         }],
         phase: None,
         internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+#[tokio::test]
+async fn account_mismatch_rejects_start_and_steer_before_input_handling() {
+    let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
+    let actual = session.execution_account().binding.clone();
+    let expected = ExecutionAccountBinding {
+        slot_id: actual.slot_id.clone(),
+        generation: actual.generation.wrapping_add(1),
+    };
+    let expected_submission = TurnInputSubmission::NotSubmitted {
+        reason: NotSubmittedReason::ExpectedExecutionAccountMismatch {
+            expected: expected.clone(),
+            actual,
+        },
+    };
+
+    for mode in [
+        TurnInputMode::StartIfIdle,
+        TurnInputMode::Steer {
+            expected_turn_id: "missing-turn".to_string(),
+        },
+    ] {
+        let submission = handle(
+            &session,
+            TurnInputRequest::new(SubmittedTurnInput::ResponseItem(user_message(
+                "stale prompt",
+            )))
+            .with_expected_execution_account(expected.clone()),
+            mode,
+            "account-fenced-submission".to_string(),
+        )
+        .await
+        .expect("account mismatch should be a submission result");
+
+        assert_eq!(submission, expected_submission);
     }
 }
 

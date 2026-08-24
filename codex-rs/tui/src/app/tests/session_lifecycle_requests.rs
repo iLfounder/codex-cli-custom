@@ -48,6 +48,11 @@ enum HistoryCapabilities {
     ForkHydrationFails,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransitionFault {
+    CommitProofDelayedUntilStartRetry,
+}
+
 /// Returns and resets `(thread/loaded/list, thread/read)` request counts.
 fn take_backfill_counts(requests: &RecordedRequests) -> (usize, usize) {
     let requests = std::mem::take(&mut *requests.lock().expect("request recorder lock"));
@@ -74,6 +79,7 @@ pub(super) async fn start_recording_app_server(
         HistoryCapabilities::Current,
         blocked_thread_list,
         failed_thread_name,
+        /*transition_fault*/ None,
     )
     .await
 }
@@ -84,6 +90,7 @@ async fn start_recording_app_server_with_history(
     history_capabilities: HistoryCapabilities,
     mut blocked_thread_list: Option<(ThreadId, oneshot::Sender<()>, oneshot::Receiver<()>)>,
     failed_thread_name: Option<&'static str>,
+    transition_fault: Option<TransitionFault>,
 ) -> Result<RecordingAppServer> {
     let state_db =
         crate::init_state_db_for_app_server_target(config, &crate::AppServerTarget::Embedded)
@@ -111,6 +118,8 @@ async fn start_recording_app_server_with_history(
         let mut websocket = accept_async(stream).await?;
         let mut inventories = usize::from(failed_thread_name == Some("background"));
         let mut reject_detach = false;
+        let mut obscured_commit_responses = 0;
+        let mut failed_transition_readbacks = 0;
         while let Some(frame) = websocket.next().await {
             let Message::Text(text) = frame? else {
                 continue;
@@ -137,6 +146,7 @@ async fn start_recording_app_server_with_history(
                         .expect("request recorder lock")
                         .push(request.clone());
                     let request_id = request.id.clone();
+                    let request_method = request.method.clone();
                     let params = request.params.as_ref();
                     let requires_pagination = match request.method.as_str() {
                         "thread/start" => params
@@ -157,7 +167,22 @@ async fn start_recording_app_server_with_history(
                             .expect("request recorder lock")
                             .iter()
                             .any(|recorded| recorded.method == "thread/fork");
-                    let response = if matches!(
+                    let fail_transition_readback = transition_fault
+                        == Some(TransitionFault::CommitProofDelayedUntilStartRetry)
+                        && obscured_commit_responses > 0
+                        && failed_transition_readbacks < 3
+                        && request.method == "sessionRuntime/list";
+                    let response = if fail_transition_readback {
+                        failed_transition_readbacks += 1;
+                        JSONRPCMessage::Error(JSONRPCError {
+                            id: request_id,
+                            error: JSONRPCErrorError {
+                                code: -32603,
+                                data: None,
+                                message: "forced transition readback failure".to_string(),
+                            },
+                        })
+                    } else if matches!(
                         history_capabilities,
                         HistoryCapabilities::LegacyOnly
                             | HistoryCapabilities::LegacyOnlyUnsupportedVariant
@@ -226,6 +251,14 @@ async fn start_recording_app_server_with_history(
                             })
                         } else {
                             let mut result = embedded.request(request).await?;
+                            if transition_fault
+                                == Some(TransitionFault::CommitProofDelayedUntilStartRetry)
+                                && obscured_commit_responses < 2
+                                && request_method == "thread/transition/commit"
+                            {
+                                obscured_commit_responses += 1;
+                                result = Ok(serde_json::json!({}));
+                            }
                             if background {
                                 let terminal = r#"{"data":[{"itemId":"x","processId":"x","command":"x","cwd":"/"}],"nextCursor":null}"#;
                                 result = Ok(serde_json::from_str(terminal)?);
@@ -325,6 +358,169 @@ async fn make_history_test_app() -> Result<(App, tempfile::TempDir)> {
     app.config.codex_home = codex_home.path().to_path_buf().abs();
     app.config.sqlite = SqliteConfig::new_for_testing(codex_home.path().abs());
     Ok((app, codex_home))
+}
+
+#[tokio::test]
+async fn ambiguous_commit_blocks_turns_until_the_exact_transition_converges() -> Result<()> {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let codex_home = tempdir()?;
+    app.config.codex_home = codex_home.path().to_path_buf().abs();
+    app.config.sqlite = SqliteConfig::new_for_testing(codex_home.path().abs());
+    let (mut app_server, requests, proxy) = start_recording_app_server_with_history(
+        &app.config,
+        HistoryCapabilities::Current,
+        /*blocked_thread_list*/ None,
+        /*failed_thread_name*/ None,
+        Some(TransitionFault::CommitProofDelayedUntilStartRetry),
+    )
+    .await?;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+
+    app.start_fresh_session_with_summary_hint(
+        &mut tui,
+        &mut app_server,
+        /*session_start_source*/ None,
+        /*initial_user_message*/ None,
+        /*new_thread_name*/ None,
+    )
+    .await;
+    let previous_thread_id = app.chat_widget.thread_id().expect("initial thread");
+    requests.lock().expect("request recorder lock").clear();
+    while app_event_rx.try_recv().is_ok() {}
+
+    app.start_fresh_session_with_summary_hint(
+        &mut tui,
+        &mut app_server,
+        /*session_start_source*/ None,
+        /*initial_user_message*/ None,
+        /*new_thread_name*/ None,
+    )
+    .await;
+
+    assert_eq!(app.chat_widget.thread_id(), Some(previous_thread_id));
+    let recorded = requests.lock().expect("request recorder lock").clone();
+    let starts = recorded
+        .iter()
+        .filter(|request| request.method == "thread/start")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        starts.len(),
+        1,
+        "must prepare only B while proof is pending"
+    );
+    let transition_id = starts[0]
+        .params
+        .as_ref()
+        .and_then(|params| params.pointer("/transition/transitionId"))
+        .and_then(serde_json::Value::as_str)
+        .expect("transition id")
+        .to_string();
+    let commits = recorded
+        .iter()
+        .filter(|request| request.method == "thread/transition/commit")
+        .collect::<Vec<_>>();
+    assert_eq!(commits.len(), 2);
+    assert!(commits.iter().all(|request| {
+        request
+            .params
+            .as_ref()
+            .and_then(|params| params.get("transitionId"))
+            .and_then(serde_json::Value::as_str)
+            == Some(transition_id.as_str())
+    }));
+    while app_event_rx.try_recv().is_ok() {}
+
+    app.chat_widget
+        .restore_user_message_to_composer("must not reach A".into());
+    app.chat_widget
+        .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let mut rejected_input_cells = Vec::new();
+    let turn = loop {
+        match app_event_rx.try_recv() {
+            Ok(AppEvent::CodexOp(turn @ AppCommand::UserTurn { .. })) => break turn,
+            Ok(AppEvent::InsertHistoryCell(cell)) => rejected_input_cells
+                .push(lines_to_single_string(&cell.display_lines(/*width*/ 120))),
+            Ok(_) => {}
+            Err(error) => panic!("expected UserTurn app event: {error}"),
+        }
+    };
+    app.submit_thread_op(&mut app_server, previous_thread_id, turn)
+        .await?;
+
+    assert!(
+        recorded_params(&requests, "turn/start")
+            .into_iter()
+            .chain(recorded_params(&requests, "turn/steer"))
+            .next()
+            .is_none(),
+        "ambiguous transition must fence all turn submission"
+    );
+    rejected_input_cells.extend(
+        std::iter::from_fn(|| app_event_rx.try_recv().ok()).filter_map(|event| match event {
+            AppEvent::InsertHistoryCell(cell) => {
+                Some(lines_to_single_string(&cell.display_lines(/*width*/ 120)))
+            }
+            _ => None,
+        }),
+    );
+    let rejected_input = rejected_input_cells.join("\n");
+    insta::assert_snapshot!(rejected_input, @r"
+
+    › must not reach A
+
+    ■ Input is paused while the thread transition is being resolved. Retry /new to continue.
+    ");
+
+    app.start_fresh_session_with_summary_hint(
+        &mut tui,
+        &mut app_server,
+        /*session_start_source*/ None,
+        /*initial_user_message*/ None,
+        /*new_thread_name*/ None,
+    )
+    .await;
+
+    let current_thread_id = app
+        .chat_widget
+        .thread_id()
+        .expect("committed replacement thread");
+    assert_ne!(current_thread_id, previous_thread_id);
+    let current_thread_id = current_thread_id.to_string();
+    let recorded = requests.lock().expect("request recorder lock").clone();
+    let starts = recorded
+        .iter()
+        .filter(|request| request.method == "thread/start")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        starts.len(),
+        2,
+        "retry must read back B instead of creating B2"
+    );
+    assert!(starts.iter().all(|request| {
+        request
+            .params
+            .as_ref()
+            .and_then(|params| params.pointer("/transition/transitionId"))
+            .and_then(serde_json::Value::as_str)
+            == Some(transition_id.as_str())
+    }));
+    assert!(
+        recorded
+            .iter()
+            .filter(|request| request.method == "thread/unsubscribe")
+            .all(|request| {
+                request
+                    .params
+                    .as_ref()
+                    .and_then(|params| params.get("threadId"))
+                    .and_then(serde_json::Value::as_str)
+                    != Some(current_thread_id.as_str())
+            })
+    );
+
+    app_server.shutdown().await?;
+    proxy.await??;
+    Ok(())
 }
 
 #[tokio::test]
@@ -712,6 +908,7 @@ async fn remote_legacy_history_start_negotiates_once_for_resume_and_fork() -> Re
         HistoryCapabilities::LegacyOnly,
         /*blocked_thread_list*/ None,
         /*failed_thread_name*/ None,
+        /*transition_fault*/ None,
     )
     .await?;
 
@@ -774,6 +971,7 @@ async fn remote_legacy_history_start_retries_unsupported_paginated_variant() -> 
         HistoryCapabilities::LegacyOnlyUnsupportedVariant,
         /*blocked_thread_list*/ None,
         /*failed_thread_name*/ None,
+        /*transition_fault*/ None,
     )
     .await?;
 
@@ -804,6 +1002,7 @@ async fn assert_remote_legacy_history_retry(request: LegacyHistoryRequest) -> Re
         HistoryCapabilities::LegacyOnly,
         /*blocked_thread_list*/ None,
         /*failed_thread_name*/ None,
+        /*transition_fault*/ None,
     )
     .await?;
 
@@ -869,6 +1068,7 @@ async fn paginated_fork_survives_post_response_hydration_failure() -> Result<()>
         HistoryCapabilities::ForkHydrationFails,
         /*blocked_thread_list*/ None,
         /*failed_thread_name*/ None,
+        /*transition_fault*/ None,
     )
     .await?;
 

@@ -31,7 +31,10 @@ impl App {
                     .add_error_message("The selected account slot no longer exists.".to_string());
                 return;
             };
-            let action = if slot.status == AccountSlotStatus::Failed {
+            let action = if matches!(
+                slot.status,
+                AccountSlotStatus::Ready | AccountSlotStatus::Failed
+            ) {
                 AccountSlotAction::RetryLogin
             } else {
                 AccountSlotAction::Login

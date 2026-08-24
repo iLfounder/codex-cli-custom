@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use crate::bottom_pane::LocalImageAttachment;
 use crate::bottom_pane::MentionBinding;
 use crate::bottom_pane::QueuedInputAction;
+use codex_app_server_protocol::SessionRuntimeAccountRef;
 use codex_app_server_protocol::TextElement as AppServerTextElement;
 use codex_app_server_protocol::UserInput;
 use codex_protocol::config_types::CollaborationMode;
@@ -44,6 +45,46 @@ pub(crate) struct UserMessage {
 pub(super) enum UserMessageHistoryRecord {
     UserMessageText,
     Override(UserMessageHistoryOverride),
+    PluginPrompt {
+        account: Option<SessionRuntimeAccountRef>,
+        history: Option<UserMessageHistoryOverride>,
+    },
+}
+
+impl UserMessageHistoryRecord {
+    pub(super) fn expected_account(&self) -> Option<&SessionRuntimeAccountRef> {
+        match self {
+            Self::PluginPrompt {
+                account: Some(account),
+                ..
+            } => Some(account),
+            Self::PluginPrompt { account: None, .. }
+            | Self::UserMessageText
+            | Self::Override(_) => None,
+        }
+    }
+
+    pub(super) fn has_account_conflict(&self) -> bool {
+        match self {
+            Self::PluginPrompt { account: None, .. } => true,
+            Self::PluginPrompt {
+                account: Some(_), ..
+            }
+            | Self::UserMessageText
+            | Self::Override(_) => false,
+        }
+    }
+
+    pub(super) fn history_override(&self) -> Option<&UserMessageHistoryOverride> {
+        match self {
+            Self::Override(history)
+            | Self::PluginPrompt {
+                history: Some(history),
+                ..
+            } => Some(history),
+            Self::UserMessageText | Self::PluginPrompt { history: None, .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -344,6 +385,20 @@ fn remap_placeholders_for_message_and_history_record(
                 text_elements,
             })
         }
+        UserMessageHistoryRecord::PluginPrompt {
+            account,
+            history: Some(history),
+        } if !history.text.is_empty() => {
+            let (text, text_elements) =
+                remap_placeholders_in_text(history.text, history.text_elements, &mapping);
+            UserMessageHistoryRecord::PluginPrompt {
+                account,
+                history: Some(UserMessageHistoryOverride {
+                    text,
+                    text_elements,
+                }),
+            }
+        }
         record => record,
     };
 
@@ -440,15 +495,13 @@ pub(super) fn user_message_for_restore(
     message: UserMessage,
     history_record: &UserMessageHistoryRecord,
 ) -> UserMessage {
-    match history_record {
-        UserMessageHistoryRecord::Override(history) if !history.text.is_empty() => UserMessage {
+    match history_record.history_override() {
+        Some(history) if !history.text.is_empty() => UserMessage {
             text: history.text.clone(),
             text_elements: history.text_elements.clone(),
             ..message
         },
-        UserMessageHistoryRecord::Override(_) | UserMessageHistoryRecord::UserMessageText => {
-            message
-        }
+        Some(_) | None => message,
     }
 }
 
@@ -456,13 +509,9 @@ pub(super) fn user_message_preview_text(
     message: &UserMessage,
     history_record: Option<&UserMessageHistoryRecord>,
 ) -> String {
-    match history_record {
-        Some(UserMessageHistoryRecord::Override(history)) if !history.text.is_empty() => {
-            history.text.clone()
-        }
-        Some(UserMessageHistoryRecord::Override(_))
-        | Some(UserMessageHistoryRecord::UserMessageText)
-        | None => message.text.clone(),
+    match history_record.and_then(UserMessageHistoryRecord::history_override) {
+        Some(history) if !history.text.is_empty() => history.text.clone(),
+        Some(_) | None => message.text.clone(),
     }
 }
 
@@ -487,9 +536,18 @@ pub(super) fn merge_user_messages_with_history_record(
     messages: Vec<(UserMessage, UserMessageHistoryRecord)>,
 ) -> (UserMessage, UserMessageHistoryRecord) {
     let messages = remap_user_messages_with_history_records(messages);
-    let history_record = if messages
+    let has_plugin_prompt = messages
         .iter()
-        .all(|(_, record)| *record == UserMessageHistoryRecord::UserMessageText)
+        .any(|(_, record)| matches!(record, UserMessageHistoryRecord::PluginPrompt { .. }));
+    let expected_account = (messages.len() == 1)
+        .then(|| messages.first())
+        .flatten()
+        .and_then(|(_, record)| record.expected_account())
+        .cloned();
+    let history_record = if !has_plugin_prompt
+        && messages
+            .iter()
+            .all(|(_, record)| *record == UserMessageHistoryRecord::UserMessageText)
     {
         UserMessageHistoryRecord::UserMessageText
     } else {
@@ -509,21 +567,28 @@ pub(super) fn merge_user_messages_with_history_record(
             history_segment_count += 1;
         };
         for (message, record) in &messages {
-            match record {
-                UserMessageHistoryRecord::Override(history) if !history.text.is_empty() => {
+            match record.history_override() {
+                Some(history) if !history.text.is_empty() => {
                     append_history_segment(&history.text, history.text_elements.clone());
                 }
-                UserMessageHistoryRecord::Override(_) if message.text.is_empty() => {}
-                UserMessageHistoryRecord::Override(_)
-                | UserMessageHistoryRecord::UserMessageText => {
+                Some(_) if message.text.is_empty() => {}
+                Some(_) | None => {
                     append_history_segment(&message.text, message.text_elements.clone());
                 }
             }
         }
-        UserMessageHistoryRecord::Override(UserMessageHistoryOverride {
+        let history = UserMessageHistoryOverride {
             text: history_text,
             text_elements: history_text_elements,
-        })
+        };
+        if has_plugin_prompt {
+            UserMessageHistoryRecord::PluginPrompt {
+                account: expected_account,
+                history: Some(history),
+            }
+        } else {
+            UserMessageHistoryRecord::Override(history)
+        }
     };
 
     (

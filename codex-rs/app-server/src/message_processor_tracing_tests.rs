@@ -152,6 +152,10 @@ impl TracingHarness {
             )
             .await;
         assert!(harness.session.initialized());
+        harness
+            .processor
+            .connection_initialized(TEST_CONNECTION_ID, /*request_attestation*/ false)
+            .await;
 
         Ok(harness)
     }
@@ -176,15 +180,21 @@ impl TracingHarness {
         let mut request = request_from_client_request(request);
         request.trace = trace;
 
-        self.processor
-            .process_request(
-                TEST_CONNECTION_ID,
-                request,
-                &AppServerTransport::Stdio,
-                Arc::clone(&self.session),
-            )
-            .await;
-        read_response(&mut self.outgoing_rx, request_id).await
+        let processor = Arc::clone(&self.processor);
+        let session = Arc::clone(&self.session);
+        let processor_task = tokio::spawn(async move {
+            processor
+                .process_request(
+                    TEST_CONNECTION_ID,
+                    request,
+                    &AppServerTransport::Stdio,
+                    session,
+                )
+                .await;
+        });
+        let response = read_response(&mut self.outgoing_rx, request_id).await;
+        processor_task.await.expect("request processor task");
+        response
     }
 
     async fn start_thread(
@@ -446,6 +456,11 @@ async fn read_response<T: serde::de::DeserializeOwned>(
         if connection_id != TEST_CONNECTION_ID {
             continue;
         }
+        if let crate::outgoing_message::OutgoingMessage::Error(error) = &message
+            && error.id == RequestId::Integer(request_id)
+        {
+            panic!("request {request_id} failed: {error:?}");
+        }
         let crate::outgoing_message::OutgoingMessage::Response(response) = message else {
             continue;
         };
@@ -658,6 +673,7 @@ async fn turn_start_jsonrpc_span_parents_core_turn_spans() -> Result<()> {
                 params: TurnStartParams {
                     environments: None,
                     thread_id,
+                    expected_execution_account: None,
                     client_user_message_id: None,
                     input: vec![UserInput::Text {
                         text: "hello".to_string(),

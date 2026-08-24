@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::collections::HashSet;
 
 use codex_app_server_protocol::GitInfo;
@@ -45,8 +46,10 @@ use crate::thread_status::resolve_thread_status;
 const STORE_PAGE_SIZE: usize = 200;
 const IDENTITY_CAPABILITY: &str = "ananke_session_identity_v1";
 const CONTROL_CAPABILITY: &str = "ananke_session_control_v1";
+const TRANSITION_CAPABILITY: &str = "ananke_thread_transition_v1";
 const RUNTIME_SNAPSHOT_UNAVAILABLE: &str = "thread store runtime state is unavailable";
 
+#[derive(Clone)]
 pub(super) enum RuntimeRecord {
     Stored(Box<StoredThread>),
     LoadedOnly {
@@ -57,6 +60,18 @@ pub(super) enum RuntimeRecord {
         forked_from_id: Option<ThreadId>,
         parent_thread_id: Option<ThreadId>,
     },
+}
+
+pub(super) struct RuntimeInventory {
+    pub(super) records: Vec<RuntimeRecord>,
+    pub(super) overlay: RuntimeOverlay,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct RuntimeOverlay {
+    pub(super) loaded_thread_ids: HashSet<ThreadId>,
+    pub(super) account_capability: Option<codex_app_server_protocol::AccountSlotCapability>,
+    pub(super) switching_accounts: HashMap<ThreadId, String>,
 }
 
 impl SessionRuntimeEngine {
@@ -73,7 +88,17 @@ impl SessionRuntimeEngine {
                 .map(|record| record.into_iter().collect());
         }
 
+        Ok(self.runtime_inventory().await?.records)
+    }
+
+    pub(super) async fn runtime_inventory(&self) -> Result<RuntimeInventory, JSONRPCErrorError> {
         let mut stored = self.list_stored_threads().await?;
+        let loaded_thread_ids = self
+            .thread_manager
+            .list_thread_ids()
+            .await
+            .into_iter()
+            .collect::<HashSet<_>>();
         let mut seen = stored
             .iter()
             .map(|thread| thread.thread_id)
@@ -82,14 +107,22 @@ impl SessionRuntimeEngine {
             .drain(..)
             .map(|thread| RuntimeRecord::Stored(Box::new(thread)))
             .collect::<Vec<_>>();
-        for thread_id in self.thread_manager.list_thread_ids().await {
+        for &thread_id in &loaded_thread_ids {
             if seen.insert(thread_id)
                 && let Some(record) = self.loaded_record(thread_id).await
             {
                 records.push(record);
             }
         }
-        Ok(records)
+        records.sort_by_key(|record| record.thread_id().to_string());
+        Ok(RuntimeInventory {
+            records,
+            overlay: RuntimeOverlay {
+                loaded_thread_ids,
+                account_capability: self.account_registry.runtime_capability().await.ok(),
+                switching_accounts: self.state.lock().await.switching_accounts.clone(),
+            },
+        })
     }
 
     async fn runtime_record(
@@ -128,6 +161,15 @@ impl SessionRuntimeEngine {
     }
 
     async fn list_stored_threads(&self) -> Result<Vec<StoredThread>, JSONRPCErrorError> {
+        let use_state_db_only = if let Some(local_store) =
+            self.thread_store
+                .as_any()
+                .downcast_ref::<codex_thread_store::LocalThreadStore>()
+        {
+            local_store.state_db().await.is_some()
+        } else {
+            false
+        };
         let mut cursor = None;
         let mut threads = Vec::new();
         loop {
@@ -146,7 +188,7 @@ impl SessionRuntimeEngine {
                     archived: false,
                     search_term: None,
                     relation_filter: None,
-                    use_state_db_only: false,
+                    use_state_db_only,
                 })
                 .await
                 .map_err(|_| internal_error("session runtime identity store is unavailable"))?;
@@ -159,9 +201,18 @@ impl SessionRuntimeEngine {
         Ok(threads)
     }
 
-    pub(super) async fn build_snapshot(&self, record: RuntimeRecord) -> SessionRuntimeSnapshot {
+    pub(super) async fn build_snapshot(
+        &self,
+        record: RuntimeRecord,
+        overlay: Option<&RuntimeOverlay>,
+    ) -> SessionRuntimeSnapshot {
         let thread_id = record.thread_id();
-        let loaded_thread = self.thread_manager.get_thread(thread_id).await.ok();
+        let loaded_thread =
+            if overlay.is_none_or(|overlay| overlay.loaded_thread_ids.contains(&thread_id)) {
+                self.thread_manager.get_thread(thread_id).await.ok()
+            } else {
+                None
+            };
         let (settings, loaded_session_id) = match loaded_thread.as_ref() {
             Some(thread) => {
                 let configured = thread.session_configured();
@@ -217,7 +268,10 @@ impl SessionRuntimeEngine {
                 .flatten(),
             None => None,
         };
-        let account_capability = self.account_registry.runtime_capability().await.ok();
+        let account_capability = match overlay {
+            Some(overlay) => overlay.account_capability.clone(),
+            None => self.account_registry.runtime_capability().await.ok(),
+        };
         let lifecycle = lifecycle_snapshot(
             status,
             loaded_thread.is_some(),
@@ -232,14 +286,17 @@ impl SessionRuntimeEngine {
         let writer = writer_snapshot(&store_runtime);
         let mut account =
             account_snapshot(current_binding, active_binding, account_capability.as_ref());
-        if let Some(target_slot_id) = self
-            .state
-            .lock()
-            .await
-            .switching_accounts
-            .get(&thread_id)
-            .cloned()
-        {
+        let target_slot_id = match overlay {
+            Some(overlay) => overlay.switching_accounts.get(&thread_id).cloned(),
+            None => self
+                .state
+                .lock()
+                .await
+                .switching_accounts
+                .get(&thread_id)
+                .cloned(),
+        };
+        if let Some(target_slot_id) = target_slot_id {
             account.switch_state = SessionRuntimeAccountSwitchState::Preparing;
             account.switch_target_slot_id = Some(target_slot_id);
             account.deny_reason = None;
@@ -254,6 +311,7 @@ impl SessionRuntimeEngine {
             persistence: persistence_snapshot(&store_runtime),
             account,
             actions,
+            continuity: self.continuity_snapshot(thread_id).await,
         }
     }
 
@@ -271,6 +329,11 @@ impl SessionRuntimeEngine {
             SessionRuntimeCapability {
                 name: CONTROL_CAPABILITY.to_string(),
                 available,
+                deny_reason: deny_reason.clone(),
+            },
+            SessionRuntimeCapability {
+                name: TRANSITION_CAPABILITY.to_string(),
+                available,
                 deny_reason,
             },
         ]
@@ -278,10 +341,53 @@ impl SessionRuntimeEngine {
 }
 
 impl RuntimeRecord {
-    fn thread_id(&self) -> ThreadId {
+    pub(super) fn thread_id(&self) -> ThreadId {
         match self {
             Self::Stored(thread) => thread.thread_id,
             Self::LoadedOnly { thread_id, .. } => *thread_id,
+        }
+    }
+
+    pub(super) fn same_inventory(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Stored(left), Self::Stored(right)) => {
+                left.thread_id == right.thread_id
+                    && left.rollout_path == right.rollout_path
+                    && left.forked_from_id == right.forked_from_id
+                    && left.parent_thread_id == right.parent_thread_id
+                    && left.name == right.name
+                    && left.updated_at == right.updated_at
+                    && left.cwd == right.cwd
+                    && left.source == right.source
+                    && same_git_info(left.git_info.as_ref(), right.git_info.as_ref())
+            }
+            (
+                Self::LoadedOnly {
+                    thread_id: left_thread_id,
+                    session_id: left_session_id,
+                    source: left_source,
+                    cwd: left_cwd,
+                    forked_from_id: left_forked_from_id,
+                    parent_thread_id: left_parent_thread_id,
+                },
+                Self::LoadedOnly {
+                    thread_id: right_thread_id,
+                    session_id: right_session_id,
+                    source: right_source,
+                    cwd: right_cwd,
+                    forked_from_id: right_forked_from_id,
+                    parent_thread_id: right_parent_thread_id,
+                },
+            ) => {
+                left_thread_id == right_thread_id
+                    && left_session_id == right_session_id
+                    && left_source == right_source
+                    && left_cwd == right_cwd
+                    && left_forked_from_id == right_forked_from_id
+                    && left_parent_thread_id == right_parent_thread_id
+            }
+            (Self::Stored(_), Self::LoadedOnly { .. })
+            | (Self::LoadedOnly { .. }, Self::Stored(_)) => false,
         }
     }
 
@@ -344,6 +450,22 @@ impl RuntimeRecord {
                 settings,
             },
         }
+    }
+}
+
+fn same_git_info(
+    left: Option<&codex_protocol::protocol::GitInfo>,
+    right: Option<&codex_protocol::protocol::GitInfo>,
+) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            left.commit_hash.as_ref().map(|sha| sha.0.as_str())
+                == right.commit_hash.as_ref().map(|sha| sha.0.as_str())
+                && left.branch == right.branch
+                && left.repository_url == right.repository_url
+        }
+        (None, None) => true,
+        (Some(_), None) | (None, Some(_)) => false,
     }
 }
 

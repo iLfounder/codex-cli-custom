@@ -80,6 +80,38 @@ struct PreparedExecutionAccountRuntime {
     async_hook_results: async_channel::Receiver<HookCompletedEvent>,
 }
 
+pub(crate) struct PreparedExecutionAccountReplacement {
+    session: Arc<Session>,
+    target: Arc<crate::execution_account::ExecutionAccountContext>,
+    prepared: Option<PreparedExecutionAccountRuntime>,
+}
+
+impl Drop for PreparedExecutionAccountReplacement {
+    fn drop(&mut self) {
+        self.session.end_execution_control_transition();
+    }
+}
+
+struct ExecutionAccountSwitchCancellation {
+    token: CancellationToken,
+}
+
+impl Drop for ExecutionAccountSwitchCancellation {
+    fn drop(&mut self) {
+        self.token.cancel();
+    }
+}
+
+struct ExecutionControlTransitionGuard {
+    session: Arc<Session>,
+}
+
+impl Drop for ExecutionControlTransitionGuard {
+    fn drop(&mut self) {
+        self.session.end_execution_control_transition();
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct SessionConfiguration {
     /// Runtime provider and its provider-specific execution policy.
@@ -769,9 +801,6 @@ impl Session {
             config.chatgpt_base_url.trim_end_matches('/').to_string(),
             config.analytics_enabled,
         );
-        services
-            .plugins_manager
-            .set_analytics_events_client(analytics_events_client.clone());
         let model_client = ModelClient::new(
             Some(Arc::clone(&execution_account.auth_manager)),
             if config.features.enabled(Feature::UseAgentIdentity) {
@@ -855,13 +884,172 @@ impl Session {
 
     #[expect(
         clippy::await_holding_invalid_type,
-        reason = "account runtime preparation and durable binding commit share one transition fence"
+        reason = "account runtime preparation and quiesce share one transition fence"
     )]
+    pub(crate) async fn prepare_execution_account_replacement(
+        self: &Arc<Self>,
+        expected: codex_protocol::protocol::ExecutionAccountBinding,
+        target: Arc<crate::execution_account::ExecutionAccountContext>,
+        services: crate::execution_account::ExecutionAccountServices,
+    ) -> Result<
+        PreparedExecutionAccountReplacement,
+        crate::execution_account::ExecutionAccountSwitchError,
+    > {
+        let _transition = self.execution_runtime_transition_lock.lock().await;
+        let _mcp_refresh = self.mcp_refresh.acquire().await.map_err(|_| {
+            crate::execution_account::ExecutionAccountSwitchError::PreparationFailed
+        })?;
+        if self.execution_account().binding != expected
+            || self.conversation.running_state().await.is_some()
+        {
+            return Err(crate::execution_account::ExecutionAccountSwitchError::ThreadBusy);
+        }
+        let prepared = self
+            .prepare_execution_account_runtime(Arc::clone(&target), services)
+            .await?;
+        if self.execution_account().binding != expected
+            || self.conversation.running_state().await.is_some()
+        {
+            return Err(crate::execution_account::ExecutionAccountSwitchError::ThreadBusy);
+        }
+        self.begin_execution_control_transition()
+            .await
+            .map_err(|()| crate::execution_account::ExecutionAccountSwitchError::ThreadBusy)?;
+        for extension_runtime in &prepared.runtime.extension_runtimes {
+            if extension_runtime.quiesce().await.is_err() {
+                self.end_execution_control_transition();
+                return Err(
+                    crate::execution_account::ExecutionAccountSwitchError::PreparationFailed,
+                );
+            }
+        }
+        Ok(PreparedExecutionAccountReplacement {
+            session: Arc::clone(self),
+            target,
+            prepared: Some(prepared),
+        })
+    }
+
+    pub(crate) async fn publish_execution_account_replacement(
+        mut replacement: PreparedExecutionAccountReplacement,
+    ) {
+        let session = Arc::clone(&replacement.session);
+        let target = Arc::clone(&replacement.target);
+        let Some(PreparedExecutionAccountRuntime {
+            runtime: prepared,
+            hooks: prepared_hooks,
+            async_hook_results: prepared_async_hook_results,
+        }) = replacement.prepared.take()
+        else {
+            tracing::error!(
+                "execution account replacement was published without a prepared runtime"
+            );
+            return;
+        };
+        let previous = session.execution_account_runtime();
+        let startup_prewarm = session.take_session_startup_prewarm().await;
+        if let Some(startup_prewarm) = startup_prewarm {
+            startup_prewarm.abort().await;
+        }
+        session.stop_mcp_prewarm_worker().await;
+        previous.guardian_review_session.shutdown().await;
+        previous.mcp_runtime.shutdown().await;
+        let target_auth_changes = target.auth_manager.auth_change_receiver();
+        session.hooks().shutdown().await;
+        let previous_async_hook_results = session.async_hook_results.load_full();
+        previous_async_hook_results.close();
+        while previous_async_hook_results.try_recv().is_ok() {}
+        session
+            .async_hook_results
+            .store(Arc::new(prepared_async_hook_results));
+        session.services.hooks.store(Arc::new(prepared_hooks));
+        previous.mcp_runtime.adopt_prepared(&prepared.mcp_runtime);
+        session
+            .services
+            .mcp_runtime
+            .adopt_prepared(&prepared.mcp_runtime);
+        prepared
+            .services
+            .plugins_manager
+            .set_analytics_events_client(prepared.analytics_events_client.clone());
+        session
+            .services
+            .session_extension_data
+            .insert(target.as_ref().clone());
+        session
+            .services
+            .session_extension_data
+            .insert(Arc::clone(&target.auth_manager));
+        session
+            .services
+            .thread_extension_data
+            .insert(target.as_ref().clone());
+        session
+            .services
+            .thread_extension_data
+            .insert(Arc::clone(&target.auth_manager));
+        session
+            .services
+            .hook_mcp_runtime
+            .store(Arc::clone(&prepared.mcp_runtime));
+        session
+            .services
+            .turn_environments
+            .replace_shell_snapshot(prepared.shell_snapshot.clone());
+        if let Some(network_proxy) = session.services.network_proxy.load_full() {
+            network_proxy
+                .proxy()
+                .replace_audit_metadata(prepared.network_proxy_audit_metadata.clone());
+        }
+        for extension_runtime in &prepared.extension_runtimes {
+            extension_runtime.publish(
+                &session.services.session_extension_data,
+                &session.services.thread_extension_data,
+            );
+        }
+        session.execution_account_runtime.store(prepared);
+        session.start_mcp_prewarm_worker(target_auth_changes);
+        session.schedule_mcp_prewarm();
+    }
+
     pub(crate) async fn switch_execution_account(
         self: &Arc<Self>,
         expected: codex_protocol::protocol::ExecutionAccountBinding,
         target: Arc<crate::execution_account::ExecutionAccountContext>,
         services: crate::execution_account::ExecutionAccountServices,
+    ) -> Result<
+        codex_protocol::protocol::ExecutionAccountBinding,
+        crate::execution_account::ExecutionAccountSwitchError,
+    > {
+        let cancellation = CancellationToken::new();
+        let _cancel_on_drop = ExecutionAccountSwitchCancellation {
+            token: cancellation.clone(),
+        };
+        let session = Arc::clone(self);
+        // The owned task observes caller cancellation only before CAS. Once the durable commit
+        // starts, it retains the session and finishes publication even if its caller is dropped.
+        tokio::spawn(async move {
+            session
+                .switch_execution_account_owned(expected, target, services, cancellation)
+                .await
+        })
+        .await
+        .map_err(|err| {
+            tracing::error!("execution account transition task failed: {err}");
+            crate::execution_account::ExecutionAccountSwitchError::PreparationFailed
+        })?
+    }
+
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "account runtime preparation and durable binding commit share one transition fence"
+    )]
+    async fn switch_execution_account_owned(
+        self: Arc<Self>,
+        expected: codex_protocol::protocol::ExecutionAccountBinding,
+        target: Arc<crate::execution_account::ExecutionAccountContext>,
+        services: crate::execution_account::ExecutionAccountServices,
+        cancellation: CancellationToken,
     ) -> Result<
         codex_protocol::protocol::ExecutionAccountBinding,
         crate::execution_account::ExecutionAccountSwitchError,
@@ -879,152 +1067,126 @@ impl Session {
             runtime: prepared,
             hooks: prepared_hooks,
             async_hook_results: prepared_async_hook_results,
-        } = self
-            .prepare_execution_account_runtime(Arc::clone(&target), services)
-            .await?;
+        } = tokio::select! {
+            _ = cancellation.cancelled() => {
+                return Err(crate::execution_account::ExecutionAccountSwitchError::ThreadBusy);
+            }
+            prepared = self.prepare_execution_account_runtime(Arc::clone(&target), services) => {
+                prepared?
+            }
+        };
         if self.execution_account().binding != expected
             || self.conversation.running_state().await.is_some()
         {
             return Err(crate::execution_account::ExecutionAccountSwitchError::ThreadBusy);
         }
         let previous = self.execution_account_runtime();
-        let rollback_mcp_runtime = self
-            .prepare_mcp_runtime_for_execution_account(
-                &previous.execution_account,
-                &previous.services,
-            )
-            .await
-            .map_err(|_| {
-                crate::execution_account::ExecutionAccountSwitchError::PreparationFailed
-            })?;
-        let rollback = Arc::new(crate::execution_account::ExecutionAccountRuntime {
-            execution_account: Arc::clone(&previous.execution_account),
-            services: previous.services.clone(),
-            mcp_runtime: Arc::clone(&previous.mcp_runtime),
-            model_client: previous.model_client.clone(),
-            analytics_events_client: previous.analytics_events_client.clone(),
-            session_telemetry: previous.session_telemetry.clone(),
-            network_proxy_audit_metadata: previous.network_proxy_audit_metadata.clone(),
-            shell_snapshot: previous.shell_snapshot.clone(),
-            extension_runtimes: previous.extension_runtimes.clone(),
-            guardian_review_session: Arc::new(GuardianReviewSessionManager::default()),
-        });
+        if cancellation.is_cancelled() {
+            return Err(crate::execution_account::ExecutionAccountSwitchError::ThreadBusy);
+        }
         self.begin_execution_control_transition()
             .await
             .map_err(|()| crate::execution_account::ExecutionAccountSwitchError::ThreadBusy)?;
-        let rollback_base_instructions = self.get_base_instructions().await.text;
+        let _closing = ExecutionControlTransitionGuard {
+            session: Arc::clone(&self),
+        };
+        for extension_runtime in &prepared.extension_runtimes {
+            tokio::select! {
+                _ = cancellation.cancelled() => {
+                    return Err(crate::execution_account::ExecutionAccountSwitchError::ThreadBusy);
+                }
+                result = extension_runtime.quiesce() => {
+                    result.map_err(|_| {
+                        crate::execution_account::ExecutionAccountSwitchError::PreparationFailed
+                    })?;
+                }
+            }
+        }
+        if cancellation.is_cancelled() {
+            return Err(crate::execution_account::ExecutionAccountSwitchError::ThreadBusy);
+        }
+
+        // Do not observe cancellation beyond this point: CAS and its infallible publication are
+        // one owned commit path. Until CAS succeeds, the old bundle and workers remain untouched.
+        let next = self
+            .services
+            .thread_store
+            .compare_and_swap_execution_account_binding(
+                self.thread_id,
+                expected,
+                target.binding.slot_id.clone(),
+            )
+            .await
+            .map_err(|_| crate::execution_account::ExecutionAccountSwitchError::PersistenceFailed)?
+            .ok_or(crate::execution_account::ExecutionAccountSwitchError::StaleGeneration)?;
+        if next != target.binding {
+            return Err(crate::execution_account::ExecutionAccountSwitchError::PersistenceFailed);
+        }
+
         let startup_prewarm = self.take_session_startup_prewarm().await;
-        let restart_startup_prewarm = startup_prewarm.is_some();
         if let Some(startup_prewarm) = startup_prewarm {
             startup_prewarm.abort().await;
         }
         self.stop_mcp_prewarm_worker().await;
-        for extension_runtime in &prepared.extension_runtimes {
-            extension_runtime.quiesce().await.map_err(|_| {
-                crate::execution_account::ExecutionAccountSwitchError::PreparationFailed
-            })?;
-        }
         previous.guardian_review_session.shutdown().await;
         previous.mcp_runtime.shutdown().await;
         let target_auth_changes = target.auth_manager.auth_change_receiver();
-        let result = async {
-            if self.execution_account().binding != expected {
-                return Err(crate::execution_account::ExecutionAccountSwitchError::StaleGeneration);
-            }
-            let next = self
-                .services
-                .thread_store
-                .compare_and_swap_execution_account_binding(
-                    self.thread_id,
-                    expected,
-                    target.binding.slot_id.clone(),
-                )
-                .await
-                .map_err(|_| {
-                    crate::execution_account::ExecutionAccountSwitchError::PersistenceFailed
-                })?
-                .ok_or(crate::execution_account::ExecutionAccountSwitchError::StaleGeneration)?;
-            if next != target.binding {
-                return Err(
-                    crate::execution_account::ExecutionAccountSwitchError::PersistenceFailed,
-                );
-            }
+        let previous_hooks = self.hooks();
+        previous_hooks.shutdown().await;
+        let previous_async_hook_results = self.async_hook_results.load_full();
+        previous_async_hook_results.close();
+        while previous_async_hook_results.try_recv().is_ok() {}
+        self.async_hook_results
+            .store(Arc::new(prepared_async_hook_results));
+        self.services.hooks.store(Arc::new(prepared_hooks));
 
-            let previous_hooks = self.hooks();
-            previous_hooks.shutdown().await;
-            let previous_async_hook_results = self.async_hook_results.load_full();
-            previous_async_hook_results.close();
-            while previous_async_hook_results.try_recv().is_ok() {}
-            self.async_hook_results
-                .store(Arc::new(prepared_async_hook_results));
-            self.services.hooks.store(Arc::new(prepared_hooks));
-
-            previous.mcp_runtime.adopt_prepared(&prepared.mcp_runtime);
-            self.services
-                .mcp_runtime
-                .adopt_prepared(&prepared.mcp_runtime);
-            self.services
-                .session_extension_data
-                .insert(target.as_ref().clone());
-            self.services
-                .session_extension_data
-                .insert(Arc::clone(&target.auth_manager));
-            self.services
-                .session_extension_data
-                .insert(prepared.analytics_events_client.clone());
-            self.services
-                .thread_extension_data
-                .insert(target.as_ref().clone());
-            self.services
-                .thread_extension_data
-                .insert(Arc::clone(&target.auth_manager));
-            self.services
-                .thread_extension_data
-                .insert(prepared.analytics_events_client.clone());
-            self.services
-                .hook_mcp_runtime
-                .store(Arc::clone(&prepared.mcp_runtime));
-            self.services
-                .turn_environments
-                .replace_shell_snapshot(prepared.shell_snapshot.clone());
-            if let Some(network_proxy) = self.services.network_proxy.load_full() {
-                network_proxy
-                    .proxy()
-                    .replace_audit_metadata(prepared.network_proxy_audit_metadata.clone());
-            }
-            for extension_runtime in &prepared.extension_runtimes {
-                extension_runtime.publish(
-                    &self.services.session_extension_data,
-                    &self.services.thread_extension_data,
-                );
-            }
-            self.execution_account_runtime.store(Arc::clone(&prepared));
-            self.start_mcp_prewarm_worker(target_auth_changes);
-            self.schedule_mcp_prewarm();
-            Ok(next)
+        previous.mcp_runtime.adopt_prepared(&prepared.mcp_runtime);
+        self.services
+            .mcp_runtime
+            .adopt_prepared(&prepared.mcp_runtime);
+        prepared
+            .services
+            .plugins_manager
+            .set_analytics_events_client(prepared.analytics_events_client.clone());
+        self.services
+            .session_extension_data
+            .insert(target.as_ref().clone());
+        self.services
+            .session_extension_data
+            .insert(Arc::clone(&target.auth_manager));
+        self.services
+            .session_extension_data
+            .insert(prepared.analytics_events_client.clone());
+        self.services
+            .thread_extension_data
+            .insert(target.as_ref().clone());
+        self.services
+            .thread_extension_data
+            .insert(Arc::clone(&target.auth_manager));
+        self.services
+            .thread_extension_data
+            .insert(prepared.analytics_events_client.clone());
+        self.services
+            .hook_mcp_runtime
+            .store(Arc::clone(&prepared.mcp_runtime));
+        self.services
+            .turn_environments
+            .replace_shell_snapshot(prepared.shell_snapshot.clone());
+        if let Some(network_proxy) = self.services.network_proxy.load_full() {
+            network_proxy
+                .proxy()
+                .replace_audit_metadata(prepared.network_proxy_audit_metadata.clone());
         }
-        .await;
-        if result.is_err() {
-            drop(prepared);
-            previous.mcp_runtime.adopt_prepared(&rollback_mcp_runtime);
-            self.services
-                .mcp_runtime
-                .adopt_prepared(&rollback_mcp_runtime);
-            self.execution_account_runtime.store(rollback);
-            self.start_mcp_prewarm_worker(
-                previous
-                    .execution_account
-                    .auth_manager
-                    .auth_change_receiver(),
+        for extension_runtime in &prepared.extension_runtimes {
+            extension_runtime.publish(
+                &self.services.session_extension_data,
+                &self.services.thread_extension_data,
             );
-            self.schedule_mcp_prewarm();
-            if restart_startup_prewarm {
-                self.schedule_startup_prewarm(rollback_base_instructions)
-                    .await;
-            }
         }
-        self.end_execution_control_transition();
-        result
+        self.execution_account_runtime.store(Arc::clone(&prepared));
+        self.start_mcp_prewarm_worker(target_auth_changes);
+        self.schedule_mcp_prewarm();
+        Ok(next)
     }
 
     /// Close the idle input boundary immediately before a writer-control commit.

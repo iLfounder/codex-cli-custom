@@ -648,6 +648,7 @@ impl App {
             }
             AppCommand::UserTurn {
                 items,
+                expected_execution_account,
                 cwd,
                 approval_policy,
                 approvals_reviewer,
@@ -660,13 +661,29 @@ impl App {
                 collaboration_mode,
                 personality,
             } => {
+                if app_server.has_ambiguous_thread_transition_from(thread_id) {
+                    let message = "Input is paused while the thread transition is being resolved. Retry /new to continue.";
+                    if self.chat_widget.enqueue_rejected_steer()
+                        || !self
+                            .chat_widget
+                            .handle_turn_start_rejection(message.to_string())
+                    {
+                        self.chat_widget.add_error_message(message.to_string());
+                    }
+                    return Ok(true);
+                }
                 let mut should_start_turn = true;
                 if let Some(turn_id) = self.active_turn_id_for_thread(thread_id).await {
                     let mut steer_turn_id = turn_id;
                     let mut retried_after_turn_mismatch = false;
                     loop {
                         match app_server
-                            .turn_steer(thread_id, steer_turn_id.clone(), items.to_vec())
+                            .turn_steer(
+                                thread_id,
+                                steer_turn_id.clone(),
+                                items.to_vec(),
+                                expected_execution_account.clone(),
+                            )
                             .await
                         {
                             Ok(_) => return Ok(true),
@@ -740,6 +757,7 @@ impl App {
                         .turn_start(
                             thread_id,
                             items.to_vec(),
+                            expected_execution_account.clone(),
                             cwd.clone(),
                             *approval_policy,
                             approvals_reviewer,

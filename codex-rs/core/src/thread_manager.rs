@@ -867,6 +867,95 @@ impl ThreadManager {
         result
     }
 
+    /// Replaces one slot runtime across its exact durable and loaded idle thread set.
+    pub async fn execution_account_slot_runtime_version(
+        &self,
+        slot_id: String,
+    ) -> Result<u64, crate::execution_account::ExecutionAccountSwitchError> {
+        self.state
+            .thread_store
+            .execution_account_slot_runtime_state(slot_id)
+            .await
+            .map(|(runtime_version, _)| runtime_version)
+            .map_err(|_| crate::execution_account::ExecutionAccountSwitchError::PersistenceFailed)
+    }
+
+    /// Replaces one slot runtime across its exact durable and loaded idle thread set.
+    pub async fn replace_slot_execution_account_runtime(
+        &self,
+        slot_id: String,
+        auth_manager: Arc<AuthManager>,
+        models_manager: SharedModelsManager,
+    ) -> Result<
+        (u64, Vec<(ThreadId, ExecutionAccountBinding)>),
+        crate::execution_account::ExecutionAccountSwitchError,
+    > {
+        let (runtime_version, expected_bindings) = self
+            .state
+            .thread_store
+            .execution_account_slot_runtime_state(slot_id.clone())
+            .await
+            .map_err(|_| {
+                crate::execution_account::ExecutionAccountSwitchError::PersistenceFailed
+            })?;
+        let mut loaded = self
+            .state
+            .threads
+            .read()
+            .await
+            .iter()
+            .filter(|(_, thread)| thread.execution_account().binding.slot_id == slot_id)
+            .map(|(thread_id, thread)| (*thread_id, Arc::clone(thread)))
+            .collect::<Vec<_>>();
+        loaded.sort_by_key(|(thread_id, _)| thread_id.to_string());
+        if loaded.iter().any(|(thread_id, thread)| {
+            let binding = &thread.execution_account().binding;
+            !expected_bindings
+                .iter()
+                .any(|(expected_thread_id, expected)| {
+                    expected_thread_id == thread_id && expected == binding
+                })
+        }) {
+            return Err(crate::execution_account::ExecutionAccountSwitchError::StaleGeneration);
+        }
+
+        let mut prepared = Vec::with_capacity(loaded.len());
+        for (_, thread) in loaded {
+            let expected = thread.execution_account().binding.clone();
+            let target = Arc::new(ExecutionAccountContext {
+                binding: ExecutionAccountBinding {
+                    slot_id: slot_id.clone(),
+                    generation: expected.generation.checked_add(1).ok_or(
+                        crate::execution_account::ExecutionAccountSwitchError::PreparationFailed,
+                    )?,
+                },
+                auth_manager: Arc::clone(&auth_manager),
+                models_manager: Arc::clone(&models_manager),
+            });
+            let services = self.execution_account_services(&target);
+            prepared.push(
+                thread
+                    .prepare_execution_account_replacement(expected, target, services)
+                    .await?,
+            );
+        }
+        let (next_version, next_bindings) = self
+            .state
+            .thread_store
+            .compare_and_swap_execution_account_slot_runtime(
+                slot_id,
+                runtime_version,
+                expected_bindings,
+            )
+            .await
+            .map_err(|_| crate::execution_account::ExecutionAccountSwitchError::PersistenceFailed)?
+            .ok_or(crate::execution_account::ExecutionAccountSwitchError::StaleGeneration)?;
+        for replacement in prepared {
+            CodexThread::publish_execution_account_replacement(replacement).await;
+        }
+        Ok((next_version, next_bindings))
+    }
+
     pub fn clear_all_account_plugin_caches(&self) {
         let services = self
             .state
@@ -2041,7 +2130,7 @@ impl ThreadManagerState {
     async fn spawn_thread(&self, request: ThreadSpawnRequest) -> CodexResult<NewThread> {
         let ThreadSpawnRequest {
             options,
-            auth_manager,
+            auth_manager: _auth_manager,
             execution_account,
             agent_control,
             parent_thread_id,
@@ -2101,27 +2190,26 @@ impl ThreadManagerState {
                 threads.remove(&resumed.conversation_id);
             }
         }
-        let execution_account = if let Some(execution_account) = execution_account {
-            execution_account
+        // Keep the slot readiness lease through session construction. This fences start,
+        // resume, and fork against a same-slot runtime replacement that was enumerated before
+        // this thread became loaded.
+        let execution_account_binding = if let Some(execution_account) = execution_account {
+            execution_account.binding.clone()
         } else if let Some(source_thread_id) = forked_from_thread_id.or(parent_thread_id) {
             if let Some(source) = self.threads.read().await.get(&source_thread_id).cloned() {
-                source.session.execution_account()
+                source.session.execution_account().binding.clone()
             } else {
                 match self
                     .thread_store
                     .execution_account_binding(source_thread_id)
                     .await
                 {
-                    Ok(Some(binding)) => self.execution_account_resolver.resolve(binding).await?,
+                    Ok(Some(binding)) => binding,
                     Ok(None) | Err(ThreadStoreError::Unsupported { .. }) => {
-                        Arc::new(ExecutionAccountContext {
-                            binding: ExecutionAccountBinding {
-                                slot_id: "default".to_string(),
-                                generation: 1,
-                            },
-                            auth_manager: Arc::clone(&auth_manager),
-                            models_manager: Arc::clone(&self.models_manager),
-                        })
+                        ExecutionAccountBinding {
+                            slot_id: "default".to_string(),
+                            generation: 1,
+                        }
                     }
                     Err(err) => {
                         return Err(CodexErr::Fatal(format!(
@@ -2136,17 +2224,11 @@ impl ThreadManagerState {
                 .execution_account_binding(resumed.conversation_id)
                 .await
             {
-                Ok(Some(binding)) => self.execution_account_resolver.resolve(binding).await?,
-                Ok(None) | Err(ThreadStoreError::Unsupported { .. }) => {
-                    Arc::new(ExecutionAccountContext {
-                        binding: ExecutionAccountBinding {
-                            slot_id: "default".to_string(),
-                            generation: 1,
-                        },
-                        auth_manager: Arc::clone(&auth_manager),
-                        models_manager: Arc::clone(&self.models_manager),
-                    })
-                }
+                Ok(Some(binding)) => binding,
+                Ok(None) | Err(ThreadStoreError::Unsupported { .. }) => ExecutionAccountBinding {
+                    slot_id: "default".to_string(),
+                    generation: 1,
+                },
                 Err(err) => {
                     return Err(CodexErr::Fatal(format!(
                         "failed to read execution account for thread {}: {err}",
@@ -2155,15 +2237,16 @@ impl ThreadManagerState {
                 }
             }
         } else {
-            Arc::new(ExecutionAccountContext {
-                binding: ExecutionAccountBinding {
-                    slot_id: "default".to_string(),
-                    generation: 1,
-                },
-                auth_manager: Arc::clone(&auth_manager),
-                models_manager: Arc::clone(&self.models_manager),
-            })
+            ExecutionAccountBinding {
+                slot_id: "default".to_string(),
+                generation: 1,
+            }
         };
+        let execution_account_transition = self
+            .execution_account_resolver
+            .resolve_for_transition(execution_account_binding)
+            .await?;
+        let execution_account = Arc::clone(execution_account_transition.execution_account());
         let execution_services = self.execution_account_services(&execution_account);
         let analytics_events_client =
             if Arc::ptr_eq(&execution_account.auth_manager, &self.auth_manager) {
@@ -2271,6 +2354,7 @@ impl ThreadManagerState {
         let new_thread = self
             .finalize_thread_spawn(session, io, tracked_session_source)
             .await?;
+        drop(execution_account_transition);
         if source_changed_during_startup.load(Ordering::Acquire) {
             new_thread.thread.session.request_mcp_runtime_refresh();
         }

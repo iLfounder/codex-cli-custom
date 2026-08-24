@@ -30,6 +30,77 @@ pub(super) struct LoadedSubagentBackfill {
     pub(super) refreshed_thread_ids: HashSet<ThreadId>,
 }
 
+fn runtime_proves_thread_transition_committed(
+    runtime: &crate::app_server_session::ThreadRuntimeSnapshot,
+    preparation: &codex_app_server_protocol::ThreadTransitionPreparation,
+) -> bool {
+    runtime
+        .snapshot
+        .continuity
+        .last_incoming
+        .iter()
+        .chain(runtime.snapshot.continuity.last_outgoing.iter())
+        .any(|receipt| {
+            receipt.transition_id == preparation.transition_id
+                && receipt.reason == preparation.reason
+                && receipt.previous.thread_id == preparation.previous_thread_id
+                && receipt.current.thread_id == preparation.current_thread_id
+                && receipt.previous.writer == preparation.previous_writer
+                && receipt.current.writer == preparation.current_writer
+                && receipt.origin_instance_epoch == preparation.origin_instance_epoch
+                && receipt.initiator_client_incarnation == preparation.initiator_client_incarnation
+                && receipt.status == codex_app_server_protocol::ThreadTransitionStatus::Committed
+        })
+}
+
+async fn converge_thread_transition_commit(
+    app_server: &mut AppServerSession,
+    preparation: &codex_app_server_protocol::ThreadTransitionPreparation,
+) -> Result<()> {
+    let first_error = match app_server.thread_transition_commit(preparation).await {
+        Ok(_) => return Ok(()),
+        Err(error) => error,
+    };
+    if !app_server.thread_transition_is_pending(preparation) {
+        return Err(first_error);
+    }
+
+    let current_thread_id = ThreadId::from_string(&preparation.current_thread_id)?;
+    if crate::app_server_session::session_runtime_for_thread(
+        app_server.request_handle(),
+        current_thread_id,
+    )
+    .await
+    .is_ok_and(|runtime| runtime_proves_thread_transition_committed(&runtime, preparation))
+    {
+        app_server.mark_thread_transition_committed(preparation);
+        return Ok(());
+    }
+
+    let retry_error = match app_server.thread_transition_commit(preparation).await {
+        Ok(_) => return Ok(()),
+        Err(error) => error,
+    };
+    let previous_thread_id = ThreadId::from_string(&preparation.previous_thread_id)?;
+    for thread_id in [current_thread_id, previous_thread_id] {
+        if crate::app_server_session::session_runtime_for_thread(
+            app_server.request_handle(),
+            thread_id,
+        )
+        .await
+        .is_ok_and(|runtime| runtime_proves_thread_transition_committed(&runtime, preparation))
+        {
+            app_server.mark_thread_transition_committed(preparation);
+            return Ok(());
+        }
+    }
+
+    Err(color_eyre::eyre::eyre!(
+        "thread transition {} remains ambiguous after an idempotent commit retry: {retry_error}; initial error: {first_error}",
+        preparation.transition_id
+    ))
+}
+
 impl App {
     pub(super) async fn open_agent_picker(&mut self, app_server: &mut AppServerSession) {
         let backfill = if self.primary_thread_id.is_none() {
@@ -576,6 +647,7 @@ impl App {
     }
 
     pub(super) fn reset_for_thread_switch(&mut self, tui: &mut tui::Tui) -> Result<()> {
+        self.invalidate_rate_limit_subject();
         self.reset_transcript_state_after_clear();
         self.plugin_command_state.clear_projection();
         self.chat_widget.set_plugin_commands(Vec::new());
@@ -601,6 +673,7 @@ impl App {
     }
 
     pub(super) fn reset_thread_event_state(&mut self) {
+        self.invalidate_rate_limit_subject();
         self.abort_all_thread_event_listeners();
         self.thread_event_channels.clear();
         self.agent_navigation.clear();
@@ -724,23 +797,104 @@ impl App {
             self.chat_widget.thread_name(),
             self.chat_widget.rollout_path().as_deref(),
         );
-        self.shutdown_current_thread(app_server).await;
-        let tracked_thread_ids: Vec<ThreadId> =
-            self.thread_event_channels.keys().copied().collect();
-        for thread_id in tracked_thread_ids {
-            if let Err(err) = app_server.thread_unsubscribe(thread_id).await {
-                tracing::warn!("failed to unsubscribe tracked thread {thread_id}: {err}");
+        let previous_thread_id = self.chat_widget.thread_id();
+        let transition_runtime = match previous_thread_id {
+            Some(thread_id) => crate::app_server_session::session_runtime_for_thread(
+                app_server.request_handle(),
+                thread_id,
+            )
+            .await
+            .ok()
+            .filter(|runtime| {
+                runtime.capabilities.iter().any(|capability| {
+                    capability.name == "ananke_thread_transition_v1" && capability.available
+                })
+            }),
+            None => None,
+        };
+        let started_result = if let (Some(previous_thread_id), Some(runtime)) =
+            (previous_thread_id, transition_runtime)
+        {
+            match app_server
+                .start_thread_transition(
+                    &config,
+                    session_start_source,
+                    previous_thread_id,
+                    &runtime,
+                )
+                .await
+            {
+                Ok((started, preparation)) => {
+                    let current_thread_id = started.session.thread_id;
+                    if preparation.status
+                        == codex_app_server_protocol::ThreadTransitionStatus::Committed
+                    {
+                        Ok(started)
+                    } else {
+                        match app_server.thread_unsubscribe(previous_thread_id).await {
+                            Ok(()) => {
+                                match converge_thread_transition_commit(app_server, &preparation)
+                                    .await
+                                {
+                                    Ok(()) => Ok(started),
+                                    Err(commit_err) => {
+                                        if app_server.thread_transition_is_pending(&preparation) {
+                                            Err(commit_err)
+                                        } else {
+                                            let _ = app_server
+                                                .thread_unsubscribe(current_thread_id)
+                                                .await;
+                                            if let Err(restore_err) = app_server
+                                                .resume_thread(
+                                                    self.config.clone(),
+                                                    previous_thread_id,
+                                                    crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
+                                                )
+                                                .await
+                                            {
+                                                tracing::warn!(
+                                                    "failed to restore previous thread subscription after transition failure: {restore_err}"
+                                                );
+                                            }
+                                            Err(commit_err)
+                                        }
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                let _ = app_server.thread_unsubscribe(current_thread_id).await;
+                                Err(err)
+                            }
+                        }
+                    }
+                }
+                Err(err) => Err(err),
+            }
+        } else {
+            self.shutdown_current_thread(app_server).await;
+            app_server
+                .start_thread_with_session_start_source(
+                    &config,
+                    session_start_source,
+                    /*remote_cwd_override*/ None,
+                )
+                .await
+        };
+        if started_result.is_ok() {
+            self.shutdown_current_thread(app_server).await;
+            let tracked_thread_ids: Vec<ThreadId> =
+                self.thread_event_channels.keys().copied().collect();
+            for thread_id in tracked_thread_ids {
+                if Some(thread_id) == previous_thread_id {
+                    continue;
+                }
+                if let Err(err) = app_server.thread_unsubscribe(thread_id).await {
+                    tracing::warn!("failed to unsubscribe tracked thread {thread_id}: {err}");
+                }
             }
         }
         self.config = config.clone();
-        match app_server
-            .start_thread_with_session_start_source(
-                &config,
-                session_start_source,
-                /*remote_cwd_override*/ None,
-            )
-            .await
-        {
+        match started_result {
             Ok(mut started) => {
                 let name_error = if let Some(name) = new_thread_name {
                     match app_server

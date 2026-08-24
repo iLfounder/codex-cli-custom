@@ -51,6 +51,23 @@
       ],
       "type": "string"
     },
+    "SessionRuntimeAccountRef": {
+      "properties": {
+        "accountSlotId": {
+          "type": "string"
+        },
+        "executionGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "accountSlotId",
+        "executionGeneration"
+      ],
+      "type": "object"
+    },
     "TextElement": {
       "properties": {
         "byteRange": {
@@ -263,6 +280,17 @@
         "string",
         "null"
       ]
+    },
+    "expectedExecutionAccount": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/SessionRuntimeAccountRef"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Exact execution account expected by the client that produced this input."
     },
     "expectedTurnId": {
       "description": "Required active turn id precondition. The request fails when it does not match the currently active turn.",

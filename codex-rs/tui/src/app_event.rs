@@ -33,6 +33,7 @@ use codex_app_server_protocol::PluginMarketplaceEntry;
 use codex_app_server_protocol::PluginReadParams;
 use codex_app_server_protocol::PluginReadResponse;
 use codex_app_server_protocol::PluginUninstallResponse;
+use codex_app_server_protocol::SessionRuntimeAccountRef;
 use codex_app_server_protocol::SessionRuntimeOperation;
 use codex_app_server_protocol::SkillsListResponse;
 use codex_app_server_protocol::Thread;
@@ -72,11 +73,21 @@ use codex_protocol::openai_models::ReasoningEffort;
 
 use crate::history_cell::HistoryCell;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ThreadGoalSetMode {
     ConfirmIfExists,
+    Create {
+        expected_revision: i64,
+    },
+    #[cfg_attr(not(test), allow(dead_code))]
     ReplaceExisting,
+    ReplaceExistingExact {
+        expected_goal_id: String,
+        expected_revision: i64,
+    },
     UpdateExisting {
+        expected_goal_id: String,
+        expected_revision: i64,
         status: ThreadGoalStatus,
         token_budget: Option<i64>,
     },
@@ -180,6 +191,12 @@ pub(crate) enum RateLimitRefreshOrigin {
     ResetPicker { request_id: u64 },
     /// Refresh requested after a reset credit was successfully consumed.
     ResetConsume { request_id: u64 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RateLimitRequestSubject {
+    pub(crate) thread_id: ThreadId,
+    pub(crate) execution_account: Option<SessionRuntimeAccountRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -506,6 +523,7 @@ pub(crate) enum AppEvent {
     /// Result of refreshing rate limits.
     RateLimitsLoaded {
         origin: RateLimitRefreshOrigin,
+        subject: Option<RateLimitRequestSubject>,
         hard_stop_generation: u64,
         result: Result<GetAccountRateLimitsResponse, String>,
     },

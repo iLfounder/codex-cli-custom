@@ -95,6 +95,7 @@ mod thread_delete;
 mod thread_fork;
 mod thread_inject_items;
 mod thread_list;
+mod thread_listener_websocket;
 mod thread_loaded_list;
 mod thread_memory_mode_set;
 mod thread_metadata_update;

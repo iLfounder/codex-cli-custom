@@ -71,6 +71,7 @@ pub(super) fn server_notification_thread_target(
         ServerNotification::ThreadGoalCleared(notification) => {
             Some(notification.thread_id.as_str())
         }
+        ServerNotification::ThreadTransitioned(_) => return ServerNotificationThreadTarget::Global,
         ServerNotification::ThreadQueueChanged(notification) => {
             Some(notification.thread_id.as_str())
         }
@@ -193,7 +194,6 @@ pub(super) fn server_notification_thread_target(
         | ServerNotification::SkillsChanged(_)
         | ServerNotification::McpServerOauthLoginCompleted(_)
         | ServerNotification::AccountUpdated(_)
-        | ServerNotification::AccountRateLimitsUpdated(_)
         | ServerNotification::AccountSlotChanged(_)
         | ServerNotification::EnvironmentConnected(_)
         | ServerNotification::EnvironmentDisconnected(_)
@@ -211,6 +211,9 @@ pub(super) fn server_notification_thread_target(
         | ServerNotification::WindowsWorldWritableWarning(_)
         | ServerNotification::WindowsSandboxSetupCompleted(_)
         | ServerNotification::AccountLoginCompleted(_) => None,
+        ServerNotification::AccountRateLimitsUpdated(notification) => {
+            notification.thread_id.as_deref()
+        }
     };
 
     match thread_id {

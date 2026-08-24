@@ -1,3 +1,4 @@
+pub(crate) mod continuity;
 #[allow(dead_code)]
 mod operations;
 mod pagination;
@@ -25,7 +26,6 @@ use tokio::sync::Mutex;
 use tokio::sync::Semaphore;
 
 use self::operations::OperationCache;
-use self::pagination::CachedSnapshot;
 use crate::account_registry::AccountRegistry;
 use crate::error_code::internal_error;
 use crate::outgoing_message::OutgoingMessageSender;
@@ -52,8 +52,9 @@ pub(crate) struct SessionRuntimeEngine {
 #[derive(Default)]
 struct EngineState {
     sequence: u64,
+    source_generation: u64,
     threads: HashMap<ThreadId, RuntimeThreadState>,
-    listed_threads: HashSet<ThreadId>,
+    revisions: HashMap<ThreadId, u64>,
     pages: pagination::SnapshotCache,
     #[allow(dead_code)]
     operations: OperationCache,
@@ -99,18 +100,40 @@ impl SessionRuntimeEngine {
         self.dirty_generation.fetch_add(1, Ordering::AcqRel);
     }
 
+    pub(crate) fn instance_epoch(&self) -> &str {
+        &self.instance_epoch
+    }
+
+    pub(crate) async fn publish_transition(
+        &self,
+        transition: codex_app_server_protocol::ThreadTransitionReceipt,
+    ) {
+        let sequence = {
+            let mut state = self.state.lock().await;
+            state.sequence = state.sequence.saturating_add(1);
+            state.pages.clear();
+            state.sequence
+        };
+        self.outgoing
+            .send_server_notification(ServerNotification::ThreadTransitioned(
+                codex_app_server_protocol::ThreadTransitionedNotification {
+                    instance_epoch: self.instance_epoch.clone(),
+                    sequence,
+                    transition,
+                },
+            ))
+            .await;
+    }
+
     pub(crate) async fn list(
         &self,
         params: SessionRuntimeListParams,
     ) -> Result<SessionRuntimeListResponse, JSONRPCErrorError> {
         let limit = pagination::requested_limit(params.limit)?;
-        if let Some(cursor) = params.cursor.as_deref() {
-            if params.thread_id.is_some() {
-                return Err(crate::error_code::invalid_params(
-                    "sessionRuntime/list threadId cannot be combined with cursor",
-                ));
-            }
-            return self.list_cached(cursor, limit).await;
+        if params.cursor.is_some() && params.thread_id.is_some() {
+            return Err(crate::error_code::invalid_params(
+                "sessionRuntime/list threadId cannot be combined with cursor",
+            ));
         }
 
         let _build_guard = self
@@ -118,69 +141,116 @@ impl SessionRuntimeEngine {
             .acquire()
             .await
             .map_err(|_| internal_error("session runtime publisher is unavailable"))?;
-        let mut snapshots = self
-            .build_consistent_snapshots(params.thread_id.as_deref())
-            .await?;
+        if let Some(thread_id) = params.thread_id.as_deref() {
+            return self.list_exact(thread_id, limit).await;
+        }
+        if params.cursor.is_none() {
+            self.refresh_inventory().await?;
+        }
+        self.materialize_page(params.cursor.as_deref(), limit).await
+    }
+
+    async fn list_exact(
+        &self,
+        thread_id: &str,
+        limit: usize,
+    ) -> Result<SessionRuntimeListResponse, JSONRPCErrorError> {
+        let mut snapshots = self.build_consistent_snapshots(Some(thread_id)).await?;
+        let current_source_generation = self.dirty_generation.load(Ordering::Acquire);
         let capabilities = self.process_capabilities().await;
         let mut state = self.state.lock().await;
-        let mut changed = false;
+        let source_changed = Self::sync_source_generation(&mut state, current_source_generation);
+        let mut snapshot_changed = false;
         for snapshot in &mut snapshots {
-            changed |= Self::apply_runtime_state(&mut state, snapshot, RuntimeActivity::Observe);
+            snapshot_changed |=
+                Self::apply_runtime_state(&mut state, snapshot, RuntimeActivity::Observe);
         }
-        if params.thread_id.is_none() {
-            let listed_threads = snapshots
-                .iter()
-                .filter_map(|snapshot| ThreadId::from_string(&snapshot.thread_id).ok())
-                .collect::<HashSet<_>>();
-            state
-                .threads
-                .retain(|thread_id, _runtime| listed_threads.contains(thread_id));
-            if state.listed_threads != listed_threads {
-                state.listed_threads = listed_threads;
-                changed = true;
-            }
-        }
-        if changed {
+        if snapshot_changed && !source_changed {
             state.sequence = state.sequence.saturating_add(1);
             state.pages.clear();
         }
-        let sequence = state.sequence;
-        if params.thread_id.is_none()
-            && let Some(response) = state.pages.first_page(
-                &self.instance_epoch,
-                sequence,
-                limit,
-                capabilities.clone(),
-            )?
-        {
-            return Ok(response);
-        }
-        let cached = CachedSnapshot::new(sequence, snapshots);
-        let response = cached.first_page(&self.instance_epoch, limit, capabilities)?;
-        if params.thread_id.is_none() {
-            if response.next_cursor.is_some() {
-                state.pages.insert(cached);
-            } else {
-                state.pages.clear();
-            }
-        }
-        Ok(response)
+        let exact_thread_id = snapshots
+            .first()
+            .and_then(|snapshot| ThreadId::from_string(&snapshot.thread_id).ok());
+        Self::retain_runtime_states(&mut state, exact_thread_id);
+        Ok(SessionRuntimeListResponse {
+            data: snapshots.into_iter().take(limit).collect(),
+            next_cursor: None,
+            instance_epoch: self.instance_epoch.clone(),
+            snapshot_sequence: state.sequence,
+            capabilities,
+        })
     }
 
-    async fn list_cached(
+    async fn refresh_inventory(&self) -> Result<(), JSONRPCErrorError> {
+        for _ in 0..BUILD_ATTEMPTS {
+            let source_generation = self.dirty_generation.load(Ordering::Acquire);
+            let inventory = self.runtime_inventory().await?;
+            if source_generation != self.dirty_generation.load(Ordering::Acquire) {
+                continue;
+            }
+            let mut state = self.state.lock().await;
+            let source_changed = Self::sync_source_generation(&mut state, source_generation);
+            if source_generation != self.dirty_generation.load(Ordering::Acquire) {
+                continue;
+            }
+            if !state.pages.matches(source_generation, &inventory) {
+                if !source_changed {
+                    state.sequence = state.sequence.saturating_add(1);
+                }
+                let sequence = state.sequence;
+                state.pages.replace(sequence, source_generation, inventory);
+                Self::retain_runtime_states(&mut state, /*exact_thread_id*/ None);
+            }
+            return Ok(());
+        }
+        Err(crate::error_code::invalid_params(
+            "session runtime changed while building inventory; retry",
+        ))
+    }
+
+    async fn materialize_page(
         &self,
-        cursor: &str,
+        cursor: Option<&str>,
         limit: usize,
     ) -> Result<SessionRuntimeListResponse, JSONRPCErrorError> {
+        let source_generation = self.dirty_generation.load(Ordering::Acquire);
+        let plan = {
+            let mut state = self.state.lock().await;
+            if Self::sync_source_generation(&mut state, source_generation) {
+                return Err(pagination::stale_cursor());
+            }
+            state.pages.plan(
+                cursor,
+                &self.instance_epoch,
+                state.sequence,
+                source_generation,
+                limit,
+            )?
+        };
+        let mut snapshots = Vec::with_capacity(plan.records.len());
+        for record in &plan.records {
+            snapshots.push(
+                self.build_snapshot(record.clone(), Some(&plan.overlay))
+                    .await,
+            );
+        }
         let capabilities = self.process_capabilities().await;
-        let state = self.state.lock().await;
-        state.pages.page(
-            cursor,
-            &self.instance_epoch,
-            state.sequence,
-            limit,
-            capabilities,
-        )
+        let mut state = self.state.lock().await;
+        let current_source_generation = self.dirty_generation.load(Ordering::Acquire);
+        if source_generation != current_source_generation {
+            Self::sync_source_generation(&mut state, current_source_generation);
+            return Err(pagination::stale_cursor());
+        }
+        for snapshot in &mut snapshots {
+            Self::apply_runtime_state(&mut state, snapshot, RuntimeActivity::Observe);
+        }
+        state.pages.commit(&plan, snapshots)?;
+        let response = state
+            .pages
+            .response(&plan, &self.instance_epoch, limit, capabilities)?;
+        Self::retain_runtime_states(&mut state, /*exact_thread_id*/ None);
+        Ok(response)
     }
 
     pub(crate) async fn publish_thread(&self, thread_id: ThreadId) {
@@ -200,9 +270,8 @@ impl SessionRuntimeEngine {
         };
         let notification = {
             let mut state = self.state.lock().await;
+            Self::sync_source_generation(&mut state, self.dirty_generation.load(Ordering::Acquire));
             Self::apply_runtime_state(&mut state, &mut snapshot, RuntimeActivity::Activity);
-            state.sequence = state.sequence.saturating_add(1);
-            state.pages.clear();
             SessionRuntimeChangedNotification {
                 instance_epoch: self.instance_epoch.clone(),
                 sequence: state.sequence,
@@ -218,36 +287,61 @@ impl SessionRuntimeEngine {
         &self,
         account_slot_id: &str,
     ) -> Result<bool, JSONRPCErrorError> {
-        if let Some(local_store) = self
-            .thread_store
-            .as_any()
-            .downcast_ref::<LocalThreadStore>()
-            && local_store
-                .durable_execution_account_slot_in_use(account_slot_id)
-                .await
-                .map_err(|_| internal_error("execution account binding store is unavailable"))?
-        {
-            return Ok(true);
-        }
         let _build_guard = self
             .build_lock
             .acquire()
             .await
             .map_err(|_| internal_error("session runtime publisher is unavailable"))?;
-        let snapshots = self.build_consistent_snapshots(/*thread_id*/ None).await?;
-        Ok(snapshots.iter().any(|snapshot| {
-            snapshot
-                .account
-                .current
-                .as_ref()
-                .is_some_and(|account| account.account_slot_id == account_slot_id)
-                || snapshot
-                    .account
-                    .active_turn
-                    .as_ref()
-                    .is_some_and(|account| account.account_slot_id == account_slot_id)
-                || snapshot.account.switch_target_slot_id.as_deref() == Some(account_slot_id)
-        }))
+        if let Some(local_store) = self
+            .thread_store
+            .as_any()
+            .downcast_ref::<LocalThreadStore>()
+        {
+            if local_store
+                .durable_execution_account_slot_in_use(account_slot_id)
+                .await
+                .map_err(|_| internal_error("execution account binding store is unavailable"))?
+            {
+                return Ok(true);
+            }
+        } else {
+            for record in self.runtime_records(/*exact_thread_id*/ None).await? {
+                if self
+                    .thread_store
+                    .execution_account_binding(record.thread_id())
+                    .await
+                    .map_err(|_| internal_error("execution account binding store is unavailable"))?
+                    .is_some_and(|binding| binding.slot_id == account_slot_id)
+                {
+                    return Ok(true);
+                }
+            }
+        }
+
+        let switching_accounts = self.state.lock().await.switching_accounts.clone();
+        for thread_id in self.thread_manager.list_thread_ids().await {
+            if switching_accounts.get(&thread_id).map(String::as_str) == Some(account_slot_id) {
+                return Ok(true);
+            }
+            let Ok(thread) = self.thread_manager.get_thread(thread_id).await else {
+                continue;
+            };
+            if thread.execution_account().binding.slot_id == account_slot_id {
+                return Ok(true);
+            }
+            let subscriptions = self.thread_state_manager.runtime_snapshot(thread_id).await;
+            if let Some(turn_id) = subscriptions.active_turn_id
+                && self
+                    .thread_store
+                    .turn_execution_account(thread_id, turn_id)
+                    .await
+                    .map_err(|_| internal_error("turn execution account store is unavailable"))?
+                    .is_some_and(|binding| binding.slot_id == account_slot_id)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     async fn build_consistent_snapshots(
@@ -259,7 +353,7 @@ impl SessionRuntimeEngine {
             let records = self.runtime_records(thread_id).await?;
             let mut snapshots = Vec::with_capacity(records.len());
             for record in records {
-                snapshots.push(self.build_snapshot(record).await);
+                snapshots.push(self.build_snapshot(record, /*overlay*/ None).await);
             }
             snapshots.sort_by(|left, right| left.thread_id.cmp(&right.thread_id));
             if generation == self.dirty_generation.load(Ordering::Acquire) {
@@ -279,7 +373,10 @@ impl SessionRuntimeEngine {
         let Ok(thread_id) = ThreadId::from_string(&snapshot.thread_id) else {
             return false;
         };
-        let runtime = state.threads.entry(thread_id).or_default();
+        let EngineState {
+            threads, revisions, ..
+        } = state;
+        let runtime = threads.entry(thread_id).or_default();
         match activity {
             RuntimeActivity::Activity => runtime.last_activity_at = Some(unix_timestamp()),
             RuntimeActivity::Observe if runtime.last_activity_at.is_none() => {
@@ -291,12 +388,50 @@ impl SessionRuntimeEngine {
         let mut comparable = snapshot.clone();
         comparable.state_revision = 0;
         let changed = runtime.last_snapshot.as_ref() != Some(&comparable);
+        let revision = revisions.entry(thread_id).or_default();
         if changed {
-            runtime.revision = runtime.revision.saturating_add(1).max(1);
+            *revision = revision.saturating_add(1).max(1);
+            runtime.revision = *revision;
             runtime.last_snapshot = Some(comparable);
         }
-        snapshot.state_revision = runtime.revision;
+        runtime.revision = *revision;
+        snapshot.state_revision = *revision;
         changed
+    }
+
+    fn sync_source_generation(state: &mut EngineState, source_generation: u64) -> bool {
+        if state.source_generation == source_generation {
+            return false;
+        }
+        state.source_generation = source_generation;
+        state.sequence = state.sequence.saturating_add(1);
+        state.pages.clear();
+        true
+    }
+
+    fn retain_runtime_states(state: &mut EngineState, exact_thread_id: Option<ThreadId>) {
+        let mut retained = state.pages.retained_thread_ids();
+        retained.extend(exact_thread_id);
+        retained.extend(state.switching_accounts.keys().copied());
+        retained.extend(
+            state
+                .operations
+                .operations
+                .values()
+                .filter_map(|operation| {
+                    operation
+                        .thread_id
+                        .as_deref()
+                        .and_then(|thread_id| ThreadId::from_string(thread_id).ok())
+                }),
+        );
+        state
+            .threads
+            .retain(|thread_id, _runtime| retained.contains(thread_id));
+        retained.extend(state.pages.inventory_thread_ids());
+        state
+            .revisions
+            .retain(|thread_id, _revision| retained.contains(thread_id));
     }
 }
 

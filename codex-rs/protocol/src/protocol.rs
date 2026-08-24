@@ -1378,6 +1378,9 @@ pub enum EventMsg {
     /// Updated long-running goal metadata for the thread.
     ThreadGoalUpdated(ThreadGoalUpdatedEvent),
 
+    /// Cleared long-running goal metadata for the thread.
+    ThreadGoalCleared(ThreadGoalClearedEvent),
+
     /// A durable thread-scoped user-message queue changed.
     ThreadQueueChanged(ThreadQueueChangedEvent),
 
@@ -3856,6 +3859,12 @@ pub fn validate_thread_goal_objective(value: &str) -> Result<(), String> {
 #[ts(export_to = "protocol/")]
 pub struct ThreadGoal {
     pub thread_id: ThreadId,
+    /// Stable identity for the current goal. Missing values decode as the legacy sentinel.
+    #[serde(default)]
+    pub goal_id: String,
+    /// Monotonic goal-state revision. Missing values decode as the legacy sentinel.
+    #[serde(default)]
+    pub revision: i64,
     pub objective: String,
     pub status: ThreadGoalStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3876,6 +3885,18 @@ pub struct ThreadGoalUpdatedEvent {
     #[ts(optional)]
     pub turn_id: Option<String>,
     pub goal: ThreadGoal,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "protocol/")]
+pub struct ThreadGoalClearedEvent {
+    pub thread_id: ThreadId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub turn_id: Option<String>,
+    pub previous_goal: ThreadGoal,
+    pub revision: i64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]

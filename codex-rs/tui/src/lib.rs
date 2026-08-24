@@ -239,10 +239,6 @@ pub use public_widgets::composer_input::ComposerInput;
 const TUI_LOG_FILE_NAME: &str = "codex-tui.log";
 const INTERACTIVE_OTEL_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(/*millis*/ 500);
 
-#[cfg(unix)]
-const AUTO_CONNECT_DAEMON_CONNECT_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_millis(50);
-
 #[allow(clippy::too_many_arguments)]
 async fn start_embedded_app_server(
     arg0_paths: Arg0DispatchPaths,
@@ -435,33 +431,26 @@ async fn connect_remote_app_server(
 }
 
 #[cfg(unix)]
-async fn maybe_probe_default_daemon_socket(codex_home: &Path) -> Option<AbsolutePathBuf> {
-    let socket_path = codex_app_server_client::app_server_control_socket_path(codex_home).ok()?;
-    match tokio::time::timeout(
-        AUTO_CONNECT_DAEMON_CONNECT_TIMEOUT,
-        tokio::net::UnixStream::connect(socket_path.as_path()),
-    )
-    .await
-    {
-        Ok(Ok(_stream)) => Some(socket_path),
-        Ok(Err(err)) => {
-            tracing::debug!(%err, socket_path = %socket_path.display(), "skipping default app-server daemon socket");
-            None
-        }
-        Err(_) => {
-            tracing::debug!(
-                socket_path = %socket_path.display(),
-                timeout_ms = AUTO_CONNECT_DAEMON_CONNECT_TIMEOUT.as_millis(),
-                "timed out probing default app-server daemon socket"
-            );
-            None
-        }
+fn default_daemon_socket_if_present(codex_home: &Path) -> std::io::Result<Option<AbsolutePathBuf>> {
+    let socket_path = codex_app_server_client::app_server_control_socket_path(codex_home)?;
+    match std::fs::symlink_metadata(socket_path.as_path()) {
+        Ok(_) => Ok(Some(socket_path)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(std::io::Error::new(
+            err.kind(),
+            format!(
+                "failed to inspect default app-server daemon socket at {}: {err}",
+                socket_path.display()
+            ),
+        )),
     }
 }
 
 #[cfg(not(unix))]
-async fn maybe_probe_default_daemon_socket(_codex_home: &Path) -> Option<AbsolutePathBuf> {
-    None
+fn default_daemon_socket_if_present(
+    _codex_home: &Path,
+) -> std::io::Result<Option<AbsolutePathBuf>> {
+    Ok(None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -493,9 +482,23 @@ async fn start_app_server(
         )
         .await
         .map(AppServerClient::InProcess),
-        AppServerTarget::LocalDaemon { endpoint } | AppServerTarget::Remote { endpoint } => {
-            connect_remote_app_server(endpoint.clone()).await
+        AppServerTarget::LocalDaemon { endpoint } => {
+            let socket_path = match endpoint {
+                RemoteAppServerEndpoint::UnixSocket { socket_path } => socket_path,
+                RemoteAppServerEndpoint::WebSocket { .. } => {
+                    return connect_remote_app_server(endpoint.clone()).await;
+                }
+            };
+            connect_remote_app_server(endpoint.clone())
+                .await
+                .wrap_err_with(|| {
+                    format!(
+                        "failed to connect to or initialize local app-server daemon at {}; check its operating status and restart it through its dedicated app-server supervisor if needed",
+                        socket_path.display()
+                    )
+                })
         }
+        AppServerTarget::Remote { endpoint } => connect_remote_app_server(endpoint.clone()).await,
     }
 }
 
@@ -2426,29 +2429,113 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn default_daemon_auto_connect_skips_missing_socket() -> color_eyre::Result<()> {
+    #[test]
+    fn default_daemon_socket_absence_selects_embedded() -> color_eyre::Result<()> {
         let codex_home = TempDir::new()?;
+        assert_eq!(default_daemon_socket_if_present(codex_home.path())?, None);
+        assert_eq!(
+            app_server_target_for_launch(
+                /*explicit_remote_endpoint*/ None, /*default_daemon_socket*/ None,
+                /*can_reuse_implicit_local_daemon*/ true,
+                /*workload_identity_selected*/ false,
+            )?,
+            AppServerTarget::Embedded
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_daemon_presence_error_includes_socket_context() -> color_eyre::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let codex_home = temp_dir.path().join("occupied-codex-home");
+        std::fs::write(&codex_home, "occupied")?;
+        let socket_path = codex_app_server_client::app_server_control_socket_path(&codex_home)?;
+
+        let error = default_daemon_socket_if_present(&codex_home)
+            .expect_err("non-directory CODEX_HOME must fail presence classification");
+
         assert!(
-            maybe_probe_default_daemon_socket(codex_home.path())
-                .await
-                .is_none()
+            error
+                .to_string()
+                .contains("failed to inspect default app-server daemon socket")
+        );
+        assert!(
+            error
+                .to_string()
+                .contains(&socket_path.display().to_string())
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_daemon_socket_presence_does_not_connect() -> color_eyre::Result<()> {
+        let codex_home = TempDir::new()?;
+        let socket_path =
+            codex_app_server_client::app_server_control_socket_path(codex_home.path())?;
+        std::fs::create_dir_all(socket_path.as_path().parent().expect("socket parent"))?;
+        let listener = std::os::unix::net::UnixListener::bind(socket_path.as_path())?;
+        listener.set_nonblocking(true)?;
+
+        assert_eq!(
+            default_daemon_socket_if_present(codex_home.path())?,
+            Some(socket_path)
+        );
+        assert_eq!(
+            listener
+                .accept()
+                .expect_err("presence classification must not connect")
+                .kind(),
+            std::io::ErrorKind::WouldBlock
         );
         Ok(())
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn default_daemon_auto_connect_probes_socket_only() -> color_eyre::Result<()> {
+    async fn stale_default_daemon_socket_fails_without_embedded_fallback() -> color_eyre::Result<()>
+    {
         let codex_home = TempDir::new()?;
         let socket_path =
             codex_app_server_client::app_server_control_socket_path(codex_home.path())?;
         std::fs::create_dir_all(socket_path.as_path().parent().expect("socket parent"))?;
-        let _listener = tokio::net::UnixListener::bind(socket_path.as_path())?;
+        let listener = std::os::unix::net::UnixListener::bind(socket_path.as_path())?;
+        drop(listener);
 
+        let target = app_server_target_for_launch(
+            /*explicit_remote_endpoint*/ None,
+            default_daemon_socket_if_present(codex_home.path())?,
+            /*can_reuse_implicit_local_daemon*/ true,
+            /*workload_identity_selected*/ false,
+        )?;
+        let config = build_config(&codex_home).await?;
+        let result = start_app_server(
+            &target,
+            Arg0DispatchPaths::default(),
+            config,
+            Vec::new(),
+            LoaderOverrides::default(),
+            /*strict_config*/ false,
+            CloudConfigBundleLoader::default(),
+            codex_feedback::CodexFeedback::new(),
+            /*log_db*/ None,
+            /*state_db*/ None,
+            Arc::new(EnvironmentManager::default_for_tests()),
+        )
+        .await;
+
+        assert!(matches!(target, AppServerTarget::LocalDaemon { .. }));
+        let error = match result {
+            Ok(_) => panic!("stale daemon socket must fail without embedded fallback"),
+            Err(error) => error,
+        };
         assert_eq!(
-            maybe_probe_default_daemon_socket(codex_home.path()).await,
-            Some(socket_path)
+            error.to_string(),
+            format!(
+                "failed to connect to or initialize local app-server daemon at {}; check its operating status and restart it through its dedicated app-server supervisor if needed",
+                socket_path.display()
+            )
         );
         Ok(())
     }

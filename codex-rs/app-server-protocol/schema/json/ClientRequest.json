@@ -1677,6 +1677,17 @@
       },
       "type": "object"
     },
+    "GetAccountRateLimitsParams": {
+      "properties": {
+        "threadId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "GetAccountTokenUsageParams": {
       "properties": {
         "threadId": {
@@ -4044,6 +4055,23 @@
       ],
       "type": "object"
     },
+    "SessionRuntimeAccountRef": {
+      "properties": {
+        "accountSlotId": {
+          "type": "string"
+        },
+        "executionGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "accountSlotId",
+        "executionGeneration"
+      ],
+      "type": "object"
+    },
     "SessionRuntimeListParams": {
       "description": "Parameters for reading a revision-consistent page of session runtime snapshots.",
       "properties": {
@@ -4413,6 +4441,19 @@
     },
     "ThreadGoalClearParams": {
       "properties": {
+        "expectedGoalId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expectedRevision": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "threadId": {
           "type": "string"
         }
@@ -4435,6 +4476,19 @@
     },
     "ThreadGoalSetParams": {
       "properties": {
+        "expectedGoalId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expectedRevision": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "objective": {
           "type": [
             "string",
@@ -5436,6 +5490,46 @@
       ],
       "type": "string"
     },
+    "ThreadTransitionIntent": {
+      "properties": {
+        "expectedInstanceEpoch": {
+          "type": "string"
+        },
+        "expectedStateRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "expectedWriter": {
+          "$ref": "#/definitions/ThreadWriterEvidence"
+        },
+        "previousThreadId": {
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/definitions/ThreadTransitionReason"
+        },
+        "transitionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expectedInstanceEpoch",
+        "expectedStateRevision",
+        "expectedWriter",
+        "previousThreadId",
+        "reason",
+        "transitionId"
+      ],
+      "type": "object"
+    },
+    "ThreadTransitionReason": {
+      "enum": [
+        "clear",
+        "new"
+      ],
+      "type": "string"
+    },
     "ThreadUnarchiveParams": {
       "properties": {
         "threadId": {
@@ -5455,6 +5549,23 @@
       },
       "required": [
         "threadId"
+      ],
+      "type": "object"
+    },
+    "ThreadWriterEvidence": {
+      "properties": {
+        "storeId": {
+          "type": "string"
+        },
+        "writerGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "storeId",
+        "writerGeneration"
       ],
       "type": "object"
     },
@@ -5571,6 +5682,17 @@
           ],
           "description": "Override the reasoning effort for this turn and subsequent turns."
         },
+        "expectedExecutionAccount": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionRuntimeAccountRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Exact execution account expected by the client that produced this input."
+        },
         "input": {
           "items": {
             "$ref": "#/definitions/UserInput"
@@ -5644,6 +5766,17 @@
             "string",
             "null"
           ]
+        },
+        "expectedExecutionAccount": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionRuntimeAccountRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Exact execution account expected by the client that produced this input."
         },
         "expectedTurnId": {
           "description": "Required active turn id precondition. The request fails when it does not match the currently active turn.",
@@ -7907,7 +8040,14 @@
           "type": "string"
         },
         "params": {
-          "type": "null"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GetAccountRateLimitsParams"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [

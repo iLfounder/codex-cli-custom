@@ -5,9 +5,12 @@ use std::any::Any;
 use std::future::Future;
 use std::pin::Pin;
 
+use crate::AbortThreadTransition;
 use crate::AppendThreadItemsParams;
 use crate::ArchiveThreadParams;
 use crate::ArchiveThreadsParams;
+use crate::CommitThreadTransition;
+use crate::CommittedThreadTransitions;
 use crate::CreateProjectParams;
 use crate::CreateThreadParams;
 use crate::CreateThreadSectionParams;
@@ -23,6 +26,7 @@ use crate::ListThreadSectionsParams;
 use crate::ListThreadsParams;
 use crate::ListTurnsParams;
 use crate::LoadThreadHistoryParams;
+use crate::MarkThreadTransitionPrepared;
 use crate::MoveProjectParams;
 use crate::MoveThreadToSectionParams;
 use crate::PrepareForkParams;
@@ -48,6 +52,13 @@ use crate::ThreadPage;
 use crate::ThreadSearchPage;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
+use crate::ThreadTransitionAbortOutcome;
+use crate::ThreadTransitionClaimOutcome;
+use crate::ThreadTransitionCommitOutcome;
+use crate::ThreadTransitionIntent;
+use crate::ThreadTransitionPreparation;
+use crate::ThreadTransitionRecord;
+use crate::ThreadWriterEvidence;
 use crate::TurnPage;
 use crate::UpdateProjectParams;
 use crate::UpdateThreadMetadataParams;
@@ -191,6 +202,107 @@ pub trait ThreadStore: Any + Send + Sync {
         Box::pin(async {
             Err(ThreadStoreError::Unsupported {
                 operation: "compare_and_swap_execution_account_binding",
+            })
+        })
+    }
+
+    /// Returns one consistent runtime version and the complete durable binding set for a slot.
+    ///
+    /// A slot without a runtime-version record has version zero.
+    fn execution_account_slot_runtime_state(
+        &self,
+        _slot_id: String,
+    ) -> ThreadStoreFuture<'_, (u64, Vec<(ThreadId, ExecutionAccountBinding)>)> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "execution_account_slot_runtime_state",
+            })
+        })
+    }
+
+    /// Atomically advances one slot runtime and every exact expected binding generation.
+    ///
+    /// Returns `None` without mutation if the runtime version or complete binding set is stale.
+    fn compare_and_swap_execution_account_slot_runtime(
+        &self,
+        _slot_id: String,
+        _expected_runtime_version: u64,
+        _expected_bindings: Vec<(ThreadId, ExecutionAccountBinding)>,
+    ) -> ThreadStoreFuture<'_, Option<(u64, Vec<(ThreadId, ExecutionAccountBinding)>)>> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "compare_and_swap_execution_account_slot_runtime",
+            })
+        })
+    }
+
+    fn claim_thread_transition(
+        &self,
+        _intent: ThreadTransitionIntent,
+        _reserved_current_thread_id: ThreadId,
+        _origin_instance_epoch: String,
+        _initiator_client_incarnation: String,
+        _previous_writer: ThreadWriterEvidence,
+    ) -> ThreadStoreFuture<'_, ThreadTransitionClaimOutcome> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "claim_thread_transition",
+            })
+        })
+    }
+
+    fn mark_thread_transition_prepared(
+        &self,
+        _request: MarkThreadTransitionPrepared,
+    ) -> ThreadStoreFuture<'_, ThreadTransitionPreparation> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "mark_thread_transition_prepared",
+            })
+        })
+    }
+
+    fn abort_thread_transition(
+        &self,
+        _request: AbortThreadTransition,
+    ) -> ThreadStoreFuture<'_, ThreadTransitionAbortOutcome> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "abort_thread_transition",
+            })
+        })
+    }
+
+    fn commit_thread_transition(
+        &self,
+        _request: CommitThreadTransition,
+    ) -> ThreadStoreFuture<'_, ThreadTransitionCommitOutcome> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "commit_thread_transition",
+            })
+        })
+    }
+
+    fn thread_transition_by_id(
+        &self,
+        _transition_id: String,
+    ) -> ThreadStoreFuture<'_, Option<ThreadTransitionRecord>> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "thread_transition_by_id",
+            })
+        })
+    }
+
+    fn committed_thread_transitions_for_threads(
+        &self,
+        _thread_ids: Vec<ThreadId>,
+    ) -> ThreadStoreFuture<'_, std::collections::HashMap<ThreadId, CommittedThreadTransitions>>
+    {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "committed_thread_transitions_for_threads",
             })
         })
     }

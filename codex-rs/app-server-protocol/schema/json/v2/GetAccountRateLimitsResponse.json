@@ -250,6 +250,23 @@
       ],
       "type": "object"
     },
+    "SessionRuntimeAccountRef": {
+      "properties": {
+        "accountSlotId": {
+          "type": "string"
+        },
+        "executionGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "accountSlotId",
+        "executionGeneration"
+      ],
+      "type": "object"
+    },
     "SpendControlLimitSnapshot": {
       "properties": {
         "limit": {
@@ -277,6 +294,17 @@
     }
   },
   "properties": {
+    "executionAccount": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/SessionRuntimeAccountRef"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The account runtime captured for `thread_id`, or `null` for process-default reads."
+    },
     "rateLimitResetCredits": {
       "anyOf": [
         {
@@ -302,6 +330,13 @@
       "description": "Multi-bucket view keyed by metered `limit_id` (for example, `codex`).",
       "type": [
         "object",
+        "null"
+      ]
+    },
+    "threadId": {
+      "description": "The exact thread subject used for this read, or `null` for legacy process-default reads.",
+      "type": [
+        "string",
         "null"
       ]
     }

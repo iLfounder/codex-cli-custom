@@ -36,9 +36,7 @@ pub async fn run_session_queue_command(
         start_app_server_for_session_command(options, codex_home.to_path_buf()).await?;
     if !explicit_remote
         && app_server.uses_embedded_app_server()
-        && super::maybe_probe_default_daemon_socket(codex_home.as_path())
-            .await
-            .is_some()
+        && super::default_daemon_socket_if_present(codex_home.as_path())?.is_some()
     {
         return Err(eyre!(
             "cannot queue through an embedded app server while a local app-server daemon is running; remove configuration overrides or use --remote"

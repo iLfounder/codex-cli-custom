@@ -66,6 +66,7 @@ async fn turn_steer_requires_active_turn() -> Result<()> {
     let steer_req = mcp
         .send_turn_steer_request(TurnSteerParams {
             thread_id: thread.id.clone(),
+            expected_execution_account: None,
             client_user_message_id: Some("client-steer-message-1".to_string()),
             input: vec![V2UserInput::Text {
                 text: "steer".to_string(),
@@ -98,6 +99,53 @@ async fn turn_steer_requires_active_turn() -> Result<()> {
     );
     assert_eq!(event["event_params"]["rejection_reason"], "no_active_turn");
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn turn_steer_rejects_empty_expected_turn_id() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let codex_home = tmp.path().join("codex_home");
+    std::fs::create_dir(&codex_home)?;
+    let server = create_mock_responses_server_sequence(vec![]).await;
+    write_mock_responses_config_toml_with_chatgpt_base_url(
+        &codex_home,
+        &server.uri(),
+        &server.uri(),
+    )?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(&codex_home)
+        .without_managed_config()
+        .build_initialized()
+        .await?;
+    let ThreadStartResponse { thread, .. } = mcp
+        .start_thread(ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            ..Default::default()
+        })
+        .await?;
+
+    let steer_req = mcp
+        .send_turn_steer_request(TurnSteerParams {
+            thread_id: thread.id,
+            expected_execution_account: None,
+            client_user_message_id: None,
+            input: vec![V2UserInput::Text {
+                text: "steer".to_string(),
+                text_elements: Vec::new(),
+            }],
+            responsesapi_client_metadata: None,
+            additional_context: None,
+            expected_turn_id: String::new(),
+        })
+        .await?;
+    let steer_err: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(steer_req)),
+    )
+    .await??;
+    assert_eq!(steer_err.error.code, -32600);
+    assert_eq!(steer_err.error.message, "expectedTurnId must not be empty");
     Ok(())
 }
 
@@ -178,6 +226,7 @@ async fn turn_steer_rejects_oversized_text_input() -> Result<()> {
     let steer_req = mcp
         .send_turn_steer_request(TurnSteerParams {
             thread_id: thread.id.clone(),
+            expected_execution_account: None,
             client_user_message_id: None,
             input: vec![V2UserInput::Text {
                 text: oversized_input.clone(),
@@ -293,6 +342,7 @@ async fn turn_steer_returns_active_turn_id() -> Result<()> {
             request_id,
             params: TurnSteerParams {
                 thread_id: thread.id.clone(),
+                expected_execution_account: None,
                 client_user_message_id: Some("client-steer-message-1".to_string()),
                 input: vec![V2UserInput::Text {
                     text: "steer".to_string(),
@@ -431,6 +481,7 @@ async fn turn_steer_rejects_context_only_input_without_merging_context() -> Resu
     let steer_req = mcp
         .send_turn_steer_request(TurnSteerParams {
             thread_id: thread.id.clone(),
+            expected_execution_account: None,
             client_user_message_id: None,
             input: Vec::new(),
             responsesapi_client_metadata: None,

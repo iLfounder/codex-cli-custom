@@ -27,6 +27,20 @@ static OBJECTIVE_UPDATED_PROMPT_TEMPLATE: LazyLock<Template> = LazyLock::new(|| 
     )
 });
 
+static GOAL_CLEARED_PROMPT_TEMPLATE: LazyLock<Template> = LazyLock::new(|| {
+    parse_embedded_template(
+        include_str!("../templates/goals/cleared.md"),
+        "goals/cleared.md",
+    )
+});
+
+static GOAL_REPLACED_PROMPT_TEMPLATE: LazyLock<Template> = LazyLock::new(|| {
+    parse_embedded_template(
+        include_str!("../templates/goals/replaced.md"),
+        "goals/replaced.md",
+    )
+});
+
 fn parse_embedded_template(source: &'static str, template_name: &str) -> Template {
     match Template::parse(source) {
         Ok(template) => template,
@@ -44,6 +58,27 @@ pub(crate) fn objective_updated_steering_item(goal: &ThreadGoal) -> ResponseItem
 
 pub(crate) fn continuation_steering_item(goal: &ThreadGoal) -> ResponseItem {
     goal_context_input_item(continuation_prompt(goal))
+}
+
+pub(crate) fn goal_cleared_steering_item() -> ResponseItem {
+    goal_context_input_item(
+        GOAL_CLEARED_PROMPT_TEMPLATE
+            .render(std::iter::empty::<(&str, &str)>())
+            .unwrap_or_else(|err| {
+                panic!("embedded goals/cleared.md template failed to render: {err}")
+            }),
+    )
+}
+
+pub(crate) fn goal_replaced_steering_item(goal: &ThreadGoal) -> ResponseItem {
+    let objective = escape_xml_text(&goal.objective);
+    goal_context_input_item(
+        GOAL_REPLACED_PROMPT_TEMPLATE
+            .render([("objective", objective.as_str())])
+            .unwrap_or_else(|err| {
+                panic!("embedded goals/replaced.md template failed to render: {err}")
+            }),
+    )
 }
 
 fn goal_context_input_item(prompt: String) -> ResponseItem {

@@ -150,6 +150,12 @@ macro_rules! serialization_scope_expr {
             .clone()
             .map(|thread_id| ClientRequestSerializationScope::Thread { thread_id })
     };
+    ($actual_params:ident, optional_params_thread_id($params:ident . $field:ident)) => {
+        $actual_params
+            .as_ref()
+            .and_then(|params| params.$field.clone())
+            .map(|thread_id| ClientRequestSerializationScope::Thread { thread_id })
+    };
     ($actual_params:ident, thread_or_path($params:ident . $thread_field:ident, $params2:ident . $path_field:ident)) => {
         if !$actual_params.$thread_field.is_empty() {
             Some(ClientRequestSerializationScope::Thread {
@@ -484,6 +490,16 @@ enum GetAccountTokenUsageParamsTypeScript {
     Undefined,
 }
 
+/// Preserve the legacy omitted params shape while retaining TypeScript dependency discovery.
+#[allow(dead_code)]
+#[derive(TS)]
+#[ts(untagged)]
+enum GetAccountRateLimitsParamsTypeScript {
+    Params(v2::GetAccountRateLimitsParams),
+    #[ts(type = "undefined")]
+    Undefined,
+}
+
 client_request_definitions! {
     Initialize => "initialize" {
         params: v1::InitializeParams,
@@ -583,6 +599,24 @@ client_request_definitions! {
         params: v2::ThreadGoalClearParams,
         serialization: thread_id(params.thread_id),
         response: v2::ThreadGoalClearResponse,
+    },
+    #[experimental("thread/goal/create")]
+    ThreadGoalCreate => "thread/goal/create" {
+        params: v2::ThreadGoalCreateParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadGoalCreateResponse,
+    },
+    #[experimental("thread/goal/replace")]
+    ThreadGoalReplace => "thread/goal/replace" {
+        params: v2::ThreadGoalReplaceParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadGoalReplaceResponse,
+    },
+    #[experimental("thread/transition/commit")]
+    ThreadTransitionCommit => "thread/transition/commit" {
+        params: v2::ThreadTransitionCommitParams,
+        serialization: global("thread-transition"),
+        response: v2::ThreadTransitionCommitResponse,
     },
     #[experimental("thread/queue/add")]
     ThreadQueueAdd => "thread/queue/add" {
@@ -1243,8 +1277,8 @@ client_request_definitions! {
     },
 
     GetAccountRateLimits => "account/rateLimits/read" {
-        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
-        serialization: None,
+        params: #[ts(optional, as = "Option<GetAccountRateLimitsParamsTypeScript>", inline)] #[serde(default, skip_serializing_if = "Option::is_none")] v2::NullableGetAccountRateLimitsParams,
+        serialization: optional_params_thread_id(params.thread_id),
         response: v2::GetAccountRateLimitsResponse,
     },
 
@@ -1864,6 +1898,8 @@ server_notification_definitions! {
     ThreadNameUpdated => "thread/name/updated" (v2::ThreadNameUpdatedNotification),
     ThreadGoalUpdated => "thread/goal/updated" (v2::ThreadGoalUpdatedNotification),
     ThreadGoalCleared => "thread/goal/cleared" (v2::ThreadGoalClearedNotification),
+    #[experimental("thread/transitioned")]
+    ThreadTransitioned => "thread/transitioned" (v2::ThreadTransitionedNotification),
     #[experimental("thread/queue/changed")]
     ThreadQueueChanged => "thread/queue/changed" (v2::ThreadQueueChangedNotification),
     #[experimental("project/changed")]
@@ -2444,6 +2480,8 @@ mod tests {
             request_id: request_id(),
             params: v2::ThreadGoalSetParams {
                 thread_id: "goal-thread".to_string(),
+                expected_goal_id: None,
+                expected_revision: None,
                 objective: Some("ship it".to_string()),
                 status: None,
                 token_budget: None,
@@ -3015,17 +3053,40 @@ mod tests {
 
     #[test]
     fn serialize_get_account_rate_limits() -> Result<()> {
-        let request = ClientRequest::GetAccountRateLimits {
+        let legacy_request = ClientRequest::GetAccountRateLimits {
             request_id: RequestId::Integer(1),
             params: None,
         };
-        assert_eq!(request.id(), &RequestId::Integer(1));
+        assert_eq!(legacy_request.id(), &RequestId::Integer(1));
         assert_eq!(
             json!({
                 "method": "account/rateLimits/read",
                 "id": 1,
             }),
-            serde_json::to_value(&request)?,
+            serde_json::to_value(&legacy_request)?,
+        );
+        assert_eq!(legacy_request.serialization_scope(), None);
+
+        let thread_id = "00000000-0000-0000-0000-000000000123";
+        let scoped_request = ClientRequest::GetAccountRateLimits {
+            request_id: RequestId::Integer(2),
+            params: Some(v2::GetAccountRateLimitsParams {
+                thread_id: Some(thread_id.to_string()),
+            }),
+        };
+        assert_eq!(
+            serde_json::to_value(&scoped_request)?,
+            json!({
+                "method": "account/rateLimits/read",
+                "id": 2,
+                "params": { "threadId": thread_id },
+            })
+        );
+        assert_eq!(
+            scoped_request.serialization_scope(),
+            Some(ClientRequestSerializationScope::Thread {
+                thread_id: thread_id.to_string(),
+            })
         );
         Ok(())
     }
@@ -3165,6 +3226,7 @@ mod tests {
                 active_permission_profile: None,
                 reasoning_effort: None,
                 multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
+                transition: None,
             },
         };
 
@@ -3219,7 +3281,8 @@ mod tests {
                     },
                     "activePermissionProfile": null,
                     "reasoningEffort": null,
-                    "multiAgentMode": "explicitRequestOnly"
+                    "multiAgentMode": "explicitRequestOnly",
+                    "transition": null
                 }
             }),
             serde_json::to_value(&response)?,
@@ -4312,6 +4375,8 @@ mod tests {
             request_id: RequestId::Integer(1),
             params: v2::ThreadGoalSetParams {
                 thread_id: "thr_123".to_string(),
+                expected_goal_id: None,
+                expected_revision: None,
                 objective: Some("ship goal mode".to_string()),
                 status: Some(v2::ThreadGoalStatus::Active),
                 token_budget: Some(Some(10_000)),
@@ -4327,6 +4392,8 @@ mod tests {
             request_id: RequestId::Integer(3),
             params: v2::ThreadGoalClearParams {
                 thread_id: "thr_123".to_string(),
+                expected_goal_id: None,
+                expected_revision: None,
             },
         };
 
@@ -4348,6 +4415,8 @@ mod tests {
     fn thread_goal_notifications_are_not_marked_experimental() {
         let goal = v2::ThreadGoal {
             thread_id: "thr_123".to_string(),
+            goal_id: "goal_123".to_string(),
+            revision: 1,
             objective: "ship goal mode".to_string(),
             status: v2::ThreadGoalStatus::Active,
             token_budget: Some(10_000),
@@ -4363,6 +4432,9 @@ mod tests {
         });
         let cleared = ServerNotification::ThreadGoalCleared(v2::ThreadGoalClearedNotification {
             thread_id: "thr_123".to_string(),
+            turn_id: None,
+            previous_goal: None,
+            revision: 2,
         });
 
         assert_eq!(

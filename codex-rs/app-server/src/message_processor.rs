@@ -314,6 +314,7 @@ impl MessageProcessor {
             Arc::clone(&config),
             Arc::clone(&auth_manager),
             Arc::clone(&default_models_manager),
+            Arc::clone(&thread_store),
         ));
         let startup_account_registry = Arc::clone(&account_registry);
         tokio::spawn(async move {
@@ -536,6 +537,7 @@ impl MessageProcessor {
             thread_watch_manager.clone(),
             Arc::clone(&thread_list_state_permit),
             thread_goal_processor.clone(),
+            Arc::clone(&session_runtime),
             state_db.clone(),
             log_db,
             Arc::clone(&skills_watcher),
@@ -544,6 +546,7 @@ impl MessageProcessor {
         );
         let turn_processor = TurnRequestProcessor::new(
             Arc::clone(&thread_manager),
+            Arc::clone(&thread_store),
             outgoing.clone(),
             analytics_events_client.clone(),
             arg0_paths.clone(),
@@ -1261,6 +1264,21 @@ impl MessageProcessor {
                     .thread_goal_clear(request_id.clone(), params)
                     .await
             }
+            ClientRequest::ThreadGoalCreate { params, .. } => {
+                self.thread_goal_processor
+                    .thread_goal_create(request_id.clone(), params)
+                    .await
+            }
+            ClientRequest::ThreadGoalReplace { params, .. } => {
+                self.thread_goal_processor
+                    .thread_goal_replace(request_id.clone(), params)
+                    .await
+            }
+            ClientRequest::ThreadTransitionCommit { params, .. } => {
+                self.thread_processor
+                    .thread_transition_commit(request_id.clone(), params)
+                    .await
+            }
             ClientRequest::ThreadPresentationAppend { params, .. } => {
                 self.plugin_command_processor
                     .append_presentation(params)
@@ -1613,8 +1631,8 @@ impl MessageProcessor {
             ClientRequest::GetAuthStatus { params, .. } => {
                 self.account_processor.get_auth_status(params).await
             }
-            ClientRequest::GetAccountRateLimits { .. } => {
-                self.account_processor.get_account_rate_limits().await
+            ClientRequest::GetAccountRateLimits { params, .. } => {
+                self.account_processor.get_account_rate_limits(params).await
             }
             ClientRequest::ConsumeAccountRateLimitResetCredit { params, .. } => {
                 self.account_processor

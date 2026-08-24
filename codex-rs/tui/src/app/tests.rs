@@ -5637,6 +5637,8 @@ async fn replace_goal_confirmation_snapshot() {
             objective: "New goal".to_string(),
             ..Default::default()
         },
+        "goal-test".to_string(),
+        1,
     );
     assert_app_snapshot!(
         "replace_goal_confirmation",

@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 
+use super::SessionRuntimeAccountRef;
 use super::ThreadGoal;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -72,6 +73,9 @@ pub struct PluginCommandInvokeParams {
 pub enum PluginCommandInvokeResponse {
     Prompt {
         prompt: String,
+        #[serde(rename = "executionAccount")]
+        #[ts(rename = "executionAccount")]
+        execution_account: Option<SessionRuntimeAccountRef>,
     },
     McpTool {
         result: PluginCommandMcpToolResult,

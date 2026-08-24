@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 
 use codex_app_server_protocol::SessionRuntimeAccountBinding;
@@ -24,13 +26,16 @@ use super::operations::evict_terminal_operations;
 use super::operations::retained_counts;
 use super::operations::valid_initial_status;
 use super::operations::valid_transition;
-use super::pagination::CachedSnapshot;
 use super::pagination::SnapshotCache;
+use super::snapshot::RuntimeInventory;
+use super::snapshot::RuntimeOverlay;
+use super::snapshot::RuntimeRecord;
 
 fn snapshot(thread_id: ThreadId) -> SessionRuntimeSnapshot {
     SessionRuntimeSnapshot {
         thread_id: thread_id.to_string(),
         state_revision: 0,
+        continuity: Default::default(),
         identity: SessionRuntimeIdentity {
             session_id: thread_id.to_string(),
             forked_from_id: None,
@@ -93,63 +98,102 @@ fn operation(id: usize, status: SessionRuntimeOperationStatus) -> SessionRuntime
     }
 }
 
+fn inventory(thread_ids: &[ThreadId]) -> RuntimeInventory {
+    RuntimeInventory {
+        records: thread_ids
+            .iter()
+            .map(|thread_id| RuntimeRecord::LoadedOnly {
+                thread_id: *thread_id,
+                session_id: thread_id.to_string(),
+                source: codex_protocol::protocol::SessionSource::Exec,
+                cwd: "/sanitized/project".to_string(),
+                forked_from_id: None,
+                parent_thread_id: None,
+            })
+            .collect(),
+        overlay: RuntimeOverlay {
+            loaded_thread_ids: thread_ids.iter().copied().collect::<HashSet<_>>(),
+            account_capability: None,
+            switching_accounts: HashMap::new(),
+        },
+    }
+}
+
+fn materialize_plan(plan: &super::pagination::PagePlan) -> Vec<SessionRuntimeSnapshot> {
+    plan.records
+        .iter()
+        .map(|record| snapshot(record.thread_id()))
+        .collect()
+}
+
 #[test]
 fn pagination_cursor_is_stable_and_restarts_after_sequence_change() {
-    let snapshots = (0..3)
-        .map(|_index| snapshot(ThreadId::new()))
-        .collect::<Vec<_>>();
-    let cached = CachedSnapshot::new(7, snapshots);
-    let first = cached
-        .first_page("epoch-a", 1, Vec::new())
+    let thread_ids = (0..3).map(|_index| ThreadId::new()).collect::<Vec<_>>();
+    let mut cache = SnapshotCache::default();
+    cache.replace(7, 11, inventory(&thread_ids));
+    let first_plan = cache
+        .plan(None, "epoch-a", 7, 11, 1)
+        .expect("first page plan");
+    assert_eq!(first_plan.records.len(), 2);
+    cache
+        .commit(&first_plan, materialize_plan(&first_plan))
+        .expect("commit first page");
+    let first = cache
+        .response(&first_plan, "epoch-a", 1, Vec::new())
         .expect("first page");
     let cursor = first.next_cursor.expect("next cursor");
-    let mut cache = SnapshotCache::default();
-    cache.insert(cached);
-
+    let second_plan = cache
+        .plan(Some(&cursor), "epoch-a", 7, 11, 1)
+        .expect("second page plan");
+    assert_eq!(second_plan.records.len(), 1);
+    cache
+        .commit(&second_plan, materialize_plan(&second_plan))
+        .expect("commit second page");
     let second = cache
-        .page(&cursor, "epoch-a", 7, 1, Vec::new())
+        .response(&second_plan, "epoch-a", 1, Vec::new())
         .expect("stable second page");
 
     assert_eq!(first.data.len(), 1);
     assert_eq!(second.data.len(), 1);
-    assert!(cache.page(&cursor, "epoch-a", 8, 1, Vec::new()).is_err());
-    assert!(cache.page(&cursor, "epoch-b", 7, 1, Vec::new()).is_err());
-
-    let replacement = CachedSnapshot::new(7, vec![snapshot(ThreadId::new())]);
-    cache.insert(replacement);
-    assert!(cache.page(&cursor, "epoch-a", 7, 1, Vec::new()).is_err());
+    assert!(cache.plan(Some(&cursor), "epoch-a", 8, 11, 1).is_err());
+    assert!(cache.plan(Some(&cursor), "epoch-b", 7, 11, 1).is_err());
+    cache.replace(7, 11, inventory(&[ThreadId::new()]));
+    assert!(cache.plan(Some(&cursor), "epoch-a", 7, 11, 1).is_err());
 }
 
 #[test]
 fn cursorless_clients_reuse_the_same_snapshot_at_the_same_sequence() {
-    let snapshots = (0..3)
-        .map(|_index| snapshot(ThreadId::new()))
-        .collect::<Vec<_>>();
-    let cached = CachedSnapshot::new(7, snapshots);
+    let thread_ids = (0..3).map(|_index| ThreadId::new()).collect::<Vec<_>>();
     let mut cache = SnapshotCache::default();
-    cache.insert(cached);
-
+    cache.replace(7, 11, inventory(&thread_ids));
+    let first_plan = cache
+        .plan(None, "epoch-a", 7, 11, 1)
+        .expect("first client plan");
+    cache
+        .commit(&first_plan, materialize_plan(&first_plan))
+        .expect("commit first client page");
     let first = cache
-        .first_page("epoch-a", 7, 1, Vec::new())
-        .expect("first client page")
-        .expect("cached snapshot");
+        .response(&first_plan, "epoch-a", 1, Vec::new())
+        .expect("first client page");
+    let second_plan = cache
+        .plan(None, "epoch-a", 7, 11, 2)
+        .expect("second client plan");
+    cache
+        .commit(&second_plan, materialize_plan(&second_plan))
+        .expect("commit second client page");
     let second = cache
-        .first_page("epoch-a", 7, 2, Vec::new())
-        .expect("second client page")
-        .expect("cached snapshot");
+        .response(&second_plan, "epoch-a", 2, Vec::new())
+        .expect("second client page");
     let first_cursor = first.next_cursor.expect("first client cursor");
     let second_cursor = second.next_cursor.expect("second client cursor");
 
     assert_eq!(first.data.len(), 1);
     assert_eq!(second.data.len(), 2);
+    assert_eq!(first.data[0], second.data[0]);
+    assert!(cache.plan(Some(&first_cursor), "epoch-a", 7, 11, 1).is_ok());
     assert!(
         cache
-            .page(&first_cursor, "epoch-a", 7, 1, Vec::new())
-            .is_ok()
-    );
-    assert!(
-        cache
-            .page(&second_cursor, "epoch-a", 7, 1, Vec::new())
+            .plan(Some(&second_cursor), "epoch-a", 7, 11, 1)
             .is_ok()
     );
 }

@@ -1,15 +1,18 @@
 use super::*;
 use crate::extensions::send_thread_warning;
+use crate::thread_state::ConversationSubscription;
 use crate::thread_state::PendingUnloadSubscription;
 use codex_app_server_protocol::ThreadQueueChangedNotification;
 use codex_extension_api::ThreadIdleCause;
 use codex_protocol::config_types::MultiAgentMode;
+use tokio::sync::OwnedSemaphorePermit;
 
 pub(super) const THREAD_UNLOADING_DELAY: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Clone)]
 pub(super) struct ListenerTaskContext {
     pub(super) thread_manager: Arc<ThreadManager>,
+    pub(super) thread_store: Arc<dyn ThreadStore>,
     pub(super) thread_state_manager: ThreadStateManager,
     pub(super) outgoing: Arc<OutgoingMessageSender>,
     pub(super) pending_thread_unloads: Arc<Mutex<HashSet<ThreadId>>>,
@@ -174,6 +177,12 @@ pub(super) enum ThreadShutdownResult {
 pub(super) enum EnsureConversationListenerResult {
     Attached,
     ConnectionClosed,
+    TransitionInProgress,
+}
+
+pub(super) enum ListenerAdmission {
+    Acquire,
+    Reserved,
 }
 
 pub(super) async fn ensure_conversation_listener(
@@ -181,6 +190,44 @@ pub(super) async fn ensure_conversation_listener(
     conversation_id: ThreadId,
     connection_id: ConnectionId,
     raw_events_enabled: bool,
+) -> Result<EnsureConversationListenerResult, JSONRPCErrorError> {
+    ensure_conversation_listener_with_runtime_publish(
+        listener_task_context,
+        conversation_id,
+        connection_id,
+        raw_events_enabled,
+        InitialRuntimePublish::Immediate,
+    )
+    .await
+}
+
+pub(super) async fn ensure_conversation_listener_before_response(
+    listener_task_context: ListenerTaskContext,
+    conversation_id: ThreadId,
+    connection_id: ConnectionId,
+    raw_events_enabled: bool,
+) -> Result<EnsureConversationListenerResult, JSONRPCErrorError> {
+    ensure_conversation_listener_with_runtime_publish(
+        listener_task_context,
+        conversation_id,
+        connection_id,
+        raw_events_enabled,
+        InitialRuntimePublish::Deferred,
+    )
+    .await
+}
+
+enum InitialRuntimePublish {
+    Immediate,
+    Deferred,
+}
+
+async fn ensure_conversation_listener_with_runtime_publish(
+    listener_task_context: ListenerTaskContext,
+    conversation_id: ThreadId,
+    connection_id: ConnectionId,
+    raw_events_enabled: bool,
+    initial_runtime_publish: InitialRuntimePublish,
 ) -> Result<EnsureConversationListenerResult, JSONRPCErrorError> {
     let conversation = match listener_task_context
         .thread_manager
@@ -194,41 +241,125 @@ pub(super) async fn ensure_conversation_listener(
             )));
         }
     };
-    let thread_state = match listener_task_context
-        .thread_state_manager
-        .try_ensure_connection_subscribed_unless_pending_unload(
-            listener_task_context.pending_thread_unloads.as_ref(),
-            conversation_id,
-            connection_id,
-            raw_events_enabled,
-        )
-        .await
-    {
-        PendingUnloadSubscription::PendingUnload => {
-            return Err(invalid_request(format!(
-                "thread {conversation_id} is closing; retry after the thread is closed"
-            )));
-        }
-        PendingUnloadSubscription::ConnectionClosed => {
-            return Ok(EnsureConversationListenerResult::ConnectionClosed);
-        }
-        PendingUnloadSubscription::Subscribed(thread_state) => thread_state,
+    ensure_conversation_listener_for_thread_with_runtime_publish(
+        listener_task_context,
+        conversation_id,
+        conversation,
+        connection_id,
+        raw_events_enabled,
+        initial_runtime_publish,
+    )
+    .await
+}
+
+pub(super) async fn ensure_conversation_listener_for_thread(
+    listener_task_context: ListenerTaskContext,
+    conversation_id: ThreadId,
+    conversation: Arc<CodexThread>,
+    connection_id: ConnectionId,
+    raw_events_enabled: bool,
+) -> Result<EnsureConversationListenerResult, JSONRPCErrorError> {
+    ensure_conversation_listener_for_thread_with_runtime_publish(
+        listener_task_context,
+        conversation_id,
+        conversation,
+        connection_id,
+        raw_events_enabled,
+        InitialRuntimePublish::Immediate,
+    )
+    .await
+}
+
+async fn ensure_conversation_listener_for_thread_with_runtime_publish(
+    listener_task_context: ListenerTaskContext,
+    conversation_id: ThreadId,
+    conversation: Arc<CodexThread>,
+    connection_id: ConnectionId,
+    raw_events_enabled: bool,
+    initial_runtime_publish: InitialRuntimePublish,
+) -> Result<EnsureConversationListenerResult, JSONRPCErrorError> {
+    let (thread_state, subscription_changed, transition_admission_permit) =
+        match listener_task_context
+            .thread_state_manager
+            .try_ensure_connection_subscribed_unless_pending_unload(
+                listener_task_context.pending_thread_unloads.as_ref(),
+                conversation_id,
+                connection_id,
+                raw_events_enabled,
+            )
+            .await
+        {
+            ConversationSubscription::PendingUnload => {
+                return Err(invalid_request(format!(
+                    "thread {conversation_id} is closing; retry after the thread is closed"
+                )));
+            }
+            ConversationSubscription::ConnectionClosed => {
+                return Ok(EnsureConversationListenerResult::ConnectionClosed);
+            }
+            ConversationSubscription::TransitionInProgress => {
+                return Ok(EnsureConversationListenerResult::TransitionInProgress);
+            }
+            ConversationSubscription::Subscribed {
+                thread_state,
+                subscription_changed,
+                transition_admission_permit,
+            } => (
+                thread_state,
+                subscription_changed,
+                transition_admission_permit,
+            ),
+        };
+    if !subscription_changed && thread_state.lock().await.listener_matches(&conversation) {
+        return Ok(EnsureConversationListenerResult::Attached);
+    }
+    if subscription_changed && matches!(initial_runtime_publish, InitialRuntimePublish::Immediate) {
+        listener_task_context
+            .thread_state_manager
+            .publish_runtime(conversation_id)
+            .await;
+    }
+    let listener_admission = if transition_admission_permit.is_some() {
+        ListenerAdmission::Reserved
+    } else {
+        ListenerAdmission::Acquire
     };
     if let Err(error) = ensure_listener_task_running(
         listener_task_context.clone(),
         conversation_id,
         conversation,
         thread_state,
+        listener_admission,
     )
     .await
     {
-        let _ = listener_task_context
-            .thread_state_manager
-            .unsubscribe_connection_from_thread(conversation_id, connection_id)
+        if subscription_changed {
+            rollback_new_listener_subscription(
+                &listener_task_context.thread_state_manager,
+                conversation_id,
+                connection_id,
+                transition_admission_permit,
+            )
             .await;
+        } else {
+            drop(transition_admission_permit);
+        }
         return Err(error);
     }
+    drop(transition_admission_permit);
     Ok(EnsureConversationListenerResult::Attached)
+}
+
+async fn rollback_new_listener_subscription(
+    thread_state_manager: &ThreadStateManager,
+    conversation_id: ThreadId,
+    connection_id: ConnectionId,
+    transition_admission_permit: Option<OwnedSemaphorePermit>,
+) {
+    let _ = thread_state_manager
+        .unsubscribe_connection_from_thread(conversation_id, connection_id)
+        .await;
+    drop(transition_admission_permit);
 }
 
 pub(super) fn log_listener_attach_result(
@@ -246,6 +377,13 @@ pub(super) fn log_listener_attach_result(
                 "skipping auto-attach for closed connection"
             );
         }
+        Ok(EnsureConversationListenerResult::TransitionInProgress) => {
+            tracing::debug!(
+                thread_id = %thread_id,
+                connection_id = ?connection_id,
+                "skipping auto-attach while a thread transition is in progress"
+            );
+        }
         Err(err) => {
             tracing::warn!(
                 "failed to attach listener for {thread_kind} {thread_id}: {message}",
@@ -260,7 +398,21 @@ pub(super) async fn ensure_listener_task_running(
     conversation_id: ThreadId,
     conversation: Arc<CodexThread>,
     thread_state: Arc<Mutex<ThreadState>>,
+    listener_admission: ListenerAdmission,
 ) -> Result<(), JSONRPCErrorError> {
+    if thread_state.lock().await.listener_matches(&conversation) {
+        return Ok(());
+    }
+    let _transition_admission_permit = match listener_admission {
+        ListenerAdmission::Acquire => Some(
+            listener_task_context
+                .thread_state_manager
+                .acquire_thread_mutation_permit(conversation_id)
+                .await
+                .map_err(|reason| invalid_request(reason.replace('_', " ")))?,
+        ),
+        ListenerAdmission::Reserved => None,
+    };
     let (cancel_tx, mut cancel_rx) = oneshot::channel();
     let Some(mut unloading_state) = UnloadingState::new(
         &listener_task_context,
@@ -316,6 +468,7 @@ pub(super) async fn ensure_listener_task_running(
     let ListenerTaskContext {
         outgoing,
         thread_manager,
+        thread_store,
         thread_state_manager,
         pending_thread_unloads,
         thread_watch_manager,
@@ -398,6 +551,7 @@ pub(super) async fn ensure_listener_task_running(
                         conversation_id,
                         conversation.clone(),
                         thread_manager.clone(),
+                        Arc::clone(&thread_store),
                         thread_outgoing,
                         thread_state.clone(),
                         thread_watch_manager.clone(),
@@ -426,6 +580,13 @@ pub(super) async fn ensure_listener_task_running(
                         unloading_state.note_thread_activity_observed().await;
                         continue;
                     }
+                    let Ok(_transition_admission_permit) = thread_state_manager
+                        .acquire_thread_mutation_permit(conversation_id)
+                        .await
+                    else {
+                        unloading_state.note_thread_activity_observed().await;
+                        continue;
+                    };
                     thread_state_manager.mark_runtime_dirty();
                     let (start_unload, target_changed) = {
                         let mut pending_thread_unloads = pending_thread_unloads.lock().await;
@@ -610,11 +771,18 @@ pub(super) async fn handle_thread_listener_command(
         ThreadListenerCommand::EmitWarning { message } => {
             send_thread_warning(outgoing, thread_state_manager, conversation_id, message).await;
         }
-        ThreadListenerCommand::EmitThreadGoalCleared => {
+        ThreadListenerCommand::EmitThreadGoalCleared {
+            turn_id,
+            previous_goal,
+            revision,
+        } => {
             outgoing
                 .send_server_notification(ServerNotification::ThreadGoalCleared(
                     ThreadGoalClearedNotification {
                         thread_id: conversation_id.to_string(),
+                        turn_id,
+                        previous_goal,
+                        revision,
                     },
                 ))
                 .await;
@@ -747,6 +915,25 @@ pub(super) async fn handle_pending_thread_resume_request(
         }
     }
 
+    let (turns_backwards_cursor, items_backwards_cursor) = if let Some(thread_store) =
+        pending.resume_cursor_store.as_ref()
+    {
+        match super::thread_processor::ThreadRequestProcessor::paginated_resume_backwards_cursors(
+            thread_store.as_ref(),
+            conversation_id,
+        )
+        .await
+        {
+            Ok(cursors) => cursors,
+            Err(error) => {
+                outgoing.send_error(request_id, error).await;
+                return;
+            }
+        }
+    } else {
+        (None, None)
+    };
+
     match thread_state_manager
         .try_add_connection_to_thread_unless_pending_unload(
             pending_thread_unloads.as_ref(),
@@ -774,27 +961,14 @@ pub(super) async fn handle_pending_thread_resume_request(
             );
             return;
         }
+        PendingUnloadSubscription::TransitionInProgress => {
+            outgoing
+                .send_error(request_id, invalid_request("thread transition in progress"))
+                .await;
+            return;
+        }
         PendingUnloadSubscription::Subscribed(()) => {}
     }
-
-    let (turns_backwards_cursor, items_backwards_cursor) = if let Some(thread_store) =
-        pending.resume_cursor_store.as_ref()
-    {
-        match super::thread_processor::ThreadRequestProcessor::paginated_resume_backwards_cursors(
-            thread_store.as_ref(),
-            conversation_id,
-        )
-        .await
-        {
-            Ok(cursors) => cursors,
-            Err(error) => {
-                outgoing.send_error(request_id, error).await;
-                return;
-            }
-        }
-    } else {
-        (None, None)
-    };
 
     let config_snapshot = pending.config_snapshot;
     let sandbox = config_snapshot.sandbox_policy().into();
@@ -890,10 +1064,18 @@ pub(super) async fn send_thread_goal_snapshot_notification(
                 .await;
         }
         Ok(None) => {
+            let revision = state_db
+                .thread_goals()
+                .get_thread_goal_revision(thread_id)
+                .await
+                .unwrap_or_default();
             outgoing
                 .send_server_notification(ServerNotification::ThreadGoalCleared(
                     ThreadGoalClearedNotification {
                         thread_id: thread_id.to_string(),
+                        turn_id: None,
+                        previous_goal: None,
+                        revision,
                     },
                 ))
                 .await;

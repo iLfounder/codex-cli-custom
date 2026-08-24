@@ -304,6 +304,23 @@
         }
       ]
     },
+    "SessionRuntimeAccountRef": {
+      "properties": {
+        "accountSlotId": {
+          "type": "string"
+        },
+        "executionGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "accountSlotId",
+        "executionGeneration"
+      ],
+      "type": "object"
+    },
     "Settings": {
       "description": "Settings for a collaboration mode.",
       "properties": {
@@ -609,6 +626,17 @@
         }
       ],
       "description": "Override the reasoning effort for this turn and subsequent turns."
+    },
+    "expectedExecutionAccount": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/SessionRuntimeAccountRef"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Exact execution account expected by the client that produced this input."
     },
     "input": {
       "items": {

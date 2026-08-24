@@ -7,6 +7,7 @@
 use super::plugin_mentions::fetch_plugin_mentions;
 use super::*;
 use crate::app_event::ConnectorsSnapshot;
+use crate::app_event::RateLimitRequestSubject;
 use crate::app_info::app_info_from_api;
 use crate::chatwidget::ThreadUsageOutcome;
 use crate::config_update::format_config_error;
@@ -14,6 +15,7 @@ use codex_app_server_protocol::AppsListParams;
 use codex_app_server_protocol::AppsListResponse;
 use codex_app_server_protocol::ConsumeAccountRateLimitResetCreditParams;
 use codex_app_server_protocol::ConsumeAccountRateLimitResetCreditResponse;
+use codex_app_server_protocol::GetAccountRateLimitsParams;
 use codex_app_server_protocol::GetAccountTokenUsageParams;
 use codex_app_server_protocol::GetAccountTokenUsageResponse;
 use codex_app_server_protocol::MarketplaceAddParams;
@@ -85,8 +87,10 @@ impl App {
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         let hard_stop_generation = self.rate_limit_hard_stop_generation;
+        let subject = self.current_rate_limit_request_subject();
+        let request_thread_id = subject.as_ref().map(|subject| subject.thread_id);
         tokio::spawn(async move {
-            let request = fetch_account_rate_limits(request_handle);
+            let request = fetch_account_rate_limits(request_handle, request_thread_id);
             let result = match origin {
                 RateLimitRefreshOrigin::ResetConsume { .. }
                 | RateLimitRefreshOrigin::ResetPicker { .. } => {
@@ -103,10 +107,30 @@ impl App {
             };
             app_event_tx.send(AppEvent::RateLimitsLoaded {
                 origin,
+                subject,
                 hard_stop_generation,
                 result,
             });
         });
+    }
+
+    pub(super) fn current_rate_limit_request_subject(&self) -> Option<RateLimitRequestSubject> {
+        let thread_id = self.current_displayed_thread_id()?;
+        let execution_account = self.account_runtime.as_ref().and_then(|(_, runtime)| {
+            (runtime.thread_id == thread_id.to_string())
+                .then(|| runtime.account.current.clone())
+                .flatten()
+        });
+        Some(RateLimitRequestSubject {
+            thread_id,
+            execution_account,
+        })
+    }
+
+    pub(super) fn invalidate_rate_limit_subject(&mut self) {
+        self.rate_limit_hard_stop_generation = self.rate_limit_hard_stop_generation.wrapping_add(1);
+        self.chat_widget.on_rate_limit_snapshot(None);
+        self.chat_widget.clear_pending_rate_limit_reset_requests();
     }
 
     pub(super) fn refresh_token_activity(
@@ -785,12 +809,15 @@ pub(super) async fn fetch_all_mcp_server_statuses(
 
 pub(super) async fn fetch_account_rate_limits(
     request_handle: AppServerRequestHandle,
+    thread_id: Option<ThreadId>,
 ) -> Result<GetAccountRateLimitsResponse> {
     let request_id = RequestId::String(format!("account-rate-limits-{}", Uuid::new_v4()));
     request_handle
         .request_typed(ClientRequest::GetAccountRateLimits {
             request_id,
-            params: None,
+            params: thread_id.map(|thread_id| GetAccountRateLimitsParams {
+                thread_id: Some(thread_id.to_string()),
+            }),
         })
         .await
         .wrap_err("account/rateLimits/read failed in TUI")

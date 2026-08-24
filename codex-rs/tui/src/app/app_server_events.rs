@@ -63,6 +63,8 @@ impl App {
                     skipped,
                     "app-server event consumer lagged; dropping ignored events"
                 );
+                self.invalidate_plugin_command_catalog();
+                self.refresh_plugin_commands(app_server_client);
                 self.refresh_mcp_startup_expected_servers_from_config();
                 self.chat_widget.finish_mcp_startup_after_lag();
                 self.refresh_agents_overview_threads(app_server_client);
@@ -106,17 +108,29 @@ impl App {
                 return;
             }
             ServerNotification::SessionRuntimeChanged(update) => {
+                let previous_rate_limit_subject = self.current_rate_limit_request_subject();
+                let previous_plugin_command_subject = self.current_plugin_command_catalog_subject();
+                self.observe_plugin_command_runtime(
+                    update.instance_epoch.clone(),
+                    &update.snapshot,
+                );
                 self.handle_account_runtime_changed(
                     update.instance_epoch.clone(),
                     update.snapshot.clone(),
                 );
-                if update.snapshot.account.switch_state
-                    == codex_app_server_protocol::SessionRuntimeAccountSwitchState::Stable
-                    && ThreadId::from_string(&update.snapshot.thread_id).is_ok_and(|thread_id| {
-                        self.current_displayed_thread_id() == Some(thread_id)
-                    })
+                let current_rate_limit_subject = self.current_rate_limit_request_subject();
+                if previous_rate_limit_subject
+                    .as_ref()
+                    .is_some_and(|previous| current_rate_limit_subject.as_ref() != Some(previous))
                 {
-                    self.refresh_plugin_commands(app_server_client);
+                    self.invalidate_rate_limit_subject();
+                }
+                let current_plugin_command_subject = self.current_plugin_command_catalog_subject();
+                if previous_plugin_command_subject != current_plugin_command_subject {
+                    self.invalidate_plugin_command_catalog();
+                    if current_plugin_command_subject.is_some() {
+                        self.refresh_plugin_commands(app_server_client);
+                    }
                 }
             }
             ServerNotification::AccountSlotChanged(update) => {
@@ -201,6 +215,21 @@ impl App {
                 self.refresh_mcp_startup_expected_servers_from_config();
             }
             ServerNotification::AccountRateLimitsUpdated(notification) => {
+                let notification_subject = notification
+                    .thread_id
+                    .as_deref()
+                    .and_then(|thread_id| ThreadId::from_string(thread_id).ok())
+                    .zip(notification.execution_account.as_ref());
+                let accepted = notification_subject.is_some_and(|(thread_id, account)| {
+                    self.current_rate_limit_request_subject()
+                        .is_some_and(|current| {
+                            current.thread_id == thread_id
+                                && current.execution_account.as_ref() == Some(account)
+                        })
+                });
+                if !accepted {
+                    return;
+                }
                 if matches!(
                     notification.rate_limits.rate_limit_reached_type,
                     Some(
@@ -254,6 +283,8 @@ impl App {
                         "failed to refresh config after external agent config import"
                     );
                 }
+                self.invalidate_plugin_command_catalog();
+                self.app_event_tx.send(AppEvent::RefreshPluginCommands);
                 let cwd = self.chat_widget.config_ref().cwd.to_path_buf();
                 self.chat_widget.refresh_plugin_mentions();
                 self.chat_widget.submit_op(AppCommand::reload_user_config());

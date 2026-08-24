@@ -223,6 +223,26 @@ impl CodexThread {
             .await
     }
 
+    pub(crate) async fn prepare_execution_account_replacement(
+        &self,
+        expected: codex_protocol::protocol::ExecutionAccountBinding,
+        target: Arc<crate::execution_account::ExecutionAccountContext>,
+        services: crate::execution_account::ExecutionAccountServices,
+    ) -> Result<
+        crate::session::session::PreparedExecutionAccountReplacement,
+        crate::execution_account::ExecutionAccountSwitchError,
+    > {
+        self.session
+            .prepare_execution_account_replacement(expected, target, services)
+            .await
+    }
+
+    pub(crate) async fn publish_execution_account_replacement(
+        replacement: crate::session::session::PreparedExecutionAccountReplacement,
+    ) {
+        crate::session::session::Session::publish_execution_account_replacement(replacement).await;
+    }
+
     /// Returns extension-owned data attached to this thread runtime.
     pub fn thread_extension_data(&self) -> &codex_extension_api::ExtensionData {
         &self.session.services.thread_extension_data

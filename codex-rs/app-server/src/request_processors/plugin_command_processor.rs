@@ -12,6 +12,7 @@ use codex_app_server_protocol::PluginCommandListResponse;
 use codex_app_server_protocol::PluginCommandMcpToolResult;
 use codex_app_server_protocol::PluginCommandTarget as ApiCommandTarget;
 use codex_app_server_protocol::ServerNotification;
+use codex_app_server_protocol::SessionRuntimeAccountRef;
 use codex_app_server_protocol::ThreadGoalClearParams;
 use codex_app_server_protocol::ThreadGoalGetParams;
 use codex_app_server_protocol::ThreadGoalSetParams;
@@ -124,6 +125,7 @@ pub(crate) struct PluginCommandRequestProcessor {
 struct ResolvedCommand {
     api: PluginCommand,
     target: PluginCommandTarget,
+    execution_account: SessionRuntimeAccountRef,
 }
 
 impl PluginCommandRequestProcessor {
@@ -196,9 +198,10 @@ impl PluginCommandRequestProcessor {
         }
 
         let response = match command.target {
-            PluginCommandTarget::Prompt { prompt } => {
-                PluginCommandInvokeResponse::Prompt { prompt }
-            }
+            PluginCommandTarget::Prompt { prompt } => PluginCommandInvokeResponse::Prompt {
+                prompt,
+                execution_account: Some(command.execution_account),
+            },
             PluginCommandTarget::McpTool {
                 server,
                 tool,
@@ -292,6 +295,10 @@ impl PluginCommandRequestProcessor {
             .await
             .map_err(|error| internal_error(format!("failed to reload config: {error}")))?;
         let execution_account = thread.execution_account();
+        let account = SessionRuntimeAccountRef {
+            account_slot_id: execution_account.binding.slot_id.clone(),
+            execution_generation: execution_account.binding.generation,
+        };
         let services = self
             .thread_manager
             .execution_account_services(&execution_account);
@@ -325,13 +332,15 @@ impl PluginCommandRequestProcessor {
                 } else {
                     None
                 };
-                commands.push(resolved_command(
+                let command = resolved_command(
                     &plugin.config_name,
                     namespace,
                     contribution,
                     available,
                     deny_reason,
-                ));
+                    account.clone(),
+                )?;
+                commands.push(command);
             }
         }
         commands.sort_by(|left, right| {
@@ -378,6 +387,8 @@ impl PluginCommandRequestProcessor {
                 .goal_processor
                 .plugin_goal_set(ThreadGoalSetParams {
                     thread_id: thread_id.to_string(),
+                    expected_goal_id: None,
+                    expected_revision: None,
                     objective,
                     status: status.map(api_goal_status),
                     token_budget,
@@ -390,6 +401,8 @@ impl PluginCommandRequestProcessor {
                 .goal_processor
                 .plugin_goal_clear(ThreadGoalClearParams {
                     thread_id: thread_id.to_string(),
+                    expected_goal_id: None,
+                    expected_revision: None,
                 })
                 .await
                 .map(|response| PluginCommandInvokeResponse::GoalClear {
@@ -405,7 +418,8 @@ fn resolved_command(
     contribution: PluginCommandContribution,
     available: bool,
     deny_reason: Option<String>,
-) -> ResolvedCommand {
+    account: SessionRuntimeAccountRef,
+) -> Result<ResolvedCommand, JSONRPCErrorError> {
     let mut hasher = Sha256::new();
     let identity = serde_json::to_value((
         plugin_id,
@@ -414,11 +428,15 @@ fn resolved_command(
         &contribution.name,
         &contribution.target,
     ))
-    .expect("plugin command identity must serialize");
-    hasher.update(
-        serde_json::to_vec(&canonicalize_json(identity))
-            .expect("plugin command identity must encode"),
-    );
+    .map_err(|error| {
+        internal_error(format!(
+            "failed to serialize plugin command identity: {error}"
+        ))
+    })?;
+    let identity = serde_json::to_vec(&canonicalize_json(identity)).map_err(|error| {
+        internal_error(format!("failed to encode plugin command identity: {error}"))
+    })?;
+    hasher.update(identity);
     let digest = hasher.finalize();
     let id = format!("pc_{}", encode_hex(&digest[..16]));
     let target = match &contribution.target {
@@ -436,7 +454,7 @@ fn resolved_command(
         },
         PluginCommandTarget::Executable { .. } => ApiCommandTarget::Executable,
     };
-    ResolvedCommand {
+    Ok(ResolvedCommand {
         api: PluginCommand {
             id,
             plugin_id: plugin_id.to_string(),
@@ -448,7 +466,8 @@ fn resolved_command(
             deny_reason,
         },
         target: contribution.target,
-    }
+        execution_account: account,
+    })
 }
 
 fn assign_resolution_names(commands: &mut [ResolvedCommand]) {
