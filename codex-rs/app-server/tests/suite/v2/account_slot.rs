@@ -9,10 +9,13 @@ use codex_app_server_protocol::AccountSlotActionAvailability;
 use codex_app_server_protocol::AccountSlotChangedNotification;
 use codex_app_server_protocol::AccountSlotListParams;
 use codex_app_server_protocol::AccountSlotListResponse;
+use codex_app_server_protocol::AccountSlotLoginChallenge;
 use codex_app_server_protocol::AccountSlotLoginStartParams;
 use codex_app_server_protocol::AccountSlotLoginStartResponse;
 use codex_app_server_protocol::AccountSlotStatus;
+use codex_app_server_protocol::CancelLoginAccountParams;
 use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SessionRuntimeChangedNotification;
 use codex_app_server_protocol::SessionRuntimeLifecycleState;
 use codex_app_server_protocol::SessionRuntimeListParams;
@@ -32,10 +35,156 @@ use codex_login::login_with_api_key;
 use codex_login::logout;
 use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
+use serial_test::serial;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+const LOGIN_ISSUER_ENV_VAR: &str = "CODEX_APP_SERVER_LOGIN_ISSUER";
+
+#[tokio::test]
+async fn default_logout_projection_and_rpc_share_reloaded_provider_policy() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        r#"
+model = "mock-model"
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+cli_auth_credentials_store = "file"
+
+[features]
+shell_snapshot = false
+"#,
+    )?;
+    login_with_api_key(
+        codex_home.path(),
+        "default-test-secret",
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )?;
+    let mut app_server = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .with_env_overrides(&[("OPENAI_API_KEY", None)])
+        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
+        .await?;
+
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        r#"
+model_provider = "amazon-bedrock"
+cli_auth_credentials_store = "file"
+
+[model_providers.amazon-bedrock.aws]
+profile = "fixture"
+region = "us-west-2"
+"#,
+    )?;
+    let request_id = app_server
+        .send_raw_request(
+            "accountSlot/list",
+            Some(serde_json::to_value(AccountSlotListParams {
+                cursor: None,
+                limit: None,
+            })?),
+        )
+        .await?;
+    let listed: AccountSlotListResponse =
+        timeout(DEFAULT_TIMEOUT, app_server.read_response(request_id)).await??;
+    let logout = listed
+        .data
+        .iter()
+        .find(|slot| slot.is_default)
+        .and_then(|slot| {
+            slot.actions
+                .iter()
+                .find(|action| action.action == AccountSlotAction::Logout)
+        })
+        .expect("default logout action");
+    assert_eq!(
+        logout,
+        &AccountSlotActionAvailability {
+            action: AccountSlotAction::Logout,
+            allowed: false,
+            deny_reason: Some("provider_managed_logout_not_allowed".to_string()),
+        }
+    );
+
+    let request_id = app_server.send_logout_account_request().await?;
+    let error = timeout(
+        DEFAULT_TIMEOUT,
+        app_server.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    assert_eq!(error.error.code, -32600);
+    assert!(codex_home.path().join("auth.json").is_file());
+    Ok(())
+}
+
+#[tokio::test]
+#[serial(login_port)]
+async fn secondary_cancel_reports_projection_persistence_failure() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        r#"
+model = "mock-model"
+cli_auth_credentials_store = "file"
+"#,
+    )?;
+    login_with_api_key(
+        codex_home.path(),
+        "default-test-secret",
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )?;
+    let mut app_server = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .with_env_overrides(&[
+            ("OPENAI_API_KEY", None),
+            (LOGIN_ISSUER_ENV_VAR, Some("https://auth.example.com")),
+        ])
+        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
+        .await?;
+
+    let request_id = app_server
+        .send_raw_request(
+            "accountSlot/login/start",
+            Some(serde_json::to_value(
+                AccountSlotLoginStartParams::Chatgpt {
+                    slot_id: None,
+                    codex_streamlined_login: false,
+                    use_hosted_login_success_page: false,
+                    app_brand: None,
+                },
+            )?),
+        )
+        .await?;
+    let started: AccountSlotLoginStartResponse =
+        timeout(DEFAULT_TIMEOUT, app_server.read_response(request_id)).await??;
+    let Some(AccountSlotLoginChallenge::Browser { login_id, .. }) = started.challenge else {
+        anyhow::bail!("expected browser login challenge");
+    };
+
+    let manifest = codex_home.path().join("account-slots.toml");
+    std::fs::rename(
+        &manifest,
+        codex_home.path().join("account-slots.before-cancel.toml"),
+    )?;
+    std::fs::create_dir(&manifest)?;
+    let request_id = app_server
+        .send_cancel_login_account_request(CancelLoginAccountParams { login_id })
+        .await?;
+    let error = timeout(
+        DEFAULT_TIMEOUT,
+        app_server.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    assert_eq!(error.error.code, -32603);
+    Ok(())
+}
 
 #[tokio::test]
 async fn api_key_login_creates_ready_private_slot_and_sanitized_events() -> Result<()> {
@@ -85,6 +234,11 @@ shell_snapshot = false
         app_server.read_notification("sessionRuntime/operation/updated"),
     )
     .await??;
+    let started: AccountSlotChangedNotification = timeout(
+        DEFAULT_TIMEOUT,
+        app_server.read_notification("accountSlot/changed"),
+    )
+    .await??;
     let changed: AccountSlotChangedNotification = timeout(
         DEFAULT_TIMEOUT,
         app_server.read_notification("accountSlot/changed"),
@@ -98,6 +252,18 @@ shell_snapshot = false
 
     assert_eq!(response.slot.status, AccountSlotStatus::Ready);
     assert_eq!(response.challenge, None);
+    assert_eq!(
+        (
+            started.slot.status,
+            started.slot.active_login_operation_id.as_deref(),
+            started.slot.attempt_generation,
+        ),
+        (
+            AccountSlotStatus::LoginRequired,
+            None,
+            response.slot.attempt_generation,
+        )
+    );
     assert_eq!(changed.slot, response.slot);
     assert_eq!(
         accepted.operation.status,

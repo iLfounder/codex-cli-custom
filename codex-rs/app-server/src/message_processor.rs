@@ -312,6 +312,7 @@ impl MessageProcessor {
             codex_core::build_models_manager(config.as_ref(), auth_manager.clone());
         let account_registry = Arc::new(AccountRegistry::new(
             Arc::clone(&config),
+            config_manager.clone(),
             Arc::clone(&auth_manager),
             Arc::clone(&default_models_manager),
             Arc::clone(&thread_store),

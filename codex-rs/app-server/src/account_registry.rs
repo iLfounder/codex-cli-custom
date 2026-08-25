@@ -25,8 +25,10 @@ use codex_core::path_utils::write_atomically;
 use codex_login::AuthConfig;
 use codex_login::AuthManager;
 use codex_login::AuthSourceKind;
+use codex_login::CodexAuth;
 use codex_model_provider::create_model_provider;
 use codex_models_manager::manager::SharedModelsManager;
+use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::error::CodexErr;
 use codex_protocol::protocol::ExecutionAccountBinding;
 use codex_thread_store::ThreadStore;
@@ -37,6 +39,7 @@ use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
 
 use crate::auth_mode::auth_mode_to_api;
+use crate::config_manager::ConfigManager;
 use crate::error_code::internal_error;
 use crate::error_code::invalid_params;
 use crate::error_code::invalid_request;
@@ -56,6 +59,21 @@ const DENY_HOST_PROVIDER_AUTH: &str = "host_owned_provider_auth";
 const DENY_HOST_WORKLOAD_IDENTITY: &str = "host_owned_workload_identity";
 const DENY_LOGIN_NOT_AVAILABLE: &str = "account_slot_login_not_available";
 const DENY_SWITCH_NOT_AVAILABLE: &str = "thread_account_switch_not_available";
+const DENY_DEFAULT_LOGIN_EXTERNAL_AUTH: &str = "external_auth_active";
+const DENY_DEFAULT_LOGIN_METHOD: &str = "chatgpt_login_not_allowed";
+const DENY_DEFAULT_LOGOUT_PROVIDER: &str = "provider_managed_logout_not_allowed";
+const DENY_DEFAULT_WORKLOAD_IDENTITY: &str = "workload_identity_managed_auth";
+
+pub(crate) fn default_logout_uses_host_managed_provider(
+    config: &Config,
+    auth_manager: &AuthManager,
+) -> bool {
+    config.model_provider.is_amazon_bedrock()
+        && !matches!(
+            auth_manager.auth_cached(),
+            Some(CodexAuth::BedrockApiKey(_))
+        )
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -260,6 +278,7 @@ struct AccountSlotRecord {
     runtime: Arc<AccountRuntimeCell>,
     binding_transition: Arc<Mutex<()>>,
     active_login_operation_id: Option<String>,
+    active_login_cancelable: bool,
     active_logout_operation_id: Option<String>,
     completed_login_operation_id: Option<String>,
 }
@@ -311,6 +330,7 @@ struct AccountRegistryState {
 
 pub(crate) struct AccountRegistry {
     config: Arc<Config>,
+    config_manager: ConfigManager,
     auth_config_template: AuthConfig,
     thread_store: Arc<dyn ThreadStore>,
     state: RwLock<AccountRegistryState>,
@@ -327,6 +347,7 @@ pub(crate) enum BrowserLoginOwner {
 impl AccountRegistry {
     pub(crate) fn new(
         config: Arc<Config>,
+        config_manager: ConfigManager,
         default_auth_manager: Arc<AuthManager>,
         default_models_manager: SharedModelsManager,
         thread_store: Arc<dyn ThreadStore>,
@@ -360,6 +381,7 @@ impl AccountRegistry {
                     runtime,
                     binding_transition: Arc::new(Mutex::new(())),
                     active_login_operation_id: None,
+                    active_login_cancelable: false,
                     active_logout_operation_id: None,
                     completed_login_operation_id: None,
                 }
@@ -374,6 +396,7 @@ impl AccountRegistry {
         Self {
             auth_config_template: config.auth_config(),
             thread_store,
+            config_manager,
             config,
             state: RwLock::new(AccountRegistryState {
                 revision: manifest.revision,
@@ -407,9 +430,13 @@ impl AccountRegistry {
         };
         let start = cursor_start(params.cursor.as_deref(), revision, &slots)?;
         let end = start.saturating_add(limit).min(slots.len());
+        let current_config = self.load_latest_config().await;
         let mut data = Vec::with_capacity(end.saturating_sub(start));
         for slot in &slots[start..end] {
-            data.push(self.snapshot(slot, revision, &capability).await);
+            data.push(
+                self.snapshot(slot, revision, &capability, &current_config)
+                    .await,
+            );
         }
         let next_cursor = if end < slots.len() {
             Some(
@@ -443,6 +470,20 @@ impl AccountRegistry {
         Ok(self.capability(manifest_error))
     }
 
+    async fn load_latest_config(&self) -> Config {
+        match self
+            .config_manager
+            .load_latest_config(/*fallback_cwd*/ None)
+            .await
+        {
+            Ok(config) => config,
+            Err(error) => {
+                tracing::warn!("failed to reload config, using startup config: {error}");
+                self.config.as_ref().clone()
+            }
+        }
+    }
+
     pub(crate) async fn lock_slot_binding_transition(
         &self,
         account_slot_id: &str,
@@ -469,6 +510,7 @@ impl AccountRegistry {
         slot: &AccountSlotRecord,
         revision: u64,
         capability: &AccountSlotCapability,
+        current_config: &Config,
     ) -> AccountSlotSnapshot {
         let runtime = if capability.available || slot.manifest.is_default {
             Some(self.runtime(slot).await)
@@ -483,9 +525,40 @@ impl AccountRegistry {
             (true, Some(_)) => AccountSlotStatus::Ready,
             _ => slot.manifest.status.into(),
         };
-        let error_code = (status == AccountSlotStatus::Failed)
-            .then(|| slot.manifest.error_code.clone())
-            .flatten();
+        let error_code = slot.manifest.error_code.clone();
+        let default_policy = slot.manifest.is_default.then(|| {
+            let auth_manager = runtime.as_ref().map(|runtime| &runtime.auth_manager);
+            let login_deny_reason = if auth_manager
+                .is_none_or(|auth_manager| auth_manager.is_workload_identity_selected())
+            {
+                Some(DENY_DEFAULT_WORKLOAD_IDENTITY)
+            } else if auth_manager
+                .is_some_and(|auth_manager| auth_manager.is_external_chatgpt_auth_active())
+            {
+                Some(DENY_DEFAULT_LOGIN_EXTERNAL_AUTH)
+            } else if auth_manager.is_none_or(|auth_manager| {
+                !auth_manager.is_login_method_allowed(ForcedLoginMethod::Chatgpt)
+            }) {
+                Some(DENY_DEFAULT_LOGIN_METHOD)
+            } else {
+                None
+            };
+            let logout_deny_reason = if auth_manager
+                .is_none_or(|auth_manager| auth_manager.is_workload_identity_selected())
+            {
+                Some(DENY_DEFAULT_WORKLOAD_IDENTITY)
+            } else if auth_manager.is_some_and(|auth_manager| {
+                default_logout_uses_host_managed_provider(current_config, auth_manager)
+            }) {
+                Some(DENY_DEFAULT_LOGOUT_PROVIDER)
+            } else {
+                None
+            };
+            live_registration::DefaultAccountActionPolicy {
+                login_deny_reason,
+                logout_deny_reason,
+            }
+        });
 
         AccountSlotSnapshot {
             account_slot_id: slot.manifest.account_slot_id.clone(),
@@ -495,14 +568,19 @@ impl AccountRegistry {
             auth_mode,
             attempt_generation: slot.manifest.attempt_generation,
             registry_revision: revision,
-            active_login_operation_id: slot.active_login_operation_id.clone(),
+            active_login_operation_id: if slot.active_login_cancelable {
+                slot.active_login_operation_id.clone()
+            } else {
+                None
+            },
             error_code,
             actions: live_registration::available_actions(
                 status,
                 capability,
                 slot.manifest.is_default,
-                slot.active_login_operation_id.is_some()
-                    || slot.active_logout_operation_id.is_some(),
+                slot.active_login_operation_id.is_some(),
+                slot.active_logout_operation_id.is_some(),
+                default_policy.as_ref(),
             ),
             updated_at: slot.manifest.updated_at,
         }

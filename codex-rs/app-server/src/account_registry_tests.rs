@@ -55,7 +55,22 @@ async fn registry_for_home_and_store(
         process_home.to_path_buf(),
     );
     let models_manager = codex_core::build_models_manager(config.as_ref(), auth_manager.clone());
-    AccountRegistry::new(config, auth_manager, models_manager, thread_store)
+    let config_manager = ConfigManager::new(
+        process_home.to_path_buf(),
+        Vec::new(),
+        codex_config::LoaderOverrides::default(),
+        /*strict_config*/ false,
+        codex_config::CloudConfigBundleLoader::default(),
+        codex_arg0::Arg0DispatchPaths::default(),
+        Arc::new(codex_config::NoopThreadConfigLoader),
+    );
+    AccountRegistry::new(
+        config,
+        config_manager,
+        auth_manager,
+        models_manager,
+        thread_store,
+    )
 }
 
 fn manifest(process_home: &Path, revision: u64) -> AccountSlotsManifest {
@@ -309,6 +324,190 @@ async fn browser_login_owner_requires_exact_release() {
 }
 
 #[tokio::test]
+async fn default_login_projection_uses_exact_attempt_cas_and_exposes_cancel() {
+    let process_home = tempdir().expect("temp process home");
+    let registry = registry_for_home(process_home.path()).await;
+    let (first, first_started) = registry
+        .prepare_default_login("default-login-1".to_string())
+        .await
+        .expect("prepare first default login");
+    assert_eq!(first_started.slot.active_login_operation_id, None,);
+    let first_cancelable = registry
+        .mark_login_cancelable("default", first.attempt_generation, &first.operation_id)
+        .await
+        .expect("mark first login cancelable");
+    assert_eq!(
+        first_cancelable.slot.active_login_operation_id.as_deref(),
+        Some("default-login-1")
+    );
+
+    let (second, second_started) = registry
+        .prepare_default_login("default-login-2".to_string())
+        .await
+        .expect("replace default login");
+    assert_eq!(second_started.slot.active_login_operation_id, None);
+    let second_started = registry
+        .mark_login_cancelable("default", second.attempt_generation, &second.operation_id)
+        .await
+        .expect("mark second login cancelable");
+    assert_eq!(
+        (
+            second_started.slot.active_login_operation_id.as_deref(),
+            second_started.slot.attempt_generation,
+        ),
+        (Some("default-login-2"), first.attempt_generation + 1)
+    );
+    assert_eq!(
+        registry
+            .finish_default_login(&first, true, None)
+            .await
+            .expect("ignore superseded completion"),
+        None
+    );
+
+    assert!(second.try_claim_failure());
+    let canceled = registry
+        .finish_default_login(
+            &second,
+            false,
+            Some(live_registration::ERROR_LOGIN_CANCELED),
+        )
+        .await
+        .expect("cancel default login")
+        .expect("matching attempt must publish");
+    assert_eq!(
+        (
+            canceled.slot.status,
+            canceled.slot.active_login_operation_id,
+            canceled.slot.error_code.as_deref(),
+        ),
+        (
+            AccountSlotStatus::Ready,
+            None,
+            Some(live_registration::ERROR_LOGIN_CANCELED),
+        )
+    );
+}
+
+#[tokio::test]
+async fn default_projection_refresh_preserves_active_login_cas() {
+    let process_home = tempdir().expect("temp process home");
+    let registry = registry_for_home(process_home.path()).await;
+    let (prepared, _) = registry
+        .prepare_default_login("default-login".to_string())
+        .await
+        .expect("prepare default login");
+    let started = registry
+        .mark_login_cancelable(
+            "default",
+            prepared.attempt_generation,
+            &prepared.operation_id,
+        )
+        .await
+        .expect("mark login cancelable");
+
+    let refreshed = registry
+        .refresh_default_projection()
+        .await
+        .expect("refresh default projection");
+    assert_eq!(
+        (
+            refreshed.slot.status,
+            refreshed.slot.active_login_operation_id.as_deref(),
+            refreshed.slot.attempt_generation,
+            refreshed.slot.registry_revision,
+        ),
+        (
+            AccountSlotStatus::Ready,
+            Some("default-login"),
+            prepared.attempt_generation,
+            started.slot.registry_revision + 1,
+        )
+    );
+
+    assert!(prepared.try_claim_failure());
+    let terminal = registry
+        .finish_default_login(
+            &prepared,
+            false,
+            Some(live_registration::ERROR_LOGIN_CANCELED),
+        )
+        .await
+        .expect("finish default login")
+        .expect("active login must retain its terminal CAS");
+    assert_eq!(
+        (
+            terminal.slot.status,
+            terminal.slot.active_login_operation_id,
+            terminal.slot.error_code.as_deref(),
+        ),
+        (
+            AccountSlotStatus::Ready,
+            None,
+            Some(live_registration::ERROR_LOGIN_CANCELED),
+        )
+    );
+}
+
+#[tokio::test]
+async fn committed_default_login_clears_active_projection_when_manifest_write_is_delayed() {
+    let process_home = tempdir().expect("temp process home");
+    let registry = registry_for_home(process_home.path()).await;
+    let (prepared, _) = registry
+        .prepare_default_login("default-login".to_string())
+        .await
+        .expect("prepare default login");
+    registry
+        .mark_login_cancelable(
+            DEFAULT_SLOT_ID,
+            prepared.attempt_generation,
+            &prepared.operation_id,
+        )
+        .await
+        .expect("mark login cancelable");
+    assert!(prepared.try_begin_credential_commit());
+    prepared.finish_credential_commit(true);
+
+    let manifest_path = process_home.path().join(MANIFEST_FILE);
+    std::fs::remove_file(&manifest_path).expect("remove manifest fixture");
+    std::fs::create_dir(&manifest_path).expect("block manifest replacement");
+
+    let terminal = registry
+        .finish_default_login(&prepared, true, None)
+        .await
+        .expect("committed auth must retain an in-memory terminal projection")
+        .expect("matching attempt must publish");
+    assert_eq!(
+        (
+            terminal.slot.status,
+            terminal.slot.active_login_operation_id,
+            terminal.slot.error_code,
+        ),
+        (AccountSlotStatus::Ready, None, None)
+    );
+    assert!(
+        registry
+            .state
+            .read()
+            .expect("read registry state")
+            .projection_dirty
+    );
+
+    std::fs::remove_dir(&manifest_path).expect("unblock manifest replacement");
+    registry
+        .reconcile()
+        .await
+        .expect("retry manifest projection");
+    assert!(
+        !registry
+            .state
+            .read()
+            .expect("read registry state")
+            .projection_dirty
+    );
+}
+
+#[tokio::test]
 async fn reconcile_reloads_added_and_removed_auth_once() {
     let process_home = tempdir().expect("temp process home");
     let slots = manifest(process_home.path(), 1);
@@ -349,15 +548,15 @@ async fn reconcile_reloads_added_and_removed_auth_once() {
         AuthKeyringBackendKind::default(),
     )
     .expect("persist secondary auth");
-    registry
-        .state
-        .write()
-        .expect("registry state")
+    let mut state = registry.state.write().expect("registry state");
+    let slot = state
         .slots
         .iter_mut()
         .find(|slot| slot.manifest.account_slot_id == SECOND_SLOT_ID)
-        .expect("secondary slot")
-        .active_login_operation_id = Some("active-login".to_string());
+        .expect("secondary slot");
+    slot.active_login_operation_id = Some("active-login".to_string());
+    slot.active_login_cancelable = true;
+    drop(state);
     registry.reconcile().await.expect("busy reconcile");
     let busy = registry
         .slot_snapshot(SECOND_SLOT_ID)
@@ -377,15 +576,15 @@ async fn reconcile_reloads_added_and_removed_auth_once() {
             0,
         )
     );
-    registry
-        .state
-        .write()
-        .expect("registry state")
+    let mut state = registry.state.write().expect("registry state");
+    let slot = state
         .slots
         .iter_mut()
         .find(|slot| slot.manifest.account_slot_id == SECOND_SLOT_ID)
-        .expect("secondary slot")
-        .active_login_operation_id = None;
+        .expect("secondary slot");
+    slot.active_login_operation_id = None;
+    slot.active_login_cancelable = false;
+    drop(state);
 
     registry.reconcile().await.expect("reconcile");
     let ready = registry

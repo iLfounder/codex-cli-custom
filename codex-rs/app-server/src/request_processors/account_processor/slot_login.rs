@@ -183,6 +183,15 @@ impl AccountRequestProcessor {
                 .await;
             return Err(error);
         }
+        if !starts_async_login {
+            let started = self
+                .account_registry
+                .changed_notification(&prepared.account_slot_id)
+                .await?;
+            self.outgoing
+                .send_server_notification(ServerNotification::AccountSlotChanged(started))
+                .await;
+        }
         let failure_prepared = prepared.clone();
         let result = match params {
             AccountSlotLoginStartParams::ApiKey { api_key, .. } => {
@@ -369,16 +378,32 @@ impl AccountRequestProcessor {
         let (runtime_version, affected) = match replacement {
             Ok(Ok(replacement)) => replacement,
             Ok(Err(error)) => {
-                self.finish_claimed_slot_failure(prepared, ERROR_LOGIN_FAILED)
-                    .await;
+                if let Err(projection_error) = self
+                    .finish_claimed_slot_failure(prepared, ERROR_LOGIN_FAILED)
+                    .await
+                {
+                    tracing::warn!(
+                        operation_id = %prepared.operation_id,
+                        "failed to publish terminal account slot login projection: {}",
+                        projection_error.message
+                    );
+                }
                 return Err(structured_invalid_request(
                     ERROR_LOGIN_FAILED,
                     &error.to_string(),
                 ));
             }
             Err(error) => {
-                self.finish_claimed_slot_failure(prepared, ERROR_LOGIN_FAILED)
-                    .await;
+                if let Err(projection_error) = self
+                    .finish_claimed_slot_failure(prepared, ERROR_LOGIN_FAILED)
+                    .await
+                {
+                    tracing::warn!(
+                        operation_id = %prepared.operation_id,
+                        "failed to publish terminal account slot login projection: {}",
+                        projection_error.message
+                    );
+                }
                 return Err(error);
             }
         };
@@ -412,14 +437,20 @@ impl AccountRequestProcessor {
         if !prepared.try_claim_failure() {
             return;
         }
-        self.finish_claimed_slot_failure(prepared, error_code).await;
+        if let Err(error) = self.finish_claimed_slot_failure(prepared, error_code).await {
+            tracing::warn!(
+                operation_id = %prepared.operation_id,
+                "failed to publish terminal account slot login projection: {}",
+                error.message
+            );
+        }
     }
 
     async fn finish_claimed_slot_failure(
         &self,
         prepared: &PreparedSlotLogin,
         error_code: &'static str,
-    ) {
+    ) -> Result<(), JSONRPCErrorError> {
         let _ = prepared.runtime.auth_manager.logout().await;
         if let Err(error) = tokio::fs::remove_dir_all(&prepared.auth_home).await
             && error.kind() != std::io::ErrorKind::NotFound
@@ -429,19 +460,19 @@ impl AccountRequestProcessor {
                 "failed to remove candidate account credential home: {error}"
             );
         }
-        let pending_failure = self
+        let notification = self
             .account_registry
             .finish_slot_login(prepared, ManifestSlotStatus::Failed, Some(error_code))
+            .await?
+            .ok_or_else(|| {
+                structured_invalid_request(
+                    ERROR_LOGIN_CANCELED,
+                    "account slot login was superseded",
+                )
+            })?;
+        self.outgoing
+            .send_server_notification(ServerNotification::AccountSlotChanged(notification))
             .await;
-        let notification = match pending_failure {
-            Ok(Some(notification)) => Some(notification),
-            Ok(None) | Err(_) => None,
-        };
-        if let Some(notification) = notification {
-            self.outgoing
-                .send_server_notification(ServerNotification::AccountSlotChanged(notification))
-                .await;
-        }
         self.publish_slot_operation(
             prepared,
             SessionRuntimeOperationStatus::Failed,
@@ -451,6 +482,7 @@ impl AccountRequestProcessor {
             }),
         )
         .await;
+        Ok(())
     }
 
     async fn fail_external_slot(&self, prepared: &PreparedSlotLogin) {
@@ -570,9 +602,12 @@ impl AccountRequestProcessor {
         let Some(active) = active else {
             return Ok(false);
         };
+        if !active.prepared.try_claim_failure() {
+            return Ok(false);
+        }
         active.cancel.cancel();
-        self.finish_slot_failure(&active.prepared, ERROR_LOGIN_CANCELED)
-            .await;
+        self.finish_claimed_slot_failure(&active.prepared, ERROR_LOGIN_CANCELED)
+            .await?;
         Ok(true)
     }
 

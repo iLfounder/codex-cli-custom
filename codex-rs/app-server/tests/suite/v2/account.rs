@@ -13,6 +13,8 @@ use chrono::Duration as ChronoDuration;
 use chrono::Utc;
 use codex_app_server_protocol::Account;
 use codex_app_server_protocol::AccountLoginCompletedNotification;
+use codex_app_server_protocol::AccountSlotChangedNotification;
+use codex_app_server_protocol::AccountSlotStatus;
 use codex_app_server_protocol::AccountUpdatedNotification;
 use codex_app_server_protocol::AuthMode;
 use codex_app_server_protocol::CancelLoginAccountParams;
@@ -1091,6 +1093,20 @@ async fn login_account_api_key_succeeds_and_notifies() -> Result<()> {
     pretty_assertions::assert_eq!(payload.auth_mode, Some(AuthMode::ApiKey));
     pretty_assertions::assert_eq!(payload.plan_type, None);
 
+    let projected: AccountSlotChangedNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_notification("accountSlot/changed"),
+    )
+    .await??;
+    assert_eq!(
+        (
+            projected.slot.account_slot_id.as_str(),
+            projected.slot.status,
+            projected.slot.auth_mode,
+        ),
+        ("default", AccountSlotStatus::Ready, Some(AuthMode::ApiKey))
+    );
+
     assert!(codex_home.path().join("auth.json").exists());
     Ok(())
 }
@@ -2034,6 +2050,18 @@ async fn login_account_chatgpt_start_can_be_cancelled() -> Result<()> {
         auth_url.contains("redirect_uri=http%3A%2F%2Flocalhost"),
         "auth_url should contain a redirect_uri to localhost"
     );
+    let started: AccountSlotChangedNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_notification("accountSlot/changed"),
+    )
+    .await??;
+    assert_eq!(
+        (
+            started.slot.account_slot_id.as_str(),
+            started.slot.active_login_operation_id.as_deref(),
+        ),
+        ("default", Some(login_id.as_str()))
+    );
 
     let cancel_id = mcp
         .send_cancel_login_account_request(CancelLoginAccountParams {
@@ -2042,6 +2070,19 @@ async fn login_account_chatgpt_start_can_be_cancelled() -> Result<()> {
         .await?;
     let _ok: CancelLoginAccountResponse =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(cancel_id)).await??;
+    let canceled: AccountSlotChangedNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_notification("accountSlot/changed"),
+    )
+    .await??;
+    assert_eq!(
+        (
+            canceled.slot.status,
+            canceled.slot.active_login_operation_id,
+            canceled.slot.error_code.as_deref(),
+        ),
+        (AccountSlotStatus::Failed, None, Some("loginCanceled"),)
+    );
 
     let note = timeout(
         DEFAULT_READ_TIMEOUT,
