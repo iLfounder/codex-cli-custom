@@ -119,3 +119,24 @@ async fn same_runtime_epoch_rejects_revision_regression() {
     );
     assert_eq!(app.account_registry_revision, 20);
 }
+
+#[tokio::test]
+async fn same_runtime_epoch_merges_each_fresh_projection_independently() {
+    let mut app = make_test_app().await;
+    app.account_registry_revision = 20;
+    app.account_runtime = Some(("epoch-a".to_string(), runtime_snapshot("thread-1", 20)));
+
+    assert_eq!(
+        app.apply_account_snapshot(picker_snapshot("epoch-a", 19, 21)),
+        false
+    );
+    assert_eq!(
+        (
+            app.account_registry_revision,
+            app.account_runtime
+                .as_ref()
+                .map(|(epoch, runtime)| (epoch.as_str(), runtime.state_revision)),
+        ),
+        (20, Some(("epoch-a", 21)))
+    );
+}

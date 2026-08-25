@@ -48,12 +48,7 @@ impl App {
                 thread_id,
                 request_generation,
                 result,
-            } => self.handle_account_picker_loaded(
-                app_server,
-                thread_id,
-                request_generation,
-                result,
-            ),
+            } => self.handle_account_picker_loaded(thread_id, request_generation, result),
             AppEvent::AccountStateRefreshed {
                 thread_id,
                 request_generation,

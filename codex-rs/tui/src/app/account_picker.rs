@@ -148,7 +148,6 @@ impl App {
 
     pub(super) fn handle_account_picker_loaded(
         &mut self,
-        app_server: &AppServerSession,
         thread_id: ThreadId,
         request_generation: u64,
         result: Result<AccountPickerSnapshot, String>,
@@ -167,10 +166,7 @@ impl App {
                 return;
             }
         };
-        if !self.apply_account_snapshot(snapshot) {
-            self.refresh_account_state(app_server);
-            return;
-        }
+        self.apply_account_snapshot(snapshot);
         self.replace_account_picker_if_present(None);
     }
 
@@ -189,14 +185,14 @@ impl App {
         match result {
             Ok(snapshot) => {
                 let selected_slot_id = self.selected_account_slot_id();
-                if !self.apply_account_snapshot(snapshot) {
-                    if self
+                let snapshot_is_fresh = self.apply_account_snapshot(snapshot);
+                if !snapshot_is_fresh
+                    && self
                         .pending_account_control
                         .as_ref()
                         .is_some_and(PendingAccountControl::validation_in_flight)
-                    {
-                        self.refresh_account_state(app_server);
-                    }
+                {
+                    self.refresh_account_state(app_server);
                     return;
                 }
                 self.replace_open_account_views(selected_slot_id.as_deref());
@@ -210,11 +206,13 @@ impl App {
             .account_runtime
             .as_ref()
             .is_some_and(|(epoch, _)| epoch == &snapshot.runtime.instance_epoch);
-        if same_runtime_epoch
-            && (!super::account_validation::revision_meets_lower_bound(
+        let slots_are_fresh = !same_runtime_epoch
+            || super::account_validation::revision_meets_lower_bound(
                 snapshot.slots.registry_revision,
                 self.account_registry_revision,
-            ) || !super::account_validation::runtime_revision_meets_lower_bound(
+            );
+        let runtime_is_fresh = !same_runtime_epoch
+            || super::account_validation::runtime_revision_meets_lower_bound(
                 self.account_runtime
                     .as_ref()
                     .map(|(epoch, runtime)| (epoch.as_str(), runtime.state_revision)),
@@ -222,22 +220,26 @@ impl App {
                     snapshot.runtime.instance_epoch.as_str(),
                     snapshot.runtime.snapshot.state_revision,
                 ),
-            ))
-        {
-            return false;
+            );
+        if slots_are_fresh {
+            self.account_registry_revision = snapshot.slots.registry_revision;
+            self.account_slots = snapshot.slots.data;
+            self.account_slot_capability = Some(snapshot.slots.multi_account);
         }
-        self.account_registry_revision = snapshot.slots.registry_revision;
-        self.account_slots = snapshot.slots.data;
-        self.account_slot_capability = Some(snapshot.slots.multi_account);
-        self.account_runtime = Some((snapshot.runtime.instance_epoch, snapshot.runtime.snapshot));
-        if self
-            .pending_account_control
-            .as_ref()
-            .is_some_and(PendingAccountControl::validation_in_flight)
+        if runtime_is_fresh {
+            self.account_runtime =
+                Some((snapshot.runtime.instance_epoch, snapshot.runtime.snapshot));
+        }
+        let snapshot_is_fresh = slots_are_fresh && runtime_is_fresh;
+        if snapshot_is_fresh
+            && self
+                .pending_account_control
+                .as_ref()
+                .is_some_and(PendingAccountControl::validation_in_flight)
         {
             self.finish_account_control_validation();
         }
-        true
+        snapshot_is_fresh
     }
 
     pub(super) fn next_account_request_generation(&mut self) -> u64 {
