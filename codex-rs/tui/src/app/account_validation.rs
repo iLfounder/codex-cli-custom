@@ -11,6 +11,22 @@ pub(super) fn revision_meets_lower_bound(actual: u64, minimum: u64) -> bool {
     actual >= minimum
 }
 
+pub(super) fn runtime_revision_meets_lower_bound(
+    current: Option<(&str, u64)>,
+    candidate: (&str, u64),
+) -> bool {
+    current.is_none_or(|(current_epoch, current_revision)| {
+        current_epoch != candidate.0 || revision_meets_lower_bound(candidate.1, current_revision)
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AccountSlotUpdateDisposition {
+    Stale,
+    Successor,
+    Gap,
+}
+
 impl App {
     pub(super) fn finish_account_control_validation(&mut self) {
         let Some(pending) = self.pending_account_control.take() else {
@@ -108,6 +124,12 @@ impl App {
         if self
             .current_displayed_thread_id()
             .is_some_and(|thread_id| snapshot.thread_id == thread_id.to_string())
+            && runtime_revision_meets_lower_bound(
+                self.account_runtime
+                    .as_ref()
+                    .map(|(epoch, runtime)| (epoch.as_str(), runtime.state_revision)),
+                (instance_epoch.as_str(), snapshot.state_revision),
+            )
         {
             self.account_runtime = Some((instance_epoch, snapshot));
         }
@@ -117,7 +139,16 @@ impl App {
         &mut self,
         registry_revision: u64,
         slot: AccountSlotSnapshot,
-    ) {
+    ) -> AccountSlotUpdateDisposition {
+        let selected_slot_id = self.selected_account_slot_id();
+        if registry_revision <= self.account_registry_revision {
+            return AccountSlotUpdateDisposition::Stale;
+        }
+        if registry_revision != self.account_registry_revision.saturating_add(1)
+            || slot.registry_revision != registry_revision
+        {
+            return AccountSlotUpdateDisposition::Gap;
+        }
         self.account_registry_revision = registry_revision;
         if let Some(existing) = self
             .account_slots
@@ -128,6 +159,8 @@ impl App {
         } else {
             self.account_slots.push(slot);
         }
+        self.replace_open_account_views(selected_slot_id.as_deref());
+        AccountSlotUpdateDisposition::Successor
     }
 }
 

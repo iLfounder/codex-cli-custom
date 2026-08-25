@@ -1,12 +1,11 @@
 //! Account-slot picker and exact-thread account controls.
 
+use super::account_picker_view::ACCOUNT_PICKER_VIEW_ID;
 use super::*;
 use crate::app_server_session::AccountSlotsSnapshot;
 use crate::app_server_session::ThreadRuntimeSnapshot;
 use crate::app_server_session::list_account_slots;
 use crate::app_server_session::session_runtime_for_thread;
-
-const ACCOUNT_PICKER_VIEW_ID: &str = "account-picker";
 
 #[derive(Debug)]
 pub(crate) struct AccountPickerSnapshot {
@@ -122,8 +121,34 @@ impl App {
         });
     }
 
+    pub(super) fn refresh_account_state(&mut self, app_server: &AppServerSession) {
+        let Some(thread_id) = self.current_displayed_thread_id() else {
+            return;
+        };
+        let request_generation = self.next_account_request_generation();
+        let request_handle = app_server.request_handle();
+        let runtime_handle = request_handle.clone();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let (slots, runtime) = tokio::join!(
+                list_account_slots(request_handle),
+                session_runtime_for_thread(runtime_handle, thread_id)
+            );
+            let result = match (slots, runtime) {
+                (Ok(slots), Ok(runtime)) => Ok(AccountPickerSnapshot { slots, runtime }),
+                (Err(error), _) | (_, Err(error)) => Err(error.to_string()),
+            };
+            app_event_tx.send(AppEvent::AccountStateRefreshed {
+                thread_id,
+                request_generation,
+                result,
+            });
+        });
+    }
+
     pub(super) fn handle_account_picker_loaded(
         &mut self,
+        app_server: &AppServerSession,
         thread_id: ThreadId,
         request_generation: u64,
         result: Result<AccountPickerSnapshot, String>,
@@ -142,6 +167,65 @@ impl App {
                 return;
             }
         };
+        if !self.apply_account_snapshot(snapshot) {
+            self.refresh_account_state(app_server);
+            return;
+        }
+        self.replace_account_picker_if_present(None);
+    }
+
+    pub(super) fn handle_account_state_refreshed(
+        &mut self,
+        app_server: &AppServerSession,
+        thread_id: ThreadId,
+        request_generation: u64,
+        result: Result<AccountPickerSnapshot, String>,
+    ) {
+        if request_generation != self.account_request_generation
+            || self.current_displayed_thread_id() != Some(thread_id)
+        {
+            return;
+        }
+        match result {
+            Ok(snapshot) => {
+                let selected_slot_id = self.selected_account_slot_id();
+                if !self.apply_account_snapshot(snapshot) {
+                    if self
+                        .pending_account_control
+                        .as_ref()
+                        .is_some_and(PendingAccountControl::validation_in_flight)
+                    {
+                        self.refresh_account_state(app_server);
+                    }
+                    return;
+                }
+                self.replace_open_account_views(selected_slot_id.as_deref());
+            }
+            Err(error) => tracing::warn!("could not refresh account state: {error}"),
+        }
+    }
+
+    fn apply_account_snapshot(&mut self, snapshot: AccountPickerSnapshot) -> bool {
+        let same_runtime_epoch = self
+            .account_runtime
+            .as_ref()
+            .is_some_and(|(epoch, _)| epoch == &snapshot.runtime.instance_epoch);
+        if same_runtime_epoch
+            && (!super::account_validation::revision_meets_lower_bound(
+                snapshot.slots.registry_revision,
+                self.account_registry_revision,
+            ) || !super::account_validation::runtime_revision_meets_lower_bound(
+                self.account_runtime
+                    .as_ref()
+                    .map(|(epoch, runtime)| (epoch.as_str(), runtime.state_revision)),
+                (
+                    snapshot.runtime.instance_epoch.as_str(),
+                    snapshot.runtime.snapshot.state_revision,
+                ),
+            ))
+        {
+            return false;
+        }
         self.account_registry_revision = snapshot.slots.registry_revision;
         self.account_slots = snapshot.slots.data;
         self.account_slot_capability = Some(snapshot.slots.multi_account);
@@ -153,7 +237,7 @@ impl App {
         {
             self.finish_account_control_validation();
         }
-        self.show_account_picker();
+        true
     }
 
     pub(super) fn next_account_request_generation(&mut self) -> u64 {
@@ -161,3 +245,7 @@ impl App {
         self.account_request_generation
     }
 }
+
+#[cfg(test)]
+#[path = "account_picker_tests.rs"]
+mod tests;

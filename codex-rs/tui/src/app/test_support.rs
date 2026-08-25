@@ -65,6 +65,7 @@ pub(super) async fn make_test_app() -> App {
         account_registry_revision: 0,
         account_runtime: None,
         account_request_generation: 0,
+        account_detail_slot_id: None,
         pending_account_control: None,
         pending_dynamic_thread_control: None,
         plugin_command_state: plugin_commands::PluginCommandState::default(),

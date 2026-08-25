@@ -36,6 +36,8 @@ use codex_app_server_protocol::AccountSlotLogoutResponse;
 use codex_app_server_protocol::AccountSlotSnapshot;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::AuthMode;
+use codex_app_server_protocol::CancelLoginAccountParams;
+use codex_app_server_protocol::CancelLoginAccountResponse;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ConfigBatchWriteParams;
 use codex_app_server_protocol::ConfigRequirementsReadResponse;
@@ -49,6 +51,8 @@ use codex_app_server_protocol::GetAccountParams;
 use codex_app_server_protocol::GetAccountRateLimitsResponse;
 use codex_app_server_protocol::GetAccountResponse;
 use codex_app_server_protocol::JSONRPCErrorError;
+use codex_app_server_protocol::LoginAccountParams;
+use codex_app_server_protocol::LoginAccountResponse;
 use codex_app_server_protocol::LogoutAccountResponse;
 use codex_app_server_protocol::MemoryResetResponse;
 use codex_app_server_protocol::Model as ApiModel;
@@ -1815,6 +1819,44 @@ pub(crate) async fn start_account_slot_login(
         .request_typed(ClientRequest::AccountSlotLoginStart {
             request_id: RequestId::String(format!("tui-account-login-{}", Uuid::new_v4())),
             params,
+        })
+        .await
+        .map_err(Into::into)
+}
+
+pub(crate) async fn start_account_login(
+    request_handle: AppServerRequestHandle,
+    params: LoginAccountParams,
+) -> Result<LoginAccountResponse> {
+    request_handle
+        .request_typed(ClientRequest::LoginAccount {
+            request_id: RequestId::String(format!("tui-default-account-login-{}", Uuid::new_v4())),
+            params,
+        })
+        .await
+        .map_err(Into::into)
+}
+
+pub(crate) async fn cancel_account_login(
+    request_handle: AppServerRequestHandle,
+    params: CancelLoginAccountParams,
+) -> Result<CancelLoginAccountResponse> {
+    request_handle
+        .request_typed(ClientRequest::CancelLoginAccount {
+            request_id: RequestId::String(format!("tui-account-login-cancel-{}", Uuid::new_v4())),
+            params,
+        })
+        .await
+        .map_err(Into::into)
+}
+
+pub(crate) async fn logout_default_account(
+    request_handle: AppServerRequestHandle,
+) -> Result<LogoutAccountResponse> {
+    request_handle
+        .request_typed(ClientRequest::LogoutAccount {
+            request_id: RequestId::String(format!("tui-default-account-logout-{}", Uuid::new_v4())),
+            params: None,
         })
         .await
         .map_err(Into::into)

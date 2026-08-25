@@ -1,148 +1,211 @@
 use super::*;
+use crate::app::account_login::login_challenge_params;
 use crate::app::test_support::make_test_app;
-use codex_app_server_protocol::AccountSlotActionAvailability;
-use codex_app_server_protocol::AccountSlotCapability;
-use codex_app_server_protocol::AccountSlotSnapshot;
+use codex_app_server_protocol::AccountSlotLoginChallenge;
 use insta::assert_snapshot;
-
-#[tokio::test]
-async fn account_picker_enables_ready_target_but_not_current_slot() {
-    let mut app = make_test_app().await;
-    app.account_slots = vec![
-        AccountSlotSnapshot {
-            account_slot_id: "default".to_string(),
-            label: "Primary".to_string(),
-            is_default: true,
-            status: AccountSlotStatus::Ready,
-            auth_mode: None,
-            attempt_generation: 3,
-            registry_revision: 7,
-            active_login_operation_id: None,
-            error_code: None,
-            actions: vec![AccountSlotActionAvailability {
-                action: AccountSlotAction::SwitchTo,
-                allowed: true,
-                deny_reason: None,
-            }],
-            updated_at: 0,
-        },
-        AccountSlotSnapshot {
-            account_slot_id: "secondary".to_string(),
-            label: "Secondary".to_string(),
-            is_default: false,
-            status: AccountSlotStatus::Ready,
-            auth_mode: None,
-            attempt_generation: 2,
-            registry_revision: 7,
-            active_login_operation_id: None,
-            error_code: None,
-            actions: vec![
-                AccountSlotActionAvailability {
-                    action: AccountSlotAction::SwitchTo,
-                    allowed: true,
-                    deny_reason: None,
-                },
-                AccountSlotActionAvailability {
-                    action: AccountSlotAction::Logout,
-                    allowed: true,
-                    deny_reason: None,
-                },
-                AccountSlotActionAvailability {
-                    action: AccountSlotAction::RetryLogin,
-                    allowed: true,
-                    deny_reason: None,
-                },
-            ],
-            updated_at: 0,
-        },
-    ];
-    app.account_slot_capability = Some(AccountSlotCapability {
-        available: true,
-        deny_reason: None,
-    });
-    app.account_runtime = Some((
-        "instance".to_string(),
-        serde_json::from_value(serde_json::json!({
-            "threadId": "thread",
-            "stateRevision": 1,
-            "identity": {
-                "sessionId": "thread",
-                "forkedFromId": null,
-                "parentThreadId": null,
-                "name": null,
-                "source": "cli",
-                "cwd": "/tmp",
-                "gitInfo": null,
-                "settings": null
-            },
-            "lifecycle": {
-                "state": "idle",
-                "activeTurnId": null,
-                "waitingOn": [],
-                "subscriberCount": 1,
-                "clientIncarnations": [],
-                "lastActivityAt": null,
-                "unloadAt": null
-            },
-            "writer": {
-                "state": "ownedHere",
-                "storeId": null,
-                "writerGeneration": 1,
-                "denyReason": null
-            },
-            "persistence": {
-                "jsonl": null,
-                "sqlite": null,
-                "lag": null,
-                "flushHealth": "unknown",
-                "materializeHealth": "unknown",
-                "flushedAt": null,
-                "materializedAt": null,
-                "denyReason": null
-            },
-            "account": {
-                "current": {
-                    "accountSlotId": "default",
-                    "executionGeneration": 1
-                },
-                "activeTurn": null,
-                "switchState": "stable",
-                "switchTargetSlotId": null,
-                "denyReason": null
-            },
-            "actions": [{
-                "action": "switchAccount",
-                "allowed": true,
-                "denyReason": null
-            }]
-        }))
-        .expect("runtime snapshot"),
-    ));
-
-    let params = app.account_selection_view_params();
-    let rendered = params
+use pretty_assertions::assert_eq;
+fn slot(
+    id: &str,
+    status: AccountSlotStatus,
+    active_login: Option<&str>,
+    actions: &[(AccountSlotAction, bool, Option<&str>)],
+) -> AccountSlotSnapshot {
+    AccountSlotSnapshot {
+        account_slot_id: id.to_string(),
+        label: id.to_string(),
+        is_default: id == "default",
+        status,
+        auth_mode: None,
+        attempt_generation: 1,
+        registry_revision: 7,
+        active_login_operation_id: active_login.map(str::to_string),
+        error_code: Some("oauth_failed".to_string()),
+        actions: actions
+            .iter()
+            .map(|(action, allowed, reason)| AccountSlotActionAvailability {
+                action: *action,
+                allowed: *allowed,
+                deny_reason: reason.map(str::to_string),
+            })
+            .collect(),
+        updated_at: 0,
+    }
+}
+fn rendered_items(params: &SelectionViewParams) -> String {
+    params
         .items
         .iter()
         .map(|item| {
             format!(
-                "{} | {} | {}",
+                "{} | {} | {}{}",
                 item.name,
                 item.description.as_deref().unwrap_or_default(),
                 if item.is_disabled {
                     "disabled"
                 } else {
                     "enabled"
-                }
+                },
+                item.disabled_reason
+                    .as_ref()
+                    .map(|reason| format!(" ({reason})"))
+                    .unwrap_or_default()
             )
         })
         .collect::<Vec<_>>()
-        .join("\n");
-
-    assert_snapshot!(rendered, @r"
-    Primary | Ready | disabled
-    Secondary | Ready | enabled
-    Sign in again to Secondary | Replace credentials for every idle bound session | enabled
-    Log out Secondary | Remove this secondary account | enabled
-    Add account | Sign in with a browser or device code | enabled
+        .join("\n")
+}
+#[test]
+fn login_challenge_requires_explicit_browser_or_cancel_selection() {
+    let params = login_challenge_params(
+        "secondary".to_string(),
+        AccountSlotLoginChallenge::DeviceCode {
+            login_id: "login-1".to_string(),
+            verification_url: "https://example.test/device".to_string(),
+            user_code: "ABCD-EFGH".to_string(),
+        },
+    );
+    assert_snapshot!(format!("{}\n{}", params.subtitle.unwrap(), params.items.iter().map(|item| item.name.as_str()).collect::<Vec<_>>().join(" | ")), @r"
+    Open https://example.test/device
+    and enter code ABCD-EFGH
+    Open Browser | Cancel login
     ");
+}
+#[tokio::test]
+async fn account_rows_are_always_selectable_and_report_active_login() {
+    let mut app = make_test_app().await;
+    app.account_slots = vec![
+        slot("default", AccountSlotStatus::Ready, None, &[]),
+        slot("failed", AccountSlotStatus::Failed, None, &[]),
+        slot(
+            "active",
+            AccountSlotStatus::LoginRequired,
+            Some("login-1"),
+            &[],
+        ),
+    ];
+    assert_snapshot!(rendered_items(&app.account_selection_view_params(None)), @r"
+    default | Ready | enabled
+    failed | Login failed | enabled
+    active | Login in progress | enabled
+    Add account | Sign in with a browser or device code | disabled
+    ");
+}
+#[tokio::test]
+async fn account_detail_disables_only_unavailable_actions() {
+    let app = make_test_app().await;
+    let ready = slot(
+        "secondary",
+        AccountSlotStatus::Ready,
+        None,
+        &[
+            (AccountSlotAction::RetryLogin, false, Some("policy")),
+            (AccountSlotAction::SwitchTo, true, None),
+            (AccountSlotAction::Logout, true, None),
+        ],
+    );
+    assert_snapshot!(rendered_items(&app.account_detail_view_params(&ready)), @r"
+    Log in | Authenticate this account | disabled (Account does not require login)
+    Retry login | Retry the failed sign-in | disabled (No failed login to retry)
+    Sign in again | Replace this account's credentials | disabled (policy)
+    Cancel login | Stop the active sign-in attempt | disabled (No login is in progress)
+    Use for this session | Switch the next turn to this account | disabled (Account switching is unavailable)
+    Log out | Remove this account's credentials | enabled
+    ");
+    let ready_params = app.account_detail_view_params(&ready);
+    assert_eq!(
+        ready_params.subtitle.as_deref(),
+        Some("Ready · Secondary account · Error: oauth_failed")
+    );
+
+    let failed = slot(
+        "secondary",
+        AccountSlotStatus::Failed,
+        None,
+        &[
+            (AccountSlotAction::RetryLogin, true, None),
+            (
+                AccountSlotAction::SwitchTo,
+                false,
+                Some("Account is not ready"),
+            ),
+            (
+                AccountSlotAction::Logout,
+                false,
+                Some("Account is not ready"),
+            ),
+        ],
+    );
+    assert_snapshot!(rendered_items(&app.account_detail_view_params(&failed)), @r"
+    Log in | Authenticate this account | disabled (Account does not require login)
+    Retry login | Retry the failed sign-in | enabled
+    Sign in again | Replace this account's credentials | disabled (Account is not ready)
+    Cancel login | Stop the active sign-in attempt | disabled (No login is in progress)
+    Use for this session | Switch the next turn to this account | disabled (Account is not ready)
+    Log out | Remove this account's credentials | disabled (Account is not ready)
+    ");
+
+    let active = slot(
+        "secondary",
+        AccountSlotStatus::LoginRequired,
+        Some("login-1"),
+        &[
+            (
+                AccountSlotAction::Login,
+                false,
+                Some("Login already in progress"),
+            ),
+            (
+                AccountSlotAction::RetryLogin,
+                false,
+                Some("Login already in progress"),
+            ),
+            (
+                AccountSlotAction::SwitchTo,
+                false,
+                Some("Login already in progress"),
+            ),
+            (
+                AccountSlotAction::Logout,
+                false,
+                Some("Login already in progress"),
+            ),
+        ],
+    );
+    assert_snapshot!(rendered_items(&app.account_detail_view_params(&active)), @r"
+    Log in | Authenticate this account | disabled (Login already in progress)
+    Retry login | Retry the failed sign-in | disabled (No failed login to retry)
+    Sign in again | Replace this account's credentials | disabled (Account is not ready)
+    Cancel login | Stop the active sign-in attempt | enabled
+    Use for this session | Switch the next turn to this account | disabled (Login already in progress)
+    Log out | Remove this account's credentials | disabled (Login already in progress)
+    ");
+}
+
+#[tokio::test]
+async fn selection_is_preserved_by_account_slot_identity() {
+    let mut app = make_test_app().await;
+    app.account_slots = vec![
+        slot("default", AccountSlotStatus::Ready, None, &[]),
+        slot("secondary", AccountSlotStatus::Ready, None, &[]),
+    ];
+    assert_eq!(
+        app.account_selection_view_params(Some("secondary"))
+            .initial_selected_idx,
+        Some(1)
+    );
+}
+
+#[tokio::test]
+async fn replacing_a_closed_picker_updates_no_ui() {
+    let mut app = make_test_app().await;
+    app.account_slots = vec![slot("default", AccountSlotStatus::Ready, None, &[])];
+    assert_eq!(app.replace_account_picker_if_present(None), false);
+    assert_eq!(app.chat_widget.no_modal_or_popup_active(), true);
+}
+
+#[test]
+fn unavailable_auth_state_is_distinct_from_failed_login() {
+    let mut unavailable = slot("secondary", AccountSlotStatus::Failed, None, &[]);
+    unavailable.error_code = Some("authUnavailable".to_string());
+    assert_eq!(account_slot_status_label(&unavailable), "Unavailable");
 }

@@ -48,7 +48,23 @@ impl App {
                 thread_id,
                 request_generation,
                 result,
-            } => self.handle_account_picker_loaded(thread_id, request_generation, result),
+            } => self.handle_account_picker_loaded(
+                app_server,
+                thread_id,
+                request_generation,
+                result,
+            ),
+            AppEvent::AccountStateRefreshed {
+                thread_id,
+                request_generation,
+                result,
+            } => self.handle_account_state_refreshed(
+                app_server,
+                thread_id,
+                request_generation,
+                result,
+            ),
+            AppEvent::OpenAccountDetail { slot_id } => self.show_account_detail(slot_id),
             AppEvent::OpenAccountLoginMethods { slot_id } => {
                 self.show_account_login_methods(slot_id)
             }
@@ -75,6 +91,19 @@ impl App {
                 app_server,
                 thread_id,
                 instance_epoch,
+                result,
+            ),
+            AppEvent::CancelAccountLogin { slot_id, login_id } => {
+                self.cancel_account_login(app_server, slot_id, login_id)
+            }
+            AppEvent::AccountLoginCanceled {
+                slot_id,
+                login_id,
+                result,
+            } => self.handle_account_login_canceled(
+                app_server,
+                &slot_id,
+                &login_id,
                 result,
             ),
             AppEvent::AccountSwitchFinished {

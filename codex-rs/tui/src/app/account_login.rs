@@ -1,16 +1,30 @@
-//! Account-slot login transport and terminal validation.
-
 use super::account_picker::AccountLoginMethod;
 use super::account_picker::PendingAccountControl;
 use super::*;
+use crate::app_server_session::cancel_account_login;
+use crate::app_server_session::start_account_login as start_default_account_login;
 use crate::app_server_session::start_account_slot_login;
 use codex_app_server_protocol::AccountSlotAction;
 use codex_app_server_protocol::AccountSlotLoginChallenge;
 use codex_app_server_protocol::AccountSlotLoginStartParams;
 use codex_app_server_protocol::AccountSlotLoginStartResponse;
 use codex_app_server_protocol::AccountSlotStatus;
+use codex_app_server_protocol::CancelLoginAccountParams;
+use codex_app_server_protocol::CancelLoginAccountResponse;
+use codex_app_server_protocol::CancelLoginAccountStatus;
+use codex_app_server_protocol::LoginAccountParams;
+use codex_app_server_protocol::LoginAccountResponse;
 use codex_app_server_protocol::SessionRuntimeOperation;
 use codex_app_server_protocol::SessionRuntimeOperationStatus;
+
+#[derive(Debug)]
+pub(crate) enum AccountLoginStartOutcome {
+    Default {
+        slot_id: String,
+        challenge: AccountSlotLoginChallenge,
+    },
+    Secondary(AccountSlotLoginStartResponse),
+}
 
 impl App {
     pub(super) fn start_account_login(
@@ -21,16 +35,17 @@ impl App {
         slot_id: Option<String>,
         method: AccountLoginMethod,
     ) {
-        if let Some(slot_id) = slot_id.as_deref() {
-            let Some(slot) = self
-                .account_slots
+        let selected_slot = slot_id.as_ref().and_then(|slot_id| {
+            self.account_slots
                 .iter()
-                .find(|slot| slot.account_slot_id == slot_id)
-            else {
-                self.chat_widget
-                    .add_error_message("The selected account slot no longer exists.".to_string());
-                return;
-            };
+                .find(|slot| slot.account_slot_id == *slot_id)
+        });
+        if slot_id.is_some() && selected_slot.is_none() {
+            self.chat_widget
+                .add_error_message("The selected account slot no longer exists.".to_string());
+            return;
+        }
+        if let Some(slot) = selected_slot {
             let action = if matches!(
                 slot.status,
                 AccountSlotStatus::Ready | AccountSlotStatus::Failed
@@ -59,23 +74,43 @@ impl App {
                 .add_error_message("Adding another account is unavailable.".to_string());
             return;
         }
-        let params = match method {
-            AccountLoginMethod::Browser => AccountSlotLoginStartParams::Chatgpt {
-                slot_id,
-                codex_streamlined_login: false,
-                use_hosted_login_success_page: false,
-                app_brand: None,
-            },
-            AccountLoginMethod::DeviceCode => {
-                AccountSlotLoginStartParams::ChatgptDeviceCode { slot_id }
-            }
-        };
+
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
+        let default_slot_id = selected_slot
+            .filter(|slot| slot.is_default)
+            .map(|slot| slot.account_slot_id.clone());
         tokio::spawn(async move {
-            let result = start_account_slot_login(request_handle, params)
-                .await
-                .map_err(|error| error.to_string());
+            let result = if let Some(default_slot_id) = default_slot_id {
+                let params = match method {
+                    AccountLoginMethod::Browser => LoginAccountParams::Chatgpt {
+                        codex_streamlined_login: false,
+                        use_hosted_login_success_page: false,
+                        app_brand: None,
+                    },
+                    AccountLoginMethod::DeviceCode => LoginAccountParams::ChatgptDeviceCode,
+                };
+                match start_default_account_login(request_handle, params).await {
+                    Ok(response) => default_login_outcome(default_slot_id, method, response),
+                    Err(error) => Err(error.to_string()),
+                }
+            } else {
+                let params = match method {
+                    AccountLoginMethod::Browser => AccountSlotLoginStartParams::Chatgpt {
+                        slot_id,
+                        codex_streamlined_login: false,
+                        use_hosted_login_success_page: false,
+                        app_brand: None,
+                    },
+                    AccountLoginMethod::DeviceCode => {
+                        AccountSlotLoginStartParams::ChatgptDeviceCode { slot_id }
+                    }
+                };
+                start_account_slot_login(request_handle, params)
+                    .await
+                    .map(AccountLoginStartOutcome::Secondary)
+                    .map_err(|error| error.to_string())
+            };
             app_event_tx.send(AppEvent::AccountSlotLoginStarted {
                 thread_id,
                 instance_epoch,
@@ -89,13 +124,18 @@ impl App {
         app_server: &AppServerSession,
         thread_id: ThreadId,
         instance_epoch: String,
-        result: Result<AccountSlotLoginStartResponse, String>,
+        result: Result<AccountLoginStartOutcome, String>,
     ) {
+        if self.current_displayed_thread_id() != Some(thread_id) {
+            return;
+        }
         match result {
-            Ok(response) => {
-                if self.current_displayed_thread_id() != Some(thread_id)
-                    || response.operation.action
-                        != codex_app_server_protocol::SessionRuntimeOperationAction::AccountSlotLogin
+            Ok(AccountLoginStartOutcome::Default { slot_id, challenge }) => {
+                self.show_account_login_challenge(slot_id, challenge)
+            }
+            Ok(AccountLoginStartOutcome::Secondary(response)) => {
+                if response.operation.action
+                    != codex_app_server_protocol::SessionRuntimeOperationAction::AccountSlotLogin
                     || response.operation.operation_id.is_empty()
                     || response.operation.account_slot_id.as_deref()
                         != Some(response.slot.account_slot_id.as_str())
@@ -115,21 +155,11 @@ impl App {
                     minimum_registry_revision: response.slot.registry_revision,
                     validation_in_flight: false,
                 });
-                match response.challenge {
-                    Some(AccountSlotLoginChallenge::Browser { auth_url, .. }) => {
-                        self.open_url_in_browser(auth_url)
-                    }
-                    Some(AccountSlotLoginChallenge::DeviceCode {
-                        verification_url,
-                        user_code,
-                        ..
-                    }) => {
-                        self.chat_widget.add_info_message(
-                            format!("Open {verification_url} and enter code {user_code}."),
-                            /*hint*/ None,
-                        );
-                    }
-                    None => {}
+                if let Some(challenge) = response.challenge {
+                    self.show_account_login_challenge(
+                        response.slot.account_slot_id.clone(),
+                        challenge,
+                    );
                 }
                 match response.operation.status {
                     SessionRuntimeOperationStatus::Ready => self.begin_account_control_validation(
@@ -147,9 +177,7 @@ impl App {
                         );
                     }
                     SessionRuntimeOperationStatus::Accepted
-                    | SessionRuntimeOperationStatus::Running => {
-                        self.open_account_picker(app_server)
-                    }
+                    | SessionRuntimeOperationStatus::Running => {}
                     SessionRuntimeOperationStatus::Released => {
                         self.pending_account_control = None;
                         self.chat_widget.add_error_message(
@@ -161,6 +189,69 @@ impl App {
             Err(error) => self
                 .chat_widget
                 .add_error_message(format!("Account login failed: {error}")),
+        }
+    }
+
+    fn show_account_login_challenge(
+        &mut self,
+        slot_id: String,
+        challenge: AccountSlotLoginChallenge,
+    ) {
+        self.chat_widget
+            .show_selection_view(login_challenge_params(slot_id, challenge));
+    }
+
+    pub(super) fn cancel_account_login(
+        &mut self,
+        app_server: &AppServerSession,
+        slot_id: String,
+        login_id: String,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let result = cancel_account_login(
+                request_handle,
+                CancelLoginAccountParams {
+                    login_id: login_id.clone(),
+                },
+            )
+            .await
+            .map_err(|error| error.to_string());
+            app_event_tx.send(AppEvent::AccountLoginCanceled {
+                slot_id,
+                login_id,
+                result,
+            });
+        });
+    }
+
+    pub(super) fn handle_account_login_canceled(
+        &mut self,
+        app_server: &AppServerSession,
+        slot_id: &str,
+        login_id: &str,
+        result: Result<CancelLoginAccountResponse, String>,
+    ) {
+        if self
+            .account_slots
+            .iter()
+            .find(|slot| slot.account_slot_id == slot_id)
+            .and_then(|slot| slot.active_login_operation_id.as_deref())
+            .is_some_and(|active_login_id| active_login_id != login_id)
+        {
+            return;
+        }
+        match result {
+            Ok(response) => match response.status {
+                CancelLoginAccountStatus::Canceled | CancelLoginAccountStatus::NotFound => {
+                    self.pending_account_control = None;
+                    self.refresh_account_state(app_server);
+                }
+            },
+            Err(error) => self
+                .chat_widget
+                .add_error_message(format!("Could not cancel account login: {error}")),
         }
     }
 
@@ -204,5 +295,85 @@ impl App {
             SessionRuntimeOperationStatus::Released => return false,
         }
         true
+    }
+}
+
+pub(super) fn login_challenge_params(
+    slot_id: String,
+    challenge: AccountSlotLoginChallenge,
+) -> SelectionViewParams {
+    let (subtitle, url, login_id) = match challenge {
+        AccountSlotLoginChallenge::Browser { login_id, auth_url } => (
+            format!("Open this URL to continue:\n{auth_url}"),
+            auth_url,
+            login_id,
+        ),
+        AccountSlotLoginChallenge::DeviceCode {
+            login_id,
+            verification_url,
+            user_code,
+        } => (
+            format!("Open {verification_url}\nand enter code {user_code}"),
+            verification_url,
+            login_id,
+        ),
+    };
+    SelectionViewParams {
+        title: Some("Complete account login".to_string()),
+        subtitle: Some(subtitle),
+        items: vec![
+            SelectionItem {
+                name: "Open Browser".to_string(),
+                actions: vec![Box::new(move |tx| {
+                    tx.send(AppEvent::OpenUrlInBrowser { url: url.clone() });
+                })],
+                ..Default::default()
+            },
+            SelectionItem {
+                name: "Cancel login".to_string(),
+                actions: vec![Box::new(move |tx| {
+                    tx.send(AppEvent::CancelAccountLogin {
+                        slot_id: slot_id.clone(),
+                        login_id: login_id.clone(),
+                    });
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    }
+}
+
+fn default_login_outcome(
+    slot_id: String,
+    method: AccountLoginMethod,
+    response: LoginAccountResponse,
+) -> Result<AccountLoginStartOutcome, String> {
+    match (method, response) {
+        (AccountLoginMethod::Browser, LoginAccountResponse::Chatgpt { login_id, auth_url }) => {
+            Ok(AccountLoginStartOutcome::Default {
+                slot_id,
+                challenge: AccountSlotLoginChallenge::Browser { login_id, auth_url },
+            })
+        }
+        (
+            AccountLoginMethod::DeviceCode,
+            LoginAccountResponse::ChatgptDeviceCode {
+                login_id,
+                verification_url,
+                user_code,
+            },
+        ) => Ok(AccountLoginStartOutcome::Default {
+            slot_id,
+            challenge: AccountSlotLoginChallenge::DeviceCode {
+                login_id,
+                verification_url,
+                user_code,
+            },
+        }),
+        (_, response) => Err(format!(
+            "Unexpected account/login/start response: {response:?}"
+        )),
     }
 }

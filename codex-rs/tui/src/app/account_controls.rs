@@ -4,9 +4,11 @@ use super::account_picker::AccountControlIntent;
 use super::account_picker::AccountPickerSnapshot;
 use super::account_picker::PendingAccountControl;
 use super::account_validation::revision_meets_lower_bound;
+use super::account_validation::runtime_revision_meets_lower_bound;
 use super::*;
 use crate::app_server_session::list_account_slots;
 use crate::app_server_session::logout_account_slot;
+use crate::app_server_session::logout_default_account;
 use crate::app_server_session::session_runtime_for_thread;
 use crate::app_server_session::switch_thread_account;
 use codex_app_server_protocol::AccountSlotAction;
@@ -75,6 +77,23 @@ impl App {
                 return;
             }
         };
+        if !revision_meets_lower_bound(
+            snapshot.slots.registry_revision,
+            self.account_registry_revision,
+        ) || !runtime_revision_meets_lower_bound(
+            self.account_runtime
+                .as_ref()
+                .map(|(epoch, runtime)| (epoch.as_str(), runtime.state_revision)),
+            (
+                snapshot.runtime.instance_epoch.as_str(),
+                snapshot.runtime.snapshot.state_revision,
+            ),
+        ) {
+            self.chat_widget.add_error_message(
+                "Account state changed before the request. Select the action again.".to_string(),
+            );
+            return;
+        }
         self.account_registry_revision = snapshot.slots.registry_revision;
         self.account_slots = snapshot.slots.data;
         self.account_slot_capability = Some(snapshot.slots.multi_account);
@@ -89,13 +108,7 @@ impl App {
                 self.start_account_switch(app_server, thread_id, instance_epoch, runtime, slot_id);
             }
             AccountControlIntent::Logout { slot_id } => {
-                self.start_secondary_logout(
-                    app_server,
-                    thread_id,
-                    instance_epoch,
-                    runtime,
-                    slot_id,
-                );
+                self.start_account_logout(app_server, thread_id, instance_epoch, runtime, slot_id);
             }
         }
     }
@@ -164,7 +177,7 @@ impl App {
         });
     }
 
-    fn start_secondary_logout(
+    fn start_account_logout(
         &mut self,
         app_server: &AppServerSession,
         thread_id: ThreadId,
@@ -192,17 +205,28 @@ impl App {
                 .as_ref()
                 .is_some_and(|account| account.account_slot_id == slot_id)
             || runtime.account.switch_target_slot_id.as_deref() == Some(slot_id.as_str());
-        let allowed = !slot.is_default
-            && slot.status == AccountSlotStatus::Ready
+        let allowed = slot.status == AccountSlotStatus::Ready
             && slot.actions.iter().any(|availability| {
                 availability.action == AccountSlotAction::Logout && availability.allowed
             })
-            && !bound
+            && (slot.is_default || !bound)
             && runtime.thread_id == thread_id.to_string();
         if !allowed {
             self.chat_widget.add_error_message(
                 "That account cannot be logged out while it is bound to this session.".to_string(),
             );
+            return;
+        }
+        if slot.is_default {
+            let request_handle = app_server.request_handle();
+            let app_event_tx = self.app_event_tx.clone();
+            tokio::spawn(async move {
+                let result = logout_default_account(request_handle)
+                    .await
+                    .map(|_| None)
+                    .map_err(|error| error.to_string());
+                app_event_tx.send(AppEvent::AccountSlotLogoutFinished { slot_id, result });
+            });
             return;
         }
         let prior_generation = slot.attempt_generation;
@@ -224,6 +248,7 @@ impl App {
         tokio::spawn(async move {
             let result = logout_account_slot(request_handle, params)
                 .await
+                .map(Some)
                 .map_err(|error| error.to_string());
             app_event_tx.send(AppEvent::AccountSlotLogoutFinished { slot_id, result });
         });
@@ -310,8 +335,13 @@ impl App {
         &mut self,
         app_server: &AppServerSession,
         slot_id: &str,
-        result: Result<AccountSlotLogoutResponse, String>,
+        result: Result<Option<AccountSlotLogoutResponse>, String>,
     ) {
+        if matches!(result, Ok(None)) {
+            self.pending_account_control = None;
+            self.refresh_account_state(app_server);
+            return;
+        }
         let Some(PendingAccountControl::Logout {
             target_slot_id,
             minimum_registry_revision,
@@ -325,7 +355,7 @@ impl App {
             return;
         }
         match result {
-            Ok(response)
+            Ok(Some(response))
                 if response.slot.account_slot_id == slot_id
                     && response.slot.status == AccountSlotStatus::LoginRequired
                     && revision_meets_lower_bound(
@@ -339,7 +369,7 @@ impl App {
                     app_server, /*state_revision*/ None, /*execution_generation*/ None,
                 );
             }
-            Ok(_) => {
+            Ok(None) | Ok(Some(_)) => {
                 self.pending_account_control = None;
                 self.chat_widget.add_error_message(
                     "The logout response did not match the requested account generation."

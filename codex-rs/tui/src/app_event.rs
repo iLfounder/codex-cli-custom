@@ -13,10 +13,10 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use crate::inline_visualization::InlineVisualizationContext;
-use codex_app_server_protocol::AccountSlotLoginStartResponse;
 use codex_app_server_protocol::AccountSlotLogoutResponse;
 use codex_app_server_protocol::AddCreditsNudgeCreditType;
 use codex_app_server_protocol::AddCreditsNudgeEmailStatus;
+use codex_app_server_protocol::CancelLoginAccountResponse;
 use codex_app_server_protocol::ConsumeAccountRateLimitResetCreditResponse;
 use codex_app_server_protocol::GetAccountRateLimitsResponse;
 use codex_app_server_protocol::GetAccountTokenUsageResponse;
@@ -49,6 +49,7 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_approval_presets::ApprovalPreset;
 use uuid::Uuid;
 
+use crate::app::account_login::AccountLoginStartOutcome;
 use crate::app::account_picker::AccountControlIntent;
 use crate::app::account_picker::AccountPickerSnapshot;
 use crate::app::runtime_controls::ShutdownIntent;
@@ -228,6 +229,14 @@ pub(crate) enum AppEvent {
         request_generation: u64,
         result: Result<AccountPickerSnapshot, String>,
     },
+    AccountStateRefreshed {
+        thread_id: ThreadId,
+        request_generation: u64,
+        result: Result<AccountPickerSnapshot, String>,
+    },
+    OpenAccountDetail {
+        slot_id: String,
+    },
     OpenAccountLoginMethods {
         slot_id: Option<String>,
     },
@@ -243,7 +252,16 @@ pub(crate) enum AppEvent {
     AccountSlotLoginStarted {
         thread_id: ThreadId,
         instance_epoch: String,
-        result: Result<AccountSlotLoginStartResponse, String>,
+        result: Result<AccountLoginStartOutcome, String>,
+    },
+    CancelAccountLogin {
+        slot_id: String,
+        login_id: String,
+    },
+    AccountLoginCanceled {
+        slot_id: String,
+        login_id: String,
+        result: Result<CancelLoginAccountResponse, String>,
     },
     AccountSwitchFinished {
         operation_id: String,
@@ -251,7 +269,7 @@ pub(crate) enum AppEvent {
     },
     AccountSlotLogoutFinished {
         slot_id: String,
-        result: Result<AccountSlotLogoutResponse, String>,
+        result: Result<Option<AccountSlotLogoutResponse>, String>,
     },
     ShutdownRuntimeLoaded {
         thread_id: ThreadId,
