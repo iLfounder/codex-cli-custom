@@ -1,7 +1,7 @@
 schema_version = 1
 applies_to = "rust-v0.149.0"
 base_commit = "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0"
-final_tree = "53be19a1ca4b5c1b095b385065e6695a8429b196"
+final_tree = "19b5d617c643331845ae12e946d54d95b4a467c3"
 
 [[patches]]
 number = "P001"
@@ -61,4 +61,4 @@ sha256 = "4928ee9057659e740352efd6f3ccfcc3a516f1823810884762a47bd2063b7e88"
 [[patches]]
 number = "P012"
 file = "0012-P012-complete-live-controls-and-account-lifecycle.patch"
-sha256 = "19175098f0e1035f83434e1fadc821689094fc030d08ff504753d26aa2a27a84"
+sha256 = "4360ff5f904071676ef8ccc90497920c07f1abcfdbf56cc4d7bf6ec6cc3734bf"
