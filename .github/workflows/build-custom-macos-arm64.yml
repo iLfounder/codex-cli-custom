@@ -23,11 +23,16 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
       CARGO_TERM_COLOR: always
       SOURCE_COMMIT: 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
-      PATCH_TREE: 70d5992eaee56f500fd1d09479d8ee30876ffdf1
+      PATCH_TREE: c569b1a12f8b03f07445349f4a51f6de040164b7
 
     steps:
       - name: Check out patch repository
         uses: actions/checkout@v6
+
+      - name: Set up package-builder Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
 
       - name: Cache Cargo downloads
         uses: actions/cache@v4
@@ -59,7 +64,7 @@ jobs:
           ./custom-patches/apply-series.sh upstream-codex
           test "$(git -C upstream-codex rev-parse HEAD^{tree})" = "$PATCH_TREE"
 
-      - name: Build Codex and app-server
+      - name: Build release binaries
         working-directory: upstream-codex/codex-rs
         shell: bash
         run: |
@@ -72,20 +77,44 @@ jobs:
           compiled_tree=$(git -C .. write-tree)
           printf 'COMPILED_LOCK_SHA256=%s\n' "$compiled_lock_sha256" >> "$GITHUB_ENV"
           printf 'COMPILED_TREE=%s\n' "$compiled_tree" >> "$GITHUB_ENV"
-          cargo build --locked --release -p codex-cli --bin codex
-          cargo build --locked --release -p codex-app-server --bin codex-app-server
+          cargo build --locked --release \
+            -p codex-cli --bin codex \
+            -p codex-app-server --bin codex-app-server \
+            -p codex-code-mode-host --bin codex-code-mode-host \
+            -p codex-responses-api-proxy --bin codex-responses-api-proxy
 
-      - name: Package binaries and provenance
+      - name: Assemble canonical packages and provenance
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp "$CARGO_TARGET_DIR/release/codex" dist/codex
-          cp "$CARGO_TARGET_DIR/release/codex-app-server" dist/codex-app-server
+          strip -x \
+            "$CARGO_TARGET_DIR/release/codex" \
+            "$CARGO_TARGET_DIR/release/codex-app-server" \
+            "$CARGO_TARGET_DIR/release/codex-code-mode-host" \
+            "$CARGO_TARGET_DIR/release/codex-responses-api-proxy"
+
+          export CODEX_REPO_ROOT="$GITHUB_WORKSPACE/upstream-codex"
+          python3 upstream-codex/scripts/build_codex_package.py \
+            --target aarch64-apple-darwin \
+            --variant codex \
+            --package-version 0.149.0 \
+            --package-dir "$RUNNER_TEMP/codex-package-aarch64-apple-darwin" \
+            --archive-output "$GITHUB_WORKSPACE/dist/codex-package-aarch64-apple-darwin.tar.gz" \
+            --entrypoint-bin "$CARGO_TARGET_DIR/release/codex" \
+            --code-mode-host-bin "$CARGO_TARGET_DIR/release/codex-code-mode-host"
+          python3 upstream-codex/scripts/build_codex_package.py \
+            --target aarch64-apple-darwin \
+            --variant codex-app-server \
+            --package-version 0.149.0 \
+            --package-dir "$RUNNER_TEMP/codex-app-server-package-aarch64-apple-darwin" \
+            --archive-output "$GITHUB_WORKSPACE/dist/codex-app-server-package-aarch64-apple-darwin.tar.gz" \
+            --entrypoint-bin "$CARGO_TARGET_DIR/release/codex-app-server" \
+            --code-mode-host-bin "$CARGO_TARGET_DIR/release/codex-code-mode-host"
+
+          cp "$CARGO_TARGET_DIR/release/codex-responses-api-proxy" dist/
           cp LICENSE NOTICE dist/
-          strip -x dist/codex dist/codex-app-server
-          chmod 0755 dist/codex dist/codex-app-server
-          (cd dist && shasum -a 256 codex codex-app-server > SHA256SUMS)
+          chmod 0755 dist/codex-responses-api-proxy
           {
             printf 'upstream_commit=%s\n' "$SOURCE_COMMIT"
             printf 'patched_tree=%s\n' "$PATCH_TREE"
@@ -96,17 +125,62 @@ jobs:
             cargo --version
             sw_vers
           } > dist/BUILD-METADATA.txt
-          COPYFILE_DISABLE=1 tar -C dist -czf codex-custom-rust-v0.149.0-macos-arm64.tar.gz .
-          shasum -a 256 codex-custom-rust-v0.149.0-macos-arm64.tar.gz \
-            > codex-custom-rust-v0.149.0-macos-arm64.tar.gz.sha256
-          file dist/codex dist/codex-app-server
+
+          primary_dir="$RUNNER_TEMP/verify-codex-package"
+          app_server_dir="$RUNNER_TEMP/verify-codex-app-server-package"
+          mkdir -p "$primary_dir" "$app_server_dir"
+          tar -xzf dist/codex-package-aarch64-apple-darwin.tar.gz -C "$primary_dir"
+          tar -xzf dist/codex-app-server-package-aarch64-apple-darwin.tar.gz -C "$app_server_dir"
+          test -x "$primary_dir/bin/codex"
+          test -x "$primary_dir/bin/codex-code-mode-host"
+          test -x "$primary_dir/codex-path/rg"
+          test -x "$primary_dir/codex-resources/zsh/bin/zsh"
+          test -x "$app_server_dir/bin/codex-app-server"
+          test -x "$app_server_dir/bin/codex-code-mode-host"
+          test -x "$app_server_dir/codex-path/rg"
+          test -x "$app_server_dir/codex-resources/zsh/bin/zsh"
+          cmp "$primary_dir/bin/codex-code-mode-host" "$app_server_dir/bin/codex-code-mode-host"
+          cmp "$primary_dir/bin/codex-code-mode-host" "$CARGO_TARGET_DIR/release/codex-code-mode-host"
+          python3 - "$primary_dir/codex-package.json" "$app_server_dir/codex-package.json" <<'PY'
+          import json
+          import sys
+
+          expected = (
+              ("codex", "bin/codex"),
+              ("codex-app-server", "bin/codex-app-server"),
+          )
+          assert len(sys.argv[1:]) == len(expected)
+          for path, (variant, entrypoint) in zip(sys.argv[1:], expected):
+              with open(path, encoding="utf-8") as package_file:
+                  package = json.load(package_file)
+              assert package == {
+                  "layoutVersion": 1,
+                  "version": "0.149.0",
+                  "target": "aarch64-apple-darwin",
+                  "variant": variant,
+                  "entrypoint": entrypoint,
+                  "resourcesDir": "codex-resources",
+                  "pathDir": "codex-path",
+              }
+          PY
+          (
+            cd dist
+            shasum -a 256 \
+              codex-package-aarch64-apple-darwin.tar.gz \
+              codex-app-server-package-aarch64-apple-darwin.tar.gz \
+              codex-responses-api-proxy \
+              BUILD-METADATA.txt LICENSE NOTICE > SHA256SUMS
+          )
+          file \
+            "$primary_dir/bin/codex" \
+            "$primary_dir/bin/codex-code-mode-host" \
+            "$app_server_dir/bin/codex-app-server" \
+            dist/codex-responses-api-proxy
 
       - name: Upload macOS arm64 artifact
         uses: actions/upload-artifact@v4
         with:
           name: codex-custom-rust-v0.149.0-macos-arm64
-          path: |
-            codex-custom-rust-v0.149.0-macos-arm64.tar.gz
-            codex-custom-rust-v0.149.0-macos-arm64.tar.gz.sha256
+          path: dist/
           if-no-files-found: error
           retention-days: 14

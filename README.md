@@ -25,6 +25,7 @@ The fork makes account selection, thread ownership, session handoff, and externa
 | P009 | Idle-thread account switching while keeping the same thread ID. |
 | P010 | TUI `/account`, `/logout`, `/exit`, `/clear`, `/new`, and `/goal` controls, including typed agent-requested clear/new. |
 | P011 | Installable `/namespace:name` plugin commands and ephemeral card, notice, and progress presentation. |
+| P012 | Reviewed live-session control fixes plus canonical account login, cancellation, reconciliation, and selectable TUI account status. |
 
 The app-server exposes opaque account references and sanitized session state. It never stores external workflow roles, group IDs, or user handles.
 
@@ -43,32 +44,54 @@ Generated Rust, JSON Schema, and TypeScript definitions are included by the patc
 
 ## Apply and build
 
-Apply the eleven patches only to the exact upstream commit:
+Apply the twelve patches only to the exact upstream commit:
 
 ```sh
 git checkout 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
 /path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD"
 ```
 
-The applier requires a clean tree, verifies every patch digest, applies P001–P011 in order, and verifies the final Git tree. It needs a POSIX shell, Git, `sed`, `awk`, and either `shasum` or `sha256sum`.
+The applier requires a clean tree, verifies every patch digest, applies P001–P012 in order, and verifies the final Git tree. It needs a POSIX shell, Git, `sed`, `awk`, and either `shasum` or `sha256sum`.
 
 Build locally from `codex-rs`:
 
 ```sh
+perl -0pi -e 's/version = "0\.0\.0"/version = "0.149.0"/g' Cargo.lock
 cargo build --locked --release -p codex-cli --bin codex
 cargo build --locked --release -p codex-app-server --bin codex-app-server
+cargo build --locked --release -p codex-code-mode-host --bin codex-code-mode-host
+cargo build --locked --release -p codex-responses-api-proxy --bin codex-responses-api-proxy
+CODEX_REPO_ROOT="$(cd .. && pwd)" python3 ../scripts/build_codex_package.py \
+  --target aarch64-apple-darwin --variant codex --package-version 0.149.0 \
+  --entrypoint-bin target/release/codex \
+  --code-mode-host-bin target/release/codex-code-mode-host
+CODEX_REPO_ROOT="$(cd .. && pwd)" python3 ../scripts/build_codex_package.py \
+  --target aarch64-apple-darwin --variant codex-app-server --package-version 0.149.0 \
+  --entrypoint-bin target/release/codex-app-server \
+  --code-mode-host-bin target/release/codex-code-mode-host
 ```
+
+The tagged upstream source keeps workspace-package versions as `0.0.0` placeholders in
+`Cargo.lock`. The first command normalizes only those exact placeholders, matching the GitHub
+Actions build, before Cargo performs locked dependency resolution.
+The package builder requires Python 3.10 or newer. It also fetches and verifies the
+target-specific ripgrep and patched zsh resources defined by the upstream source.
 
 The manual GitHub Actions workflow uses a standard macOS arm64 runner and produces:
 
-- `codex`
-- `codex-app-server`
+- `codex-package-aarch64-apple-darwin.tar.gz`: the TUI/CLI, its matching Code Mode host,
+  ripgrep, patched zsh, and package metadata
+- `codex-app-server-package-aarch64-apple-darwin.tar.gz`: app-server, the same matching
+  Code Mode host, ripgrep, patched zsh, and package metadata
+- `codex-responses-api-proxy`: an optional standalone proxy; it is not required by the TUI
+  or app-server at runtime
 - `SHA256SUMS`
 - `BUILD-METADATA.txt`
 - `LICENSE`
 - `NOTICE`
 
-The uploaded artifact contains a compressed archive and its SHA-256 checksum.
+The workflow checks both package layouts, verifies that they contain the exact same built
+Code Mode host, and records SHA-256 digests and source-tree provenance before upload.
 
 ## Upgrading a 0.148 custom state store
 
