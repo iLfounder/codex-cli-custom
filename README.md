@@ -76,6 +76,8 @@ The tagged upstream source keeps workspace-package versions as `0.0.0` placehold
 Actions build, before Cargo performs locked dependency resolution.
 The package builder requires Python 3.10 or newer. It also fetches and verifies the
 target-specific ripgrep and patched zsh resources defined by the upstream source.
+The Code Mode host build uses the matching Codex-published V8 archive and generated binding;
+the workflow verifies both against their release checksum manifest and records their digests.
 
 The manual GitHub Actions workflow uses a standard macOS arm64 runner and produces:
 

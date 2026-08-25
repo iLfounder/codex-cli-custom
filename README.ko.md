@@ -76,6 +76,8 @@ upstream release tag의 `Cargo.lock`에는 workspace package version이 `0.0.0` 
 정규화한 뒤 Cargo가 locked dependency resolution을 수행하게 한다.
 Package builder는 Python 3.10 이상이 필요하다. 또한 upstream source에 고정된 target별
 ripgrep과 patched zsh resource를 다운로드하고 digest를 검증한다.
+Code Mode host build에는 동일 version의 Codex 배포 V8 archive와 generated binding을
+사용하며, workflow가 release checksum manifest와 대조하고 두 digest를 기록한다.
 
 수동 GitHub Actions workflow는 표준 macOS arm64 runner에서 다음 산출물을 만든다.
 
