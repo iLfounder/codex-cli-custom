@@ -1,9 +1,9 @@
-From 992e18de9f7fbe4d64f08d3eebb3ba1bd92515d8 Mon Sep 17 00:00:00 2001
+From a39f3231286b3fdf147f61725725f8a6fb230105 Mon Sep 17 00:00:00 2001
 From: Codex CLI Custom <noreply@local>
-Date: Tue, 25 Aug 2026 23:19:16 +0900
+Date: Wed, 26 Aug 2026 01:48:12 +0900
 Subject: [PATCH] P012: complete live controls and canonical account lifecycle
 
-Converge the reviewed 0.149 runtime controls, account login lifecycle, TUI picker, and generated protocol artifacts on the published P001-P011 tree.
+Converge the reviewed 0.149 runtime controls, account login lifecycle, responsive TUI picker, and generated protocol artifacts on the published P001-P011 tree.
 ---
  codex-rs/Cargo.lock                           | 278 ++++----
  .../schema/json/ServerNotification.json       |   2 +-
@@ -70,8 +70,8 @@ Converge the reviewed 0.149 runtime controls, account login lifecycle, TUI picke
  codex-rs/tui/src/app.rs                       |   3 +-
  codex-rs/tui/src/app/account_controls.rs      |  58 +-
  codex-rs/tui/src/app/account_login.rs         | 267 ++++++--
- codex-rs/tui/src/app/account_picker.rs        |  94 ++-
- codex-rs/tui/src/app/account_picker_tests.rs  | 121 ++++
+ codex-rs/tui/src/app/account_picker.rs        | 110 +++-
+ codex-rs/tui/src/app/account_picker_tests.rs  | 142 +++++
  codex-rs/tui/src/app/account_picker_view.rs   | 463 +++++++++-----
  .../tui/src/app/account_picker_view_tests.rs  | 321 ++++++----
  codex-rs/tui/src/app/account_validation.rs    |  35 +-
@@ -79,7 +79,7 @@ Converge the reviewed 0.149 runtime controls, account login lifecycle, TUI picke
  codex-rs/tui/src/app/app_server_events.rs     |  48 +-
  .../tui/src/app/dynamic_thread_controls.rs    |  60 +-
  .../src/app/dynamic_thread_controls_tests.rs  |  67 +-
- codex-rs/tui/src/app/event_dispatch.rs        |  40 +-
+ codex-rs/tui/src/app/event_dispatch.rs        |  33 +-
  codex-rs/tui/src/app/plugin_commands.rs       | 290 ++++++++-
  codex-rs/tui/src/app/plugin_commands_tests.rs | 433 +++++++++++++
  codex-rs/tui/src/app/startup.rs               |   1 +
@@ -91,7 +91,7 @@ Converge the reviewed 0.149 runtime controls, account login lifecycle, TUI picke
  codex-rs/tui/src/session_archive_commands.rs  |   2 +-
  codex-rs/tui/src/session_queue_commands.rs    |   4 +-
  codex-rs/tui/src/startup_orchestration.rs     |   4 +-
- 86 files changed, 6240 insertions(+), 1369 deletions(-)
+ 86 files changed, 6264 insertions(+), 1375 deletions(-)
  create mode 100644 codex-rs/app-server/tests/suite/v2/thread_listener_websocket.rs
  create mode 100644 codex-rs/tui/src/app/account_picker_tests.rs
 
@@ -14655,7 +14655,7 @@ index 03026b99f..8798751a2 100644
 +    }
 +}
 diff --git a/codex-rs/tui/src/app/account_picker.rs b/codex-rs/tui/src/app/account_picker.rs
-index cb5db20b5..757e220f3 100644
+index cb5db20b5..b7e6446f4 100644
 --- a/codex-rs/tui/src/app/account_picker.rs
 +++ b/codex-rs/tui/src/app/account_picker.rs
 @@ -1,13 +1,12 @@
@@ -14673,7 +14673,7 @@ index cb5db20b5..757e220f3 100644
  #[derive(Debug)]
  pub(crate) struct AccountPickerSnapshot {
      pub(crate) slots: AccountSlotsSnapshot,
-@@ -122,8 +121,34 @@ impl App {
+@@ -122,6 +121,31 @@ impl App {
          });
      }
  
@@ -14704,18 +14704,18 @@ index cb5db20b5..757e220f3 100644
 +
      pub(super) fn handle_account_picker_loaded(
          &mut self,
-+        app_server: &AppServerSession,
          thread_id: ThreadId,
-         request_generation: u64,
-         result: Result<AccountPickerSnapshot, String>,
-@@ -142,6 +167,65 @@ impl App {
+@@ -142,18 +166,80 @@ impl App {
                  return;
              }
          };
-+        if !self.apply_account_snapshot(snapshot) {
-+            self.refresh_account_state(app_server);
-+            return;
-+        }
+-        self.account_registry_revision = snapshot.slots.registry_revision;
+-        self.account_slots = snapshot.slots.data;
+-        self.account_slot_capability = Some(snapshot.slots.multi_account);
+-        self.account_runtime = Some((snapshot.runtime.instance_epoch, snapshot.runtime.snapshot));
+-        if self
+-            .pending_account_control
++        self.apply_account_snapshot(snapshot);
 +        self.replace_account_picker_if_present(None);
 +    }
 +
@@ -14734,14 +14734,14 @@ index cb5db20b5..757e220f3 100644
 +        match result {
 +            Ok(snapshot) => {
 +                let selected_slot_id = self.selected_account_slot_id();
-+                if !self.apply_account_snapshot(snapshot) {
-+                    if self
++                let snapshot_is_fresh = self.apply_account_snapshot(snapshot);
++                if !snapshot_is_fresh
++                    && self
 +                        .pending_account_control
 +                        .as_ref()
 +                        .is_some_and(PendingAccountControl::validation_in_flight)
-+                    {
-+                        self.refresh_account_state(app_server);
-+                    }
++                {
++                    self.refresh_account_state(app_server);
 +                    return;
 +                }
 +                self.replace_open_account_views(selected_slot_id.as_deref());
@@ -14753,13 +14753,16 @@ index cb5db20b5..757e220f3 100644
 +    fn apply_account_snapshot(&mut self, snapshot: AccountPickerSnapshot) -> bool {
 +        let same_runtime_epoch = self
 +            .account_runtime
-+            .as_ref()
+             .as_ref()
+-            .is_some_and(PendingAccountControl::validation_in_flight)
 +            .is_some_and(|(epoch, _)| epoch == &snapshot.runtime.instance_epoch);
-+        if same_runtime_epoch
-+            && (!super::account_validation::revision_meets_lower_bound(
++        let slots_are_fresh = !same_runtime_epoch
++            || super::account_validation::revision_meets_lower_bound(
 +                snapshot.slots.registry_revision,
 +                self.account_registry_revision,
-+            ) || !super::account_validation::runtime_revision_meets_lower_bound(
++            );
++        let runtime_is_fresh = !same_runtime_epoch
++            || super::account_validation::runtime_revision_meets_lower_bound(
 +                self.account_runtime
 +                    .as_ref()
 +                    .map(|(epoch, runtime)| (epoch.as_str(), runtime.state_revision)),
@@ -14767,23 +14770,31 @@ index cb5db20b5..757e220f3 100644
 +                    snapshot.runtime.instance_epoch.as_str(),
 +                    snapshot.runtime.snapshot.state_revision,
 +                ),
-+            ))
-+        {
-+            return false;
++            );
++        if slots_are_fresh {
++            self.account_registry_revision = snapshot.slots.registry_revision;
++            self.account_slots = snapshot.slots.data;
++            self.account_slot_capability = Some(snapshot.slots.multi_account);
 +        }
-         self.account_registry_revision = snapshot.slots.registry_revision;
-         self.account_slots = snapshot.slots.data;
-         self.account_slot_capability = Some(snapshot.slots.multi_account);
-@@ -153,7 +237,7 @@ impl App {
++        if runtime_is_fresh {
++            self.account_runtime =
++                Some((snapshot.runtime.instance_epoch, snapshot.runtime.snapshot));
++        }
++        let snapshot_is_fresh = slots_are_fresh && runtime_is_fresh;
++        if snapshot_is_fresh
++            && self
++                .pending_account_control
++                .as_ref()
++                .is_some_and(PendingAccountControl::validation_in_flight)
          {
              self.finish_account_control_validation();
          }
 -        self.show_account_picker();
-+        true
++        snapshot_is_fresh
      }
  
      pub(super) fn next_account_request_generation(&mut self) -> u64 {
-@@ -161,3 +245,7 @@ impl App {
+@@ -161,3 +247,7 @@ impl App {
          self.account_request_generation
      }
  }
@@ -14793,10 +14804,10 @@ index cb5db20b5..757e220f3 100644
 +mod tests;
 diff --git a/codex-rs/tui/src/app/account_picker_tests.rs b/codex-rs/tui/src/app/account_picker_tests.rs
 new file mode 100644
-index 000000000..063e3b972
+index 000000000..dbcb312d9
 --- /dev/null
 +++ b/codex-rs/tui/src/app/account_picker_tests.rs
-@@ -0,0 +1,121 @@
+@@ -0,0 +1,142 @@
 +use super::*;
 +use crate::app::test_support::make_test_app;
 +use codex_app_server_protocol::AccountSlotCapability;
@@ -14917,6 +14928,27 @@ index 000000000..063e3b972
 +        false
 +    );
 +    assert_eq!(app.account_registry_revision, 20);
++}
++
++#[tokio::test]
++async fn same_runtime_epoch_merges_each_fresh_projection_independently() {
++    let mut app = make_test_app().await;
++    app.account_registry_revision = 20;
++    app.account_runtime = Some(("epoch-a".to_string(), runtime_snapshot("thread-1", 20)));
++
++    assert_eq!(
++        app.apply_account_snapshot(picker_snapshot("epoch-a", 19, 21)),
++        false
++    );
++    assert_eq!(
++        (
++            app.account_registry_revision,
++            app.account_runtime
++                .as_ref()
++                .map(|(epoch, runtime)| (epoch.as_str(), runtime.state_revision)),
++        ),
++        (20, Some(("epoch-a", 21)))
++    );
 +}
 diff --git a/codex-rs/tui/src/app/account_picker_view.rs b/codex-rs/tui/src/app/account_picker_view.rs
 index 68ff55f8a..80eee2499 100644
@@ -16228,20 +16260,13 @@ index 813429a61..c2752f999 100644
 -    }
 -}
 diff --git a/codex-rs/tui/src/app/event_dispatch.rs b/codex-rs/tui/src/app/event_dispatch.rs
-index e73ed7646..7d2b85fd6 100644
+index e73ed7646..4cff494c4 100644
 --- a/codex-rs/tui/src/app/event_dispatch.rs
 +++ b/codex-rs/tui/src/app/event_dispatch.rs
-@@ -48,7 +48,23 @@ impl App {
-                 thread_id,
+@@ -49,6 +49,17 @@ impl App {
                  request_generation,
                  result,
--            } => self.handle_account_picker_loaded(thread_id, request_generation, result),
-+            } => self.handle_account_picker_loaded(
-+                app_server,
-+                thread_id,
-+                request_generation,
-+                result,
-+            ),
+             } => self.handle_account_picker_loaded(thread_id, request_generation, result),
 +            AppEvent::AccountStateRefreshed {
 +                thread_id,
 +                request_generation,
@@ -16256,7 +16281,7 @@ index e73ed7646..7d2b85fd6 100644
              AppEvent::OpenAccountLoginMethods { slot_id } => {
                  self.show_account_login_methods(slot_id)
              }
-@@ -77,6 +93,19 @@ impl App {
+@@ -77,6 +88,19 @@ impl App {
                  instance_epoch,
                  result,
              ),
@@ -16276,7 +16301,7 @@ index e73ed7646..7d2b85fd6 100644
              AppEvent::AccountSwitchFinished {
                  operation_id,
                  result,
-@@ -2170,7 +2199,12 @@ impl App {
+@@ -2170,7 +2194,12 @@ impl App {
                  request_generation,
                  result,
              } => {
@@ -16290,7 +16315,7 @@ index e73ed7646..7d2b85fd6 100644
              }
              AppEvent::InvokePluginCommand { command_id } => {
                  self.invoke_plugin_command(app_server, command_id);
-@@ -2945,6 +2979,8 @@ impl App {
+@@ -2945,6 +2974,8 @@ impl App {
      }
  
      fn refresh_plugin_mentions_after_config_write(&mut self) {
@@ -17611,3 +17636,5 @@ index 8df90803e..077ded4f0 100644
      } else {
          None
      };
+-- 
+2.50.1 (Apple Git-155)
