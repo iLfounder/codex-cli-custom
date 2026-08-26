@@ -13,6 +13,7 @@ pub(super) const THREAD_UNLOADING_DELAY: Duration = Duration::from_secs(30 * 60)
 pub(super) struct ListenerTaskContext {
     pub(super) thread_manager: Arc<ThreadManager>,
     pub(super) thread_store: Arc<dyn ThreadStore>,
+    pub(super) session_runtime: Arc<crate::session_runtime::SessionRuntimeEngine>,
     pub(super) thread_state_manager: ThreadStateManager,
     pub(super) outgoing: Arc<OutgoingMessageSender>,
     pub(super) pending_thread_unloads: Arc<Mutex<HashSet<ThreadId>>>,
@@ -469,6 +470,7 @@ pub(super) async fn ensure_listener_task_running(
         outgoing,
         thread_manager,
         thread_store,
+        session_runtime,
         thread_state_manager,
         pending_thread_unloads,
         thread_watch_manager,
@@ -545,6 +547,18 @@ pub(super) async fn ensure_listener_task_running(
                         subscribed_connection_ids,
                         conversation_id,
                     );
+
+                    if let EventMsg::TokenCount(token_count) = &event.msg
+                        && let Some(rate_limits) = &token_count.rate_limits
+                    {
+                        session_runtime
+                            .observe_rate_limit_update(
+                                conversation_id,
+                                &event.id,
+                                rate_limits,
+                            )
+                            .await;
+                    }
 
                     apply_bespoke_event_handling(
                         event.clone(),

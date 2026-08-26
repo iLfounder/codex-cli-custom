@@ -90,6 +90,7 @@ pub(crate) struct TurnRequestProcessor {
     agent_runner: AgentRunner,
     thread_manager: Arc<ThreadManager>,
     thread_store: Arc<dyn ThreadStore>,
+    session_runtime: Arc<crate::session_runtime::SessionRuntimeEngine>,
     outgoing: Arc<OutgoingMessageSender>,
     analytics_events_client: AnalyticsEventsClient,
     arg0_paths: Arg0DispatchPaths,
@@ -159,6 +160,7 @@ impl TurnRequestProcessor {
     pub(crate) fn new(
         thread_manager: Arc<ThreadManager>,
         thread_store: Arc<dyn ThreadStore>,
+        session_runtime: Arc<crate::session_runtime::SessionRuntimeEngine>,
         outgoing: Arc<OutgoingMessageSender>,
         analytics_events_client: AnalyticsEventsClient,
         arg0_paths: Arg0DispatchPaths,
@@ -176,6 +178,7 @@ impl TurnRequestProcessor {
             agent_runner,
             thread_manager,
             thread_store,
+            session_runtime,
             outgoing,
             analytics_events_client,
             arg0_paths,
@@ -1570,6 +1573,7 @@ impl TurnRequestProcessor {
         ListenerTaskContext {
             thread_manager: Arc::clone(&self.thread_manager),
             thread_store: Arc::clone(&self.thread_store),
+            session_runtime: Arc::clone(&self.session_runtime),
             thread_state_manager: self.thread_state_manager.clone(),
             outgoing: Arc::clone(&self.outgoing),
             pending_thread_unloads: Arc::clone(&self.pending_thread_unloads),

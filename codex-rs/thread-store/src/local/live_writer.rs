@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::path::PathBuf;
 
 use codex_protocol::ThreadId;
@@ -8,10 +9,12 @@ use codex_rollout::RolloutItem;
 use codex_rollout::RolloutRecorder;
 use codex_rollout::RolloutRecorderParams;
 use codex_rollout::is_persisted_rollout_item;
+use tokio::sync::OwnedMutexGuard;
 use tracing::warn;
 
 use super::LocalThreadStore;
 use super::create_thread;
+use super::writer_lock::WriterLockGuard;
 use crate::AppendThreadItemsParams;
 use crate::CreateThreadParams;
 use crate::ReadThreadParams;
@@ -21,6 +24,64 @@ use crate::ThreadStoreResult;
 use crate::types::canonical_history_mode_from_rollout_items;
 
 const ROLLOUT_SIZE_BYTES_METRIC: &str = "codex.rollout.size_bytes";
+
+pub(super) struct RolloutCompatibilityAppender {
+    _live_writer_guard: OwnedMutexGuard<()>,
+    target: RolloutCompatibilityAppendTarget,
+}
+
+enum RolloutCompatibilityAppendTarget {
+    Live(RolloutRecorder),
+    Offline { _writer_lock: WriterLockGuard },
+}
+
+impl RolloutCompatibilityAppender {
+    pub(super) async fn acquire(
+        store: &LocalThreadStore,
+        thread_id: ThreadId,
+    ) -> ThreadStoreResult<Self> {
+        let live_writer_guard = store.live_writer_locks.lock(thread_id).await;
+        let recorder = store
+            .live_recorders
+            .lock()
+            .await
+            .get(&thread_id)
+            .map(|entry| entry.recorder.clone());
+        let target = if let Some(recorder) = recorder {
+            recorder.persist().await.map_err(thread_store_io_error)?;
+            RolloutCompatibilityAppendTarget::Live(recorder)
+        } else {
+            RolloutCompatibilityAppendTarget::Offline {
+                _writer_lock: store.acquire_writer_lock(thread_id).await?,
+            }
+        };
+        Ok(Self {
+            _live_writer_guard: live_writer_guard,
+            target,
+        })
+    }
+
+    pub(super) async fn append(
+        &self,
+        rollout_path: &Path,
+        item: &RolloutItem,
+    ) -> ThreadStoreResult<()> {
+        match &self.target {
+            RolloutCompatibilityAppendTarget::Live(recorder) => {
+                recorder
+                    .record_canonical_items(std::slice::from_ref(item))
+                    .await
+                    .map_err(thread_store_io_error)?;
+                recorder.flush().await.map_err(thread_store_io_error)
+            }
+            RolloutCompatibilityAppendTarget::Offline { .. } => {
+                codex_rollout::append_rollout_item_to_path(rollout_path, item)
+                    .await
+                    .map_err(thread_store_io_error)
+            }
+        }
+    }
+}
 
 pub(super) async fn create_thread(
     store: &LocalThreadStore,

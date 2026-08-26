@@ -28,6 +28,14 @@ pub(crate) struct MigrateRolloutsCommand {
     #[arg(long, value_name = "THREAD_ID", value_parser = ThreadId::from_string)]
     thread: Vec<ThreadId>,
 
+    /// Inspect or repair invalid ordinals in one exact paginated rollout.
+    #[arg(long)]
+    repair_ordinals: bool,
+
+    /// Exact file identity emitted by a preceding ordinal-repair dry run.
+    #[arg(long, value_name = "IDENTITY", requires = "apply")]
+    file_identity: Option<String>,
+
     /// Limit aggregate rollout read and write throughput, in MiB per second.
     #[arg(
         long,
@@ -72,19 +80,29 @@ pub(crate) async fn run(
     } else {
         RolloutMigrationMode::DryRun
     };
+    if command.repair_ordinals && command.thread.len() != 1 {
+        anyhow::bail!("--repair-ordinals requires exactly one --thread");
+    }
+    if command.repair_ordinals && command.apply && command.file_identity.is_none() {
+        anyhow::bail!("--repair-ordinals --apply requires --file-identity from a dry run");
+    }
+    if !command.repair_ordinals && command.file_identity.is_some() {
+        anyhow::bail!("--file-identity requires --repair-ordinals");
+    }
     let json = command.json;
     let verbose = command.verbose;
     let thread_history_db_path = config.sqlite.thread_history_db_path();
-    let thread_storage_before = if mode == RolloutMigrationMode::Apply && !json {
-        thread_storage_bytes(
-            config.codex_home.as_path(),
-            thread_history_db_path.as_path(),
-        )
-        .await
-        .ok()
-    } else {
-        None
-    };
+    let thread_storage_before =
+        if mode == RolloutMigrationMode::Apply && !command.repair_ordinals && !json {
+            thread_storage_bytes(
+                config.codex_home.as_path(),
+                thread_history_db_path.as_path(),
+            )
+            .await
+            .ok()
+        } else {
+            None
+        };
     let state_db = if mode == RolloutMigrationMode::Apply {
         Some(
             codex_rollout::state_db::try_init(&config)
@@ -95,6 +113,18 @@ pub(crate) async fn run(
         None
     };
     let store = LocalThreadStore::new(LocalThreadStoreConfig::from_config(&config), state_db);
+    if command.repair_ordinals {
+        let thread_id = command.thread[0];
+        let report = store
+            .repair_rollout_ordinals(thread_id, command.file_identity.as_deref())
+            .await?;
+        if command.json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            print_ordinal_repair_report(&report, command.apply);
+        }
+        return Ok(());
+    }
     let mut progress = MigrationProgress::new(mode, json);
     progress.begin();
     let result = store
@@ -134,6 +164,45 @@ pub(crate) async fn run(
         anyhow::bail!("one or more rollout migrations failed");
     }
     Ok(())
+}
+
+fn print_ordinal_repair_report(report: &RolloutMigrationReport, applied: bool) {
+    for outcome in &report.outcomes {
+        let action = if applied {
+            "Ordinal repair"
+        } else {
+            "Ordinal repair dry run"
+        };
+        println!("{action}: {:?}", outcome.status);
+        if let Some(thread_id) = outcome.thread_id {
+            println!("Thread: {thread_id}");
+        }
+        println!("Path: {}", outcome.rollout_path.display());
+        if let Some(history_mode) = outcome.history_mode {
+            println!("History mode: {history_mode:?}");
+        }
+        if let Some(identity) = outcome.file_identity.as_deref() {
+            println!("File identity: {identity}");
+        }
+        match (outcome.first_invalid_ordinal, outcome.expected_ordinal) {
+            (Some(actual), Some(expected)) => {
+                println!("First invalid ordinal: {actual} (expected {expected})");
+            }
+            (None, Some(expected)) => {
+                println!("First invalid ordinal: missing (expected {expected})");
+            }
+            (None, None) => println!("First invalid ordinal: none"),
+            (Some(actual), None) => println!("First invalid ordinal: {actual}"),
+        }
+        println!(
+            "Affected suffix records: {}",
+            outcome.affected_suffix_records.unwrap_or(0)
+        );
+        println!("Mutations: {}", outcome.mutation_count.unwrap_or(0));
+        if let Some(path) = outcome.backup_path.as_ref() {
+            println!("Backup: {}", path.display());
+        }
+    }
 }
 
 const TTY_PROGRESS_INTERVAL: Duration = Duration::from_millis(250);

@@ -681,21 +681,134 @@ impl ThreadStore for LocalThreadStore {
         expected: ExecutionAccountBinding,
         next_slot_id: String,
     ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
+        self.compare_and_swap_execution_account_binding_with_intent(
+            thread_id,
+            expected,
+            next_slot_id,
+            crate::AccountBindingCommitIntent::PinFixed,
+        )
+    }
+
+    fn compare_and_swap_execution_account_binding_with_intent(
+        &self,
+        thread_id: ThreadId,
+        expected: ExecutionAccountBinding,
+        next_slot_id: String,
+        intent: crate::AccountBindingCommitIntent,
+    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
         Box::pin(async move {
             let Some(state_db) = self.state_db.as_ref() else {
                 return Err(ThreadStoreError::Unsupported {
-                    operation: "compare_and_swap_execution_account_binding",
+                    operation: "compare_and_swap_execution_account_binding_with_intent",
                 });
             };
             state_db
-                .compare_and_swap_execution_account_binding(
+                .compare_and_swap_execution_account_binding_with_intent(
                     thread_id,
                     &expected,
                     next_slot_id.as_str(),
+                    intent,
                 )
                 .await
                 .map_err(|err| ThreadStoreError::Internal {
                     message: format!("failed to compare and swap execution account binding: {err}"),
+                })
+        })
+    }
+
+    fn thread_account_rotation_policy(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreFuture<'_, crate::ThreadAccountRotationPolicy> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Ok(crate::ThreadAccountRotationPolicy::virtual_fixed(
+                    &ExecutionAccountBinding {
+                        slot_id: "default".to_string(),
+                        generation: 1,
+                    },
+                ));
+            };
+            state_db
+                .thread_account_rotation_policy(thread_id)
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!("failed to read thread account rotation policy: {err}"),
+                })
+        })
+    }
+
+    fn compare_and_swap_thread_account_rotation_policy(
+        &self,
+        thread_id: ThreadId,
+        expected_revision: u64,
+        update: crate::ThreadAccountRotationPolicyUpdate,
+    ) -> ThreadStoreFuture<'_, Option<crate::ThreadAccountRotationPolicy>> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "compare_and_swap_thread_account_rotation_policy",
+                });
+            };
+            state_db
+                .compare_and_swap_thread_account_rotation_policy(
+                    thread_id,
+                    expected_revision,
+                    &update,
+                )
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!(
+                        "failed to compare and swap thread account rotation policy: {err}"
+                    ),
+                })
+        })
+    }
+
+    fn compare_and_swap_thread_account_rotation_cursor(
+        &self,
+        thread_id: ThreadId,
+        expected_revision: u64,
+        accepted_account_slot_id: String,
+    ) -> ThreadStoreFuture<'_, Option<crate::ThreadAccountRotationPolicy>> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "compare_and_swap_thread_account_rotation_cursor",
+                });
+            };
+            state_db
+                .compare_and_swap_thread_account_rotation_cursor(
+                    thread_id,
+                    expected_revision,
+                    accepted_account_slot_id.as_str(),
+                )
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!(
+                        "failed to compare and swap thread account rotation cursor: {err}"
+                    ),
+                })
+        })
+    }
+
+    fn remove_account_slot_from_automatic_rotation_policies(
+        &self,
+        account_slot_id: String,
+    ) -> ThreadStoreFuture<'_, Vec<(ThreadId, crate::ThreadAccountRotationPolicy)>> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "remove_account_slot_from_automatic_rotation_policies",
+                });
+            };
+            state_db
+                .remove_account_slot_from_automatic_rotation_policies(&account_slot_id)
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!(
+                        "failed to remove account slot from automatic rotation policies: {err}"
+                    ),
                 })
         })
     }

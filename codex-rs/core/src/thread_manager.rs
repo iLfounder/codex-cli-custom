@@ -8,9 +8,14 @@ use crate::current_time::TimeProvider;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::environment_selection::default_thread_environment_selections;
 use crate::execution_account::DefaultExecutionAccountResolver;
+use crate::execution_account::DefaultTurnExecutionAccountSelector;
 use crate::execution_account::ExecutionAccountContext;
 use crate::execution_account::ExecutionAccountResolver;
 use crate::execution_account::ExecutionAccountServices;
+use crate::execution_account::PreparedTurnExecutionAccountTransition;
+use crate::execution_account::TurnExecutionAccountSelector;
+use crate::execution_account::TurnExecutionAccountTransitionResolver;
+use crate::execution_account::TurnExecutionAccountTransitionResolverFuture;
 use crate::mcp::McpManager;
 use crate::rollout::truncation;
 use crate::session::ForkPersistence;
@@ -348,14 +353,14 @@ pub(crate) struct ThreadManagerState {
     auth_manager: Arc<AuthManager>,
     models_manager: SharedModelsManager,
     execution_account_resolver: Arc<dyn ExecutionAccountResolver>,
-    codex_home: PathBuf,
-    restriction_product: Option<Product>,
+    turn_execution_account_transition_resolver: Arc<dyn TurnExecutionAccountTransitionResolver>,
+    turn_execution_account_selector: Arc<dyn TurnExecutionAccountSelector>,
     environment_manager: Arc<EnvironmentManager>,
     starting_mcp_runtimes: std::sync::Mutex<Vec<std::sync::Weak<AtomicBool>>>,
     skills_service: Arc<HostSkillsService>,
     plugins_manager: Arc<PluginsManager>,
     mcp_manager: Arc<McpManager>,
-    account_services: std::sync::RwLock<HashMap<String, AccountServiceEntry>>,
+    account_services: Arc<ThreadExecutionAccountServices>,
     code_mode_session_provider: Arc<dyn CodeModeSessionProvider>,
     extensions: Arc<ExtensionRegistry<Config>>,
     user_instructions_provider: Arc<dyn UserInstructionsProvider>,
@@ -375,6 +380,99 @@ struct AccountServiceEntry {
     auth_manager: Arc<AuthManager>,
     models_manager: SharedModelsManager,
     services: ExecutionAccountServices,
+}
+
+struct ThreadExecutionAccountServices {
+    codex_home: PathBuf,
+    restriction_product: Option<Product>,
+    skills_service: Arc<HostSkillsService>,
+    extensions: Arc<ExtensionRegistry<Config>>,
+    entries: std::sync::RwLock<HashMap<String, AccountServiceEntry>>,
+}
+
+impl ThreadExecutionAccountServices {
+    fn resolve(&self, execution_account: &ExecutionAccountContext) -> ExecutionAccountServices {
+        let slot_id = execution_account.binding.slot_id.as_str();
+        if let Some(entry) = self
+            .entries
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(slot_id)
+            .cloned()
+            && Arc::ptr_eq(&entry.auth_manager, &execution_account.auth_manager)
+            && Arc::ptr_eq(&entry.models_manager, &execution_account.models_manager)
+        {
+            return entry.services;
+        }
+
+        let mut entries = self
+            .entries
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = entries.get(slot_id)
+            && Arc::ptr_eq(&entry.auth_manager, &execution_account.auth_manager)
+            && Arc::ptr_eq(&entry.models_manager, &execution_account.models_manager)
+        {
+            return entry.services.clone();
+        }
+        let plugins_manager = Arc::new(PluginsManager::new_with_options(
+            self.codex_home.clone(),
+            self.restriction_product,
+            Arc::clone(&execution_account.auth_manager),
+            self.skills_service.clone(),
+        ));
+        let mcp_manager = Arc::new(McpManager::new_with_extensions(
+            Arc::clone(&plugins_manager),
+            Arc::clone(&self.extensions),
+            CodexAppsToolsCache::default(),
+        ));
+        let services = ExecutionAccountServices {
+            plugins_manager,
+            mcp_manager,
+        };
+        entries.insert(
+            slot_id.to_string(),
+            AccountServiceEntry {
+                auth_manager: Arc::clone(&execution_account.auth_manager),
+                models_manager: Arc::clone(&execution_account.models_manager),
+                services: services.clone(),
+            },
+        );
+        services
+    }
+}
+
+struct DefaultTurnExecutionAccountTransitionResolver {
+    resolver: Arc<dyn ExecutionAccountResolver>,
+    services: Arc<ThreadExecutionAccountServices>,
+}
+
+impl TurnExecutionAccountTransitionResolver for DefaultTurnExecutionAccountTransitionResolver {
+    fn resolve(
+        &self,
+        current_binding: ExecutionAccountBinding,
+        target_slot_id: String,
+    ) -> TurnExecutionAccountTransitionResolverFuture<'_> {
+        Box::pin(async move {
+            let target_binding = ExecutionAccountBinding {
+                slot_id: target_slot_id,
+                generation: current_binding.generation.checked_add(1).ok_or(
+                    crate::execution_account::ExecutionAccountSwitchError::PreparationFailed,
+                )?,
+            };
+            let resolved = self
+                .resolver
+                .resolve_for_transition(target_binding)
+                .await
+                .map_err(|_| {
+                    crate::execution_account::ExecutionAccountSwitchError::TargetUnavailable
+                })?;
+            let services = self.services.resolve(resolved.execution_account());
+            Ok(PreparedTurnExecutionAccountTransition::new(
+                resolved, services,
+            ))
+        })
+    }
 }
 
 pub fn build_models_manager(
@@ -471,7 +569,7 @@ impl ThreadManager {
             Arc::clone(&extensions),
             codex_apps_tools_cache,
         ));
-        let account_services = HashMap::from([(
+        let account_service_entries = HashMap::from([(
             "default".to_string(),
             AccountServiceEntry {
                 auth_manager: Arc::clone(&auth_manager),
@@ -482,6 +580,13 @@ impl ThreadManager {
                 },
             },
         )]);
+        let account_services = Arc::new(ThreadExecutionAccountServices {
+            codex_home: codex_home.to_path_buf(),
+            restriction_product,
+            skills_service: Arc::clone(&skills_service),
+            extensions: Arc::clone(&extensions),
+            entries: std::sync::RwLock::new(account_service_entries),
+        });
         let code_mode_session_provider: Arc<dyn CodeModeSessionProvider> =
             if config.features.enabled(Feature::CodeModeHost)
                 || config.code_mode.disable_in_process_fallback
@@ -494,6 +599,12 @@ impl ThreadManager {
             Arc::clone(&auth_manager),
             Arc::clone(&models_manager),
         ));
+        let turn_execution_account_transition_resolver =
+            Arc::new(DefaultTurnExecutionAccountTransitionResolver {
+                resolver: execution_account_resolver.clone(),
+                services: Arc::clone(&account_services),
+            });
+        let turn_execution_account_selector = Arc::new(DefaultTurnExecutionAccountSelector);
         Self {
             state: Arc::new(ThreadManagerState {
                 threads: Arc::new(RwLock::new(HashMap::new())),
@@ -501,14 +612,14 @@ impl ThreadManager {
                 thread_id_generator: default_thread_id_generator(),
                 models_manager,
                 execution_account_resolver,
-                codex_home: codex_home.to_path_buf(),
-                restriction_product,
+                turn_execution_account_transition_resolver,
+                turn_execution_account_selector,
                 environment_manager,
                 starting_mcp_runtimes: std::sync::Mutex::new(Vec::new()),
                 skills_service,
                 plugins_manager,
                 mcp_manager,
-                account_services: std::sync::RwLock::new(account_services),
+                account_services,
                 code_mode_session_provider,
                 extensions,
                 user_instructions_provider,
@@ -547,6 +658,25 @@ impl ThreadManager {
             unreachable!("execution account resolver must be set before thread manager is shared");
         };
         state.execution_account_resolver = resolver;
+        state.turn_execution_account_transition_resolver =
+            Arc::new(DefaultTurnExecutionAccountTransitionResolver {
+                resolver: Arc::clone(&state.execution_account_resolver),
+                services: Arc::clone(&state.account_services),
+            });
+        self
+    }
+
+    /// Replaces the per-turn account selector before this manager is shared with threads.
+    pub fn with_turn_execution_account_selector(
+        mut self,
+        selector: Arc<dyn TurnExecutionAccountSelector>,
+    ) -> Self {
+        let Some(state) = Arc::get_mut(&mut self.state) else {
+            unreachable!(
+                "turn execution account selector must be set before thread manager is shared"
+            );
+        };
+        state.turn_execution_account_selector = selector;
         self
     }
 
@@ -646,7 +776,7 @@ impl ThreadManager {
         let mcp_manager = Arc::new(McpManager::new(Arc::clone(&plugins_manager)));
         let models_manager = create_model_provider(provider, Some(auth_manager.clone()))
             .models_manager(codex_home.clone(), /*config_model_catalog*/ None);
-        let account_services = HashMap::from([(
+        let account_service_entries = HashMap::from([(
             "default".to_string(),
             AccountServiceEntry {
                 auth_manager: Arc::clone(&auth_manager),
@@ -657,11 +787,19 @@ impl ThreadManager {
                 },
             },
         )]);
+        let extensions = empty_extension_registry();
+        let account_services = Arc::new(ThreadExecutionAccountServices {
+            codex_home: codex_home.clone(),
+            restriction_product,
+            skills_service: Arc::clone(&skills_service),
+            extensions: Arc::clone(&extensions),
+            entries: std::sync::RwLock::new(account_service_entries),
+        });
         // This test constructor has no Config input. Tests that need a non-local
         // process store should construct ThreadManager::new with an explicit store.
         let thread_store: Arc<dyn ThreadStore> = Arc::new(LocalThreadStore::new(
             LocalThreadStoreConfig {
-                codex_home: codex_home.clone(),
+                codex_home,
                 sqlite: codex_state::SqliteConfig::new_for_testing(absolute_codex_home),
                 default_model_provider_id: OPENAI_PROVIDER_ID.to_string(),
             },
@@ -672,6 +810,12 @@ impl ThreadManager {
             Arc::clone(&auth_manager),
             Arc::clone(&models_manager),
         ));
+        let turn_execution_account_transition_resolver =
+            Arc::new(DefaultTurnExecutionAccountTransitionResolver {
+                resolver: execution_account_resolver.clone(),
+                services: Arc::clone(&account_services),
+            });
+        let turn_execution_account_selector = Arc::new(DefaultTurnExecutionAccountSelector);
         Self {
             state: Arc::new(ThreadManagerState {
                 threads: Arc::new(RwLock::new(HashMap::new())),
@@ -679,16 +823,16 @@ impl ThreadManager {
                 thread_id_generator: default_thread_id_generator(),
                 models_manager,
                 execution_account_resolver,
-                codex_home,
-                restriction_product,
+                turn_execution_account_transition_resolver,
+                turn_execution_account_selector,
                 environment_manager,
                 starting_mcp_runtimes: std::sync::Mutex::new(Vec::new()),
                 skills_service,
                 plugins_manager,
                 mcp_manager,
-                account_services: std::sync::RwLock::new(account_services),
+                account_services,
                 code_mode_session_provider: Arc::new(DisabledCodeModeSessionProvider),
-                extensions: empty_extension_registry(),
+                extensions,
                 user_instructions_provider: Arc::new(
                     crate::test_support::EmptyUserInstructionsProvider,
                 ),
@@ -960,6 +1104,7 @@ impl ThreadManager {
         let services = self
             .state
             .account_services
+            .entries
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()
@@ -975,6 +1120,7 @@ impl ThreadManager {
         let plugins_manager = self
             .state
             .account_services
+            .entries
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(slot_id)
@@ -1664,53 +1810,7 @@ impl ThreadManagerState {
         &self,
         execution_account: &ExecutionAccountContext,
     ) -> ExecutionAccountServices {
-        let slot_id = execution_account.binding.slot_id.as_str();
-        if let Some(entry) = self
-            .account_services
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(slot_id)
-            .cloned()
-            && Arc::ptr_eq(&entry.auth_manager, &execution_account.auth_manager)
-            && Arc::ptr_eq(&entry.models_manager, &execution_account.models_manager)
-        {
-            return entry.services;
-        }
-
-        let mut account_services = self
-            .account_services
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(entry) = account_services.get(slot_id)
-            && Arc::ptr_eq(&entry.auth_manager, &execution_account.auth_manager)
-            && Arc::ptr_eq(&entry.models_manager, &execution_account.models_manager)
-        {
-            return entry.services.clone();
-        }
-        let plugins_manager = Arc::new(PluginsManager::new_with_options(
-            self.codex_home.clone(),
-            self.restriction_product,
-            Arc::clone(&execution_account.auth_manager),
-            self.skills_service.clone(),
-        ));
-        let mcp_manager = Arc::new(McpManager::new_with_extensions(
-            Arc::clone(&plugins_manager),
-            Arc::clone(&self.extensions),
-            CodexAppsToolsCache::default(),
-        ));
-        let services = ExecutionAccountServices {
-            plugins_manager,
-            mcp_manager,
-        };
-        account_services.insert(
-            slot_id.to_string(),
-            AccountServiceEntry {
-                auth_manager: Arc::clone(&execution_account.auth_manager),
-                models_manager: Arc::clone(&execution_account.models_manager),
-                services: services.clone(),
-            },
-        );
-        services
+        self.account_services.resolve(execution_account)
     }
 
     pub(crate) fn agent_graph_store(&self) -> Option<Arc<dyn AgentGraphStore>> {
@@ -2340,6 +2440,11 @@ impl ThreadManagerState {
                 codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
         }))
         .await?;
+        session
+            .set_turn_execution_account_selector(Arc::clone(&self.turn_execution_account_selector));
+        session.set_turn_execution_account_transition_resolver(Arc::clone(
+            &self.turn_execution_account_transition_resolver,
+        ));
         // Enable Full Access form input only after session startup so a required MCP server cannot
         // block startup while waiting for form input.
         if session

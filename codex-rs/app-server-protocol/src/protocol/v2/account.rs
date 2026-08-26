@@ -293,6 +293,8 @@ pub struct AccountSlotCapability {
 #[ts(export_to = "v2/")]
 pub struct AccountSlotSnapshot {
     pub account_slot_id: String,
+    /// Stable display order within this app-server's account registry.
+    pub account_number: u32,
     pub label: String,
     pub is_default: bool,
     pub status: AccountSlotStatus,
@@ -509,6 +511,30 @@ pub struct GetAccountRateLimitsResponse {
     /// Multi-bucket view keyed by metered `limit_id` (for example, `codex`).
     pub rate_limits_by_limit_id: Option<HashMap<String, RateLimitSnapshot>>,
     pub rate_limit_reset_credits: Option<RateLimitResetCreditsSummary>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AccountSlotRateLimitsReadParams {
+    pub account_slot_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AccountSlotRateLimitsReadResponse {
+    pub account_slot_id: String,
+    #[ts(type = "number")]
+    pub attempt_generation: u64,
+    /// Unix timestamp in seconds when the rate-limit snapshot was captured.
+    #[ts(type = "number")]
+    pub captured_at: i64,
+    /// Unix timestamp in seconds after which this snapshot is stale.
+    #[ts(type = "number")]
+    pub stale_at: i64,
+    pub rate_limits: RateLimitSnapshot,
+    pub rate_limits_by_limit_id: HashMap<String, RateLimitSnapshot>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]

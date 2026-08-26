@@ -1,5 +1,6 @@
 use super::account_picker::AccountControlIntent;
 use super::account_picker::AccountLoginMethod;
+use super::account_rotation::AccountRotationEdit;
 use super::*;
 use codex_app_server_protocol::AccountSlotAction;
 use codex_app_server_protocol::AccountSlotActionAvailability;
@@ -14,32 +15,40 @@ impl App {
     fn account_selection_view_params(&self, selected_slot_id: Option<&str>) -> SelectionViewParams {
         let current_slot_id = self.current_account_slot_id();
         let mut initial_selected_idx = None;
-        let mut items = self
-            .account_slots
-            .iter()
-            .enumerate()
-            .map(|(index, slot)| {
-                let is_current = current_slot_id == Some(slot.account_slot_id.as_str());
-                if selected_slot_id == Some(slot.account_slot_id.as_str())
-                    || selected_slot_id.is_none() && is_current
-                {
-                    initial_selected_idx = Some(index);
-                }
-                let slot_id = slot.account_slot_id.clone();
-                SelectionItem {
-                    name: slot.label.clone(),
-                    description: Some(account_slot_status_label(slot).to_string()),
-                    is_current,
-                    is_default: slot.is_default,
-                    actions: vec![Box::new(move |tx: &AppEventSender| {
-                        tx.send(AppEvent::OpenAccountDetail {
-                            slot_id: slot_id.clone(),
-                        });
-                    })],
-                    ..Default::default()
-                }
-            })
-            .collect::<Vec<_>>();
+        let mut items = Vec::new();
+        if let Some(summary) = self.account_rotation_summary() {
+            items.push(SelectionItem {
+                name: "Rotation settings".to_string(),
+                description: Some(summary),
+                actions: vec![Box::new(|tx: &AppEventSender| {
+                    tx.send(AppEvent::OpenAccountRotation);
+                })],
+                ..Default::default()
+            });
+        }
+        let account_row_offset = items.len();
+        items.extend(self.account_slots.iter().enumerate().map(|(index, slot)| {
+            let index = index + account_row_offset;
+            let is_current = current_slot_id == Some(slot.account_slot_id.as_str());
+            if selected_slot_id == Some(slot.account_slot_id.as_str())
+                || selected_slot_id.is_none() && is_current
+            {
+                initial_selected_idx = Some(index);
+            }
+            let slot_id = slot.account_slot_id.clone();
+            SelectionItem {
+                name: account_slot_display_name(slot),
+                description: Some(account_slot_status_label(slot)),
+                is_current,
+                is_default: slot.is_default,
+                actions: vec![Box::new(move |tx: &AppEventSender| {
+                    tx.send(AppEvent::OpenAccountDetail {
+                        slot_id: slot_id.clone(),
+                    });
+                })],
+                ..Default::default()
+            }
+        }));
         let add_allowed = self
             .account_slot_capability
             .as_ref()
@@ -194,6 +203,24 @@ impl App {
             },
         );
 
+        if let Some(rotation) = self.account_rotation_snapshot() {
+            let is_fixed_target =
+                rotation.fixed_account_slot_id.as_deref() == Some(slot.account_slot_id.as_str());
+            let slot_id = slot.account_slot_id.clone();
+            push_account_action(
+                &mut items,
+                "Set as fixed account",
+                "Use this account when rotation mode is fixed",
+                !is_fixed_target,
+                is_fixed_target.then(|| "Current fixed account".to_string()),
+                move |tx| {
+                    tx.send(AppEvent::EditAccountRotation {
+                        edit: AccountRotationEdit::FixedSlot(slot_id.clone()),
+                    });
+                },
+            );
+        }
+
         let logout = action_availability(slot, AccountSlotAction::Logout);
         let logout_allowed = logout.is_some_and(|action| action.allowed);
         let logout_reason = logout
@@ -217,27 +244,23 @@ impl App {
 
         SelectionViewParams {
             view_id: Some(ACCOUNT_DETAIL_VIEW_ID),
-            title: Some(slot.label.clone()),
+            title: Some(account_slot_display_name(slot)),
             subtitle: Some(format!(
-                "{} · {}{}{}",
+                "{} · {}{}",
                 account_slot_status_label(slot),
                 if slot.is_default {
                     "Default account"
                 } else {
                     "Secondary account"
                 },
-                if is_current { " · Current" } else { "" },
-                slot.error_code
-                    .as_ref()
-                    .map(|code| format!(" · Error: {code}"))
-                    .unwrap_or_default()
+                if is_current { " · Current" } else { "" }
             )),
             items,
             ..Default::default()
         }
     }
 
-    fn current_account_slot_id(&self) -> Option<&str> {
+    pub(super) fn current_account_slot_id(&self) -> Option<&str> {
         self.account_runtime
             .as_ref()
             .and_then(|(_, runtime)| runtime.account.current.as_ref())
@@ -260,8 +283,10 @@ impl App {
     }
 
     pub(super) fn selected_account_slot_id(&self) -> Option<String> {
+        let account_row_offset = usize::from(self.account_rotation_snapshot().is_some());
         self.chat_widget
             .selected_index_for_present_view(ACCOUNT_PICKER_VIEW_ID)
+            .and_then(|index| index.checked_sub(account_row_offset))
             .and_then(|index| self.account_slots.get(index))
             .map(|slot| slot.account_slot_id.clone())
     }
@@ -291,7 +316,8 @@ impl App {
             self.chat_widget
                 .replace_selection_view_if_present(ACCOUNT_DETAIL_VIEW_ID, params)
         });
-        if !list_replaced && !detail_replaced {
+        let rotation_replaced = self.replace_account_rotation_view_if_present();
+        if !list_replaced && !detail_replaced && !rotation_replaced {
             self.account_detail_slot_id = None;
         }
     }
@@ -334,22 +360,24 @@ impl App {
     }
 }
 
-fn account_slot_status_label(slot: &AccountSlotSnapshot) -> &'static str {
-    if slot.active_login_operation_id.is_some() {
-        return "Login in progress";
-    }
-    if slot
-        .error_code
-        .as_deref()
-        .is_some_and(|code| matches!(code, "authUnavailable" | "refreshUnavailable"))
-    {
-        return "Unavailable";
-    }
-    match slot.status {
+pub(super) fn account_slot_display_name(slot: &AccountSlotSnapshot) -> String {
+    format!("{}. {}", slot.account_number, slot.label)
+}
+
+pub(super) fn account_slot_status_label(slot: &AccountSlotSnapshot) -> String {
+    let mut status = match slot.status {
         AccountSlotStatus::LoginRequired => "Login required",
         AccountSlotStatus::Ready => "Ready",
         AccountSlotStatus::Failed => "Login failed",
     }
+    .to_string();
+    if slot.active_login_operation_id.is_some() {
+        status.push_str(" · Login in progress");
+    }
+    if let Some(error_code) = &slot.error_code {
+        status.push_str(&format!(" · Error: {error_code}"));
+    }
+    status
 }
 
 fn action_availability(

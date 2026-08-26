@@ -6209,6 +6209,10 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         ),
         tool_search_handler_cache: Default::default(),
         turn_environments: Arc::clone(&turn_environments),
+        turn_execution_account_selector: std::sync::RwLock::new(Arc::new(
+            crate::execution_account::DefaultTurnExecutionAccountSelector,
+        )),
+        turn_execution_account_transition_resolver: Default::default(),
     };
 
     let session = Session {
@@ -6238,6 +6242,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         active_turn: Mutex::new(None),
         execution_runtime_transition_lock: Mutex::new(()),
         execution_control_closing: std::sync::atomic::AtomicBool::new(false),
+        execution_account_preparation_cancellation: Default::default(),
         async_hook_results: arc_swap::ArcSwap::from_pointee(async_hook_results),
         input_queue: super::input_queue::InputQueue::new(),
         services,
@@ -8455,6 +8460,10 @@ where
         ),
         tool_search_handler_cache: Default::default(),
         turn_environments: Arc::clone(&turn_environments),
+        turn_execution_account_selector: std::sync::RwLock::new(Arc::new(
+            crate::execution_account::DefaultTurnExecutionAccountSelector,
+        )),
+        turn_execution_account_transition_resolver: Default::default(),
     };
 
     let session = Arc::new(Session {
@@ -8484,6 +8493,7 @@ where
         active_turn: Mutex::new(None),
         execution_runtime_transition_lock: Mutex::new(()),
         execution_control_closing: std::sync::atomic::AtomicBool::new(false),
+        execution_account_preparation_cancellation: Default::default(),
         async_hook_results: arc_swap::ArcSwap::from_pointee(async_hook_results),
         input_queue: super::input_queue::InputQueue::new(),
         services,
@@ -10309,7 +10319,7 @@ enum TerminalEventKind {
     TurnAborted,
 }
 
-async fn attach_in_memory_thread_store(
+pub(crate) async fn attach_in_memory_thread_store(
     session: &mut Session,
 ) -> Arc<codex_thread_store::InMemoryThreadStore> {
     let store = Arc::new(codex_thread_store::InMemoryThreadStore::default());

@@ -90,6 +90,12 @@
     "AccountSlotSnapshot": {
       "description": "A host-managed account slot without credential paths, email addresses, or tokens.",
       "properties": {
+        "accountNumber": {
+          "description": "Stable display order within this app-server's account registry.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "accountSlotId": {
           "type": "string"
         },
@@ -147,6 +153,7 @@
         }
       },
       "required": [
+        "accountNumber",
         "accountSlotId",
         "actions",
         "attemptGeneration",

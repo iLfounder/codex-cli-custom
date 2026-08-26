@@ -26,11 +26,13 @@ use codex_protocol::protocol::ImageGenerationEndEvent;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::SandboxPolicy;
+use codex_protocol::protocol::SessionContextWindow;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_protocol::protocol::ThreadMemoryMode;
 use codex_protocol::protocol::ThreadRolledBackEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnContextItem;
@@ -59,9 +61,11 @@ use crate::ListItemsParams;
 use crate::ListThreadsParams;
 use crate::ListTurnsParams;
 use crate::LoadThreadHistoryParams;
+use crate::ResumeThreadParams;
 use crate::SortDirection;
 use crate::StoredTurnItemsView;
 use crate::ThreadMetadataPatch;
+use crate::ThreadPersistenceMetadata;
 use crate::ThreadSortKey;
 use crate::ThreadStore;
 use crate::ThreadStoreError;
@@ -255,6 +259,41 @@ fn read_rollout(path: &Path) -> Vec<RolloutLine> {
         .collect()
 }
 
+fn write_paginated_ordinal_fixture(home: &Path, thread_id: ThreadId) -> PathBuf {
+    let path = write_rollout(
+        home,
+        thread_id,
+        SessionSource::Cli,
+        vec![
+            started("turn-1"),
+            user_message("question"),
+            agent_message("answer"),
+            completed("turn-1"),
+        ],
+    );
+    let mut lines = read_rollout(&path);
+    let RolloutItem::SessionMeta(session_meta) = &mut lines[0].item else {
+        panic!("fixture head is session metadata");
+    };
+    session_meta.meta.history_mode = ThreadHistoryMode::Paginated;
+    session_meta.meta.context_window =
+        Some(SessionContextWindow::new(uuid::Uuid::now_v7().to_string()));
+    for (line, ordinal) in lines.iter_mut().zip([0, 1, 2, 2, 3]) {
+        line.ordinal = Some(ordinal);
+    }
+    let bytes = lines
+        .into_iter()
+        .map(|line| {
+            format!(
+                "{}\n",
+                serde_json::to_string(&line).expect("serialize fixture")
+            )
+        })
+        .collect::<String>();
+    fs::write(&path, bytes).expect("write paginated ordinal fixture");
+    path
+}
+
 fn apply_options() -> RolloutMigrationOptions {
     RolloutMigrationOptions {
         mode: RolloutMigrationMode::Apply,
@@ -276,6 +315,149 @@ async fn indexed_store(home: &Path) -> LocalThreadStore {
         .await
         .expect("backfill legacy thread metadata");
     LocalThreadStore::new(config, Some(state_db))
+}
+
+#[tokio::test]
+async fn ordinal_repair_dry_run_reports_exact_suffix_without_mutation() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let path = write_paginated_ordinal_fixture(home.path(), thread_id);
+    let before = fs::read(&path).expect("read fixture");
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+
+    let report = store
+        .repair_rollout_ordinals(thread_id, /*expected_file_identity*/ None)
+        .await
+        .expect("inspect duplicate ordinal");
+
+    assert_eq!(report.outcomes.len(), 1);
+    let outcome = &report.outcomes[0];
+    assert_eq!(outcome.thread_id, Some(thread_id));
+    assert_eq!(outcome.rollout_path, path);
+    assert_eq!(outcome.status, RolloutMigrationStatus::Eligible);
+    assert_eq!(outcome.history_mode, Some(ThreadHistoryMode::Paginated));
+    assert!(
+        outcome
+            .file_identity
+            .as_deref()
+            .is_some_and(|id| id.starts_with("v1:"))
+    );
+    assert_eq!(outcome.first_invalid_ordinal, Some(2));
+    assert_eq!(outcome.expected_ordinal, Some(3));
+    assert_eq!(outcome.affected_suffix_records, Some(2));
+    assert_eq!(outcome.mutation_count, Some(0));
+    assert_eq!(outcome.backup_path, None);
+    assert_eq!(fs::read(&path).expect("reread fixture"), before);
+    assert!(!home.path().join("rollout-migrations").exists());
+}
+
+#[tokio::test]
+async fn ordinal_repair_applies_exact_identity_with_backup_and_full_projection() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let path = write_paginated_ordinal_fixture(home.path(), thread_id);
+    let original_bytes = fs::read(&path).expect("read fixture");
+    let original_items = read_rollout(&path)
+        .into_iter()
+        .map(|line| serde_json::to_value(line.item).expect("serialize original item"))
+        .collect::<Vec<_>>();
+    let store = indexed_store(home.path()).await;
+    let dry_run = store
+        .repair_rollout_ordinals(thread_id, /*expected_file_identity*/ None)
+        .await
+        .expect("inspect duplicate ordinal");
+    let file_identity = dry_run.outcomes[0]
+        .file_identity
+        .as_deref()
+        .expect("file identity");
+
+    let active_writer = store
+        .acquire_writer_lock(thread_id)
+        .await
+        .expect("hold writer ownership");
+    let busy = store
+        .repair_rollout_ordinals(thread_id, Some(file_identity))
+        .await
+        .expect_err("reject loaded writer");
+    assert!(matches!(busy, ThreadStoreError::Conflict { .. }));
+    drop(active_writer);
+
+    let mismatch = store
+        .repair_rollout_ordinals(thread_id, Some("v1:stale"))
+        .await
+        .expect_err("reject stale file identity");
+    assert!(matches!(mismatch, ThreadStoreError::Conflict { .. }));
+    assert_eq!(
+        fs::read(&path).expect("read unchanged fixture"),
+        original_bytes
+    );
+
+    let report = store
+        .repair_rollout_ordinals(thread_id, Some(file_identity))
+        .await
+        .expect("repair duplicate ordinal");
+
+    let outcome = &report.outcomes[0];
+    assert_eq!(outcome.status, RolloutMigrationStatus::Migrated);
+    assert_eq!(outcome.mutation_count, Some(2));
+    let repaired = read_rollout(&path);
+    assert_eq!(
+        repaired.iter().map(|line| line.ordinal).collect::<Vec<_>>(),
+        (0..repaired.len() as u64).map(Some).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        repaired
+            .into_iter()
+            .map(|line| serde_json::to_value(line.item).expect("serialize repaired item"))
+            .collect::<Vec<_>>(),
+        original_items
+    );
+    let backup_path = outcome.backup_path.as_ref().expect("backup path");
+    assert_eq!(fs::read(backup_path).expect("read backup"), original_bytes);
+    #[cfg(unix)]
+    assert_eq!(
+        fs::metadata(backup_path)
+            .expect("backup metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    assert!(!migration_journal_path(home.path(), thread_id).exists());
+    let projection = thread_history::projection_state(&store, thread_id)
+        .await
+        .expect("read projection")
+        .expect("projection exists");
+    assert_eq!(
+        projection.next_byte_offset,
+        fs::metadata(&path).expect("metadata").len()
+    );
+    assert_eq!(projection.next_ordinal, 5);
+
+    store
+        .resume_thread(ResumeThreadParams {
+            thread_id,
+            rollout_path: Some(path),
+            history: None,
+            include_archived: true,
+            metadata: ThreadPersistenceMetadata {
+                cwd: Some(home.path().to_path_buf()),
+                model_provider: "test-provider".to_string(),
+                memory_mode: ThreadMemoryMode::Enabled,
+            },
+        })
+        .await
+        .expect("resume repaired rollout");
+    let generation = store
+        .runtime_snapshot(thread_id)
+        .await
+        .expect("runtime snapshot")
+        .writer_generation
+        .expect("writer generation");
+    store
+        .relinquish_thread(thread_id, generation)
+        .await
+        .expect("strictly release repaired rollout");
 }
 
 async fn list_active_summary_turns(store: &LocalThreadStore, thread_id: ThreadId) -> TurnPage {

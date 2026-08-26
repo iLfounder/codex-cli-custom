@@ -169,6 +169,21 @@ impl AccountRequestProcessor {
             .prepare_slot_login(requested_slot, operation_id, candidate_runtime_version)
             .await?;
         drop(binding_transition);
+        let rotation_affected = match self
+            .account_registry
+            .reset_automatic_rotation_memberships(&prepared.account_slot_id)
+            .await
+        {
+            Ok(thread_ids) => thread_ids,
+            Err(error) => {
+                self.finish_slot_failure(&prepared, ERROR_LOGIN_FAILED)
+                    .await;
+                return Err(error);
+            }
+        };
+        for thread_id in rotation_affected {
+            self.session_runtime.publish_thread(thread_id).await;
+        }
         if let Err(error) = self
             .session_runtime
             .begin_operation(operation(

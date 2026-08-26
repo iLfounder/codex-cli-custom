@@ -1,4 +1,14 @@
 use super::*;
+use crate::execution_account::ExecutionAccountContext;
+use crate::execution_account::ExecutionAccountServices;
+use crate::execution_account::PreparedTurnExecutionAccountTransition;
+use crate::execution_account::ResolvedExecutionAccountTransition;
+use crate::execution_account::TurnExecutionAccountSelector;
+use crate::execution_account::TurnExecutionAccountSelectorFuture;
+use crate::execution_account::TurnExecutionAccountTransitionResolver;
+use crate::execution_account::TurnExecutionAccountTransitionResolverFuture;
+use crate::session::tests::attach_in_memory_thread_store;
+use crate::session::tests::make_session_and_context;
 use crate::session::tests::make_session_and_context_with_rx;
 use crate::state::TaskKind;
 use crate::tasks::SessionTask;
@@ -16,8 +26,14 @@ use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::turn_input::TurnInput as SubmittedTurnInput;
 use codex_protocol::user_input::UserInput;
+use codex_thread_store::ThreadAccountRotationMode;
+use codex_thread_store::ThreadAccountRotationPolicyUpdate;
+use codex_thread_store::ThreadStore;
 use core_test_support::test_codex::local_selections;
 use pretty_assertions::assert_eq;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
@@ -25,6 +41,281 @@ use tokio_util::sync::CancellationToken;
 struct NeverEndingTask {
     kind: TaskKind,
     listen_to_cancellation_token: bool,
+}
+
+struct StaticExecutionAccountSelector {
+    decision: TurnExecutionAccountDecision,
+}
+
+struct BlockingExecutionAccountSelector {
+    started: async_channel::Sender<()>,
+}
+
+impl TurnExecutionAccountSelector for BlockingExecutionAccountSelector {
+    fn select(
+        &self,
+        _selection: TurnExecutionAccountSelection,
+    ) -> TurnExecutionAccountSelectorFuture<'_> {
+        Box::pin(async move {
+            self.started
+                .send(())
+                .await
+                .expect("selector start observer remains open");
+            std::future::pending().await
+        })
+    }
+}
+
+impl TurnExecutionAccountSelector for StaticExecutionAccountSelector {
+    fn select(
+        &self,
+        _selection: TurnExecutionAccountSelection,
+    ) -> TurnExecutionAccountSelectorFuture<'_> {
+        let decision = self.decision.clone();
+        Box::pin(async move { Ok(decision) })
+    }
+}
+
+struct TestReadinessLease {
+    dropped: Arc<AtomicBool>,
+}
+
+impl Drop for TestReadinessLease {
+    fn drop(&mut self) {
+        self.dropped.store(true, Ordering::Release);
+    }
+}
+
+struct RecordingExecutionAccountTransitionResolver {
+    target: Arc<ExecutionAccountContext>,
+    services: ExecutionAccountServices,
+    calls: Arc<AtomicUsize>,
+    lease_dropped: Arc<AtomicBool>,
+}
+
+impl TurnExecutionAccountTransitionResolver for RecordingExecutionAccountTransitionResolver {
+    fn resolve(
+        &self,
+        _current_binding: ExecutionAccountBinding,
+        _target_slot_id: String,
+    ) -> TurnExecutionAccountTransitionResolverFuture<'_> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        let resolved = ResolvedExecutionAccountTransition::with_readiness_lease(
+            Arc::clone(&self.target),
+            TestReadinessLease {
+                dropped: Arc::clone(&self.lease_dropped),
+            },
+        );
+        let services = self.services.clone();
+        Box::pin(async move {
+            Ok(PreparedTurnExecutionAccountTransition::new(
+                resolved, services,
+            ))
+        })
+    }
+}
+
+async fn make_rotation_test_session() -> (
+    Arc<Session>,
+    Arc<codex_thread_store::InMemoryThreadStore>,
+    ExecutionAccountBinding,
+    u64,
+) {
+    let (mut session, _turn_context) = make_session_and_context().await;
+    let store = attach_in_memory_thread_store(&mut session).await;
+    let binding = session.execution_account().binding.clone();
+    store
+        .initialize_execution_account_binding(session.thread_id(), binding.clone())
+        .await
+        .expect("initialize execution account binding");
+    let policy = store
+        .compare_and_swap_thread_account_rotation_policy(
+            session.thread_id(),
+            /*expected_revision*/ 0,
+            ThreadAccountRotationPolicyUpdate {
+                mode: ThreadAccountRotationMode::RoundRobin,
+                fixed_account_slot_id: None,
+                automatic_account_slot_ids: vec![binding.slot_id.clone(), "target".to_string()],
+            },
+        )
+        .await
+        .expect("persist rotation policy")
+        .expect("initial policy revision matches");
+    (Arc::new(session), store, binding, policy.revision)
+}
+
+fn root_turn_request() -> TurnInputRequest {
+    TurnInputRequest::user_input(vec![UserInput::Text {
+        text: "rotate this turn".to_string(),
+        text_elements: Vec::new(),
+    }])
+}
+
+#[tokio::test]
+async fn same_target_selection_skips_resolution_and_commits_cursor_after_start() {
+    let (session, store, binding, policy_revision) = make_rotation_test_session().await;
+    store
+        .compare_and_swap_thread_account_rotation_cursor(
+            session.thread_id(),
+            policy_revision,
+            "target".to_string(),
+        )
+        .await
+        .expect("seed a distinguishable rotation cursor")
+        .expect("policy revision matches");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let lease_dropped = Arc::new(AtomicBool::new(false));
+    let runtime = session.execution_account_runtime();
+    session.set_turn_execution_account_selector(Arc::new(StaticExecutionAccountSelector {
+        decision: TurnExecutionAccountDecision::Select {
+            target_slot_id: binding.slot_id.clone(),
+            policy_revision,
+        },
+    }));
+    session.set_turn_execution_account_transition_resolver(Arc::new(
+        RecordingExecutionAccountTransitionResolver {
+            target: session.execution_account(),
+            services: runtime.services.clone(),
+            calls: Arc::clone(&calls),
+            lease_dropped,
+        },
+    ));
+
+    let submission = handle(
+        &session,
+        root_turn_request(),
+        TurnInputMode::StartOrSteer,
+        "same-target-turn".to_string(),
+    )
+    .await
+    .expect("same-target selection starts");
+
+    assert_eq!(
+        submission,
+        TurnInputSubmission::Started {
+            turn_id: "same-target-turn".to_string(),
+        }
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert_eq!(session.execution_account().binding, binding.clone());
+    let policy = store
+        .thread_account_rotation_policy(session.thread_id())
+        .await
+        .expect("read rotation cursor");
+    assert_eq!(policy.mode, ThreadAccountRotationMode::RoundRobin);
+    assert_eq!(policy.last_committed_account_slot_id, Some(binding.slot_id));
+    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
+}
+
+#[tokio::test]
+async fn different_target_selection_preserves_rotation_and_holds_readiness_through_switch() {
+    let (session, store, binding, policy_revision) = make_rotation_test_session().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let lease_dropped = Arc::new(AtomicBool::new(false));
+    let current = session.execution_account();
+    let runtime = session.execution_account_runtime();
+    let target = Arc::new(ExecutionAccountContext {
+        binding: ExecutionAccountBinding {
+            slot_id: "target".to_string(),
+            generation: binding.generation + 1,
+        },
+        auth_manager: Arc::clone(&current.auth_manager),
+        models_manager: Arc::clone(&current.models_manager),
+    });
+    session.set_turn_execution_account_selector(Arc::new(StaticExecutionAccountSelector {
+        decision: TurnExecutionAccountDecision::Select {
+            target_slot_id: "target".to_string(),
+            policy_revision,
+        },
+    }));
+    session.set_turn_execution_account_transition_resolver(Arc::new(
+        RecordingExecutionAccountTransitionResolver {
+            target: Arc::clone(&target),
+            services: runtime.services.clone(),
+            calls: Arc::clone(&calls),
+            lease_dropped: Arc::clone(&lease_dropped),
+        },
+    ));
+
+    let submission = handle(
+        &session,
+        root_turn_request(),
+        TurnInputMode::StartIfIdle,
+        "different-target-turn".to_string(),
+    )
+    .await
+    .expect("different-target selection starts");
+
+    assert_eq!(
+        submission,
+        TurnInputSubmission::Started {
+            turn_id: "different-target-turn".to_string(),
+        }
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert!(lease_dropped.load(Ordering::Acquire));
+    assert_eq!(session.execution_account().binding, target.binding);
+    let policy = store
+        .thread_account_rotation_policy(session.thread_id())
+        .await
+        .expect("read preserved rotation policy");
+    assert_eq!(
+        (
+            policy.mode,
+            policy.fixed_account_slot_id,
+            policy.last_committed_account_slot_id,
+        ),
+        (
+            ThreadAccountRotationMode::RoundRobin,
+            None,
+            Some("target".to_string()),
+        )
+    );
+    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
+}
+
+#[tokio::test]
+async fn cancelling_account_selection_releases_exact_idle_reservation_without_cursor_commit() {
+    let (session, store, binding, _policy_revision) = make_rotation_test_session().await;
+    let initial_policy = store
+        .thread_account_rotation_policy(session.thread_id())
+        .await
+        .expect("read initial policy");
+    let (started_tx, started_rx) = async_channel::bounded(1);
+    session.set_turn_execution_account_selector(Arc::new(BlockingExecutionAccountSelector {
+        started: started_tx,
+    }));
+    let submission = tokio::spawn({
+        let session = Arc::clone(&session);
+        async move {
+            handle(
+                &session,
+                root_turn_request(),
+                TurnInputMode::StartIfIdle,
+                "cancelled-selection".to_string(),
+            )
+            .await
+        }
+    });
+    started_rx.recv().await.expect("selector started");
+
+    session.cancel_execution_account_preparation();
+
+    let error = submission
+        .await
+        .expect("submission task joins")
+        .expect_err("cancelled selection cannot start");
+    assert_eq!(
+        error.to_string(),
+        ExecutionAccountSwitchError::ThreadBusy.to_string()
+    );
+    assert!(session.active_turn.lock().await.is_none());
+    assert_eq!(session.execution_account().binding, binding);
+    let policy = store
+        .thread_account_rotation_policy(session.thread_id())
+        .await
+        .expect("read unchanged policy");
+    assert_eq!(policy, initial_policy);
 }
 
 impl SessionTask for NeverEndingTask {

@@ -37,6 +37,8 @@ use codex_app_server_protocol::SessionRuntimeAccountRef;
 use codex_app_server_protocol::SessionRuntimeOperation;
 use codex_app_server_protocol::SkillsListResponse;
 use codex_app_server_protocol::Thread;
+use codex_app_server_protocol::ThreadAccountRotationReadResponse;
+use codex_app_server_protocol::ThreadAccountRotationUpdateResponse;
 use codex_app_server_protocol::ThreadGoalStatus;
 use codex_app_server_protocol::ThreadItemsListResponse;
 use codex_app_server_protocol::ThreadPresentation;
@@ -52,6 +54,7 @@ use uuid::Uuid;
 use crate::app::account_login::AccountLoginStartOutcome;
 use crate::app::account_picker::AccountControlIntent;
 use crate::app::account_picker::AccountPickerSnapshot;
+use crate::app::account_rotation::AccountRotationEdit;
 use crate::app::runtime_controls::ShutdownIntent;
 use crate::app::runtime_controls::ShutdownLookup;
 use crate::app_command::AppCommand;
@@ -236,6 +239,20 @@ pub(crate) enum AppEvent {
     },
     OpenAccountDetail {
         slot_id: String,
+    },
+    OpenAccountRotation,
+    AccountRotationLoaded {
+        thread_id: ThreadId,
+        request_generation: u64,
+        result: Result<ThreadAccountRotationReadResponse, String>,
+    },
+    EditAccountRotation {
+        edit: AccountRotationEdit,
+    },
+    AccountRotationUpdated {
+        thread_id: ThreadId,
+        expected_rotation_revision: u64,
+        result: Result<ThreadAccountRotationUpdateResponse, String>,
     },
     OpenAccountLoginMethods {
         slot_id: Option<String>,

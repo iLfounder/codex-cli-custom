@@ -32,6 +32,7 @@ fn runtime_revision_may_restart_with_a_new_epoch_but_not_regress_within_an_epoch
 fn snapshot(revision: u64, label: &str) -> AccountSlotSnapshot {
     AccountSlotSnapshot {
         account_slot_id: "secondary".to_string(),
+        account_number: 2,
         label: label.to_string(),
         is_default: false,
         status: AccountSlotStatus::Ready,

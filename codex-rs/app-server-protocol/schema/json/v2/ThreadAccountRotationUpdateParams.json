@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ThreadAccountRotationMode": {
+      "enum": [
+        "fixed",
+        "quotaAware",
+        "roundRobin",
+        "exhaustThenNext"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "automaticAccountSlotIds": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "expectedRotationRevision": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "fixedAccountSlotId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "mode": {
+      "$ref": "#/definitions/ThreadAccountRotationMode"
+    },
+    "threadId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "automaticAccountSlotIds",
+    "expectedRotationRevision",
+    "mode",
+    "threadId"
+  ],
+  "title": "ThreadAccountRotationUpdateParams",
+  "type": "object"
+}

@@ -95,6 +95,15 @@ const THREAD_TRANSITIONS_DEFINITION: &str = r#"CREATE TABLE thread_transitions (
     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
     committed_at INTEGER
 )"#;
+const THREAD_ACCOUNT_ROTATION_POLICIES_DEFINITION: &str = r#"CREATE TABLE thread_account_rotation_policies (
+    thread_id TEXT PRIMARY KEY NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    mode TEXT NOT NULL CHECK (mode IN ('fixed','quotaAware','roundRobin','exhaustThenNext')),
+    fixed_slot_id TEXT,
+    automatic_slot_ids_json TEXT NOT NULL,
+    last_committed_slot_id TEXT,
+    updated_at INTEGER NOT NULL
+)"#;
 
 const CUSTOM_SCHEMA_V1: CustomSchemaMigration = CustomSchemaMigration {
     version: 1,
@@ -217,12 +226,35 @@ ON thread_transitions(current_thread_id, status);
         definition: THREAD_TRANSITIONS_DEFINITION,
     }],
 };
+const CUSTOM_SCHEMA_V5: CustomSchemaMigration = CustomSchemaMigration {
+    version: 5,
+    name: "thread_account_rotation_policies",
+    definition: r#"
+CREATE TABLE thread_account_rotation_policies (
+    thread_id TEXT PRIMARY KEY NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    mode TEXT NOT NULL CHECK (mode IN ('fixed','quotaAware','roundRobin','exhaustThenNext')),
+    fixed_slot_id TEXT,
+    automatic_slot_ids_json TEXT NOT NULL,
+    last_committed_slot_id TEXT,
+    updated_at INTEGER NOT NULL
+);
+"#,
+    legacy_upstream_version: 0,
+    legacy_description: "",
+    legacy_checksum: "",
+    required_tables: &[RequiredCustomTable {
+        name: "thread_account_rotation_policies",
+        definition: THREAD_ACCOUNT_ROTATION_POLICIES_DEFINITION,
+    }],
+};
 
 const ACTIVE_CUSTOM_SCHEMA_MIGRATIONS: &[&CustomSchemaMigration] = &[
     &CUSTOM_SCHEMA_V1,
     &CUSTOM_SCHEMA_V2,
     &CUSTOM_SCHEMA_V3,
     &CUSTOM_SCHEMA_V4,
+    &CUSTOM_SCHEMA_V5,
 ];
 const LEGACY_CUSTOM_SCHEMA_MIGRATIONS: &[&CustomSchemaMigration] =
     &[&CUSTOM_SCHEMA_V1, &CUSTOM_SCHEMA_V2];

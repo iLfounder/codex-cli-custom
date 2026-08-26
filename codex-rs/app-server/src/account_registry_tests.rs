@@ -14,6 +14,65 @@ use tempfile::tempdir;
 const SECOND_SLOT_ID: &str = "11111111111141118111111111111111";
 const THIRD_SLOT_ID: &str = "22222222222242228222222222222222";
 
+#[test]
+fn account_numbers_preserve_exact_labels_and_assign_legacy_slots_by_slot_id() {
+    let process_home = Path::new("/tmp/codex-account-number-test");
+    let slots = vec![
+        AccountSlotManifest {
+            account_slot_id: DEFAULT_SLOT_ID.to_string(),
+            label: "Default account".to_string(),
+            auth_home: process_home.to_path_buf(),
+            is_default: true,
+            status: ManifestSlotStatus::Ready,
+            attempt_generation: 0,
+            updated_at: 0,
+            error_code: None,
+        },
+        AccountSlotManifest {
+            account_slot_id: SECOND_SLOT_ID.to_string(),
+            label: "legacy".to_string(),
+            auth_home: process_home.join("accounts").join(SECOND_SLOT_ID),
+            is_default: false,
+            status: ManifestSlotStatus::Ready,
+            attempt_generation: 0,
+            updated_at: 0,
+            error_code: None,
+        },
+        AccountSlotManifest {
+            account_slot_id: THIRD_SLOT_ID.to_string(),
+            label: "Account 2".to_string(),
+            auth_home: process_home.join("accounts").join(THIRD_SLOT_ID),
+            is_default: false,
+            status: ManifestSlotStatus::Ready,
+            attempt_generation: 0,
+            updated_at: 0,
+            error_code: None,
+        },
+    ];
+    let assigned = assign_account_numbers(&slots);
+    let first = slots
+        .iter()
+        .zip(assigned)
+        .map(|(slot, number)| (slot.account_slot_id.clone(), number))
+        .collect::<std::collections::HashMap<_, _>>();
+    let reordered = vec![slots[0].clone(), slots[2].clone(), slots[1].clone()];
+    let reassigned = assign_account_numbers(&reordered);
+    let second = reordered
+        .iter()
+        .zip(reassigned)
+        .map(|(slot, number)| (slot.account_slot_id.clone(), number))
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(first, second);
+    assert_eq!(
+        first,
+        std::collections::HashMap::from([
+            (DEFAULT_SLOT_ID.to_string(), 1),
+            (SECOND_SLOT_ID.to_string(), 3),
+            (THIRD_SLOT_ID.to_string(), 2),
+        ])
+    );
+}
+
 fn persist_api_key_auth(auth_home: &Path) {
     login_with_api_key(
         auth_home,

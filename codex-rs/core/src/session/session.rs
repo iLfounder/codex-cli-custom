@@ -8,6 +8,7 @@ use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::hook_mcp_executor::CoreHookMcpExecutor;
 use crate::shell_snapshot::ShellSnapshot;
 use crate::state::ActiveTurn;
+use crate::state::TurnState;
 use codex_extension_api::ExtensionDataInit;
 use codex_http_client::ClientRouteClass;
 use codex_http_client::RouteAwareClientPool;
@@ -33,6 +34,10 @@ use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use tokio::sync::Semaphore;
+
+#[cfg(test)]
+#[path = "execution_account_transition_tests.rs"]
+mod execution_account_transition_tests;
 
 /// Context for an initialized model agent
 ///
@@ -66,6 +71,7 @@ pub(crate) struct Session {
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
     pub(crate) execution_runtime_transition_lock: Mutex<()>,
     pub(crate) execution_control_closing: AtomicBool,
+    pub(super) execution_account_preparation_cancellation: ExecutionAccountPreparationCancellation,
     pub(crate) async_hook_results: arc_swap::ArcSwap<async_channel::Receiver<HookCompletedEvent>>,
     pub(crate) input_queue: InputQueue,
     pub(crate) services: SessionServices,
@@ -94,6 +100,79 @@ impl Drop for PreparedExecutionAccountReplacement {
 
 struct ExecutionAccountSwitchCancellation {
     token: CancellationToken,
+}
+
+#[derive(Default)]
+pub(super) struct ExecutionAccountPreparationCancellation {
+    current: std::sync::Mutex<Option<Arc<CancellationToken>>>,
+}
+
+impl ExecutionAccountPreparationCancellation {
+    fn begin(&self) -> Option<Arc<CancellationToken>> {
+        let mut current = self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if current.is_some() {
+            return None;
+        }
+        let cancellation = Arc::new(CancellationToken::new());
+        *current = Some(Arc::clone(&cancellation));
+        Some(cancellation)
+    }
+
+    fn clear(&self, cancellation: &Arc<CancellationToken>) {
+        let mut current = self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if current
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, cancellation))
+        {
+            *current = None;
+        }
+    }
+
+    fn cancel(&self) {
+        let cancellation = self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(cancellation) = cancellation {
+            cancellation.cancel();
+        }
+    }
+}
+
+/// Exact task-less active-turn reservation held while an account runtime is prepared.
+#[derive(Clone)]
+pub(crate) struct IdleExecutionAccountReservation {
+    turn_state: Arc<Mutex<TurnState>>,
+    cancellation: Arc<CancellationToken>,
+}
+
+impl IdleExecutionAccountReservation {
+    pub(crate) fn cancellation_token(&self) -> CancellationToken {
+        self.cancellation.as_ref().clone()
+    }
+
+    pub(crate) fn turn_state(&self) -> Arc<Mutex<TurnState>> {
+        Arc::clone(&self.turn_state)
+    }
+}
+
+/// Idle condition accepted by the owned execution-account transition.
+#[derive(Clone)]
+pub(crate) enum ExecutionAccountTransitionIdle {
+    Unreserved,
+    ExactReservation(IdleExecutionAccountReservation),
+}
+
+enum ExecutionAccountBindingCommit {
+    PinFixed,
+    PreserveRotation { policy_revision: u64 },
 }
 
 impl Drop for ExecutionAccountSwitchCancellation {
@@ -696,6 +775,65 @@ impl Session {
         self.execution_account_runtime.load_full()
     }
 
+    pub(crate) fn set_turn_execution_account_selector(
+        &self,
+        selector: Arc<dyn crate::execution_account::TurnExecutionAccountSelector>,
+    ) {
+        *self
+            .services
+            .turn_execution_account_selector
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = selector;
+    }
+
+    pub(crate) fn turn_execution_account_selector(
+        &self,
+    ) -> Arc<dyn crate::execution_account::TurnExecutionAccountSelector> {
+        Arc::clone(
+            &self
+                .services
+                .turn_execution_account_selector
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    pub(crate) fn set_turn_execution_account_transition_resolver(
+        &self,
+        resolver: Arc<dyn crate::execution_account::TurnExecutionAccountTransitionResolver>,
+    ) {
+        *self
+            .services
+            .turn_execution_account_transition_resolver
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(resolver);
+    }
+
+    pub(crate) fn turn_execution_account_transition_resolver(
+        &self,
+    ) -> Option<Arc<dyn crate::execution_account::TurnExecutionAccountTransitionResolver>> {
+        self.services
+            .turn_execution_account_transition_resolver
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) async fn can_admit_root_user_turn(&self) -> bool {
+        let state = self.state.lock().await;
+        let configuration = &state.session_configuration;
+        if configuration.session_source.is_non_root_agent() {
+            return false;
+        }
+        match &configuration.thread_source {
+            Some(ThreadSource::Subagent | ThreadSource::MemoryConsolidation) => false,
+            Some(ThreadSource::Feature(feature)) => {
+                !matches!(feature.as_str(), "system" | "title") && !feature.starts_with("ambient")
+            }
+            Some(ThreadSource::User) | None => true,
+        }
+    }
+
     pub(crate) fn guardian_review_session(&self) -> Arc<GuardianReviewSessionManager> {
         Arc::clone(
             &self
@@ -1030,7 +1168,13 @@ impl Session {
         // starts, it retains the session and finishes publication even if its caller is dropped.
         tokio::spawn(async move {
             session
-                .switch_execution_account_owned(expected, target, services, cancellation)
+                .switch_execution_account_owned_for_idle(
+                    expected,
+                    target,
+                    services,
+                    ExecutionAccountTransitionIdle::Unreserved,
+                    cancellation,
+                )
                 .await
         })
         .await
@@ -1044,149 +1188,331 @@ impl Session {
         clippy::await_holding_invalid_type,
         reason = "account runtime preparation and durable binding commit share one transition fence"
     )]
-    async fn switch_execution_account_owned(
+    pub(crate) async fn switch_execution_account_owned_for_idle(
         self: Arc<Self>,
         expected: codex_protocol::protocol::ExecutionAccountBinding,
         target: Arc<crate::execution_account::ExecutionAccountContext>,
         services: crate::execution_account::ExecutionAccountServices,
+        idle: ExecutionAccountTransitionIdle,
         cancellation: CancellationToken,
     ) -> Result<
         codex_protocol::protocol::ExecutionAccountBinding,
         crate::execution_account::ExecutionAccountSwitchError,
     > {
+        let cancellation = match &idle {
+            ExecutionAccountTransitionIdle::Unreserved => cancellation,
+            ExecutionAccountTransitionIdle::ExactReservation(reservation) => {
+                reservation.cancellation_token()
+            }
+        };
         let _transition = self.execution_runtime_transition_lock.lock().await;
-        let _mcp_refresh = self.mcp_refresh.acquire().await.map_err(|_| {
-            crate::execution_account::ExecutionAccountSwitchError::PreparationFailed
-        })?;
-        if self.execution_account().binding != expected
-            || self.conversation.running_state().await.is_some()
-        {
-            return Err(crate::execution_account::ExecutionAccountSwitchError::ThreadBusy);
-        }
-        let PreparedExecutionAccountRuntime {
-            runtime: prepared,
-            hooks: prepared_hooks,
-            async_hook_results: prepared_async_hook_results,
-        } = tokio::select! {
-            _ = cancellation.cancelled() => {
+        self.switch_execution_account_for_idle_locked(
+            expected,
+            target,
+            services,
+            idle,
+            cancellation,
+            ExecutionAccountBindingCommit::PinFixed,
+        )
+        .await
+    }
+
+    pub(crate) async fn switch_execution_account_for_reserved_turn(
+        self: &Arc<Self>,
+        expected: codex_protocol::protocol::ExecutionAccountBinding,
+        target: Arc<crate::execution_account::ExecutionAccountContext>,
+        services: crate::execution_account::ExecutionAccountServices,
+        reservation: IdleExecutionAccountReservation,
+        policy_revision: u64,
+    ) -> Result<
+        codex_protocol::protocol::ExecutionAccountBinding,
+        crate::execution_account::ExecutionAccountSwitchError,
+    > {
+        let cancellation = reservation.cancellation_token();
+        Arc::clone(self)
+            .switch_execution_account_for_idle_locked(
+                expected,
+                target,
+                services,
+                ExecutionAccountTransitionIdle::ExactReservation(reservation),
+                cancellation,
+                ExecutionAccountBindingCommit::PreserveRotation { policy_revision },
+            )
+            .await
+    }
+
+    fn switch_execution_account_for_idle_locked(
+        self: &Arc<Self>,
+        expected: codex_protocol::protocol::ExecutionAccountBinding,
+        target: Arc<crate::execution_account::ExecutionAccountContext>,
+        services: crate::execution_account::ExecutionAccountServices,
+        idle: ExecutionAccountTransitionIdle,
+        cancellation: CancellationToken,
+        commit: ExecutionAccountBindingCommit,
+    ) -> BoxFuture<
+        '_,
+        Result<
+            codex_protocol::protocol::ExecutionAccountBinding,
+            crate::execution_account::ExecutionAccountSwitchError,
+        >,
+    > {
+        Box::pin(async move {
+            let _mcp_refresh = self.mcp_refresh.acquire().await.map_err(|_| {
+                crate::execution_account::ExecutionAccountSwitchError::PreparationFailed
+            })?;
+            if !self
+                .execution_account_transition_is_allowed(&expected, &idle)
+                .await
+            {
                 return Err(crate::execution_account::ExecutionAccountSwitchError::ThreadBusy);
             }
-            prepared = self.prepare_execution_account_runtime(Arc::clone(&target), services) => {
-                prepared?
-            }
-        };
-        if self.execution_account().binding != expected
-            || self.conversation.running_state().await.is_some()
-        {
-            return Err(crate::execution_account::ExecutionAccountSwitchError::ThreadBusy);
-        }
-        let previous = self.execution_account_runtime();
-        if cancellation.is_cancelled() {
-            return Err(crate::execution_account::ExecutionAccountSwitchError::ThreadBusy);
-        }
-        self.begin_execution_control_transition()
-            .await
-            .map_err(|()| crate::execution_account::ExecutionAccountSwitchError::ThreadBusy)?;
-        let _closing = ExecutionControlTransitionGuard {
-            session: Arc::clone(&self),
-        };
-        for extension_runtime in &prepared.extension_runtimes {
-            tokio::select! {
+            let PreparedExecutionAccountRuntime {
+                runtime: prepared,
+                hooks: prepared_hooks,
+                async_hook_results: prepared_async_hook_results,
+            } = tokio::select! {
                 _ = cancellation.cancelled() => {
                     return Err(crate::execution_account::ExecutionAccountSwitchError::ThreadBusy);
                 }
-                result = extension_runtime.quiesce() => {
-                    result.map_err(|_| {
-                        crate::execution_account::ExecutionAccountSwitchError::PreparationFailed
-                    })?;
+                prepared = self.prepare_execution_account_runtime(Arc::clone(&target), services) => {
+                    prepared?
+                }
+            };
+            if !self
+                .execution_account_transition_is_allowed(&expected, &idle)
+                .await
+            {
+                return Err(crate::execution_account::ExecutionAccountSwitchError::ThreadBusy);
+            }
+            let previous = self.execution_account_runtime();
+            if cancellation.is_cancelled() {
+                return Err(crate::execution_account::ExecutionAccountSwitchError::ThreadBusy);
+            }
+            self.begin_execution_control_transition_for_idle(&idle)
+                .await
+                .map_err(|()| crate::execution_account::ExecutionAccountSwitchError::ThreadBusy)?;
+            let _closing = ExecutionControlTransitionGuard {
+                session: Arc::clone(self),
+            };
+            for extension_runtime in &prepared.extension_runtimes {
+                tokio::select! {
+                    _ = cancellation.cancelled() => {
+                        return Err(crate::execution_account::ExecutionAccountSwitchError::ThreadBusy);
+                    }
+                    result = extension_runtime.quiesce() => {
+                        result.map_err(|_| {
+                            crate::execution_account::ExecutionAccountSwitchError::PreparationFailed
+                        })?;
+                    }
                 }
             }
-        }
-        if cancellation.is_cancelled() {
+            if cancellation.is_cancelled() {
+                return Err(crate::execution_account::ExecutionAccountSwitchError::ThreadBusy);
+            }
+
+            // Do not observe cancellation beyond this point: CAS and its infallible publication are
+            // one owned commit path. Until CAS succeeds, the old bundle and workers remain untouched.
+            let commit_intent = match commit {
+                ExecutionAccountBindingCommit::PinFixed => {
+                    codex_thread_store::AccountBindingCommitIntent::PinFixed
+                }
+                ExecutionAccountBindingCommit::PreserveRotation { policy_revision } => {
+                    let policy = self
+                        .services
+                        .thread_store
+                        .thread_account_rotation_policy(self.thread_id)
+                        .await
+                        .map_err(|_| {
+                            crate::execution_account::ExecutionAccountSwitchError::PersistenceFailed
+                        })?;
+                    if policy.revision != policy_revision {
+                        return Err(
+                            crate::execution_account::ExecutionAccountSwitchError::StaleGeneration,
+                        );
+                    }
+                    codex_thread_store::AccountBindingCommitIntent::PreserveRotation
+                }
+            };
+            let next = self
+                .services
+                .thread_store
+                .compare_and_swap_execution_account_binding_with_intent(
+                    self.thread_id,
+                    expected,
+                    target.binding.slot_id.clone(),
+                    commit_intent,
+                )
+                .await
+                .map_err(|_| {
+                    crate::execution_account::ExecutionAccountSwitchError::PersistenceFailed
+                })?
+                .ok_or(crate::execution_account::ExecutionAccountSwitchError::StaleGeneration)?;
+            if next != target.binding {
+                return Err(
+                    crate::execution_account::ExecutionAccountSwitchError::PersistenceFailed,
+                );
+            }
+
+            let startup_prewarm = self.take_session_startup_prewarm().await;
+            if let Some(startup_prewarm) = startup_prewarm {
+                startup_prewarm.abort().await;
+            }
+            self.stop_mcp_prewarm_worker().await;
+            previous.guardian_review_session.shutdown().await;
+            previous.mcp_runtime.shutdown().await;
+            let target_auth_changes = target.auth_manager.auth_change_receiver();
+            let previous_hooks = self.hooks();
+            previous_hooks.shutdown().await;
+            let previous_async_hook_results = self.async_hook_results.load_full();
+            previous_async_hook_results.close();
+            while previous_async_hook_results.try_recv().is_ok() {}
+            self.async_hook_results
+                .store(Arc::new(prepared_async_hook_results));
+            self.services.hooks.store(Arc::new(prepared_hooks));
+
+            previous.mcp_runtime.adopt_prepared(&prepared.mcp_runtime);
+            self.services
+                .mcp_runtime
+                .adopt_prepared(&prepared.mcp_runtime);
+            prepared
+                .services
+                .plugins_manager
+                .set_analytics_events_client(prepared.analytics_events_client.clone());
+            self.services
+                .session_extension_data
+                .insert(target.as_ref().clone());
+            self.services
+                .session_extension_data
+                .insert(Arc::clone(&target.auth_manager));
+            self.services
+                .session_extension_data
+                .insert(prepared.analytics_events_client.clone());
+            self.services
+                .thread_extension_data
+                .insert(target.as_ref().clone());
+            self.services
+                .thread_extension_data
+                .insert(Arc::clone(&target.auth_manager));
+            self.services
+                .thread_extension_data
+                .insert(prepared.analytics_events_client.clone());
+            self.services
+                .hook_mcp_runtime
+                .store(Arc::clone(&prepared.mcp_runtime));
+            self.services
+                .turn_environments
+                .replace_shell_snapshot(prepared.shell_snapshot.clone());
+            if let Some(network_proxy) = self.services.network_proxy.load_full() {
+                network_proxy
+                    .proxy()
+                    .replace_audit_metadata(prepared.network_proxy_audit_metadata.clone());
+            }
+            for extension_runtime in &prepared.extension_runtimes {
+                extension_runtime.publish(
+                    &self.services.session_extension_data,
+                    &self.services.thread_extension_data,
+                );
+            }
+            self.execution_account_runtime.store(Arc::clone(&prepared));
+            self.start_mcp_prewarm_worker(target_auth_changes);
+            self.schedule_mcp_prewarm();
+            Ok(next)
+        })
+    }
+
+    /// Reserves the exact idle task slot while a future turn prepares an account runtime.
+    ///
+    /// The caller must hold `execution_runtime_transition_lock`. Dropping the returned value does
+    /// not release the reservation; the admission path must call
+    /// [`Session::release_idle_execution_account_reservation`].
+    pub(crate) async fn reserve_idle_execution_account_preparation(
+        &self,
+    ) -> Result<
+        IdleExecutionAccountReservation,
+        crate::execution_account::ExecutionAccountSwitchError,
+    > {
+        if self.execution_control_is_closing()
+            || *self.services.elicitations.subscribe().borrow()
+            || self.conversation.running_state().await.is_some()
+        {
             return Err(crate::execution_account::ExecutionAccountSwitchError::ThreadBusy);
         }
 
-        // Do not observe cancellation beyond this point: CAS and its infallible publication are
-        // one owned commit path. Until CAS succeeds, the old bundle and workers remain untouched.
-        let next = self
-            .services
-            .thread_store
-            .compare_and_swap_execution_account_binding(
-                self.thread_id,
-                expected,
-                target.binding.slot_id.clone(),
-            )
-            .await
-            .map_err(|_| crate::execution_account::ExecutionAccountSwitchError::PersistenceFailed)?
-            .ok_or(crate::execution_account::ExecutionAccountSwitchError::StaleGeneration)?;
-        if next != target.binding {
-            return Err(crate::execution_account::ExecutionAccountSwitchError::PersistenceFailed);
+        let mut active_turn = self.active_turn.lock().await;
+        if active_turn.is_some() {
+            return Err(crate::execution_account::ExecutionAccountSwitchError::ThreadBusy);
         }
+        let Some(cancellation) = self.execution_account_preparation_cancellation.begin() else {
+            return Err(crate::execution_account::ExecutionAccountSwitchError::ThreadBusy);
+        };
+        let reserved = active_turn.get_or_insert_with(ActiveTurn::default);
+        Ok(IdleExecutionAccountReservation {
+            turn_state: Arc::clone(&reserved.turn_state),
+            cancellation,
+        })
+    }
 
-        let startup_prewarm = self.take_session_startup_prewarm().await;
-        if let Some(startup_prewarm) = startup_prewarm {
-            startup_prewarm.abort().await;
-        }
-        self.stop_mcp_prewarm_worker().await;
-        previous.guardian_review_session.shutdown().await;
-        previous.mcp_runtime.shutdown().await;
-        let target_auth_changes = target.auth_manager.auth_change_receiver();
-        let previous_hooks = self.hooks();
-        previous_hooks.shutdown().await;
-        let previous_async_hook_results = self.async_hook_results.load_full();
-        previous_async_hook_results.close();
-        while previous_async_hook_results.try_recv().is_ok() {}
-        self.async_hook_results
-            .store(Arc::new(prepared_async_hook_results));
-        self.services.hooks.store(Arc::new(prepared_hooks));
+    pub(crate) fn cancel_execution_account_preparation(&self) {
+        self.execution_account_preparation_cancellation.cancel();
+    }
 
-        previous.mcp_runtime.adopt_prepared(&prepared.mcp_runtime);
-        self.services
-            .mcp_runtime
-            .adopt_prepared(&prepared.mcp_runtime);
-        prepared
-            .services
-            .plugins_manager
-            .set_analytics_events_client(prepared.analytics_events_client.clone());
-        self.services
-            .session_extension_data
-            .insert(target.as_ref().clone());
-        self.services
-            .session_extension_data
-            .insert(Arc::clone(&target.auth_manager));
-        self.services
-            .session_extension_data
-            .insert(prepared.analytics_events_client.clone());
-        self.services
-            .thread_extension_data
-            .insert(target.as_ref().clone());
-        self.services
-            .thread_extension_data
-            .insert(Arc::clone(&target.auth_manager));
-        self.services
-            .thread_extension_data
-            .insert(prepared.analytics_events_client.clone());
-        self.services
-            .hook_mcp_runtime
-            .store(Arc::clone(&prepared.mcp_runtime));
-        self.services
-            .turn_environments
-            .replace_shell_snapshot(prepared.shell_snapshot.clone());
-        if let Some(network_proxy) = self.services.network_proxy.load_full() {
-            network_proxy
-                .proxy()
-                .replace_audit_metadata(prepared.network_proxy_audit_metadata.clone());
+    pub(crate) async fn release_idle_execution_account_reservation(
+        &self,
+        reservation: &IdleExecutionAccountReservation,
+    ) {
+        let mut active_turn = self.active_turn.lock().await;
+        if active_turn.as_ref().is_some_and(|active_turn| {
+            active_turn.task.is_none()
+                && Arc::ptr_eq(&active_turn.turn_state, &reservation.turn_state)
+        }) {
+            *active_turn = None;
         }
-        for extension_runtime in &prepared.extension_runtimes {
-            extension_runtime.publish(
-                &self.services.session_extension_data,
-                &self.services.thread_extension_data,
-            );
+        self.execution_account_preparation_cancellation
+            .clear(&reservation.cancellation);
+    }
+
+    pub(crate) fn finish_idle_execution_account_reservation(
+        &self,
+        reservation: &IdleExecutionAccountReservation,
+    ) {
+        self.execution_account_preparation_cancellation
+            .clear(&reservation.cancellation);
+    }
+
+    pub(crate) async fn idle_execution_account_reservation_matches(
+        &self,
+        reservation: &IdleExecutionAccountReservation,
+    ) -> bool {
+        self.execution_account_transition_idle_matches(
+            &ExecutionAccountTransitionIdle::ExactReservation(reservation.clone()),
+        )
+        .await
+    }
+
+    async fn execution_account_transition_idle_matches(
+        &self,
+        idle: &ExecutionAccountTransitionIdle,
+    ) -> bool {
+        let active_turn = self.active_turn.lock().await;
+        match idle {
+            ExecutionAccountTransitionIdle::Unreserved => active_turn.is_none(),
+            ExecutionAccountTransitionIdle::ExactReservation(reservation) => {
+                active_turn.as_ref().is_some_and(|active_turn| {
+                    active_turn.task.is_none()
+                        && Arc::ptr_eq(&active_turn.turn_state, &reservation.turn_state)
+                })
+            }
         }
-        self.execution_account_runtime.store(Arc::clone(&prepared));
-        self.start_mcp_prewarm_worker(target_auth_changes);
-        self.schedule_mcp_prewarm();
-        Ok(next)
+    }
+
+    async fn execution_account_transition_is_allowed(
+        &self,
+        expected: &codex_protocol::protocol::ExecutionAccountBinding,
+        idle: &ExecutionAccountTransitionIdle,
+    ) -> bool {
+        self.execution_account().binding == *expected
+            && self.execution_account_transition_idle_matches(idle).await
+            && self.conversation.running_state().await.is_none()
     }
 
     /// Close the idle input boundary immediately before a writer-control commit.
@@ -1194,9 +1520,20 @@ impl Session {
     /// Callers must hold `execution_runtime_transition_lock`. Every admission path uses the same
     /// lock, while the closing flag keeps a successfully relinquished runtime terminal.
     pub(crate) async fn begin_execution_control_transition(&self) -> Result<(), ()> {
+        self.begin_execution_control_transition_for_idle(
+            &ExecutionAccountTransitionIdle::Unreserved,
+        )
+        .await
+    }
+
+    async fn begin_execution_control_transition_for_idle(
+        &self,
+        idle: &ExecutionAccountTransitionIdle,
+    ) -> Result<(), ()> {
         if self.execution_control_is_closing()
-            || self.active_turn.lock().await.is_some()
-            || self.input_queue.has_pending_mailbox_items().await
+            || !self.execution_account_transition_idle_matches(idle).await
+            || (matches!(idle, ExecutionAccountTransitionIdle::Unreserved)
+                && self.input_queue.has_pending_mailbox_items().await)
             || *self.services.elicitations.subscribe().borrow()
             || self.conversation.running_state().await.is_some()
         {
@@ -2022,6 +2359,10 @@ impl Session {
                 ),
                 tool_search_handler_cache: Default::default(),
                 turn_environments: Arc::clone(&turn_environments),
+                turn_execution_account_selector: std::sync::RwLock::new(Arc::new(
+                    crate::execution_account::DefaultTurnExecutionAccountSelector,
+                )),
+                turn_execution_account_transition_resolver: Default::default(),
             };
             let (mcp_prewarm_tx, mcp_prewarm_rx) = async_channel::bounded(1);
             let sess = Arc::new(Session {
@@ -2046,6 +2387,8 @@ impl Session {
                 active_turn: Mutex::new(None),
                 execution_runtime_transition_lock: Mutex::new(()),
                 execution_control_closing: AtomicBool::new(false),
+                execution_account_preparation_cancellation:
+                    ExecutionAccountPreparationCancellation::default(),
                 async_hook_results: arc_swap::ArcSwap::from_pointee(async_hook_results),
                 input_queue: InputQueue::new(),
                 services,

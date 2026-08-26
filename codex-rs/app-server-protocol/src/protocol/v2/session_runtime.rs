@@ -6,6 +6,9 @@ use crate::TS;
 use serde::Deserialize;
 use serde::Serialize;
 
+/// Capability name published when durable per-thread account rotation is available.
+pub const SESSION_RUNTIME_ACCOUNT_ROTATION_CAPABILITY: &str = "ananke_account_rotation_v1";
+
 /// Parameters for reading a revision-consistent page of session runtime snapshots.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
@@ -207,6 +210,7 @@ pub enum SessionRuntimePersistenceHealth {
 pub struct SessionRuntimeAccountBinding {
     pub current: Option<SessionRuntimeAccountRef>,
     pub active_turn: Option<SessionRuntimeAccountRef>,
+    pub rotation: Option<super::ThreadAccountRotationSnapshot>,
     pub switch_state: SessionRuntimeAccountSwitchState,
     pub switch_target_slot_id: Option<String>,
     pub deny_reason: Option<String>,

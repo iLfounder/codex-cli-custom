@@ -556,6 +556,16 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ThreadAccountSwitchResponse,
     },
+    ThreadAccountRotationRead => "thread/account/rotation/read" {
+        params: v2::ThreadAccountRotationReadParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadAccountRotationReadResponse,
+    },
+    ThreadAccountRotationUpdate => "thread/account/rotation/update" {
+        params: v2::ThreadAccountRotationUpdateParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadAccountRotationUpdateResponse,
+    },
     ThreadRelinquish => "thread/relinquish" {
         params: v2::ThreadRelinquishParams,
         serialization: thread_id(params.thread_id),
@@ -1229,6 +1239,12 @@ client_request_definitions! {
         params: v2::AccountSlotListParams,
         serialization: global_shared_read("account-slots"),
         response: v2::AccountSlotListResponse,
+    },
+
+    AccountSlotRateLimitsRead => "accountSlot/rateLimits/read" {
+        params: v2::AccountSlotRateLimitsReadParams,
+        serialization: global_shared_read("account-slots"),
+        response: v2::AccountSlotRateLimitsReadResponse,
     },
 
     AccountSlotLoginStart => "accountSlot/login/start" {

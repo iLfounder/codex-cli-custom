@@ -15,12 +15,15 @@ use codex_app_server_protocol::SessionRuntimePersistenceHealth;
 use codex_app_server_protocol::SessionRuntimeSnapshot;
 use codex_app_server_protocol::SessionRuntimeWriter;
 use codex_app_server_protocol::SessionRuntimeWriterState;
+use codex_app_server_protocol::ThreadStatus;
 use codex_protocol::ThreadId;
 use pretty_assertions::assert_eq;
 
 use super::EngineState;
 use super::RuntimeActivity;
 use super::SessionRuntimeEngine;
+use super::active_status_matches_account_slot;
+use super::is_actual_active_status;
 use super::operations::OperationCache;
 use super::operations::evict_terminal_operations;
 use super::operations::retained_counts;
@@ -74,12 +77,46 @@ fn snapshot(thread_id: ThreadId) -> SessionRuntimeSnapshot {
         account: SessionRuntimeAccountBinding {
             current: None,
             active_turn: None,
+            rotation: None,
             switch_state: SessionRuntimeAccountSwitchState::Unbound,
             switch_target_slot_id: None,
             deny_reason: Some("account_unbound".to_string()),
         },
         actions: Vec::new(),
     }
+}
+
+#[test]
+fn account_login_gate_uses_actual_active_status_not_historical_turn_projection() {
+    let idle = ThreadStatus::Idle;
+    let active = ThreadStatus::Active {
+        active_flags: Vec::new(),
+    };
+    let default = codex_protocol::protocol::ExecutionAccountBinding {
+        slot_id: "default".to_string(),
+        generation: 3,
+    };
+    let secondary = codex_protocol::protocol::ExecutionAccountBinding {
+        slot_id: "secondary".to_string(),
+        generation: 5,
+    };
+    assert!(!is_actual_active_status(&idle));
+    assert!(is_actual_active_status(&active));
+    assert!(active_status_matches_account_slot(
+        &active, None, &default, "default"
+    ));
+    assert!(!active_status_matches_account_slot(
+        &active,
+        Some(&secondary),
+        &default,
+        "default",
+    ));
+    assert!(!active_status_matches_account_slot(
+        &idle,
+        Some(&default),
+        &default,
+        "default",
+    ));
 }
 
 fn operation(id: usize, status: SessionRuntimeOperationStatus) -> SessionRuntimeOperation {

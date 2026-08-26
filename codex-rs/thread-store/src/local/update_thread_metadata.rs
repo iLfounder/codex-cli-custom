@@ -8,7 +8,6 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_rollout::RolloutItem;
-use codex_rollout::append_rollout_item_to_path;
 use codex_rollout::append_thread_name;
 use codex_rollout::read_session_meta_line;
 use codex_state::ThreadMetadataBuilder;
@@ -90,6 +89,13 @@ pub(super) async fn update_thread_metadata(
         None
     };
     let paginated = matches!(history_mode, Some(ThreadHistoryMode::Paginated));
+    let compatibility_item_requested = (requires_rollout_compat || patch.name.is_some())
+        && (patch.memory_mode.is_some() || patch.git_info.is_some());
+    let compatibility_appender = if compatibility_item_requested && !paginated {
+        Some(live_writer::RolloutCompatibilityAppender::acquire(store, thread_id).await?)
+    } else {
+        None
+    };
     let require_sqlite_write =
         pending_patch.is_some() || sqlite_write_failure_should_block(&patch) || paginated;
     let mut updated = apply_metadata_update(
@@ -149,7 +155,8 @@ pub(super) async fn update_thread_metadata(
         return Ok(updated);
     }
 
-    if live_writer::rollout_path(store, thread_id).await.is_ok() {
+    if compatibility_appender.is_none() && live_writer::rollout_path(store, thread_id).await.is_ok()
+    {
         live_writer::persist_thread(store, thread_id).await?;
     }
     let mut resolved_rollout = if params.include_archived {
@@ -163,7 +170,21 @@ pub(super) async fn update_thread_metadata(
     let name = patch.name;
     let git_info = patch.git_info;
     if let Some(memory_mode) = patch.memory_mode {
-        apply_thread_memory_mode(resolved_rollout.path.as_path(), thread_id, memory_mode).await?;
+        let compatibility_appender =
+            compatibility_appender
+                .as_ref()
+                .ok_or_else(|| ThreadStoreError::Internal {
+                    message: format!(
+                        "rollout compatibility writer unavailable for thread {thread_id}"
+                    ),
+                })?;
+        apply_thread_memory_mode(
+            compatibility_appender,
+            resolved_rollout.path.as_path(),
+            thread_id,
+            memory_mode,
+        )
+        .await?;
         refresh_resolved_rollout_path(&mut resolved_rollout).await;
     }
 
@@ -232,7 +253,16 @@ pub(super) async fn update_thread_metadata(
         None => None,
     };
     if let Some(((sha, branch, origin_url), memory_mode)) = resolved_git_info.as_ref() {
+        let compatibility_appender =
+            compatibility_appender
+                .as_ref()
+                .ok_or_else(|| ThreadStoreError::Internal {
+                    message: format!(
+                        "rollout compatibility writer unavailable for thread {thread_id}"
+                    ),
+                })?;
         apply_thread_git_info_to_rollout(
+            compatibility_appender,
             resolved_rollout.path.as_path(),
             thread_id,
             sha,
@@ -774,6 +804,7 @@ fn resolve_git_info_patch(
 }
 
 async fn apply_thread_git_info_to_rollout(
+    compatibility_appender: &live_writer::RolloutCompatibilityAppender,
     rollout_path: &Path,
     thread_id: ThreadId,
     sha: &Option<String>,
@@ -802,7 +833,8 @@ async fn apply_thread_git_info_to_rollout(
         repository_url: origin_url.clone(),
     });
     session_meta.meta.memory_mode = memory_mode.map(str::to_string);
-    append_rollout_item_to_path(rollout_path, &RolloutItem::SessionMeta(session_meta))
+    compatibility_appender
+        .append(rollout_path, &RolloutItem::SessionMeta(session_meta))
         .await
         .map_err(|err| ThreadStoreError::Internal {
             message: format!("failed to set thread git metadata: {err}"),
@@ -810,6 +842,7 @@ async fn apply_thread_git_info_to_rollout(
 }
 
 async fn apply_thread_memory_mode(
+    compatibility_appender: &live_writer::RolloutCompatibilityAppender,
     rollout_path: &Path,
     thread_id: ThreadId,
     memory_mode: ThreadMemoryMode,
@@ -833,7 +866,8 @@ async fn apply_thread_memory_mode(
     // code will preserve the latest prior git marker when this field is absent.
     session_meta.git = None;
     session_meta.meta.memory_mode = Some(memory_mode_as_str(memory_mode).to_string());
-    append_rollout_item_to_path(rollout_path, &RolloutItem::SessionMeta(session_meta))
+    compatibility_appender
+        .append(rollout_path, &RolloutItem::SessionMeta(session_meta))
         .await
         .map_err(|err| ThreadStoreError::Internal {
             message: format!("failed to set thread memory mode: {err}"),
@@ -855,6 +889,8 @@ fn rollout_path_is_archived(store: &LocalThreadStore, path: &Path) -> bool {
 mod tests {
     use codex_protocol::models::PermissionProfile;
     use codex_protocol::openai_models::ReasoningEffort;
+    use codex_protocol::protocol::AgentMessageEvent;
+    use codex_protocol::protocol::EventMsg;
     use codex_protocol::protocol::ThreadHistoryMode;
     use codex_utils_absolute_path::test_support::PathExt;
     use pretty_assertions::assert_eq;
@@ -864,6 +900,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+    use crate::AppendThreadItemsParams;
     use crate::GitInfoPatch;
     use crate::ListThreadsParams;
     use crate::MoveThreadToSectionParams;
@@ -1411,6 +1448,160 @@ mod tests {
         let appended = last_rollout_item(path.as_path());
         assert_eq!(appended["type"], "session_meta");
         assert_eq!(appended["payload"]["memory_mode"], "disabled");
+    }
+
+    #[tokio::test]
+    async fn competing_store_cannot_append_legacy_metadata_while_writer_live() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let uuid = Uuid::from_u128(321);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
+        let path =
+            write_session_file(home.path(), "2025-01-03T14-50-00", uuid).expect("session file");
+        let owner = LocalThreadStore::new(config.clone(), /*state_db*/ None);
+        let competing = LocalThreadStore::new(config, /*state_db*/ None);
+        owner
+            .resume_thread(ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(path.clone()),
+                history: None,
+                include_archived: true,
+                metadata: test_thread_metadata(),
+            })
+            .await
+            .expect("resume owned live thread");
+        let before = std::fs::read(&path).expect("read rollout before competing update");
+
+        let err = competing
+            .update_thread_metadata(UpdateThreadMetadataParams {
+                thread_id,
+                patch: ThreadMetadataPatch {
+                    memory_mode: Some(ThreadMemoryMode::Disabled),
+                    ..Default::default()
+                },
+                include_archived: false,
+            })
+            .await
+            .expect_err("competing metadata append should fail");
+
+        assert!(matches!(err, ThreadStoreError::Conflict { .. }));
+        assert_eq!(
+            std::fs::read(&path).expect("read rollout after competing update"),
+            before
+        );
+        owner
+            .shutdown_thread(thread_id)
+            .await
+            .expect("shutdown owned live thread");
+    }
+
+    #[tokio::test]
+    async fn live_legacy_metadata_append_stays_ordered_with_recorder_items() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let uuid = Uuid::from_u128(322);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
+        let path =
+            write_session_file(home.path(), "2025-01-03T14-55-00", uuid).expect("session file");
+        let store = LocalThreadStore::new(config, /*state_db*/ None);
+        store
+            .resume_thread(ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(path.clone()),
+                history: None,
+                include_archived: true,
+                metadata: test_thread_metadata(),
+            })
+            .await
+            .expect("resume live thread");
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![RolloutItem::EventMsg(EventMsg::AgentMessage(
+                    AgentMessageEvent {
+                        message: "before metadata".to_string(),
+                        phase: None,
+                        memory_citation: None,
+                        delivery: None,
+                    },
+                ))],
+            })
+            .await
+            .expect("append item before metadata");
+        store
+            .update_thread_metadata(UpdateThreadMetadataParams {
+                thread_id,
+                patch: ThreadMetadataPatch {
+                    memory_mode: Some(ThreadMemoryMode::Disabled),
+                    ..Default::default()
+                },
+                include_archived: false,
+            })
+            .await
+            .expect("append live metadata")
+            .expect("local store returns updated thread");
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![RolloutItem::EventMsg(EventMsg::AgentMessage(
+                    AgentMessageEvent {
+                        message: "after metadata".to_string(),
+                        phase: None,
+                        memory_citation: None,
+                        delivery: None,
+                    },
+                ))],
+            })
+            .await
+            .expect("append item after metadata");
+        store
+            .flush_thread(thread_id)
+            .await
+            .expect("flush live thread");
+
+        let records = std::fs::read_to_string(&path)
+            .expect("read ordered rollout")
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("valid rollout line"))
+            .collect::<Vec<_>>();
+        let suffix = records[records.len() - 3..]
+            .iter()
+            .map(|record| {
+                json!({
+                    "type": record["type"],
+                    "payloadType": record["payload"]["type"],
+                    "message": record["payload"]["message"],
+                    "memoryMode": record["payload"]["memory_mode"],
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            suffix,
+            vec![
+                json!({
+                    "type": "event_msg",
+                    "payloadType": "agent_message",
+                    "message": "before metadata",
+                    "memoryMode": null,
+                }),
+                json!({
+                    "type": "session_meta",
+                    "payloadType": null,
+                    "message": null,
+                    "memoryMode": "disabled",
+                }),
+                json!({
+                    "type": "event_msg",
+                    "payloadType": "agent_message",
+                    "message": "after metadata",
+                    "memoryMode": null,
+                }),
+            ]
+        );
+        store
+            .shutdown_thread(thread_id)
+            .await
+            .expect("shutdown live thread");
     }
 
     #[tokio::test]

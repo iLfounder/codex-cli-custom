@@ -328,11 +328,9 @@ impl AccountRegistry {
                     return Err(invalid_request("account slot limit has been reached"));
                 }
                 let account_slot_id = Uuid::new_v4().simple().to_string();
-                let ordinal = slots
-                    .iter()
-                    .filter(|slot| !slot.manifest.is_default)
-                    .count()
-                    + 2;
+                let account_number = (2_u32..)
+                    .find(|number| slots.iter().all(|slot| slot.account_number != *number))
+                    .ok_or_else(|| internal_error("account slot number space is exhausted"))?;
                 slots.push(AccountSlotRecord {
                     manifest: AccountSlotManifest {
                         auth_home: self
@@ -341,14 +339,15 @@ impl AccountRegistry {
                             .join(PRIVATE_HOMES_DIR)
                             .join(&account_slot_id)
                             .to_path_buf(),
-                        account_slot_id,
-                        label: format!("Account {ordinal}"),
+                        account_slot_id: account_slot_id.clone(),
+                        label: format!("Account {account_number}"),
                         is_default: false,
                         status: ManifestSlotStatus::LoginRequired,
                         attempt_generation: 0,
                         updated_at: 0,
                         error_code: None,
                     },
+                    account_number,
                     runtime: Arc::new(super::AccountRuntimeCell::default()),
                     binding_transition: Arc::new(Mutex::new(())),
                     active_login_operation_id: None,
@@ -356,7 +355,15 @@ impl AccountRegistry {
                     active_logout_operation_id: None,
                     completed_login_operation_id: None,
                 });
-                slots.len() - 1
+                slots.sort_by(|left, right| {
+                    left.manifest
+                        .account_slot_id
+                        .cmp(&right.manifest.account_slot_id)
+                });
+                slots
+                    .iter()
+                    .position(|slot| slot.manifest.account_slot_id == account_slot_id)
+                    .ok_or_else(|| internal_error("new account slot was not retained"))?
             }
         };
 
@@ -568,6 +575,7 @@ impl AccountRegistry {
             state.projection_dirty = projection_error.is_some();
         }
         drop(_mutation);
+        self.invalidate_slot_quota(super::DEFAULT_SLOT_ID).await;
         self.changed_notification(super::DEFAULT_SLOT_ID)
             .await
             .map(Some)
@@ -615,6 +623,7 @@ impl AccountRegistry {
             state.manifest_present = true;
         }
         drop(_mutation);
+        self.invalidate_slot_quota(super::DEFAULT_SLOT_ID).await;
         self.changed_notification(super::DEFAULT_SLOT_ID).await
     }
 
@@ -690,6 +699,7 @@ impl AccountRegistry {
             runtime_cell.replace(runtime);
         }
         drop(mutation);
+        self.invalidate_slot_quota(&changed_slot_id).await;
         self.changed_notification(&changed_slot_id).await.map(Some)
     }
 
@@ -928,6 +938,7 @@ impl AccountRegistry {
             state.slots = slots;
         }
         drop(mutation);
+        self.invalidate_slot_quota(&slot_id).await;
         self.changed_notification(&slot_id).await
     }
 
@@ -1003,6 +1014,7 @@ impl AccountRegistry {
             state.slots = slots;
         }
         drop(mutation);
+        self.invalidate_slot_quota(&changed_slot_id).await;
         self.changed_notification(&changed_slot_id).await.map(Some)
     }
 

@@ -60,6 +60,25 @@ impl App {
                 result,
             ),
             AppEvent::OpenAccountDetail { slot_id } => self.show_account_detail(slot_id),
+            AppEvent::OpenAccountRotation => self.open_account_rotation_editor(app_server),
+            AppEvent::AccountRotationLoaded {
+                thread_id,
+                request_generation,
+                result,
+            } => self.handle_account_rotation_loaded(thread_id, request_generation, result),
+            AppEvent::EditAccountRotation { edit } => {
+                self.edit_account_rotation(app_server, edit)
+            }
+            AppEvent::AccountRotationUpdated {
+                thread_id,
+                expected_rotation_revision,
+                result,
+            } => self.handle_account_rotation_updated(
+                app_server,
+                thread_id,
+                expected_rotation_revision,
+                result,
+            ),
             AppEvent::OpenAccountLoginMethods { slot_id } => {
                 self.show_account_login_methods(slot_id)
             }

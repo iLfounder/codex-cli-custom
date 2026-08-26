@@ -6,6 +6,7 @@ use crate::app_server_session::AccountSlotsSnapshot;
 use crate::app_server_session::ThreadRuntimeSnapshot;
 use crate::app_server_session::list_account_slots;
 use crate::app_server_session::session_runtime_for_thread;
+use codex_app_server_protocol::SESSION_RUNTIME_ACCOUNT_ROTATION_CAPABILITY;
 
 #[derive(Debug)]
 pub(crate) struct AccountPickerSnapshot {
@@ -201,7 +202,17 @@ impl App {
         }
     }
 
-    fn apply_account_snapshot(&mut self, snapshot: AccountPickerSnapshot) -> bool {
+    fn apply_account_snapshot(&mut self, mut snapshot: AccountPickerSnapshot) -> bool {
+        let rotation_available = snapshot.runtime.capabilities.iter().any(|capability| {
+            capability.name == SESSION_RUNTIME_ACCOUNT_ROTATION_CAPABILITY && capability.available
+        });
+        self.account_rotation_available = rotation_available;
+        if !rotation_available {
+            snapshot.runtime.snapshot.account.rotation = None;
+            if let Some((_, runtime)) = self.account_runtime.as_mut() {
+                runtime.account.rotation = None;
+            }
+        }
         let same_runtime_epoch = self
             .account_runtime
             .as_ref()

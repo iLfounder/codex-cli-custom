@@ -23,7 +23,7 @@ pub(crate) enum AccountLoginStartOutcome {
         slot_id: String,
         challenge: AccountSlotLoginChallenge,
     },
-    Secondary(AccountSlotLoginStartResponse),
+    Secondary(Box<AccountSlotLoginStartResponse>),
 }
 
 impl App {
@@ -108,6 +108,7 @@ impl App {
                 };
                 start_account_slot_login(request_handle, params)
                     .await
+                    .map(Box::new)
                     .map(AccountLoginStartOutcome::Secondary)
                     .map_err(|error| error.to_string())
             };

@@ -8,7 +8,11 @@ import type { AccountSlotStatus } from "./AccountSlotStatus";
 /**
  * A host-managed account slot without credential paths, email addresses, or tokens.
  */
-export type AccountSlotSnapshot = { accountSlotId: string, label: string, isDefault: boolean, status: AccountSlotStatus, authMode: AuthMode | null, attemptGeneration: number, registryRevision: number, activeLoginOperationId: string | null, errorCode: string | null, actions: Array<AccountSlotActionAvailability>,
+export type AccountSlotSnapshot = { accountSlotId: string,
+/**
+ * Stable display order within this app-server's account registry.
+ */
+accountNumber: number, label: string, isDefault: boolean, status: AccountSlotStatus, authMode: AuthMode | null, attemptGeneration: number, registryRevision: number, activeLoginOperationId: string | null, errorCode: string | null, actions: Array<AccountSlotActionAvailability>,
 /**
  * Unix timestamp in seconds when the slot last changed.
  */

@@ -40,6 +40,7 @@ use std::sync::atomic::AtomicI64;
 use std::time::Instant;
 use tracing::warn;
 
+mod account_rotation;
 mod backfill;
 mod execution_account;
 mod external_agent_config_imports;
@@ -60,6 +61,10 @@ mod thread_transition;
 mod threads;
 mod writer_authority;
 
+pub use account_rotation::AccountBindingCommitIntent;
+pub use account_rotation::ThreadAccountRotationMode;
+pub use account_rotation::ThreadAccountRotationPolicy;
+pub use account_rotation::ThreadAccountRotationPolicyUpdate;
 pub use external_agent_config_imports::ExternalAgentConfigImportDetailsRecord;
 pub use external_agent_config_imports::ExternalAgentConfigImportFailureRecord;
 pub use external_agent_config_imports::ExternalAgentConfigImportHistoryRecord;

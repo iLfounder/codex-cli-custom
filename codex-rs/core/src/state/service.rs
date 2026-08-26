@@ -11,6 +11,8 @@ use crate::current_time::TimeProvider;
 use crate::elicitation::ElicitationService;
 use crate::environment_selection::ThreadEnvironments;
 use crate::exec_policy::ExecPolicyManager;
+use crate::execution_account::TurnExecutionAccountSelector;
+use crate::execution_account::TurnExecutionAccountTransitionResolver;
 use crate::guardian::GuardianRejectionCircuitBreaker;
 use crate::mcp::McpManager;
 use crate::mcp_tool_exposure::McpHandlerCache;
@@ -99,4 +101,10 @@ pub(crate) struct SessionServices {
     pub(crate) code_mode_service: CodeModeService,
     pub(crate) tool_search_handler_cache: ToolSearchHandlerCache,
     pub(crate) turn_environments: Arc<ThreadEnvironments>,
+    /// Host policy used to choose an account for a newly admitted user turn.
+    pub(crate) turn_execution_account_selector:
+        std::sync::RwLock<Arc<dyn TurnExecutionAccountSelector>>,
+    /// Host resolver used to prepare a selected account without exposing host policy to Core.
+    pub(crate) turn_execution_account_transition_resolver:
+        std::sync::RwLock<Option<Arc<dyn TurnExecutionAccountTransitionResolver>>>,
 }

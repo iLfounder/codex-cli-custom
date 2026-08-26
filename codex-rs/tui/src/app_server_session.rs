@@ -77,6 +77,10 @@ use codex_app_server_protocol::SessionSource;
 use codex_app_server_protocol::SkillsListParams;
 use codex_app_server_protocol::SkillsListResponse;
 use codex_app_server_protocol::Thread;
+use codex_app_server_protocol::ThreadAccountRotationReadParams;
+use codex_app_server_protocol::ThreadAccountRotationReadResponse;
+use codex_app_server_protocol::ThreadAccountRotationUpdateParams;
+use codex_app_server_protocol::ThreadAccountRotationUpdateResponse;
 use codex_app_server_protocol::ThreadAccountSwitchParams;
 use codex_app_server_protocol::ThreadAccountSwitchResponse;
 use codex_app_server_protocol::ThreadApproveGuardianDeniedActionParams;
@@ -1798,6 +1802,11 @@ pub(crate) async fn list_account_slots(
         expected_capability = Some(response.multi_account.clone());
         data.extend(response.data);
         let Some(next_cursor) = response.next_cursor else {
+            data.sort_by(|left, right| {
+                left.account_number
+                    .cmp(&right.account_number)
+                    .then_with(|| left.account_slot_id.cmp(&right.account_slot_id))
+            });
             return Ok(AccountSlotsSnapshot {
                 data,
                 registry_revision: response.registry_revision,
@@ -1930,6 +1939,37 @@ pub(crate) async fn switch_thread_account(
     request_handle
         .request_typed(ClientRequest::ThreadAccountSwitch {
             request_id: RequestId::String(format!("tui-account-switch-{}", Uuid::new_v4())),
+            params,
+        })
+        .await
+        .map_err(Into::into)
+}
+
+pub(crate) async fn read_thread_account_rotation(
+    request_handle: AppServerRequestHandle,
+    thread_id: ThreadId,
+) -> Result<ThreadAccountRotationReadResponse> {
+    request_handle
+        .request_typed(ClientRequest::ThreadAccountRotationRead {
+            request_id: RequestId::String(format!("tui-account-rotation-read-{}", Uuid::new_v4())),
+            params: ThreadAccountRotationReadParams {
+                thread_id: thread_id.to_string(),
+            },
+        })
+        .await
+        .map_err(Into::into)
+}
+
+pub(crate) async fn update_thread_account_rotation(
+    request_handle: AppServerRequestHandle,
+    params: ThreadAccountRotationUpdateParams,
+) -> Result<ThreadAccountRotationUpdateResponse> {
+    request_handle
+        .request_typed(ClientRequest::ThreadAccountRotationUpdate {
+            request_id: RequestId::String(format!(
+                "tui-account-rotation-update-{}",
+                Uuid::new_v4()
+            )),
             params,
         })
         .await

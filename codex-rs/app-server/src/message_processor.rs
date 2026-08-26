@@ -326,6 +326,12 @@ impl MessageProcessor {
                 );
             }
         });
+        let account_rotation_service = Arc::new(
+            crate::account_registry::rotation::AccountRotationService::new(
+                Arc::clone(&account_registry),
+                Arc::clone(&thread_store),
+            ),
+        );
         let mut queue_service = None;
         let thread_manager = Arc::new_cyclic(|thread_manager| {
             queue_service = queue_store.map(|queue| {
@@ -377,6 +383,9 @@ impl MessageProcessor {
                 manager
                     .with_execution_account_resolver(Arc::clone(&account_registry)
                         as Arc<dyn codex_core::ExecutionAccountResolver>);
+            let manager = manager
+                .with_turn_execution_account_selector(Arc::clone(&account_rotation_service)
+                    as Arc<dyn codex_core::TurnExecutionAccountSelector>);
             match code_mode_session_provider {
                 Some(provider) => manager.with_code_mode_session_provider(provider),
                 None => manager,
@@ -548,6 +557,7 @@ impl MessageProcessor {
         let turn_processor = TurnRequestProcessor::new(
             Arc::clone(&thread_manager),
             Arc::clone(&thread_store),
+            Arc::clone(&session_runtime),
             outgoing.clone(),
             analytics_events_client.clone(),
             arg0_paths.clone(),
@@ -1025,6 +1035,11 @@ impl MessageProcessor {
                 .list_account_slots(params)
                 .await
                 .map(|response| Some(response.into())),
+            ClientRequest::AccountSlotRateLimitsRead { params, .. } => self
+                .account_processor
+                .read_account_slot_rate_limits(params)
+                .await
+                .map(|response| Some(response.into())),
             ClientRequest::AccountSlotLoginStart { params, .. } => {
                 self.account_processor
                     .login_account_slot(request_id.clone(), params)
@@ -1036,6 +1051,16 @@ impl MessageProcessor {
             ClientRequest::ThreadAccountSwitch { params, .. } => self
                 .session_runtime
                 .switch_account(connection_id, params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::ThreadAccountRotationRead { params, .. } => self
+                .session_runtime
+                .read_account_rotation(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::ThreadAccountRotationUpdate { params, .. } => self
+                .session_runtime
+                .update_account_rotation(params)
                 .await
                 .map(|response| Some(response.into())),
             ClientRequest::ThreadRelinquish { params, .. } => self

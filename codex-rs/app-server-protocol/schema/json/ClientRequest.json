@@ -179,6 +179,17 @@
       ],
       "type": "object"
     },
+    "AccountSlotRateLimitsReadParams": {
+      "properties": {
+        "accountSlotId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "accountSlotId"
+      ],
+      "type": "object"
+    },
     "AddCreditsNudgeCreditType": {
       "enum": [
         "credits",
@@ -4247,6 +4258,60 @@
       ],
       "type": "object"
     },
+    "ThreadAccountRotationMode": {
+      "enum": [
+        "fixed",
+        "quotaAware",
+        "roundRobin",
+        "exhaustThenNext"
+      ],
+      "type": "string"
+    },
+    "ThreadAccountRotationReadParams": {
+      "properties": {
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "ThreadAccountRotationUpdateParams": {
+      "properties": {
+        "automaticAccountSlotIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "expectedRotationRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "fixedAccountSlotId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/definitions/ThreadAccountRotationMode"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "automaticAccountSlotIds",
+        "expectedRotationRevision",
+        "mode",
+        "threadId"
+      ],
+      "type": "object"
+    },
     "ThreadAccountSwitchParams": {
       "description": "Compare-and-swap parameters for switching a thread's next-turn account.",
       "properties": {
@@ -6212,6 +6277,54 @@
         },
         "method": {
           "enum": [
+            "thread/account/rotation/read"
+          ],
+          "title": "Thread/account/rotation/readRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadAccountRotationReadParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Thread/account/rotation/readRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "thread/account/rotation/update"
+          ],
+          "title": "Thread/account/rotation/updateRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadAccountRotationUpdateParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Thread/account/rotation/updateRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
             "thread/relinquish"
           ],
           "title": "Thread/relinquishRequestMethod",
@@ -7906,6 +8019,30 @@
         "params"
       ],
       "title": "AccountSlot/listRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "accountSlot/rateLimits/read"
+          ],
+          "title": "AccountSlot/rateLimits/readRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AccountSlotRateLimitsReadParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "AccountSlot/rateLimits/readRequest",
       "type": "object"
     },
     {

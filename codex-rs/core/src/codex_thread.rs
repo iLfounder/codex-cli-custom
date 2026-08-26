@@ -190,6 +190,9 @@ impl CodexThread {
     }
 
     pub async fn submit(&self, op: Op) -> CodexResult<String> {
+        if matches!(&op, Op::Interrupt | Op::Shutdown) {
+            self.session.cancel_execution_account_preparation();
+        }
         self.io.submit(op).await
     }
 
@@ -249,6 +252,7 @@ impl CodexThread {
     }
 
     pub async fn shutdown_and_wait(&self) -> CodexResult<()> {
+        self.session.cancel_execution_account_preparation();
         self.io.shutdown_and_wait().await
     }
 
@@ -294,6 +298,9 @@ impl CodexThread {
         op: Op,
         trace: Option<W3cTraceContext>,
     ) -> CodexResult<String> {
+        if matches!(&op, Op::Interrupt | Op::Shutdown) {
+            self.session.cancel_execution_account_preparation();
+        }
         self.io
             .submit_with_trace(
                 op, trace, /*parent_turn_id*/ None, /*root_turn_id*/ None,

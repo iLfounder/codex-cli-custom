@@ -483,6 +483,8 @@ See the Codex keymap documentation for supported actions and examples."
             account_slot_capability: None,
             account_registry_revision: 0,
             account_runtime: None,
+            account_rotation_available: false,
+            account_rotation_request_generation: 0,
             account_request_generation: 0,
             account_detail_slot_id: None,
             pending_account_control: None,

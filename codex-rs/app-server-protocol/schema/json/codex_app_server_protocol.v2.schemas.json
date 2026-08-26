@@ -517,9 +517,70 @@
       "title": "AccountSlotLogoutResponse",
       "type": "object"
     },
+    "AccountSlotRateLimitsReadParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "accountSlotId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "accountSlotId"
+      ],
+      "title": "AccountSlotRateLimitsReadParams",
+      "type": "object"
+    },
+    "AccountSlotRateLimitsReadResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "accountSlotId": {
+          "type": "string"
+        },
+        "attemptGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "capturedAt": {
+          "description": "Unix timestamp in seconds when the rate-limit snapshot was captured.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "rateLimits": {
+          "$ref": "#/definitions/RateLimitSnapshot"
+        },
+        "rateLimitsByLimitId": {
+          "additionalProperties": {
+            "$ref": "#/definitions/RateLimitSnapshot"
+          },
+          "type": "object"
+        },
+        "staleAt": {
+          "description": "Unix timestamp in seconds after which this snapshot is stale.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "accountSlotId",
+        "attemptGeneration",
+        "capturedAt",
+        "rateLimits",
+        "rateLimitsByLimitId",
+        "staleAt"
+      ],
+      "title": "AccountSlotRateLimitsReadResponse",
+      "type": "object"
+    },
     "AccountSlotSnapshot": {
       "description": "A host-managed account slot without credential paths, email addresses, or tokens.",
       "properties": {
+        "accountNumber": {
+          "description": "Stable display order within this app-server's account registry.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "accountSlotId": {
           "type": "string"
         },
@@ -577,6 +638,7 @@
         }
       },
       "required": [
+        "accountNumber",
         "accountSlotId",
         "actions",
         "attemptGeneration",
@@ -2080,6 +2142,54 @@
             "params"
           ],
           "title": "Thread/account/switchRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "thread/account/rotation/read"
+              ],
+              "title": "Thread/account/rotation/readRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ThreadAccountRotationReadParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/account/rotation/readRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "thread/account/rotation/update"
+              ],
+              "title": "Thread/account/rotation/updateRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ThreadAccountRotationUpdateParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/account/rotation/updateRequest",
           "type": "object"
         },
         {
@@ -3783,6 +3893,30 @@
             "params"
           ],
           "title": "AccountSlot/listRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "accountSlot/rateLimits/read"
+              ],
+              "title": "AccountSlot/rateLimits/readRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/AccountSlotRateLimitsReadParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "AccountSlot/rateLimits/readRequest",
           "type": "object"
         },
         {
@@ -17349,6 +17483,16 @@
             "null"
           ]
         },
+        "rotation": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadAccountRotationSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "switchState": {
           "$ref": "#/definitions/SessionRuntimeAccountSwitchState"
         },
@@ -18905,6 +19049,126 @@
         "turns",
         "updatedAt"
       ],
+      "type": "object"
+    },
+    "ThreadAccountRotationMode": {
+      "enum": [
+        "fixed",
+        "quotaAware",
+        "roundRobin",
+        "exhaustThenNext"
+      ],
+      "type": "string"
+    },
+    "ThreadAccountRotationReadParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "title": "ThreadAccountRotationReadParams",
+      "type": "object"
+    },
+    "ThreadAccountRotationReadResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "rotation": {
+          "$ref": "#/definitions/ThreadAccountRotationSnapshot"
+        }
+      },
+      "required": [
+        "rotation"
+      ],
+      "title": "ThreadAccountRotationReadResponse",
+      "type": "object"
+    },
+    "ThreadAccountRotationSnapshot": {
+      "properties": {
+        "automaticAccountSlotIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "fixedAccountSlotId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastCommittedAccountSlotId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/definitions/ThreadAccountRotationMode"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "automaticAccountSlotIds",
+        "mode",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "ThreadAccountRotationUpdateParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "automaticAccountSlotIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "expectedRotationRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "fixedAccountSlotId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/definitions/ThreadAccountRotationMode"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "automaticAccountSlotIds",
+        "expectedRotationRevision",
+        "mode",
+        "threadId"
+      ],
+      "title": "ThreadAccountRotationUpdateParams",
+      "type": "object"
+    },
+    "ThreadAccountRotationUpdateResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "rotation": {
+          "$ref": "#/definitions/ThreadAccountRotationSnapshot"
+        }
+      },
+      "required": [
+        "rotation"
+      ],
+      "title": "ThreadAccountRotationUpdateResponse",
       "type": "object"
     },
     "ThreadAccountSwitchParams": {

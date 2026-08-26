@@ -89,6 +89,7 @@ fn runtime_snapshot(
             switch_state: SessionRuntimeAccountSwitchState::Stable,
             switch_target_slot_id: None,
             deny_reason: None,
+            rotation: None,
         },
         actions: Vec::new(),
         continuity: Default::default(),

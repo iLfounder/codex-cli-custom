@@ -1405,6 +1405,7 @@ impl ThreadRequestProcessor {
         ListenerTaskContext {
             thread_manager: Arc::clone(&self.thread_manager),
             thread_store: Arc::clone(&self.thread_store),
+            session_runtime: Arc::clone(&self.session_runtime),
             thread_state_manager: self.thread_state_manager.clone(),
             outgoing: Arc::clone(&self.outgoing),
             pending_thread_unloads: Arc::clone(&self.pending_thread_unloads),
@@ -1725,6 +1726,7 @@ impl ThreadRequestProcessor {
         let listener_task_context = ListenerTaskContext {
             thread_manager: Arc::clone(&self.thread_manager),
             thread_store: Arc::clone(&self.thread_store),
+            session_runtime: Arc::clone(&self.session_runtime),
             thread_state_manager: self.thread_state_manager.clone(),
             outgoing: Arc::clone(&self.outgoing),
             pending_thread_unloads: Arc::clone(&self.pending_thread_unloads),

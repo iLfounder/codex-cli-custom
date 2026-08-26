@@ -14,6 +14,8 @@ use crate::auth_mode::auth_mode_to_api;
 use crate::external_auth::ExternalAuthBridge;
 use crate::session_runtime::SessionRuntimeEngine;
 use chrono::DateTime;
+use codex_app_server_protocol::AccountSlotRateLimitsReadParams;
+use codex_app_server_protocol::AccountSlotRateLimitsReadResponse;
 use codex_app_server_protocol::DesktopOnboardingEntrypoint;
 use codex_login::LoginOnboardingEntrypoint;
 use codex_model_provider::is_supported_amazon_bedrock_region;
@@ -33,6 +35,7 @@ const THREAD_USAGE_FETCH_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 60);
 const ACCOUNT_WORKSPACE_MESSAGES_FETCH_TIMEOUT: Duration =
     Duration::from_millis(/*millis*/ 1000);
 const DEFAULT_LOGIN_STOP_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 3);
+const ERROR_DEFAULT_ACCOUNT_ACTIVE_TURN: &str = "accountSlotActiveTurn";
 // Login overrides are intentionally available only in debug builds.
 #[cfg(debug_assertions)]
 const LOGIN_ISSUER_OVERRIDE_ENV_VAR: &str = "CODEX_APP_SERVER_LOGIN_ISSUER";
@@ -168,6 +171,37 @@ impl AccountRequestProcessor {
         params: AccountSlotListParams,
     ) -> Result<AccountSlotListResponse, JSONRPCErrorError> {
         self.account_registry.list(params).await
+    }
+
+    pub(crate) async fn read_account_slot_rate_limits(
+        &self,
+        params: AccountSlotRateLimitsReadParams,
+    ) -> Result<AccountSlotRateLimitsReadResponse, JSONRPCErrorError> {
+        let (key, auth_manager) = self
+            .account_registry
+            .slot_quota_subject(&params.account_slot_id)
+            .await?;
+        let response_key = key.clone();
+        let snapshot = self
+            .account_registry
+            .fetch_slot_quota(key, auth_manager)
+            .await
+            .map_err(|error| match error {
+                crate::account_registry::quota::QuotaFetchError::Unsupported => {
+                    invalid_request("account slot rate limits are unsupported")
+                }
+                crate::account_registry::quota::QuotaFetchError::Transient(message) => {
+                    internal_error(message)
+                }
+            })?;
+        Ok(AccountSlotRateLimitsReadResponse {
+            account_slot_id: response_key.account_slot_id,
+            attempt_generation: response_key.attempt_generation,
+            captured_at: snapshot.captured_at,
+            stale_at: snapshot.captured_at.saturating_add(60),
+            rate_limits: snapshot.rate_limits,
+            rate_limits_by_limit_id: snapshot.rate_limits_by_limit_id,
+        })
     }
 
     pub(crate) async fn login_account(
@@ -389,6 +423,16 @@ impl AccountRequestProcessor {
         request_id: ConnectionRequestId,
         params: LoginAccountParams,
     ) -> Result<(), JSONRPCErrorError> {
+        if self
+            .session_runtime
+            .account_slot_has_active_turn("default")
+            .await?
+        {
+            return Err(structured_invalid_request(
+                ERROR_DEFAULT_ACCOUNT_ACTIVE_TURN,
+                "default account is in use by an active turn",
+            ));
+        }
         if self.auth_manager.is_workload_identity_selected() {
             return Err(self.configured_auth_owned_by_host_error());
         }
@@ -404,6 +448,13 @@ impl AccountRequestProcessor {
                 ERROR_LOGIN_BUSY,
                 "a default account login is still active",
             ));
+        }
+        let rotation_affected = self
+            .account_registry
+            .reset_automatic_rotation_memberships("default")
+            .await?;
+        for thread_id in rotation_affected {
+            self.session_runtime.publish_thread(thread_id).await;
         }
         match params {
             LoginAccountParams::ApiKey { api_key } => {
@@ -1268,6 +1319,16 @@ impl AccountRequestProcessor {
     }
 
     async fn logout_common(&self) -> std::result::Result<Option<AuthMode>, JSONRPCErrorError> {
+        if self
+            .session_runtime
+            .account_slot_has_active_turn("default")
+            .await?
+        {
+            return Err(structured_invalid_request(
+                ERROR_DEFAULT_ACCOUNT_ACTIVE_TURN,
+                "default account is in use by an active turn",
+            ));
+        }
         self.stop_active_default_login().await?;
         if self.auth_manager.is_workload_identity_selected() {
             return Err(self.configured_auth_owned_by_host_error());

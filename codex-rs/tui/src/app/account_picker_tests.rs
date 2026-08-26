@@ -1,8 +1,10 @@
 use super::*;
 use crate::app::test_support::make_test_app;
 use codex_app_server_protocol::AccountSlotCapability;
+use codex_app_server_protocol::SESSION_RUNTIME_ACCOUNT_ROTATION_CAPABILITY;
 use codex_app_server_protocol::SessionRuntimeAccountBinding;
 use codex_app_server_protocol::SessionRuntimeAccountSwitchState;
+use codex_app_server_protocol::SessionRuntimeCapability;
 use codex_app_server_protocol::SessionRuntimeIdentity;
 use codex_app_server_protocol::SessionRuntimeLifecycle;
 use codex_app_server_protocol::SessionRuntimeLifecycleState;
@@ -11,6 +13,8 @@ use codex_app_server_protocol::SessionRuntimePersistenceHealth;
 use codex_app_server_protocol::SessionRuntimeSnapshot;
 use codex_app_server_protocol::SessionRuntimeWriter;
 use codex_app_server_protocol::SessionRuntimeWriterState;
+use codex_app_server_protocol::ThreadAccountRotationMode;
+use codex_app_server_protocol::ThreadAccountRotationSnapshot;
 use pretty_assertions::assert_eq;
 
 fn runtime_snapshot(thread_id: &str, state_revision: u64) -> SessionRuntimeSnapshot {
@@ -58,6 +62,7 @@ fn runtime_snapshot(thread_id: &str, state_revision: u64) -> SessionRuntimeSnaps
             switch_state: SessionRuntimeAccountSwitchState::Stable,
             switch_target_slot_id: None,
             deny_reason: None,
+            rotation: None,
         },
         actions: Vec::new(),
         continuity: Default::default(),
@@ -139,4 +144,30 @@ async fn same_runtime_epoch_merges_each_fresh_projection_independently() {
         ),
         (20, Some(("epoch-a", 21)))
     );
+}
+
+#[tokio::test]
+async fn rotation_is_exposed_only_with_the_matching_available_capability() {
+    let rotation = ThreadAccountRotationSnapshot {
+        mode: ThreadAccountRotationMode::Fixed,
+        fixed_account_slot_id: None,
+        automatic_account_slot_ids: Vec::new(),
+        revision: 1,
+        last_committed_account_slot_id: None,
+    };
+    let mut app = make_test_app().await;
+    let mut hidden = picker_snapshot("epoch-a", 1, 1);
+    hidden.runtime.snapshot.account.rotation = Some(rotation.clone());
+    assert_eq!(app.apply_account_snapshot(hidden), true);
+    assert_eq!(app.account_rotation_snapshot(), None);
+
+    let mut visible = picker_snapshot("epoch-b", 1, 1);
+    visible.runtime.snapshot.account.rotation = Some(rotation.clone());
+    visible.runtime.capabilities = vec![SessionRuntimeCapability {
+        name: SESSION_RUNTIME_ACCOUNT_ROTATION_CAPABILITY.to_string(),
+        available: true,
+        deny_reason: None,
+    }];
+    assert_eq!(app.apply_account_snapshot(visible), true);
+    assert_eq!(app.account_rotation_snapshot(), Some(&rotation));
 }

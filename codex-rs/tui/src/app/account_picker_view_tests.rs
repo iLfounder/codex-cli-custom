@@ -12,6 +12,12 @@ fn slot(
 ) -> AccountSlotSnapshot {
     AccountSlotSnapshot {
         account_slot_id: id.to_string(),
+        account_number: match id {
+            "default" => 1,
+            "secondary" | "failed" => 2,
+            "active" => 3,
+            _ => 4,
+        },
         label: id.to_string(),
         is_default: id == "default",
         status,
@@ -84,9 +90,9 @@ async fn account_rows_are_always_selectable_and_report_active_login() {
         ),
     ];
     assert_snapshot!(rendered_items(&app.account_selection_view_params(None)), @r"
-    default | Ready | enabled
-    failed | Login failed | enabled
-    active | Login in progress | enabled
+    1. default | Ready · Error: oauth_failed | enabled
+    2. failed | Login failed · Error: oauth_failed | enabled
+    3. active | Login required · Login in progress · Error: oauth_failed | enabled
     Add account | Sign in with a browser or device code | disabled
     ");
 }
@@ -114,7 +120,7 @@ async fn account_detail_disables_only_unavailable_actions() {
     let ready_params = app.account_detail_view_params(&ready);
     assert_eq!(
         ready_params.subtitle.as_deref(),
-        Some("Ready · Secondary account · Error: oauth_failed")
+        Some("Ready · Error: oauth_failed · Secondary account")
     );
 
     let failed = slot(
@@ -204,8 +210,11 @@ async fn replacing_a_closed_picker_updates_no_ui() {
 }
 
 #[test]
-fn unavailable_auth_state_is_distinct_from_failed_login() {
+fn exact_status_and_error_code_are_both_visible() {
     let mut unavailable = slot("secondary", AccountSlotStatus::Failed, None, &[]);
     unavailable.error_code = Some("authUnavailable".to_string());
-    assert_eq!(account_slot_status_label(&unavailable), "Unavailable");
+    assert_eq!(
+        account_slot_status_label(&unavailable),
+        "Login failed · Error: authUnavailable"
+    );
 }

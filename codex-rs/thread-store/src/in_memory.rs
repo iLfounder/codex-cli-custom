@@ -23,6 +23,7 @@ use codex_rollout::RolloutItem;
 use codex_rollout::persisted_rollout_items;
 
 use crate::AbortThreadTransition;
+use crate::AccountBindingCommitIntent;
 use crate::AppendThreadItemsParams;
 use crate::ArchiveThreadParams;
 use crate::CommitThreadTransition;
@@ -42,6 +43,9 @@ use crate::RuntimeWriterOwnership;
 use crate::StoredModelContext;
 use crate::StoredThread;
 use crate::StoredThreadHistory;
+use crate::ThreadAccountRotationMode;
+use crate::ThreadAccountRotationPolicy;
+use crate::ThreadAccountRotationPolicyUpdate;
 use crate::ThreadMetadataPatch;
 use crate::ThreadPage;
 use crate::ThreadRelationFilter;
@@ -682,6 +686,7 @@ struct InMemoryThreadStoreState {
     rollout_paths: HashMap<PathBuf, ThreadId>,
     execution_accounts: HashMap<ThreadId, ExecutionAccountBinding>,
     account_slot_runtime_versions: HashMap<String, u64>,
+    account_rotation_policies: HashMap<ThreadId, ThreadAccountRotationPolicy>,
     turn_execution_accounts: HashMap<(ThreadId, String), ExecutionAccountBinding>,
     thread_transitions: HashMap<String, InMemoryThreadTransition>,
     next_thread_transition_revision: u64,
@@ -1032,6 +1037,7 @@ impl InMemoryThreadStore {
         state.metadata_updates.remove(&params.thread_id);
         state.sections.remove(&params.thread_id);
         state.execution_accounts.remove(&params.thread_id);
+        state.account_rotation_policies.remove(&params.thread_id);
         state
             .turn_execution_accounts
             .retain(|(thread_id, _), _| *thread_id != params.thread_id);
@@ -1130,9 +1136,24 @@ impl ThreadStore for InMemoryThreadStore {
         expected: ExecutionAccountBinding,
         next_slot_id: String,
     ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
+        self.compare_and_swap_execution_account_binding_with_intent(
+            thread_id,
+            expected,
+            next_slot_id,
+            AccountBindingCommitIntent::PinFixed,
+        )
+    }
+
+    fn compare_and_swap_execution_account_binding_with_intent(
+        &self,
+        thread_id: ThreadId,
+        expected: ExecutionAccountBinding,
+        next_slot_id: String,
+        intent: AccountBindingCommitIntent,
+    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
         Box::pin(async move {
             let mut state = self.state.lock().await;
-            let Some(current) = state.execution_accounts.get_mut(&thread_id) else {
+            let Some(current) = state.execution_accounts.get(&thread_id) else {
                 return Ok(None);
             };
             if current != &expected {
@@ -1143,11 +1164,181 @@ impl ThreadStore for InMemoryThreadStore {
                     message: "execution account generation overflow".to_string(),
                 });
             };
-            *current = ExecutionAccountBinding {
-                slot_id: next_slot_id,
+            let next_binding = ExecutionAccountBinding {
+                slot_id: next_slot_id.clone(),
                 generation,
             };
-            Ok(Some(current.clone()))
+            let next_policy = if intent == AccountBindingCommitIntent::PinFixed {
+                match state.account_rotation_policies.get(&thread_id) {
+                    Some(policy) => {
+                        let Some(revision) = policy.revision.checked_add(1) else {
+                            return Err(ThreadStoreError::Internal {
+                                message: "thread account rotation revision overflow".to_string(),
+                            });
+                        };
+                        let mut policy = policy.clone();
+                        policy.revision = revision;
+                        policy.mode = ThreadAccountRotationMode::Fixed;
+                        policy.fixed_account_slot_id = Some(next_slot_id.clone());
+                        policy.last_committed_account_slot_id = Some(next_slot_id.clone());
+                        Some(policy)
+                    }
+                    None => Some(ThreadAccountRotationPolicy {
+                        mode: ThreadAccountRotationMode::Fixed,
+                        fixed_account_slot_id: Some(next_slot_id.clone()),
+                        automatic_account_slot_ids: Vec::new(),
+                        revision: 1,
+                        last_committed_account_slot_id: Some(next_slot_id.clone()),
+                    }),
+                }
+            } else {
+                None
+            };
+            state
+                .execution_accounts
+                .insert(thread_id, next_binding.clone());
+            if let Some(next_policy) = next_policy {
+                state
+                    .account_rotation_policies
+                    .insert(thread_id, next_policy);
+            }
+            Ok(Some(next_binding))
+        })
+    }
+
+    fn thread_account_rotation_policy(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreFuture<'_, ThreadAccountRotationPolicy> {
+        Box::pin(async move {
+            let state = self.state.lock().await;
+            if let Some(policy) = state.account_rotation_policies.get(&thread_id) {
+                return Ok(policy.clone());
+            }
+            let binding = state.execution_accounts.get(&thread_id).cloned().unwrap_or(
+                ExecutionAccountBinding {
+                    slot_id: "default".to_string(),
+                    generation: 1,
+                },
+            );
+            Ok(ThreadAccountRotationPolicy::virtual_fixed(&binding))
+        })
+    }
+
+    fn compare_and_swap_thread_account_rotation_policy(
+        &self,
+        thread_id: ThreadId,
+        expected_revision: u64,
+        update: ThreadAccountRotationPolicyUpdate,
+    ) -> ThreadStoreFuture<'_, Option<ThreadAccountRotationPolicy>> {
+        Box::pin(async move {
+            update
+                .validate()
+                .map_err(|error| ThreadStoreError::InvalidRequest {
+                    message: error.to_string(),
+                })?;
+            let mut state = self.state.lock().await;
+            let current_revision = state
+                .account_rotation_policies
+                .get(&thread_id)
+                .map_or(0, |policy| policy.revision);
+            if current_revision != expected_revision {
+                return Ok(None);
+            }
+            let Some(revision) = expected_revision.checked_add(1) else {
+                return Err(ThreadStoreError::Internal {
+                    message: "thread account rotation revision overflow".to_string(),
+                });
+            };
+            let last_committed_account_slot_id = state
+                .account_rotation_policies
+                .get(&thread_id)
+                .and_then(|policy| policy.last_committed_account_slot_id.clone())
+                .or_else(|| {
+                    state
+                        .execution_accounts
+                        .get(&thread_id)
+                        .map(|binding| binding.slot_id.clone())
+                });
+            let policy = ThreadAccountRotationPolicy {
+                mode: update.mode,
+                fixed_account_slot_id: update.fixed_account_slot_id,
+                automatic_account_slot_ids: update.automatic_account_slot_ids,
+                revision,
+                last_committed_account_slot_id,
+            };
+            state
+                .account_rotation_policies
+                .insert(thread_id, policy.clone());
+            Ok(Some(policy))
+        })
+    }
+
+    fn compare_and_swap_thread_account_rotation_cursor(
+        &self,
+        thread_id: ThreadId,
+        expected_revision: u64,
+        accepted_account_slot_id: String,
+    ) -> ThreadStoreFuture<'_, Option<ThreadAccountRotationPolicy>> {
+        Box::pin(async move {
+            if accepted_account_slot_id.is_empty() {
+                return Err(ThreadStoreError::InvalidRequest {
+                    message: "accepted account slot must not be empty".to_string(),
+                });
+            }
+            let mut state = self.state.lock().await;
+            let Some(policy) = state.account_rotation_policies.get_mut(&thread_id) else {
+                return Ok(None);
+            };
+            if policy.revision != expected_revision {
+                return Ok(None);
+            }
+            policy.last_committed_account_slot_id = Some(accepted_account_slot_id);
+            Ok(Some(policy.clone()))
+        })
+    }
+
+    fn remove_account_slot_from_automatic_rotation_policies(
+        &self,
+        account_slot_id: String,
+    ) -> ThreadStoreFuture<'_, Vec<(ThreadId, ThreadAccountRotationPolicy)>> {
+        Box::pin(async move {
+            if account_slot_id.is_empty() {
+                return Err(ThreadStoreError::InvalidRequest {
+                    message: "account slot must not be empty".to_string(),
+                });
+            }
+            let mut state = self.state.lock().await;
+            let mut affected = state
+                .account_rotation_policies
+                .iter()
+                .filter(|(_, policy)| {
+                    policy
+                        .automatic_account_slot_ids
+                        .iter()
+                        .any(|slot_id| slot_id == &account_slot_id)
+                })
+                .map(|(thread_id, policy)| {
+                    let revision = policy.revision.checked_add(1).ok_or_else(|| {
+                        ThreadStoreError::Internal {
+                            message: "thread account rotation revision overflow".to_string(),
+                        }
+                    })?;
+                    let mut policy = policy.clone();
+                    policy
+                        .automatic_account_slot_ids
+                        .retain(|slot_id| slot_id != &account_slot_id);
+                    policy.revision = revision;
+                    Ok((*thread_id, policy))
+                })
+                .collect::<ThreadStoreResult<Vec<_>>>()?;
+            affected.sort_by_key(|(thread_id, _)| thread_id.to_string());
+            for (thread_id, policy) in &affected {
+                state
+                    .account_rotation_policies
+                    .insert(*thread_id, policy.clone());
+            }
+            Ok(affected)
         })
     }
 

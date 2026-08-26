@@ -26,7 +26,7 @@ async fn writer_store_identity_and_generation_survive_runtime_restart() {
     .fetch_all(first.pool.as_ref())
     .await
     .expect("read custom schema versions");
-    assert_eq!(custom_schema_versions, vec![1, 2, 3, 4]);
+    assert_eq!(custom_schema_versions, vec![1, 2, 3, 4, 5]);
     let first_generation = first
         .next_writer_generation(thread_id)
         .await

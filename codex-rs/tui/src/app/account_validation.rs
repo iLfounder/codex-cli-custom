@@ -119,8 +119,11 @@ impl App {
     pub(super) fn handle_account_runtime_changed(
         &mut self,
         instance_epoch: String,
-        snapshot: SessionRuntimeSnapshot,
+        mut snapshot: SessionRuntimeSnapshot,
     ) {
+        if !self.account_rotation_available {
+            snapshot.account.rotation = None;
+        }
         if self
             .current_displayed_thread_id()
             .is_some_and(|thread_id| snapshot.thread_id == thread_id.to_string())
@@ -159,6 +162,11 @@ impl App {
         } else {
             self.account_slots.push(slot);
         }
+        self.account_slots.sort_by(|left, right| {
+            left.account_number
+                .cmp(&right.account_number)
+                .then_with(|| left.account_slot_id.cmp(&right.account_slot_id))
+        });
         self.replace_open_account_views(selected_slot_id.as_deref());
         AccountSlotUpdateDisposition::Successor
     }
