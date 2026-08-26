@@ -66,4 +66,4 @@ sha256 = "4360ff5f904071676ef8ccc90497920c07f1abcfdbf56cc4d7bf6ec6cc3734bf"
 [[patches]]
 number = "P013"
 file = "0013-P013-hot-account-rotation-and-rollout-repair.patch"
-sha256 = "0fed03aba151e1f341083d7149e39f94fa65b2f9c50bf3669033752b7bbe9da3"
+sha256 = "a079369ab7c6cf79a8eb4d4926d36d458ca1cbd06a0186961f9a683c314d1afe"
