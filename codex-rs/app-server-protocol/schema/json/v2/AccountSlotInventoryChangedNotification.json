@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Signals that the global inventory was replaced or an account was removed. Clients should refetch `accountSlot/list` from the first page.",
+  "properties": {
+    "registryRevision": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "registryRevision"
+  ],
+  "title": "AccountSlotInventoryChangedNotification",
+  "type": "object"
+}

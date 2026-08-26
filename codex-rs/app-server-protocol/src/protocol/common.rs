@@ -1968,6 +1968,7 @@ server_notification_definitions! {
     AccountUpdated => "account/updated" (v2::AccountUpdatedNotification),
     AccountRateLimitsUpdated => "account/rateLimits/updated" (v2::AccountRateLimitsUpdatedNotification),
     AccountSlotChanged => "accountSlot/changed" (v2::AccountSlotChangedNotification),
+    AccountSlotInventoryChanged => "accountSlot/inventoryChanged" (v2::AccountSlotInventoryChangedNotification),
     SessionRuntimeChanged => "sessionRuntime/changed" (v2::SessionRuntimeChangedNotification),
     SessionRuntimeOperationUpdated => "sessionRuntime/operation/updated" (v2::SessionRuntimeOperationUpdatedNotification),
     ThreadPresentationAppended => "thread/presentation/appended" (v2::ThreadPresentationAppendedNotification),

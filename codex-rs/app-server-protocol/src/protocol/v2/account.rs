@@ -250,13 +250,13 @@ pub enum AccountSessionWorkspaceKind {
     Workspace,
 }
 
-/// Parameters for reading a revision-consistent page of sanitized account slots.
+/// Parameters for reading a revision-consistent page of sanitized global accounts.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct AccountSlotListParams {
     /// Opaque cursor returned by a previous call. It is bound to the registry
-    /// revision and becomes stale after any same-process registry mutation.
+    /// revision and becomes stale after any catalog replacement.
     #[ts(optional = nullable)]
     pub cursor: Option<String>,
     /// Optional page size; the server applies a bounded default and maximum.
@@ -264,7 +264,7 @@ pub struct AccountSlotListParams {
     pub limit: Option<u32>,
 }
 
-/// A revision-consistent page of sanitized account slots.
+/// A revision-consistent page of sanitized global accounts.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -273,9 +273,23 @@ pub struct AccountSlotListResponse {
     /// Opaque cursor bound to `registryRevision` and a stable sort anchor. A stale-cursor
     /// error requires restarting from the first page.
     pub next_cursor: Option<String>,
+    /// Normalized semantic generation of the global account catalog.
     #[ts(type = "number")]
     pub registry_revision: u64,
+    /// Revision domain used by this complete list. Older servers omit this field and are treated
+    /// as legacy catalogs by compatible clients.
+    #[serde(default)]
+    pub catalog_kind: AccountSlotCatalogKind,
     pub multi_account: AccountSlotCapability,
+}
+
+#[derive(Default, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub enum AccountSlotCatalogKind {
+    #[default]
+    Legacy,
+    Global,
 }
 
 /// Sanitized capability state for account-slot operations.
@@ -287,17 +301,24 @@ pub struct AccountSlotCapability {
     pub deny_reason: Option<String>,
 }
 
-/// A host-managed account slot without credential paths, email addresses, or tokens.
+/// A global account projection without credential paths, email addresses, or tokens.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct AccountSlotSnapshot {
+    /// Stable logical account identity. Canonical global values are `C<N>`;
+    /// legacy local slot identifiers remain accepted for compatibility.
     pub account_slot_id: String,
-    /// Stable display order within this app-server's account registry.
+    /// Stable global display and tie-break order.
     pub account_number: u32,
     pub label: String,
     pub is_default: bool,
     pub status: AccountSlotStatus,
+    /// Freshness and availability of the sanitized global projection.
+    #[serde(default)]
+    pub health: AccountSlotHealth,
+    /// Sanitized quota meters supplied by the global account projection.
+    pub quota: Option<AccountSlotQuotaSnapshot>,
     pub auth_mode: Option<AuthMode>,
     #[ts(type = "number")]
     pub attempt_generation: u64,
@@ -309,6 +330,43 @@ pub struct AccountSlotSnapshot {
     /// Unix timestamp in seconds when the slot last changed.
     #[ts(type = "number")]
     pub updated_at: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum AccountSlotHealth {
+    Healthy,
+    Degraded,
+    #[default]
+    Unavailable,
+}
+
+/// Sanitized quota projection used for display and account selection.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AccountSlotQuotaSnapshot {
+    pub meters: Vec<AccountSlotQuotaMeter>,
+    /// Unix timestamp in seconds represented by this quota projection.
+    #[ts(type = "number")]
+    pub observed_at: i64,
+    /// Unix timestamp in seconds after which the projection is stale.
+    #[ts(type = "number")]
+    pub stale_at: i64,
+}
+
+/// One sanitized quota meter. It contains no provider or credential identity.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AccountSlotQuotaMeter {
+    pub id: String,
+    pub label: Option<String>,
+    pub remaining_percent: u32,
+    /// Unix timestamp in seconds when this meter resets, or `null` when unknown.
+    #[ts(type = "number | null")]
+    pub resets_at: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
@@ -411,7 +469,7 @@ pub enum AccountSlotLoginChallenge {
     },
 }
 
-/// Full changed-slot snapshot at a new registry revision.
+/// Full upserted account snapshot at a new registry revision.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -419,6 +477,16 @@ pub struct AccountSlotChangedNotification {
     #[ts(type = "number")]
     pub registry_revision: u64,
     pub slot: AccountSlotSnapshot,
+}
+
+/// Signals that the global inventory was replaced or an account was removed.
+/// Clients should refetch `accountSlot/list` from the first page.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AccountSlotInventoryChangedNotification {
+    #[ts(type = "number")]
+    pub registry_revision: u64,
 }
 
 /// Compare-and-swap parameters for logging out a secondary account slot.

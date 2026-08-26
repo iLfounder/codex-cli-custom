@@ -89,6 +89,104 @@ fn external_agent_config_detect_response_defaults_connectors_for_older_servers()
 }
 
 #[test]
+fn account_slot_snapshot_round_trips_sanitized_global_projection() {
+    let snapshot = AccountSlotSnapshot {
+        account_slot_id: "C2".to_string(),
+        account_number: 2,
+        label: "Account 2".to_string(),
+        is_default: false,
+        status: AccountSlotStatus::Ready,
+        health: AccountSlotHealth::Healthy,
+        quota: Some(AccountSlotQuotaSnapshot {
+            meters: vec![AccountSlotQuotaMeter {
+                id: "weekly".to_string(),
+                label: Some("Weekly".to_string()),
+                remaining_percent: 72,
+                resets_at: Some(1_800_000_000),
+            }],
+            observed_at: 1_700_000_000,
+            stale_at: 1_700_000_300,
+        }),
+        auth_mode: Some(crate::protocol::common::AuthMode::Chatgpt),
+        attempt_generation: 4,
+        registry_revision: 12,
+        active_login_operation_id: None,
+        error_code: None,
+        actions: Vec::new(),
+        updated_at: 1_700_000_000,
+    };
+    let expected = json!({
+        "accountSlotId": "C2",
+        "accountNumber": 2,
+        "label": "Account 2",
+        "isDefault": false,
+        "status": "ready",
+        "health": "healthy",
+        "quota": {
+            "meters": [{
+                "id": "weekly",
+                "label": "Weekly",
+                "remainingPercent": 72,
+                "resetsAt": 1_800_000_000,
+            }],
+            "observedAt": 1_700_000_000,
+            "staleAt": 1_700_000_300,
+        },
+        "authMode": "chatgpt",
+        "attemptGeneration": 4,
+        "registryRevision": 12,
+        "activeLoginOperationId": null,
+        "errorCode": null,
+        "actions": [],
+        "updatedAt": 1_700_000_000,
+    });
+
+    assert_eq!(
+        serde_json::to_value(&snapshot).expect("snapshot should serialize"),
+        expected
+    );
+    assert_eq!(
+        serde_json::from_value::<AccountSlotSnapshot>(expected)
+            .expect("snapshot should deserialize"),
+        snapshot
+    );
+}
+
+#[test]
+fn account_slot_snapshot_accepts_legacy_projection_and_inventory_change_is_minimal() {
+    let legacy = serde_json::from_value::<AccountSlotSnapshot>(json!({
+        "accountSlotId": "default",
+        "accountNumber": 1,
+        "label": "Default",
+        "isDefault": true,
+        "status": "ready",
+        "authMode": "chatgpt",
+        "attemptGeneration": 1,
+        "registryRevision": 3,
+        "activeLoginOperationId": null,
+        "errorCode": null,
+        "actions": [],
+        "updatedAt": 1_700_000_000,
+    }))
+    .expect("legacy snapshot should deserialize");
+
+    assert_eq!(legacy.health, AccountSlotHealth::Unavailable);
+    assert_eq!(legacy.quota, None);
+    assert_eq!(
+        serde_json::to_value(ServerNotification::AccountSlotInventoryChanged(
+            AccountSlotInventoryChangedNotification {
+                registry_revision: 13,
+            },
+        ))
+        .expect("notification should serialize"),
+        json!({
+            "method": "accountSlot/inventoryChanged",
+            "params": {"registryRevision": 13},
+        })
+    );
+}
+
+#[test]
 fn thread_goal_cleared_notification_defaults_revision_for_older_servers() {
     let notification = serde_json::from_value::<ThreadGoalClearedNotification>(json!({
         "threadId": "thread-1",
@@ -4991,4 +5089,19 @@ fn tool_request_user_input_params_default_legacy_missing_is_blocking_to_true() {
             auto_resolution_ms: Some(60_000),
         }
     );
+}
+#[test]
+fn account_slot_list_defaults_missing_catalog_kind_to_legacy() {
+    let response: AccountSlotListResponse = serde_json::from_value(serde_json::json!({
+        "data": [],
+        "nextCursor": null,
+        "registryRevision": 7,
+        "multiAccount": {
+            "available": true,
+            "denyReason": null
+        }
+    }))
+    .unwrap();
+
+    assert_eq!(response.catalog_kind, AccountSlotCatalogKind::Legacy);
 }

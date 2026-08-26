@@ -187,9 +187,16 @@
       ],
       "type": "object"
     },
+    "AccountSlotCatalogKind": {
+      "enum": [
+        "legacy",
+        "global"
+      ],
+      "type": "string"
+    },
     "AccountSlotChangedNotification": {
       "$schema": "http://json-schema.org/draft-07/schema#",
-      "description": "Full changed-slot snapshot at a new registry revision.",
+      "description": "Full upserted account snapshot at a new registry revision.",
       "properties": {
         "registryRevision": {
           "format": "uint64",
@@ -207,12 +214,36 @@
       "title": "AccountSlotChangedNotification",
       "type": "object"
     },
+    "AccountSlotHealth": {
+      "enum": [
+        "healthy",
+        "degraded",
+        "unavailable"
+      ],
+      "type": "string"
+    },
+    "AccountSlotInventoryChangedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "description": "Signals that the global inventory was replaced or an account was removed. Clients should refetch `accountSlot/list` from the first page.",
+      "properties": {
+        "registryRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "registryRevision"
+      ],
+      "title": "AccountSlotInventoryChangedNotification",
+      "type": "object"
+    },
     "AccountSlotListParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
-      "description": "Parameters for reading a revision-consistent page of sanitized account slots.",
+      "description": "Parameters for reading a revision-consistent page of sanitized global accounts.",
       "properties": {
         "cursor": {
-          "description": "Opaque cursor returned by a previous call. It is bound to the registry revision and becomes stale after any same-process registry mutation.",
+          "description": "Opaque cursor returned by a previous call. It is bound to the registry revision and becomes stale after any catalog replacement.",
           "type": [
             "string",
             "null"
@@ -233,8 +264,17 @@
     },
     "AccountSlotListResponse": {
       "$schema": "http://json-schema.org/draft-07/schema#",
-      "description": "A revision-consistent page of sanitized account slots.",
+      "description": "A revision-consistent page of sanitized global accounts.",
       "properties": {
+        "catalogKind": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AccountSlotCatalogKind"
+            }
+          ],
+          "default": "legacy",
+          "description": "Revision domain used by this complete list. Older servers omit this field and are treated as legacy catalogs by compatible clients."
+        },
         "data": {
           "items": {
             "$ref": "#/definitions/AccountSlotSnapshot"
@@ -252,6 +292,7 @@
           ]
         },
         "registryRevision": {
+          "description": "Normalized semantic generation of the global account catalog.",
           "format": "uint64",
           "minimum": 0.0,
           "type": "integer"
@@ -517,6 +558,65 @@
       "title": "AccountSlotLogoutResponse",
       "type": "object"
     },
+    "AccountSlotQuotaMeter": {
+      "description": "One sanitized quota meter. It contains no provider or credential identity.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "remainingPercent": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "resetsAt": {
+          "description": "Unix timestamp in seconds when this meter resets, or `null` when unknown.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "remainingPercent"
+      ],
+      "type": "object"
+    },
+    "AccountSlotQuotaSnapshot": {
+      "description": "Sanitized quota projection used for display and account selection.",
+      "properties": {
+        "meters": {
+          "items": {
+            "$ref": "#/definitions/AccountSlotQuotaMeter"
+          },
+          "type": "array"
+        },
+        "observedAt": {
+          "description": "Unix timestamp in seconds represented by this quota projection.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "staleAt": {
+          "description": "Unix timestamp in seconds after which the projection is stale.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "meters",
+        "observedAt",
+        "staleAt"
+      ],
+      "type": "object"
+    },
     "AccountSlotRateLimitsReadParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
@@ -573,15 +673,16 @@
       "type": "object"
     },
     "AccountSlotSnapshot": {
-      "description": "A host-managed account slot without credential paths, email addresses, or tokens.",
+      "description": "A global account projection without credential paths, email addresses, or tokens.",
       "properties": {
         "accountNumber": {
-          "description": "Stable display order within this app-server's account registry.",
+          "description": "Stable global display and tie-break order.",
           "format": "uint32",
           "minimum": 0.0,
           "type": "integer"
         },
         "accountSlotId": {
+          "description": "Stable logical account identity. Canonical global values are `C<N>`; legacy local slot identifiers remain accepted for compatibility.",
           "type": "string"
         },
         "actions": {
@@ -617,11 +718,31 @@
             "null"
           ]
         },
+        "health": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AccountSlotHealth"
+            }
+          ],
+          "default": "unavailable",
+          "description": "Freshness and availability of the sanitized global projection."
+        },
         "isDefault": {
           "type": "boolean"
         },
         "label": {
           "type": "string"
+        },
+        "quota": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AccountSlotQuotaSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Sanitized quota meters supplied by the global account projection."
         },
         "registryRevision": {
           "format": "uint64",
@@ -16742,6 +16863,26 @@
             "params"
           ],
           "title": "AccountSlot/changedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "accountSlot/inventoryChanged"
+              ],
+              "title": "AccountSlot/inventoryChangedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/AccountSlotInventoryChangedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "AccountSlot/inventoryChangedNotification",
           "type": "object"
         },
         {
