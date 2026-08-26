@@ -25,6 +25,7 @@ jobs:
       SCCACHE_BASEDIRS: ${{ github.workspace }}
       SCCACHE_GHA_ENABLED: "on"
       SCCACHE_GHA_VERSION: codex-macos15-arm64-rust1.95.0-release-incrementaloff-ltooff-cgu8-v1
+      SCCACHE_IDLE_TIMEOUT: "0"
       SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
       SOURCE_COMMIT: 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
       PATCH_TREE: 85dbbad8ec9ffde70c82f115a9822bd7771c6dcd
@@ -60,7 +61,9 @@ jobs:
             && [[ -x "${SCCACHE_PATH:-}" ]] \
             && [[ -n "${ACTIONS_RESULTS_URL:-}" ]] \
             && [[ -n "${ACTIONS_RUNTIME_TOKEN:-}" ]] \
-            && "$SCCACHE_PATH" --version >/dev/null; then
+            && "$SCCACHE_PATH" --version >/dev/null \
+            && "$SCCACHE_PATH" --start-server >/dev/null \
+            && "$SCCACHE_PATH" --zero-stats >/dev/null; then
             printf 'RUSTC_WRAPPER=%s\n' "$SCCACHE_PATH" >> "$GITHUB_ENV"
             printf 'CARGO_BUILD_RUSTC_WRAPPER=%s\n' "$SCCACHE_PATH" >> "$GITHUB_ENV"
             enabled=true
@@ -186,6 +189,7 @@ jobs:
             && [[ -n "${SCCACHE_PATH:-}" ]] \
             && [[ -x "${SCCACHE_PATH:-}" ]]; then
             stats=$("$SCCACHE_PATH" --show-stats 2>&1 || true)
+            "$SCCACHE_PATH" --stop-server >/dev/null 2>&1 || true
           fi
           printf '%s\n' "$stats"
           {
