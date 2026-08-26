@@ -63,6 +63,39 @@ async fn file_storage_save_persists_auth_dot_json() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn file_storage_atomic_save_exposes_only_complete_snapshots() -> anyhow::Result<()> {
+    let codex_home = tempdir()?;
+    let storage = FileAuthStorage::new(codex_home.path().to_path_buf());
+    let old = auth_with_prefix("old");
+    let new = auth_with_prefix("new");
+    storage.save(&old)?;
+
+    let reader_storage = storage.clone();
+    let expected_old = old.clone();
+    let expected_new = new.clone();
+    let reader = std::thread::spawn(move || -> std::io::Result<()> {
+        for _ in 0..500 {
+            let loaded = reader_storage
+                .load()?
+                .ok_or_else(|| std::io::Error::other("auth file disappeared during atomic save"))?;
+            if loaded != expected_old && loaded != expected_new {
+                return Err(std::io::Error::other(
+                    "reader observed a partial auth snapshot",
+                ));
+            }
+        }
+        Ok(())
+    });
+    for index in 0..100 {
+        storage.save(if index % 2 == 0 { &new } else { &old })?;
+    }
+    reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("auth reader thread panicked"))??;
+    Ok(())
+}
+
 #[tokio::test]
 async fn file_storage_round_trips_agent_identity_auth() -> anyhow::Result<()> {
     let codex_home = tempdir()?;

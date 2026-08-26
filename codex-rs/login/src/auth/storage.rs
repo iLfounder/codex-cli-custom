@@ -11,6 +11,8 @@ use std::fs::OpenOptions;
 use std::io::Read;
 use std::io::Write;
 #[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::path::PathBuf;
@@ -151,6 +153,103 @@ pub(super) fn get_auth_file(codex_home: &Path) -> PathBuf {
     codex_home.join("auth.json")
 }
 
+/// Secret-free identity for one complete `auth.json` snapshot.
+///
+/// The digest is deliberately opaque: callers may compare revisions but cannot render or export
+/// credential-derived bytes.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct CredentialRevision([u8; 32]);
+
+impl Debug for CredentialRevision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CredentialRevision(REDACTED)")
+    }
+}
+
+pub(super) struct AuthFileSnapshot {
+    pub auth: AuthDotJson,
+    pub revision: CredentialRevision,
+}
+
+fn snapshot_from_file(file: &mut File) -> std::io::Result<AuthFileSnapshot> {
+    let mut contents = Vec::new();
+    file.read_to_end(&mut contents)?;
+    let auth = serde_json::from_slice(&contents)?;
+    let revision = CredentialRevision(Sha256::digest(&contents).into());
+    Ok(AuthFileSnapshot { auth, revision })
+}
+
+fn auth_file_metadata_is_safe(metadata: &std::fs::Metadata) -> bool {
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        metadata.mode() & 0o077 == 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+#[cfg(unix)]
+fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(not(unix))]
+fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    left.is_file() && right.is_file() && left.len() == right.len()
+}
+
+pub(super) fn read_auth_file_snapshot(
+    codex_home: &Path,
+) -> std::io::Result<Option<AuthFileSnapshot>> {
+    let auth_file = get_auth_file(codex_home);
+    let before = match std::fs::symlink_metadata(&auth_file) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    #[cfg(unix)]
+    let owner_matches_home = before.uid() == std::fs::metadata(codex_home)?.uid();
+    #[cfg(not(unix))]
+    let owner_matches_home = true;
+    if before.file_type().is_symlink()
+        || !auth_file_metadata_is_safe(&before)
+        || !owner_matches_home
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "auth.json must be a private regular file",
+        ));
+    }
+
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    options.custom_flags(0x0000_0100);
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    options.custom_flags(0x0002_0000);
+    let mut file = options.open(&auth_file)?;
+    let opened = file.metadata()?;
+    if !auth_file_metadata_is_safe(&opened) || !same_file_identity(&before, &opened) {
+        return Err(std::io::Error::other(
+            "auth.json identity changed while opening",
+        ));
+    }
+
+    let snapshot = snapshot_from_file(&mut file)?;
+    let after = std::fs::symlink_metadata(&auth_file)?;
+    if after.file_type().is_symlink() || !same_file_identity(&opened, &after) {
+        return Err(std::io::Error::other(
+            "auth.json identity changed while reading",
+        ));
+    }
+    Ok(Some(snapshot))
+}
+
 pub(super) fn delete_file_if_exists(codex_home: &Path) -> std::io::Result<bool> {
     let auth_file = get_auth_file(codex_home);
     match std::fs::remove_file(&auth_file) {
@@ -186,6 +285,16 @@ impl FileAuthStorage {
 
         Ok(auth_dot_json)
     }
+
+    pub(super) fn load_snapshot(&self) -> std::io::Result<Option<AuthFileSnapshot>> {
+        let auth_file = get_auth_file(&self.codex_home);
+        let mut file = match File::open(auth_file) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        snapshot_from_file(&mut file).map(Some)
+    }
 }
 
 impl AuthStorageBackend for FileAuthStorage {
@@ -206,15 +315,36 @@ impl AuthStorageBackend for FileAuthStorage {
             std::fs::create_dir_all(parent)?;
         }
         let json_data = serde_json::to_string_pretty(auth_dot_json)?;
-        let mut options = OpenOptions::new();
-        options.truncate(true).write(true).create(true);
-        #[cfg(unix)]
-        {
+        let parent = auth_file
+            .parent()
+            .ok_or_else(|| std::io::Error::other("auth.json has no parent directory"))?;
+        let (temp_path, mut file) = loop {
+            let temp_path = parent.join(format!(
+                ".auth.json.tmp.{}.{}",
+                std::process::id(),
+                rand::random::<u64>()
+            ));
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
             options.mode(0o600);
+            match options.open(&temp_path) {
+                Ok(file) => break (temp_path, file),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        };
+        let result: std::io::Result<()> = (|| {
+            file.write_all(json_data.as_bytes())?;
+            file.flush()?;
+            file.sync_all()?;
+            std::fs::rename(&temp_path, &auth_file)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temp_path);
         }
-        let mut file = options.open(auth_file)?;
-        file.write_all(json_data.as_bytes())?;
-        file.flush()?;
+        result?;
         Ok(())
     }
 
