@@ -26,6 +26,7 @@
 | P010 | TUI `/account`, `/logout`, `/exit`, `/clear`, `/new`, `/goal`과 agent 요청형 clear/new control을 제공한다. |
 | P011 | 설치 가능한 `/namespace:name` plugin command와 ephemeral card, notice, progress presentation을 제공한다. |
 | P012 | 검수된 live-session control 보정과 canonical account login, 취소, 실시간 reconciliation, 선택 가능한 TUI 계정 상태를 제공한다. |
+| P013 | Thread별 고정·자동 계정 순환, 실시간 quota 기반 선택, 정확한 rollout ordinal 복구를 제공한다. |
 
 App-server는 opaque account reference와 sanitize된 session state만 노출한다. 외부 workflow role, group ID, 사용자 handle은 저장하지 않는다.
 
@@ -34,6 +35,7 @@ App-server는 opaque account reference와 sanitize된 session state만 노출한
 - session 목록과 상태: `sessionRuntime/list`, `sessionRuntime/changed`
 - account 관리: `accountSlot/list`, `accountSlot/login/start`, `accountSlot/logout`
 - account 전환: `thread/account/switch`
+- account 순환: `thread/account/rotation/read`, `thread/account/rotation/update`, `accountSlot/rateLimits/read`
 - writer 반환: `thread/relinquish`
 - committed clear/new continuity: `thread/start`의 transition field, `thread/transition/commit`, runtime continuity projection
 - Goal state: `thread/goal/get`, `thread/goal/create`, `thread/goal/set`, `thread/goal/replace`, `thread/goal/clear`
@@ -44,14 +46,14 @@ Patch에는 생성된 Rust, JSON Schema, TypeScript 정의가 `codex-rs/app-serv
 
 ## 적용과 build
 
-정확한 upstream commit에만 열한 개 patch를 적용한다.
+정확한 upstream commit에만 열세 개 patch를 적용한다.
 
 ```sh
 git checkout 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
 /path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD"
 ```
 
-Applier는 clean tree를 요구하고 각 patch digest를 검증한 뒤 P001–P012를 순서대로 적용하고 최종 Git tree를 확인한다. POSIX shell, Git, `sed`, `awk`, `shasum` 또는 `sha256sum`이 필요하다.
+Applier는 clean tree를 요구하고 각 patch digest를 검증한 뒤 P001–P013을 순서대로 적용하고 최종 Git tree를 확인한다. POSIX shell, Git, `sed`, `awk`, `shasum` 또는 `sha256sum`이 필요하다.
 
 `codex-rs`에서 로컬 build:
 

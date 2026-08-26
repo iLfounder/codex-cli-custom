@@ -1,7 +1,7 @@
 schema_version = 1
 applies_to = "rust-v0.149.0"
 base_commit = "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0"
-final_tree = "19b5d617c643331845ae12e946d54d95b4a467c3"
+final_tree = "b18ccc6c50f9332b7dcab17d9ffa687f48f81fd1"
 
 [[patches]]
 number = "P001"
@@ -62,3 +62,8 @@ sha256 = "4928ee9057659e740352efd6f3ccfcc3a516f1823810884762a47bd2063b7e88"
 number = "P012"
 file = "0012-P012-complete-live-controls-and-account-lifecycle.patch"
 sha256 = "4360ff5f904071676ef8ccc90497920c07f1abcfdbf56cc4d7bf6ec6cc3734bf"
+
+[[patches]]
+number = "P013"
+file = "0013-P013-hot-account-rotation-and-rollout-repair.patch"
+sha256 = "0fed03aba151e1f341083d7149e39f94fa65b2f9c50bf3669033752b7bbe9da3"
