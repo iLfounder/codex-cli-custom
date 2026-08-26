@@ -169,18 +169,25 @@ async fn select_root_execution_account(
                 TurnExecutionAccountSelection {
                     thread_id: session.thread_id(),
                     current_binding: initial_binding.clone(),
+                    credential_revision: session
+                        .execution_account()
+                        .auth_manager
+                        .credential_revision(),
                 }
             ) => decision?,
         };
-        let TurnExecutionAccountDecision::Select {
-            target_slot_id,
-            policy_revision,
-        } = decision
-        else {
-            return Ok((initial_binding, None));
+        let (target_slot_id, policy_revision, reprepare_current) = match decision {
+            TurnExecutionAccountDecision::Keep => return Ok((initial_binding, None)),
+            TurnExecutionAccountDecision::Select {
+                target_slot_id,
+                policy_revision,
+            } => (target_slot_id, policy_revision, false),
+            TurnExecutionAccountDecision::ReprepareCurrent { policy_revision } => {
+                (initial_binding.slot_id.clone(), policy_revision, true)
+            }
         };
 
-        if target_slot_id == initial_binding.slot_id {
+        if target_slot_id == initial_binding.slot_id && !reprepare_current {
             let policy = tokio::select! {
                 _ = cancellation.cancelled() => {
                     return Err(execution_account_admission_error(ExecutionAccountSwitchError::ThreadBusy));

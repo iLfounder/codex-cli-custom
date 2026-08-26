@@ -42,11 +42,144 @@ use core_test_support::PathExt;
 use core_test_support::responses::mount_models_once;
 use core_test_support::responses::strip_response_item_ids_from_json;
 use pretty_assertions::assert_eq;
+use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 use tempfile::tempdir;
 use wiremock::MockServer;
 
 const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
+
+struct InitialBindingExecutionAccountResolver {
+    initial_binding: ExecutionAccountBinding,
+    initial_binding_calls: AtomicUsize,
+    auth_manager: Arc<AuthManager>,
+    models_manager: SharedModelsManager,
+}
+
+impl ExecutionAccountResolver for InitialBindingExecutionAccountResolver {
+    fn initial_binding_for_new_thread(&self) -> ExecutionAccountBinding {
+        self.initial_binding_calls.fetch_add(1, Ordering::Relaxed);
+        self.initial_binding.clone()
+    }
+
+    fn resolve(
+        &self,
+        binding: ExecutionAccountBinding,
+    ) -> crate::execution_account::ExecutionAccountResolverFuture<'_> {
+        let auth_manager = Arc::clone(&self.auth_manager);
+        let models_manager = Arc::clone(&self.models_manager);
+        Box::pin(async move {
+            Ok(Arc::new(ExecutionAccountContext {
+                binding,
+                auth_manager,
+                models_manager,
+            }))
+        })
+    }
+}
+
+#[tokio::test]
+async fn resolver_initial_binding_applies_only_to_fresh_threads() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    config.cwd = config.codex_home.abs();
+    config.experimental_thread_store = ThreadStoreConfig::InMemory {
+        id: format!("initial-binding-{}", uuid::Uuid::new_v4()),
+    };
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
+    let manager = ThreadManager::new(
+        &config,
+        Arc::clone(&auth_manager),
+        build_models_manager(&config, auth_manager),
+        crate::CodexAppsToolsCache::default(),
+        SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        empty_extension_registry(),
+        Arc::new(crate::test_support::EmptyUserInstructionsProvider),
+        /*analytics_events_client*/ None,
+        thread_store_from_config(&config, /*state_db*/ None),
+        /*agent_graph_store*/ None,
+        TEST_INSTALLATION_ID.to_string(),
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    );
+    let initial_binding = ExecutionAccountBinding {
+        slot_id: "C2".to_string(),
+        generation: 1,
+    };
+    let resolver = Arc::new(InitialBindingExecutionAccountResolver {
+        initial_binding: initial_binding.clone(),
+        initial_binding_calls: AtomicUsize::new(0),
+        auth_manager: Arc::clone(&manager.state.auth_manager),
+        models_manager: Arc::clone(&manager.state.models_manager),
+    });
+    let manager = manager.with_execution_account_resolver(resolver.clone());
+
+    let fresh = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("start fresh thread");
+    let forked = manager
+        .fork_thread_from_history(
+            ForkSnapshot::Interrupted,
+            config.clone(),
+            InitialHistory::Resumed(ResumedHistory {
+                conversation_id: fresh.thread_id,
+                history: Arc::new(Vec::new()),
+                rollout_path: fresh.thread.rollout_path(),
+            }),
+            /*thread_source*/ None,
+            /*parent_trace*/ None,
+            ClientMcpExtensions::default(),
+            /*reserved_thread_id*/ None,
+        )
+        .await
+        .expect("fork fresh thread");
+    fresh
+        .thread
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown fresh thread");
+    let _ = manager.remove_thread(&fresh.thread_id).await;
+    let mut resumed_options = StartThreadOptions::new(config);
+    resumed_options.initial_history = InitialHistory::Resumed(ResumedHistory {
+        conversation_id: fresh.thread_id,
+        history: Arc::new(Vec::new()),
+        rollout_path: fresh.thread.rollout_path(),
+    });
+    let resumed = manager
+        .start_thread(resumed_options)
+        .await
+        .expect("resume fresh thread");
+
+    assert_eq!(
+        (
+            fresh.thread.execution_account().binding.clone(),
+            forked.thread.execution_account().binding.clone(),
+            resumed.thread.execution_account().binding.clone(),
+            resolver.initial_binding_calls.load(Ordering::Relaxed),
+        ),
+        (
+            initial_binding.clone(),
+            initial_binding.clone(),
+            initial_binding,
+            1,
+        )
+    );
+
+    forked
+        .thread
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown forked thread");
+    resumed
+        .thread
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown resumed thread");
+}
 
 #[tokio::test]
 async fn account_services_replace_same_slot_when_auth_runtime_changes() {

@@ -32,6 +32,10 @@ pub struct ExecutionAccountServices {
 pub struct TurnExecutionAccountSelection {
     pub thread_id: ThreadId,
     pub current_binding: ExecutionAccountBinding,
+    /// Opaque identity of the exact credential snapshot captured by this thread runtime.
+    ///
+    /// Selectors may compare it with host state but must not render or export it.
+    pub credential_revision: Option<codex_login::CredentialRevision>,
 }
 
 /// Account choice made for one newly admitted user turn.
@@ -47,6 +51,12 @@ pub enum TurnExecutionAccountDecision {
         target_slot_id: String,
         policy_revision: u64,
     },
+    /// Rebuild the current slot runtime under the returned policy revision.
+    ///
+    /// Hosts use this when the logical slot remains selected but its credentials or other
+    /// host-owned runtime inputs changed. Core prepares a fresh runtime and advances the durable
+    /// execution generation before starting the turn.
+    ReprepareCurrent { policy_revision: u64 },
 }
 
 /// Future returned by [`TurnExecutionAccountSelector`] without async-trait machinery.
@@ -212,6 +222,17 @@ pub type ExecutionAccountTransitionResolverFuture<'a> =
 
 /// Resolves host-managed account slots into immutable execution resources.
 pub trait ExecutionAccountResolver: Send + Sync {
+    /// Returns the binding used when a brand-new root thread has no inherited or stored binding.
+    ///
+    /// Resume, fork, and explicitly bound starts bypass this fallback. Host resolvers may override
+    /// it to choose their process-local initial slot without reinterpreting stored bindings.
+    fn initial_binding_for_new_thread(&self) -> ExecutionAccountBinding {
+        ExecutionAccountBinding {
+            slot_id: "default".to_string(),
+            generation: 1,
+        }
+    }
+
     fn resolve(&self, binding: ExecutionAccountBinding) -> ExecutionAccountResolverFuture<'_>;
 
     fn resolve_for_transition(

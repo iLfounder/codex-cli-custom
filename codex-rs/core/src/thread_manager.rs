@@ -2337,10 +2337,8 @@ impl ThreadManagerState {
                 }
             }
         } else {
-            ExecutionAccountBinding {
-                slot_id: "default".to_string(),
-                generation: 1,
-            }
+            self.execution_account_resolver
+                .initial_binding_for_new_thread()
         };
         let execution_account_transition = self
             .execution_account_resolver

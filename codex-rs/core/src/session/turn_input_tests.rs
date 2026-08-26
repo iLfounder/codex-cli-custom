@@ -51,6 +51,10 @@ struct BlockingExecutionAccountSelector {
     started: async_channel::Sender<()>,
 }
 
+struct RecordingExecutionAccountSelector {
+    selected: async_channel::Sender<TurnExecutionAccountSelection>,
+}
+
 impl TurnExecutionAccountSelector for BlockingExecutionAccountSelector {
     fn select(
         &self,
@@ -73,6 +77,21 @@ impl TurnExecutionAccountSelector for StaticExecutionAccountSelector {
     ) -> TurnExecutionAccountSelectorFuture<'_> {
         let decision = self.decision.clone();
         Box::pin(async move { Ok(decision) })
+    }
+}
+
+impl TurnExecutionAccountSelector for RecordingExecutionAccountSelector {
+    fn select(
+        &self,
+        selection: TurnExecutionAccountSelection,
+    ) -> TurnExecutionAccountSelectorFuture<'_> {
+        Box::pin(async move {
+            self.selected
+                .send(selection)
+                .await
+                .expect("selection observer remains open");
+            Ok(TurnExecutionAccountDecision::Keep)
+        })
     }
 }
 
@@ -205,6 +224,226 @@ async fn same_target_selection_skips_resolution_and_commits_cursor_after_start()
     assert_eq!(policy.mode, ThreadAccountRotationMode::RoundRobin);
     assert_eq!(policy.last_committed_account_slot_id, Some(binding.slot_id));
     session.abort_all_tasks(TurnAbortReason::Interrupted).await;
+}
+
+#[tokio::test]
+async fn selector_receives_each_same_slot_threads_exact_credential_revision() {
+    let mut captured = Vec::new();
+    for (index, api_key) in ["sk-thread-one", "sk-thread-two"].into_iter().enumerate() {
+        let (session, _store, binding, _policy_revision) = make_rotation_test_session().await;
+        let auth_home = tempfile::tempdir().expect("auth home");
+        codex_login::login_with_api_key(
+            auth_home.path(),
+            api_key,
+            codex_login::AuthCredentialsStoreMode::File,
+            codex_login::AuthKeyringBackendKind::default(),
+        )
+        .expect("write test credentials");
+        let auth_manager = Arc::new(
+            codex_login::AuthManager::new(
+                auth_home.path().to_path_buf(),
+                /*enable_codex_api_key_env*/ false,
+                codex_login::AuthCredentialsStoreMode::File,
+                /*forced_chatgpt_workspace_id*/ None,
+                /*chatgpt_base_url*/ None,
+                codex_login::AuthKeyringBackendKind::default(),
+                codex_login::test_support::transport_default_auth_route_config(),
+            )
+            .await,
+        );
+        let current = session.execution_account();
+        let runtime = session.execution_account_runtime();
+        let target = Arc::new(ExecutionAccountContext {
+            binding: ExecutionAccountBinding {
+                slot_id: binding.slot_id.clone(),
+                generation: binding.generation + 1,
+            },
+            auth_manager: Arc::clone(&auth_manager),
+            models_manager: Arc::clone(&current.models_manager),
+        });
+        let accepted = session
+            .switch_execution_account(binding, Arc::clone(&target), runtime.services.clone())
+            .await
+            .expect("publish exact thread credential runtime");
+        let (selected_tx, selected_rx) = async_channel::bounded(1);
+        session.set_turn_execution_account_selector(Arc::new(RecordingExecutionAccountSelector {
+            selected: selected_tx,
+        }));
+
+        let turn_id = format!("credential-revision-turn-{index}");
+        let submission = handle(
+            &session,
+            root_turn_request(),
+            TurnInputMode::StartIfIdle,
+            turn_id.clone(),
+        )
+        .await
+        .expect("start same-slot thread turn");
+        let selection = selected_rx.recv().await.expect("capture selection");
+
+        assert_eq!(
+            (submission, selection.clone()),
+            (
+                TurnInputSubmission::Started { turn_id },
+                TurnExecutionAccountSelection {
+                    thread_id: session.thread_id(),
+                    current_binding: accepted,
+                    credential_revision: auth_manager.credential_revision(),
+                },
+            )
+        );
+        captured.push(selection);
+        session.abort_all_tasks(TurnAbortReason::Interrupted).await;
+    }
+
+    assert_eq!(captured[0].current_binding, captured[1].current_binding);
+    assert_ne!(
+        captured[0].credential_revision,
+        captured[1].credential_revision
+    );
+}
+
+#[tokio::test]
+async fn same_slot_reprepare_prepares_once_and_advances_execution_generation() {
+    let (session, store, binding, policy_revision) = make_rotation_test_session().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let lease_dropped = Arc::new(AtomicBool::new(false));
+    let current = session.execution_account();
+    let runtime = session.execution_account_runtime();
+    let target = Arc::new(ExecutionAccountContext {
+        binding: ExecutionAccountBinding {
+            slot_id: binding.slot_id.clone(),
+            generation: binding.generation + 1,
+        },
+        auth_manager: Arc::clone(&current.auth_manager),
+        models_manager: Arc::clone(&current.models_manager),
+    });
+    session.set_turn_execution_account_selector(Arc::new(StaticExecutionAccountSelector {
+        decision: TurnExecutionAccountDecision::ReprepareCurrent { policy_revision },
+    }));
+    session.set_turn_execution_account_transition_resolver(Arc::new(
+        RecordingExecutionAccountTransitionResolver {
+            target: Arc::clone(&target),
+            services: runtime.services.clone(),
+            calls: Arc::clone(&calls),
+            lease_dropped: Arc::clone(&lease_dropped),
+        },
+    ));
+
+    let submission = handle(
+        &session,
+        root_turn_request(),
+        TurnInputMode::StartIfIdle,
+        "same-slot-reprepare-turn".to_string(),
+    )
+    .await
+    .expect("same-slot reprepare starts");
+
+    assert_eq!(
+        (
+            submission,
+            calls.load(Ordering::Relaxed),
+            lease_dropped.load(Ordering::Acquire),
+            session.execution_account().binding.clone(),
+        ),
+        (
+            TurnInputSubmission::Started {
+                turn_id: "same-slot-reprepare-turn".to_string(),
+            },
+            1,
+            true,
+            target.binding.clone(),
+        )
+    );
+    let policy = store
+        .thread_account_rotation_policy(session.thread_id())
+        .await
+        .expect("read preserved rotation policy");
+    assert_eq!(
+        (
+            policy.mode,
+            policy.fixed_account_slot_id,
+            policy.last_committed_account_slot_id,
+        ),
+        (
+            ThreadAccountRotationMode::RoundRobin,
+            None,
+            Some(binding.slot_id),
+        )
+    );
+    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
+}
+
+#[tokio::test]
+async fn stale_same_slot_reprepare_is_rechecked_once_without_starting() {
+    let (session, store, binding, stale_policy_revision) = make_rotation_test_session().await;
+    let current_policy = store
+        .compare_and_swap_thread_account_rotation_policy(
+            session.thread_id(),
+            stale_policy_revision,
+            ThreadAccountRotationPolicyUpdate {
+                mode: ThreadAccountRotationMode::RoundRobin,
+                fixed_account_slot_id: None,
+                automatic_account_slot_ids: vec![binding.slot_id.clone()],
+            },
+        )
+        .await
+        .expect("update rotation policy")
+        .expect("policy revision matches");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let current = session.execution_account();
+    let runtime = session.execution_account_runtime();
+    session.set_turn_execution_account_selector(Arc::new(StaticExecutionAccountSelector {
+        decision: TurnExecutionAccountDecision::ReprepareCurrent {
+            policy_revision: stale_policy_revision,
+        },
+    }));
+    session.set_turn_execution_account_transition_resolver(Arc::new(
+        RecordingExecutionAccountTransitionResolver {
+            target: Arc::new(ExecutionAccountContext {
+                binding: ExecutionAccountBinding {
+                    slot_id: binding.slot_id.clone(),
+                    generation: binding.generation + 1,
+                },
+                auth_manager: Arc::clone(&current.auth_manager),
+                models_manager: Arc::clone(&current.models_manager),
+            }),
+            services: runtime.services.clone(),
+            calls: Arc::clone(&calls),
+            lease_dropped: Arc::new(AtomicBool::new(false)),
+        },
+    ));
+
+    let error = handle(
+        &session,
+        root_turn_request(),
+        TurnInputMode::StartIfIdle,
+        "stale-same-slot-reprepare".to_string(),
+    )
+    .await
+    .expect_err("stale policy cannot start");
+
+    let active_turn_is_none = session.active_turn.lock().await.is_none();
+    let unchanged_policy = store
+        .thread_account_rotation_policy(session.thread_id())
+        .await
+        .expect("read unchanged current policy");
+    assert_eq!(
+        (
+            error.to_string(),
+            calls.load(Ordering::Relaxed),
+            session.execution_account().binding.clone(),
+            active_turn_is_none,
+            unchanged_policy,
+        ),
+        (
+            ExecutionAccountSwitchError::StaleGeneration.to_string(),
+            2,
+            binding,
+            true,
+            current_policy,
+        )
+    );
 }
 
 #[tokio::test]

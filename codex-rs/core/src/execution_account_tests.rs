@@ -10,6 +10,7 @@ async fn default_turn_execution_account_selector_keeps_current_binding() {
             slot_id: "default".to_string(),
             generation: 1,
         },
+        credential_revision: None,
     };
 
     assert_eq!(
