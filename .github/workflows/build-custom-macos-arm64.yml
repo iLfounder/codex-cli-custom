@@ -22,8 +22,12 @@ jobs:
       CARGO_PROFILE_RELEASE_LTO: "false"
       CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
       CARGO_TERM_COLOR: always
+      SCCACHE_BASEDIRS: ${{ github.workspace }}
+      SCCACHE_GHA_ENABLED: "on"
+      SCCACHE_GHA_VERSION: codex-macos15-arm64-rust1.95.0-release-incrementaloff-ltooff-cgu8-v1
+      SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
       SOURCE_COMMIT: 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
-      PATCH_TREE: b18ccc6c50f9332b7dcab17d9ffa687f48f81fd1
+      PATCH_TREE: 85dbbad8ec9ffde70c82f115a9822bd7771c6dcd
 
     steps:
       - name: Check out patch repository
@@ -34,15 +38,35 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Cache Cargo downloads
-        uses: actions/cache@v4
+      - name: Install compiler cache
+        id: install_sccache
+        continue-on-error: true
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-rust-v0.149.0-${{ hashFiles('custom-patches/rust-v0.149.0/**') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-${{ runner.arch }}-rust-v0.149.0-
+          version: "v0.17.0"
+          disable_annotations: true
+
+      - name: Configure compiler cache
+        id: configure_sccache
+        if: always()
+        shell: bash
+        env:
+          INSTALL_OUTCOME: ${{ steps.install_sccache.outcome }}
+        run: |
+          set -euo pipefail
+          enabled=false
+          if [[ "$INSTALL_OUTCOME" == "success" ]] \
+            && [[ -n "${SCCACHE_PATH:-}" ]] \
+            && [[ -x "${SCCACHE_PATH:-}" ]] \
+            && [[ -n "${ACTIONS_RESULTS_URL:-}" ]] \
+            && [[ -n "${ACTIONS_RUNTIME_TOKEN:-}" ]] \
+            && "$SCCACHE_PATH" --version >/dev/null; then
+            printf 'RUSTC_WRAPPER=%s\n' "$SCCACHE_PATH" >> "$GITHUB_ENV"
+            enabled=true
+          else
+            printf '%s\n' '::warning::sccache unavailable; build will use rustc directly'
+          fi
+          printf 'enabled=%s\n' "$enabled" >> "$GITHUB_OUTPUT"
 
       - name: Fetch the exact upstream source
         shell: bash
@@ -65,6 +89,7 @@ jobs:
           test "$(git -C upstream-codex rev-parse HEAD^{tree})" = "$PATCH_TREE"
 
       - name: Prepare locked source provenance
+        id: provenance
         working-directory: upstream-codex/codex-rs
         shell: bash
         run: |
@@ -75,8 +100,21 @@ jobs:
           compiled_lock_sha256=$(shasum -a 256 Cargo.lock | awk '{print $1}')
           git -C .. add codex-rs/Cargo.lock
           compiled_tree=$(git -C .. write-tree)
+          printf 'compiled_lock_sha256=%s\n' "$compiled_lock_sha256" >> "$GITHUB_OUTPUT"
           printf 'COMPILED_LOCK_SHA256=%s\n' "$compiled_lock_sha256" >> "$GITHUB_ENV"
           printf 'COMPILED_TREE=%s\n' "$compiled_tree" >> "$GITHUB_ENV"
+
+      - name: Cache Cargo downloads
+        id: cargo_downloads
+        continue-on-error: true
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-downloads-v1-${{ runner.os }}-${{ runner.arch }}-rust1.95.0-${{ steps.provenance.outputs.compiled_lock_sha256 }}
+          restore-keys: |
+            cargo-downloads-v1-${{ runner.os }}-${{ runner.arch }}-rust1.95.0-
 
       - name: Resolve the checksum-verified Codex V8 pair
         shell: bash
@@ -121,11 +159,43 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "${{ steps.configure_sccache.outputs.enabled }}" != "true" ]] \
+            || [[ ! -x "${RUSTC_WRAPPER:-}" ]]; then
+            unset RUSTC_WRAPPER
+          fi
           cargo build --locked --release \
             -p codex-cli --bin codex \
             -p codex-app-server --bin codex-app-server \
             -p codex-code-mode-host --bin codex-code-mode-host \
             -p codex-responses-api-proxy --bin codex-responses-api-proxy
+
+      - name: Report compiler cache statistics
+        if: always()
+        shell: bash
+        env:
+          SCCACHE_ENABLED: ${{ steps.configure_sccache.outputs.enabled }}
+          SCCACHE_INSTALL_OUTCOME: ${{ steps.install_sccache.outcome }}
+          CARGO_CACHE_OUTCOME: ${{ steps.cargo_downloads.outcome }}
+          CARGO_CACHE_HIT: ${{ steps.cargo_downloads.outputs.cache-hit }}
+        run: |
+          set -u
+          stats='sccache disabled; rustc compiled directly'
+          if [[ "$SCCACHE_ENABLED" == "true" ]] \
+            && [[ -n "${SCCACHE_PATH:-}" ]] \
+            && [[ -x "${SCCACHE_PATH:-}" ]]; then
+            stats=$("$SCCACHE_PATH" --show-stats 2>&1 || true)
+          fi
+          printf '%s\n' "$stats"
+          {
+            printf '### Build caches\n\n'
+            printf -- '- sccache install: `%s`\n' "$SCCACHE_INSTALL_OUTCOME"
+            printf -- '- sccache enabled: `%s`\n' "${SCCACHE_ENABLED:-false}"
+            printf -- '- Cargo cache action: `%s`\n' "$CARGO_CACHE_OUTCOME"
+            printf -- '- Cargo exact-key hit: `%s`\n\n' "${CARGO_CACHE_HIT:-false}"
+            printf '```text\n'
+            printf '%s\n' "$stats"
+            printf '```\n'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Assemble canonical packages and provenance
         shell: bash
