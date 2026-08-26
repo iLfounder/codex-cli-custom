@@ -10,9 +10,30 @@ use codex_login::login_with_api_key;
 use codex_login::logout;
 use pretty_assertions::assert_eq;
 use tempfile::tempdir;
+use wiremock::Mock;
+use wiremock::MockServer;
+use wiremock::ResponseTemplate;
+use wiremock::matchers::method;
+use wiremock::matchers::path;
 
 const SECOND_SLOT_ID: &str = "11111111111141118111111111111111";
 const THIRD_SLOT_ID: &str = "22222222222242228222222222222222";
+
+fn write_global_registry(user_home: &Path, entries: &[(u32, &Path)]) {
+    let config = user_home.join(".config");
+    std::fs::create_dir_all(&config).unwrap();
+    let registry = config.join("codex-accounts.tsv");
+    let contents = entries
+        .iter()
+        .map(|(number, home)| format!("{number}\t{}\n", home.display()))
+        .collect::<String>();
+    std::fs::write(&registry, contents).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&registry, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
 
 #[test]
 fn account_numbers_preserve_exact_labels_and_assign_legacy_slots_by_slot_id() {
@@ -130,6 +151,180 @@ async fn registry_for_home_and_store(
         models_manager,
         thread_store,
     )
+}
+
+#[tokio::test]
+async fn fresh_process_cn_binding_single_flights_initial_catalog_fetch() {
+    let process_home = tempdir().unwrap();
+    let user_home = tempdir().unwrap();
+    let mut registry = registry_for_home(process_home.path()).await;
+    write_global_registry(user_home.path(), &[(2, process_home.path())]);
+    registry.global_directory_user_home = Some(user_home.path().to_path_buf());
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/snapshots"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_millis(25))
+                .set_body_json(serde_json::json!({
+                    "accounts": [{
+                        "label": "C2",
+                        "type": "codex-chatgpt",
+                        "sourceRef": "opaque",
+                        "fetchedAt": 100,
+                        "ok": true
+                    }]
+                })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let endpoint = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+    registry.token_manager_client = Some(
+        global::TokenManagerClient::new(registry.config.http_client_factory(), endpoint).unwrap(),
+    );
+
+    let (first, second) = tokio::join!(
+        registry.ensure_global_catalog(),
+        registry.ensure_global_catalog()
+    );
+    assert_eq!((first.unwrap(), second.unwrap()), (1, 1));
+    assert_eq!(
+        registry.initial_binding_for_new_thread(),
+        ExecutionAccountBinding {
+            slot_id: "C2".to_string(),
+            generation: 1,
+        }
+    );
+}
+
+#[tokio::test]
+async fn registry_refresh_adds_new_account_home_without_restarting() {
+    let user_home = tempdir().unwrap();
+    let process_home = tempdir().unwrap();
+    let added_home = tempdir().unwrap();
+    let mut registry = registry_for_home(process_home.path()).await;
+    registry.global_directory_user_home = Some(user_home.path().to_path_buf());
+    write_global_registry(user_home.path(), &[(1, process_home.path())]);
+
+    assert_eq!(
+        registry.refresh_global_directory().process_account_id,
+        global::AccountId::parse("C1")
+    );
+    write_global_registry(
+        user_home.path(),
+        &[(1, process_home.path()), (2, added_home.path())],
+    );
+    let refreshed = registry.refresh_global_directory();
+
+    assert_eq!(
+        refreshed
+            .homes
+            .get(&global::AccountId::parse("C2").unwrap()),
+        Some(&std::fs::canonicalize(added_home.path()).unwrap())
+    );
+}
+
+#[tokio::test]
+async fn unavailable_initial_global_catalog_falls_back_to_legacy_domain() {
+    let user_home = tempdir().unwrap();
+    let process_home = tempdir().unwrap();
+    let mut registry = registry_for_home(process_home.path()).await;
+    registry.global_directory_user_home = Some(user_home.path().to_path_buf());
+    write_global_registry(user_home.path(), &[(1, process_home.path())]);
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/snapshots"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+    registry.token_manager_client = Some(
+        global::TokenManagerClient::new(
+            registry.config.http_client_factory(),
+            url::Url::parse(&format!("{}/", server.uri())).unwrap(),
+        )
+        .unwrap(),
+    );
+
+    let response = registry
+        .list(AccountSlotListParams {
+            cursor: None,
+            limit: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.catalog_kind, AccountSlotCatalogKind::Legacy);
+    assert_eq!(response.data[0].account_slot_id, DEFAULT_SLOT_ID);
+    assert_eq!(
+        registry.initial_binding_for_new_thread().slot_id,
+        DEFAULT_SLOT_ID
+    );
+
+    registry.global_catalog.replace(Vec::new()).unwrap();
+    let empty = registry
+        .list(AccountSlotListParams {
+            cursor: None,
+            limit: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(empty.catalog_kind, AccountSlotCatalogKind::Legacy);
+    assert_eq!(
+        registry.initial_binding_for_new_thread().slot_id,
+        DEFAULT_SLOT_ID
+    );
+}
+
+#[tokio::test]
+async fn removing_process_mapping_returns_to_legacy_catalog_domain() {
+    let user_home = tempdir().unwrap();
+    let process_home = tempdir().unwrap();
+    let mut registry = registry_for_home(process_home.path()).await;
+    registry.global_directory_user_home = Some(user_home.path().to_path_buf());
+    write_global_registry(user_home.path(), &[(1, process_home.path())]);
+    registry
+        .global_catalog
+        .replace(vec![global::RawSnapshot {
+            label: "C1".to_string(),
+            provider_type: "codex-chatgpt".to_string(),
+            source_ref: Some("source".to_string()),
+            fetched_at: chrono::Utc::now().timestamp(),
+            ok: true,
+            rate_limit: None,
+        }])
+        .unwrap();
+
+    let global = registry
+        .list(AccountSlotListParams {
+            cursor: None,
+            limit: None,
+        })
+        .await
+        .unwrap();
+    write_global_registry(user_home.path(), &[]);
+    let legacy = registry
+        .list(AccountSlotListParams {
+            cursor: None,
+            limit: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        (
+            global.catalog_kind,
+            global.data[0].account_slot_id.as_str(),
+            legacy.catalog_kind,
+            legacy.data[0].account_slot_id.as_str(),
+        ),
+        (
+            AccountSlotCatalogKind::Global,
+            "C1",
+            AccountSlotCatalogKind::Legacy,
+            DEFAULT_SLOT_ID,
+        )
+    );
 }
 
 fn manifest(process_home: &Path, revision: u64) -> AccountSlotsManifest {

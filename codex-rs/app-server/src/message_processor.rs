@@ -317,6 +317,7 @@ impl MessageProcessor {
             Arc::clone(&default_models_manager),
             Arc::clone(&thread_store),
         ));
+        account_registry.spawn_global_catalog(outgoing.clone());
         let startup_account_registry = Arc::clone(&account_registry);
         tokio::spawn(async move {
             if let Err(error) = startup_account_registry.reconcile().await {

@@ -177,6 +177,12 @@ impl AccountRequestProcessor {
         &self,
         params: AccountSlotRateLimitsReadParams,
     ) -> Result<AccountSlotRateLimitsReadResponse, JSONRPCErrorError> {
+        if let Some(response) = self
+            .account_registry
+            .global_rate_limits(&params.account_slot_id)
+        {
+            return response;
+        }
         let (key, auth_manager) = self
             .account_registry
             .slot_quota_subject(&params.account_slot_id)
