@@ -62,6 +62,7 @@ jobs:
             && [[ -n "${ACTIONS_RUNTIME_TOKEN:-}" ]] \
             && "$SCCACHE_PATH" --version >/dev/null; then
             printf 'RUSTC_WRAPPER=%s\n' "$SCCACHE_PATH" >> "$GITHUB_ENV"
+            printf 'CARGO_BUILD_RUSTC_WRAPPER=%s\n' "$SCCACHE_PATH" >> "$GITHUB_ENV"
             enabled=true
           else
             printf '%s\n' '::warning::sccache unavailable; build will use rustc directly'
@@ -162,6 +163,7 @@ jobs:
           if [[ "${{ steps.configure_sccache.outputs.enabled }}" != "true" ]] \
             || [[ ! -x "${RUSTC_WRAPPER:-}" ]]; then
             unset RUSTC_WRAPPER
+            unset CARGO_BUILD_RUSTC_WRAPPER
           fi
           cargo build --locked --release \
             -p codex-cli --bin codex \
