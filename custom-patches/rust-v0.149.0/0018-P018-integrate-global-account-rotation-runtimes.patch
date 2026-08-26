@@ -1,0 +1,1281 @@
+From 5649a84d6c2c8a21857862afeb62b9145f6577dd Mon Sep 17 00:00:00 2001
+From: patch-verifier <patch-verifier@localhost>
+Date: Thu, 27 Aug 2026 03:41:25 +0900
+Subject: [PATCH 18/18] P018 integrate global account rotation runtimes
+
+---
+ codex-rs/app-server/src/account_registry.rs   | 171 +++++-
+ .../account_registry/global/integration.rs    | 496 ++++++++++++++++++
+ .../global/integration_tests.rs               |  11 +
+ .../src/account_registry/global/mod.rs        |  24 +
+ .../src/account_registry/rotation.rs          | 117 +++++
+ .../src/account_registry/rotation_tests.rs    |  18 +
+ .../app-server/src/account_registry_tests.rs  | 195 +++++++
+ codex-rs/app-server/src/message_processor.rs  |   1 +
+ .../request_processors/account_processor.rs   |   6 +
+ 9 files changed, 1036 insertions(+), 3 deletions(-)
+ create mode 100644 codex-rs/app-server/src/account_registry/global/integration.rs
+ create mode 100644 codex-rs/app-server/src/account_registry/global/integration_tests.rs
+ create mode 100644 codex-rs/app-server/src/account_registry/global/mod.rs
+
+diff --git a/codex-rs/app-server/src/account_registry.rs b/codex-rs/app-server/src/account_registry.rs
+index 795ec508db..99d7e31ee7 100644
+--- a/codex-rs/app-server/src/account_registry.rs
++++ b/codex-rs/app-server/src/account_registry.rs
+@@ -12,6 +12,8 @@ use std::sync::atomic::Ordering;
+ use base64::Engine;
+ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+ use codex_app_server_protocol::AccountSlotCapability;
++use codex_app_server_protocol::AccountSlotCatalogKind;
++use codex_app_server_protocol::AccountSlotHealth;
+ use codex_app_server_protocol::AccountSlotListParams;
+ use codex_app_server_protocol::AccountSlotListResponse;
+ use codex_app_server_protocol::AccountSlotSnapshot;
+@@ -41,6 +43,7 @@ use serde::Deserialize;
+ use serde::Serialize;
+ use tokio::sync::Mutex;
+ use tokio::sync::OwnedMutexGuard;
++use tokio::sync::Semaphore;
+ use uuid::Uuid;
+ 
+ use crate::auth_mode::auth_mode_to_api;
+@@ -56,6 +59,7 @@ const DEFAULT_SLOT_ID: &str = "default";
+ const DEFAULT_LIST_LIMIT: usize = 50;
+ const MAX_LIST_LIMIT: usize = 100;
+ const MAX_MANIFEST_SLOTS: usize = 1_000;
++const TOKEN_MANAGER_URL: &str = "http://127.0.0.1:3101/";
+ 
+ const DENY_MANIFEST_INVALID: &str = "account_slot_manifest_invalid";
+ const DENY_HOST_ACCESS_TOKEN: &str = "host_owned_codex_access_token";
+@@ -344,6 +348,12 @@ pub(crate) struct AccountRegistry {
+     browser_login: StdMutex<Option<BrowserLoginOwner>>,
+     quota_cache: quota::QuotaCache,
+     exhaustion_hints: Mutex<HashSet<rotation::ExhaustionHintKey>>,
++    global_catalog: Arc<global::GlobalAccountCatalog>,
++    global_directory_user_home: Option<PathBuf>,
++    global_directory: RwLock<global::GlobalAccountDirectory>,
++    global_runtimes: Mutex<HashMap<global::AccountId, Arc<global::GlobalAccountRuntime>>>,
++    global_catalog_refresh: Semaphore,
++    token_manager_client: Option<global::TokenManagerClient>,
+ }
+ 
+ #[derive(Clone, Debug, Eq, PartialEq)]
+@@ -366,6 +376,15 @@ impl AccountRegistry {
+         default_models_manager: SharedModelsManager,
+         thread_store: Arc<dyn ThreadStore>,
+     ) -> Self {
++        let global_directory_user_home = global::GlobalAccountDirectory::user_home();
++        let global_directory = global_directory_user_home
++            .as_deref()
++            .map_or_else(global::GlobalAccountDirectory::default, |user_home| {
++                global::GlobalAccountDirectory::load_from(user_home, &config.codex_home)
++            });
++        let token_manager_client = url::Url::parse(TOKEN_MANAGER_URL).ok().and_then(|url| {
++            global::TokenManagerClient::new(config.http_client_factory(), url).ok()
++        });
+         let manifest_path = config.codex_home.join(MANIFEST_FILE);
+         let (manifest, manifest_error, manifest_present) =
+             match AccountSlotsManifest::load(&manifest_path, &config.codex_home) {
+@@ -426,13 +445,81 @@ impl AccountRegistry {
+             browser_login: StdMutex::new(None),
+             quota_cache: quota::QuotaCache::default(),
+             exhaustion_hints: Mutex::new(HashSet::new()),
++            global_catalog: Arc::new(global::GlobalAccountCatalog::default()),
++            global_directory_user_home,
++            global_directory: RwLock::new(global_directory),
++            global_runtimes: Mutex::new(HashMap::new()),
++            global_catalog_refresh: Semaphore::new(/*permits*/ 1),
++            token_manager_client,
++        }
++    }
++
++    fn refresh_global_directory(&self) -> global::GlobalAccountDirectory {
++        let refreshed = self.global_directory_user_home.as_deref().map_or_else(
++            global::GlobalAccountDirectory::default,
++            |user_home| {
++                global::GlobalAccountDirectory::load_from(user_home, &self.config.codex_home)
++            },
++        );
++        if let Ok(mut directory) = self.global_directory.write() {
++            *directory = refreshed.clone();
+         }
++        refreshed
+     }
+ 
+     pub(crate) async fn list(
+         &self,
+         params: AccountSlotListParams,
+     ) -> Result<AccountSlotListResponse, JSONRPCErrorError> {
++        let global_directory = self.refresh_global_directory();
++        if global_directory.process_account_id.is_some() && self.global_catalog.generation() == 0 {
++            let _ = self.ensure_global_catalog().await;
++        }
++        let generation = self.global_catalog.generation();
++        let projections = self
++            .global_catalog
++            .projection(chrono::Utc::now().timestamp());
++        if global_directory.process_account_id.is_some()
++            && generation > 0
++            && !projections.is_empty()
++        {
++            let limit = match params.limit.map(|limit| limit as usize) {
++                Some(0) => return Err(invalid_params("accountSlot/list limit must be positive")),
++                Some(limit) => limit.min(MAX_LIST_LIMIT),
++                None => DEFAULT_LIST_LIMIT,
++            };
++            let start = global_cursor_start(params.cursor.as_deref(), generation, &projections)?;
++            let end = start.saturating_add(limit).min(projections.len());
++            let now = chrono::Utc::now().timestamp();
++            let mut data = Vec::with_capacity(end.saturating_sub(start));
++            for projection in &projections[start..end] {
++                data.push(
++                    self.global_snapshot(projection.clone(), generation, now)
++                        .await,
++                );
++            }
++            let next_cursor = if end < projections.len() {
++                Some(
++                    encode_cursor(AccountSlotCursor {
++                        revision: generation,
++                        after_slot_id: projections[end - 1].account_slot_id.clone(),
++                    })
++                    .map_err(|_| internal_error("account slot cursor could not be serialized"))?,
++                )
++            } else {
++                None
++            };
++            return Ok(AccountSlotListResponse {
++                data,
++                next_cursor,
++                registry_revision: generation,
++                catalog_kind: AccountSlotCatalogKind::Global,
++                multi_account: AccountSlotCapability {
++                    available: true,
++                    deny_reason: None,
++                },
++            });
++        }
+         self.reconcile().await?;
+         let (revision, slots, manifest_error) = {
+             let state = self
+@@ -473,6 +560,7 @@ impl AccountRegistry {
+             data,
+             next_cursor,
+             registry_revision: revision,
++            catalog_kind: AccountSlotCatalogKind::Legacy,
+             multi_account: capability,
+         })
+     }
+@@ -585,6 +673,12 @@ impl AccountRegistry {
+             label: slot.manifest.label.clone(),
+             is_default: slot.manifest.is_default,
+             status,
++            health: if status == AccountSlotStatus::Ready {
++                AccountSlotHealth::Healthy
++            } else {
++                AccountSlotHealth::Unavailable
++            },
++            quota: None,
+             auth_mode,
+             attempt_generation: slot.manifest.attempt_generation,
+             registry_revision: revision,
+@@ -807,7 +901,6 @@ impl AccountRegistry {
+             binding_transition,
+         ))
+     }
+-
+     pub(crate) async fn slot_quota_subject(
+         &self,
+         account_slot_id: &str,
+@@ -839,6 +932,25 @@ impl AccountRegistry {
+     pub(crate) async fn rotation_slot_inventory(
+         &self,
+     ) -> Result<Vec<RotationSlotIdentity>, JSONRPCErrorError> {
++        let global_directory = self.refresh_global_directory();
++        if global_directory.process_account_id.is_some() && self.global_catalog.generation() == 0 {
++            let _ = self.ensure_global_catalog().await;
++        }
++        let projections = self
++            .global_catalog
++            .projection(chrono::Utc::now().timestamp());
++        if global_directory.process_account_id.is_some()
++            && self.global_catalog.generation() > 0
++            && !projections.is_empty()
++        {
++            return Ok(projections
++                .into_iter()
++                .map(|account| RotationSlotIdentity {
++                    account_slot_id: account.account_slot_id,
++                    account_number: account.account_number,
++                })
++                .collect());
++        }
+         self.reconcile().await?;
+         let state = self
+             .state
+@@ -959,15 +1071,43 @@ impl AccountRegistry {
+     }
+ }
+ 
++mod global;
+ pub(crate) mod live_registration;
+ pub(crate) mod quota;
+ pub(crate) mod rotation;
+ 
+ impl ExecutionAccountResolver for AccountRegistry {
++    fn initial_binding_for_new_thread(&self) -> ExecutionAccountBinding {
++        let process_account_id = self.refresh_global_directory().process_account_id;
++        process_account_id
++            .filter(|account_id| {
++                self.global_catalog.generation() > 0
++                    && self
++                        .global_catalog
++                        .projection(chrono::Utc::now().timestamp())
++                        .iter()
++                        .any(|projection| projection.account_slot_id == account_id.to_string())
++            })
++            .map_or_else(
++                || ExecutionAccountBinding {
++                    slot_id: DEFAULT_SLOT_ID.to_string(),
++                    generation: 1,
++                },
++                |account_id| ExecutionAccountBinding {
++                    slot_id: account_id.to_string(),
++                    generation: 1,
++                },
++            )
++    }
++
+     fn resolve(&self, binding: ExecutionAccountBinding) -> ExecutionAccountResolverFuture<'_> {
+         Box::pin(async move {
+             let (execution_account, _binding_transition) =
+-                self.resolve_execution_account(binding).await?;
++                if global::AccountId::parse(&binding.slot_id).is_some() {
++                    self.resolve_global_execution_account(binding).await?
++                } else {
++                    self.resolve_execution_account(binding).await?
++                };
+             Ok(execution_account)
+         })
+     }
+@@ -978,7 +1118,11 @@ impl ExecutionAccountResolver for AccountRegistry {
+     ) -> ExecutionAccountTransitionResolverFuture<'_> {
+         Box::pin(async move {
+             let (execution_account, binding_transition) =
+-                self.resolve_execution_account(binding).await?;
++                if global::AccountId::parse(&binding.slot_id).is_some() {
++                    self.resolve_global_execution_account(binding).await?
++                } else {
++                    self.resolve_execution_account(binding).await?
++                };
+             Ok(ResolvedExecutionAccountTransition::with_readiness_lease(
+                 execution_account,
+                 binding_transition,
+@@ -1105,6 +1249,27 @@ fn cursor_start(
+         .ok_or_else(|| invalid_params("accountSlot/list cursor is invalid"))
+ }
+ 
++fn global_cursor_start(
++    cursor: Option<&str>,
++    revision: u64,
++    accounts: &[global::CatalogAccountProjection],
++) -> Result<usize, JSONRPCErrorError> {
++    let Some(cursor) = cursor else {
++        return Ok(0);
++    };
++    let cursor = decode_cursor(cursor, revision).map_err(|error| match error {
++        CursorError::Invalid => invalid_params("accountSlot/list cursor is invalid"),
++        CursorError::Stale => {
++            invalid_params("accountSlot/list cursor is stale; restart pagination")
++        }
++    })?;
++    accounts
++        .iter()
++        .position(|account| account.account_slot_id == cursor.after_slot_id)
++        .map(|index| index + 1)
++        .ok_or_else(|| invalid_params("accountSlot/list cursor is invalid"))
++}
++
+ #[cfg(test)]
+ #[path = "account_registry_tests.rs"]
+ mod tests;
+diff --git a/codex-rs/app-server/src/account_registry/global/integration.rs b/codex-rs/app-server/src/account_registry/global/integration.rs
+new file mode 100644
+index 0000000000..105391456c
+--- /dev/null
++++ b/codex-rs/app-server/src/account_registry/global/integration.rs
+@@ -0,0 +1,496 @@
++use std::collections::HashMap;
++use std::sync::Arc;
++
++use codex_app_server_protocol::AccountSlotHealth;
++use codex_app_server_protocol::AccountSlotQuotaMeter;
++use codex_app_server_protocol::AccountSlotQuotaSnapshot;
++use codex_app_server_protocol::AccountSlotRateLimitsReadResponse;
++use codex_app_server_protocol::AccountSlotSnapshot;
++use codex_app_server_protocol::AccountSlotStatus;
++use codex_app_server_protocol::JSONRPCErrorError;
++use codex_app_server_protocol::RateLimitSnapshot;
++use codex_app_server_protocol::RateLimitWindow;
++use codex_core::ExecutionAccountContext;
++use codex_login::AuthManager;
++use codex_login::CredentialRevision;
++use codex_model_provider::create_model_provider;
++use codex_models_manager::manager::SharedModelsManager;
++use codex_protocol::error::CodexErr;
++use codex_protocol::protocol::ExecutionAccountBinding;
++use tokio::sync::Mutex;
++use tokio::sync::OwnedMutexGuard;
++
++use super as global;
++use super::directory::subscription_source_ref;
++use super::token_manager::TokenManagerEvent;
++use crate::account_registry::AccountRegistry;
++use crate::auth_mode::auth_mode_to_api;
++use crate::error_code::invalid_request;
++
++pub(crate) struct GlobalAccountRuntime {
++    pub(crate) credential_revision: Option<CredentialRevision>,
++    pub(crate) auth_manager: Arc<AuthManager>,
++    pub(crate) models_manager: SharedModelsManager,
++    pub(crate) source_ref: String,
++    pub(crate) binding_transition: Arc<Mutex<()>>,
++}
++
++impl AccountRegistry {
++    pub(crate) fn spawn_global_catalog(
++        self: &Arc<Self>,
++        outgoing: Arc<crate::outgoing_message::OutgoingMessageSender>,
++    ) {
++        let Some(client) = self.token_manager_client.clone() else {
++            return;
++        };
++        let registry = Arc::clone(self);
++        tokio::spawn(async move {
++            loop {
++                if registry
++                    .refresh_global_directory()
++                    .process_account_id
++                    .is_none()
++                {
++                    tokio::time::sleep(global::FULL_REFRESH_INTERVAL).await;
++                    continue;
++                }
++                match registry.refresh_global_catalog(&client).await {
++                    Ok(outcome) => match outcome {
++                        global::ApplyOutcome::Applied { generation } => {
++                            outgoing
++                                .send_server_notification(
++                                    codex_app_server_protocol::ServerNotification::AccountSlotInventoryChanged(
++                                        codex_app_server_protocol::AccountSlotInventoryChangedNotification {
++                                            registry_revision: generation,
++                                        },
++                                    ),
++                                )
++                                .await;
++                        }
++                        global::ApplyOutcome::Unchanged { .. } => {}
++                        global::ApplyOutcome::ResyncRequired { .. } => unreachable!(
++                            "full TokenManager replacement cannot require another resync"
++                        ),
++                    },
++                    Err(error) => {
++                        tracing::warn!("TokenManager account snapshot unavailable: {error}")
++                    }
++                }
++
++                let Ok(mut events) = client.subscribe().await else {
++                    tokio::time::sleep(global::FULL_REFRESH_INTERVAL).await;
++                    continue;
++                };
++                let refresh = tokio::time::sleep(global::FULL_REFRESH_INTERVAL);
++                tokio::pin!(refresh);
++                let refresh_elapsed = loop {
++                    tokio::select! {
++                        event = events.recv() => {
++                            let Some(Ok(event)) = event else {
++                                break false;
++                            };
++                            let is_full_replacement =
++                                matches!(&event, TokenManagerEvent::Initial(_));
++                            let changed_account_id = event.snapshot_account_id();
++                            match registry.global_catalog.apply_event(event) {
++                                Ok(global::ApplyOutcome::Applied { generation }) => {
++                                    if is_full_replacement {
++                                        outgoing.send_server_notification(
++                                            codex_app_server_protocol::ServerNotification::AccountSlotInventoryChanged(
++                                                codex_app_server_protocol::AccountSlotInventoryChangedNotification {
++                                                    registry_revision: generation,
++                                                },
++                                            ),
++                                        ).await;
++                                    } else if let Some(account_id) = changed_account_id {
++                                        let now = chrono::Utc::now().timestamp();
++                                        let Some(projection) = registry
++                                            .global_catalog
++                                            .projection(now)
++                                            .into_iter()
++                                            .find(|projection| {
++                                                projection.account_slot_id == account_id.to_string()
++                                            })
++                                        else {
++                                            break false;
++                                        };
++                                        let slot = registry
++                                            .global_snapshot(projection, generation, now)
++                                            .await;
++                                        outgoing.send_server_notification(
++                                            codex_app_server_protocol::ServerNotification::AccountSlotChanged(
++                                                codex_app_server_protocol::AccountSlotChangedNotification {
++                                                    registry_revision: generation,
++                                                    slot,
++                                                },
++                                            ),
++                                        ).await;
++                                    }
++                                }
++                                Ok(global::ApplyOutcome::Unchanged { .. }) => {}
++                                Ok(global::ApplyOutcome::ResyncRequired { .. }) | Err(_) => break false,
++                            }
++                        }
++                        () = &mut refresh => break true,
++                    }
++                };
++                wait_before_catalog_reconnect(refresh_elapsed).await;
++            }
++        });
++    }
++
++    async fn refresh_global_catalog(
++        &self,
++        client: &global::TokenManagerClient,
++    ) -> Result<global::ApplyOutcome, global::CatalogError> {
++        let _refresh = self
++            .global_catalog_refresh
++            .acquire()
++            .await
++            .map_err(|_| global::CatalogError::Request)?;
++        let snapshots = client.fetch_full().await?;
++        self.global_catalog.replace(snapshots)
++    }
++
++    pub(crate) async fn ensure_global_catalog(&self) -> Result<u64, CodexErr> {
++        let generation = self.global_catalog.generation();
++        if generation > 0 {
++            return Ok(generation);
++        }
++        let Some(client) = self.token_manager_client.as_ref() else {
++            return Err(CodexErr::InvalidRequest(
++                "global account catalog is unavailable".to_string(),
++            ));
++        };
++        let _refresh = self.global_catalog_refresh.acquire().await.map_err(|_| {
++            CodexErr::InvalidRequest("global account catalog is unavailable".to_string())
++        })?;
++        let generation = self.global_catalog.generation();
++        if generation > 0 {
++            return Ok(generation);
++        }
++        let snapshots = client.fetch_full().await.map_err(|_| {
++            CodexErr::InvalidRequest("global account catalog is unavailable".to_string())
++        })?;
++        self.global_catalog.replace(snapshots).map_err(|_| {
++            CodexErr::InvalidRequest("global account catalog is unavailable".to_string())
++        })?;
++        let generation = self.global_catalog.generation();
++        (generation > 0).then_some(generation).ok_or_else(|| {
++            CodexErr::InvalidRequest("global account catalog is unavailable".to_string())
++        })
++    }
++
++    pub(crate) async fn global_runtime(
++        &self,
++        account_id: global::AccountId,
++    ) -> Result<Arc<GlobalAccountRuntime>, CodexErr> {
++        let directory = self.refresh_global_directory();
++        let auth_home = directory.homes.get(&account_id).cloned().ok_or_else(|| {
++            CodexErr::InvalidRequest(format!("execution account `{account_id}` is unavailable"))
++        })?;
++        let mut auth_config = self.auth_config_template.clone();
++        auth_config.codex_home = auth_home.clone();
++        auth_config.auth_credentials_store_mode =
++            codex_config::types::AuthCredentialsStoreMode::File;
++        let auth_manager = AuthManager::shared_from_read_only_auth_config(auth_config)
++            .await
++            .map_err(|_| {
++                CodexErr::InvalidRequest(format!("execution account `{account_id}` is unavailable"))
++            })?;
++        let auth = auth_manager.auth_cached().ok_or_else(|| {
++            CodexErr::InvalidRequest(format!("execution account `{account_id}` is not logged in"))
++        })?;
++        let credential_revision = auth_manager.credential_revision();
++        let account_identity = auth.get_account_id().ok_or_else(|| {
++            CodexErr::InvalidRequest(format!(
++                "execution account `{account_id}` has no stable identity"
++            ))
++        })?;
++        let source_ref =
++            subscription_source_ref(&account_identity, &auth_home).ok_or_else(|| {
++                CodexErr::InvalidRequest(format!(
++                    "execution account `{account_id}` has invalid identity"
++                ))
++            })?;
++
++        let mut runtimes = self.global_runtimes.lock().await;
++        if let Some(runtime) = runtimes.get(&account_id)
++            && runtime.credential_revision == credential_revision
++            && runtime.source_ref == source_ref
++        {
++            return Ok(Arc::clone(runtime));
++        }
++        let provider = create_model_provider(
++            self.config.model_provider.clone(),
++            Some(Arc::clone(&auth_manager)),
++        );
++        let models_manager = provider.models_manager(auth_home, self.config.model_catalog.clone());
++        let binding_transition = runtimes.get(&account_id).map_or_else(
++            || Arc::new(Mutex::new(())),
++            |runtime| Arc::clone(&runtime.binding_transition),
++        );
++        let runtime = Arc::new(GlobalAccountRuntime {
++            credential_revision,
++            auth_manager,
++            models_manager,
++            source_ref,
++            binding_transition,
++        });
++        runtimes.insert(account_id, Arc::clone(&runtime));
++        Ok(runtime)
++    }
++
++    pub(crate) async fn global_snapshot(
++        &self,
++        projection: global::CatalogAccountProjection,
++        generation: u64,
++        now: i64,
++    ) -> AccountSlotSnapshot {
++        let account_id = global::AccountId::parse(&projection.account_slot_id);
++        let runtime = match account_id {
++            Some(account_id) => self.global_runtime(account_id).await.ok(),
++            None => None,
++        };
++        let ready = match (account_id, runtime.as_ref()) {
++            (Some(account_id), Some(runtime)) => matches!(
++                self.global_catalog.select(global::CatalogSelectionRequest {
++                    mode: global::RotationMode::Fixed,
++                    fixed_account_id: Some(account_id),
++                    automatic_account_ids: &[],
++                    current_account_id: None,
++                    last_committed_account_id: None,
++                    credential_readiness: &[global::CredentialReadiness {
++                        account_id,
++                        ready: true,
++                    }],
++                    now,
++                }),
++                global::CatalogSelection::Selected(token)
++                    if token.source_ref() == runtime.source_ref
++            ),
++            _ => false,
++        };
++        let quota = (!projection.meters.is_empty()).then(|| {
++            let observed_at = projection
++                .meters
++                .iter()
++                .map(|meter| meter.observed_at)
++                .min()
++                .unwrap_or(projection.fetched_at);
++            let stale_at = projection
++                .meters
++                .iter()
++                .map(|meter| meter.stale_at)
++                .min()
++                .unwrap_or(projection.fetched_at);
++            AccountSlotQuotaSnapshot {
++                meters: projection
++                    .meters
++                    .into_iter()
++                    .map(|meter| AccountSlotQuotaMeter {
++                        id: meter.id,
++                        label: meter.label,
++                        remaining_percent: meter.remaining_percent,
++                        resets_at: meter.resets_at,
++                    })
++                    .collect(),
++                observed_at,
++                stale_at,
++            }
++        });
++        let process_account_id = self.refresh_global_directory().process_account_id;
++        let local_default = if account_id == process_account_id {
++            let (slot, manifest_error, revision) = self
++                .state
++                .read()
++                .ok()
++                .and_then(|state| {
++                    state
++                        .slots
++                        .iter()
++                        .find(|slot| slot.manifest.is_default)
++                        .cloned()
++                        .map(|slot| (slot, state.manifest_error, state.revision))
++                })
++                .map_or((None, None, 0), |(slot, error, revision)| {
++                    (Some(slot), error, revision)
++                });
++            match slot {
++                Some(slot) => {
++                    let capability = self.capability(manifest_error);
++                    let config = self.load_latest_config().await;
++                    Some(self.snapshot(&slot, revision, &capability, &config).await)
++                }
++                None => None,
++            }
++        } else {
++            None
++        };
++        AccountSlotSnapshot {
++            account_slot_id: projection.account_slot_id.clone(),
++            account_number: projection.account_number,
++            label: projection.account_slot_id,
++            is_default: account_id == process_account_id,
++            status: if ready {
++                AccountSlotStatus::Ready
++            } else {
++                AccountSlotStatus::LoginRequired
++            },
++            health: match projection.health {
++                global::CatalogProjectionHealth::Healthy => AccountSlotHealth::Healthy,
++                global::CatalogProjectionHealth::Degraded => AccountSlotHealth::Degraded,
++                global::CatalogProjectionHealth::Unavailable => AccountSlotHealth::Unavailable,
++            },
++            quota,
++            auth_mode: runtime
++                .as_ref()
++                .and_then(|runtime| runtime.auth_manager.auth_mode())
++                .map(auth_mode_to_api),
++            attempt_generation: local_default
++                .as_ref()
++                .map_or(0, |slot| slot.attempt_generation),
++            registry_revision: generation,
++            active_login_operation_id: local_default
++                .as_ref()
++                .and_then(|slot| slot.active_login_operation_id.clone()),
++            error_code: local_default
++                .as_ref()
++                .and_then(|slot| slot.error_code.clone()),
++            actions: local_default.map_or_else(Vec::new, |slot| slot.actions),
++            updated_at: projection.fetched_at,
++        }
++    }
++
++    pub(crate) fn global_rate_limits(
++        &self,
++        account_slot_id: &str,
++    ) -> Option<Result<AccountSlotRateLimitsReadResponse, JSONRPCErrorError>> {
++        global::AccountId::parse(account_slot_id)?;
++        let projection = self
++            .global_catalog
++            .projection(chrono::Utc::now().timestamp())
++            .into_iter()
++            .find(|account| account.account_slot_id == account_slot_id);
++        Some(
++            projection
++                .ok_or_else(|| invalid_request("account slot is unavailable"))
++                .and_then(|projection| {
++                    if projection.meters.is_empty() {
++                        return Err(invalid_request("account slot rate limits are unavailable"));
++                    }
++                    let captured_at = projection
++                        .meters
++                        .iter()
++                        .map(|meter| meter.observed_at)
++                        .min()
++                        .unwrap_or(projection.fetched_at);
++                    let stale_at = projection
++                        .meters
++                        .iter()
++                        .map(|meter| meter.stale_at)
++                        .min()
++                        .unwrap_or(projection.fetched_at);
++                    let rate_limits_by_limit_id = projection
++                        .meters
++                        .into_iter()
++                        .map(|meter| {
++                            let limit_id = meter.id.clone();
++                            (
++                                limit_id.clone(),
++                                RateLimitSnapshot {
++                                    limit_id: Some(limit_id),
++                                    limit_name: meter.label,
++                                    primary: Some(RateLimitWindow {
++                                        used_percent: (100_u32
++                                            .saturating_sub(meter.remaining_percent))
++                                            as i32,
++                                        window_duration_mins: None,
++                                        resets_at: meter.resets_at,
++                                    }),
++                                    secondary: None,
++                                    credits: None,
++                                    individual_limit: None,
++                                    spend_control_reached: None,
++                                    plan_type: None,
++                                    rate_limit_reached_type: None,
++                                },
++                            )
++                        })
++                        .collect::<HashMap<_, _>>();
++                    let rate_limits = rate_limits_by_limit_id
++                        .values()
++                        .next()
++                        .cloned()
++                        .ok_or_else(|| {
++                            invalid_request("account slot rate limits are unavailable")
++                        })?;
++                    Ok(AccountSlotRateLimitsReadResponse {
++                        account_slot_id: projection.account_slot_id,
++                        attempt_generation: 0,
++                        captured_at,
++                        stale_at,
++                        rate_limits,
++                        rate_limits_by_limit_id,
++                    })
++                }),
++        )
++    }
++
++    pub(crate) async fn resolve_global_execution_account(
++        &self,
++        binding: ExecutionAccountBinding,
++    ) -> Result<(Arc<ExecutionAccountContext>, OwnedMutexGuard<()>), CodexErr> {
++        self.ensure_global_catalog().await?;
++        let account_id = global::AccountId::parse(&binding.slot_id).ok_or_else(|| {
++            CodexErr::InvalidRequest(format!(
++                "execution account slot `{}` is unavailable",
++                binding.slot_id
++            ))
++        })?;
++        let runtime = self.global_runtime(account_id).await?;
++        let selected = self.global_catalog.select(global::CatalogSelectionRequest {
++            mode: global::RotationMode::Fixed,
++            fixed_account_id: Some(account_id),
++            automatic_account_ids: &[],
++            current_account_id: None,
++            last_committed_account_id: None,
++            credential_readiness: &[global::CredentialReadiness {
++                account_id,
++                ready: true,
++            }],
++            now: chrono::Utc::now().timestamp(),
++        });
++        let global::CatalogSelection::Selected(token) = selected else {
++            return Err(CodexErr::InvalidRequest(format!(
++                "execution account slot `{}` is unavailable",
++                binding.slot_id
++            )));
++        };
++        if token.source_ref() != runtime.source_ref {
++            return Err(CodexErr::InvalidRequest(format!(
++                "execution account slot `{}` identity changed",
++                binding.slot_id
++            )));
++        }
++        let binding_transition = Arc::clone(&runtime.binding_transition).lock_owned().await;
++        Ok((
++            Arc::new(ExecutionAccountContext {
++                binding,
++                auth_manager: Arc::clone(&runtime.auth_manager),
++                models_manager: Arc::clone(&runtime.models_manager),
++            }),
++            binding_transition,
++        ))
++    }
++}
++
++async fn wait_before_catalog_reconnect(refresh_elapsed: bool) {
++    if !refresh_elapsed {
++        tokio::time::sleep(global::FULL_REFRESH_INTERVAL).await;
++    }
++}
++
++#[cfg(test)]
++#[path = "integration_tests.rs"]
++mod tests;
+diff --git a/codex-rs/app-server/src/account_registry/global/integration_tests.rs b/codex-rs/app-server/src/account_registry/global/integration_tests.rs
+new file mode 100644
+index 0000000000..ecf2897000
+--- /dev/null
++++ b/codex-rs/app-server/src/account_registry/global/integration_tests.rs
+@@ -0,0 +1,11 @@
++use super::*;
++
++#[tokio::test(start_paused = true)]
++async fn ended_event_stream_waits_before_the_next_full_refresh() {
++    let wait = tokio::spawn(wait_before_catalog_reconnect(false));
++    tokio::task::yield_now().await;
++    assert!(!wait.is_finished());
++
++    tokio::time::advance(global::FULL_REFRESH_INTERVAL).await;
++    wait.await.unwrap();
++}
+diff --git a/codex-rs/app-server/src/account_registry/global/mod.rs b/codex-rs/app-server/src/account_registry/global/mod.rs
+new file mode 100644
+index 0000000000..c2b19fb60d
+--- /dev/null
++++ b/codex-rs/app-server/src/account_registry/global/mod.rs
+@@ -0,0 +1,24 @@
++mod directory;
++mod identity;
++mod integration;
++mod runtime;
++mod selection;
++mod token_manager;
++
++pub(crate) use directory::GlobalAccountDirectory;
++pub(crate) use identity::AccountId;
++pub(crate) use integration::GlobalAccountRuntime;
++pub(crate) use runtime::ApplyOutcome;
++pub(crate) use runtime::CatalogAccountProjection;
++pub(crate) use runtime::CatalogProjectionHealth;
++pub(crate) use runtime::GlobalAccountCatalog;
++pub(crate) use selection::CatalogSelection;
++pub(crate) use selection::CatalogSelectionRequest;
++pub(crate) use selection::CatalogSelectionToken;
++pub(crate) use selection::CredentialReadiness;
++pub(crate) use selection::RotationMode;
++pub(crate) use token_manager::CatalogError;
++pub(crate) use token_manager::FULL_REFRESH_INTERVAL;
++#[cfg(test)]
++pub(crate) use token_manager::RawSnapshot;
++pub(crate) use token_manager::TokenManagerClient;
+diff --git a/codex-rs/app-server/src/account_registry/rotation.rs b/codex-rs/app-server/src/account_registry/rotation.rs
+index a2cb376efc..e650fbe20d 100644
+--- a/codex-rs/app-server/src/account_registry/rotation.rs
++++ b/codex-rs/app-server/src/account_registry/rotation.rs
+@@ -16,6 +16,7 @@ use codex_thread_store::ThreadStoreError;
+ 
+ use super::AccountRegistry;
+ use super::ManifestSlotStatus;
++use super::global;
+ use super::quota::QuotaCacheLookup;
+ 
+ #[derive(Clone, Debug, PartialEq)]
+@@ -93,6 +94,43 @@ impl TurnExecutionAccountSelector for AccountRotationService {
+                 }
+             };
+             let mode = api_mode(policy.mode);
++            if global_policy(&policy) {
++                let selected = self
++                    .registry
++                    .select_global_account(
++                        mode,
++                        policy.fixed_account_slot_id.as_deref(),
++                        &policy.automatic_account_slot_ids,
++                        Some(&selection.current_binding.slot_id),
++                        policy.last_committed_account_slot_id.as_deref(),
++                    )
++                    .await?;
++                let Some((token, runtime)) = selected else {
++                    return Err(CodexErr::InvalidRequest(
++                        "no eligible account slot is available".to_string(),
++                    ));
++                };
++                let target_slot_id = token.account_id.to_string();
++                if target_slot_id == selection.current_binding.slot_id
++                    && runtime.credential_revision != selection.credential_revision
++                {
++                    return Ok(TurnExecutionAccountDecision::ReprepareCurrent {
++                        policy_revision: policy.revision,
++                    });
++                }
++                return Ok(selection_decision(
++                    mode,
++                    target_slot_id,
++                    &selection.current_binding.slot_id,
++                    policy.revision,
++                ));
++            }
++            if mode == ThreadAccountRotationMode::Fixed
++                && policy.fixed_account_slot_id.as_deref()
++                    == Some(selection.current_binding.slot_id.as_str())
++            {
++                return Ok(TurnExecutionAccountDecision::Keep);
++            }
+             let candidates = self
+                 .registry
+                 .rotation_candidates(
+@@ -130,6 +168,21 @@ impl TurnExecutionAccountSelector for AccountRotationService {
+     }
+ }
+ 
++fn global_policy(policy: &codex_thread_store::ThreadAccountRotationPolicy) -> bool {
++    let ids = match policy.mode {
++        StoreRotationMode::Fixed => policy.fixed_account_slot_id.iter().collect::<Vec<_>>(),
++        StoreRotationMode::QuotaAware
++        | StoreRotationMode::RoundRobin
++        | StoreRotationMode::ExhaustThenNext => {
++            policy.automatic_account_slot_ids.iter().collect::<Vec<_>>()
++        }
++    };
++    !ids.is_empty()
++        && ids
++            .into_iter()
++            .all(|account_slot_id| global::AccountId::parse(account_slot_id).is_some())
++}
++
+ fn selection_decision(
+     mode: ThreadAccountRotationMode,
+     target_slot_id: String,
+@@ -147,6 +200,70 @@ fn selection_decision(
+ }
+ 
+ impl AccountRegistry {
++    async fn select_global_account(
++        &self,
++        mode: ThreadAccountRotationMode,
++        fixed_account_slot_id: Option<&str>,
++        automatic_account_slot_ids: &[String],
++        current_account_slot_id: Option<&str>,
++        last_committed_account_slot_id: Option<&str>,
++    ) -> Result<
++        Option<(
++            global::CatalogSelectionToken,
++            Arc<global::GlobalAccountRuntime>,
++        )>,
++        CodexErr,
++    > {
++        self.ensure_global_catalog().await?;
++        let fixed_account_id = fixed_account_slot_id.and_then(global::AccountId::parse);
++        let automatic_account_ids = automatic_account_slot_ids
++            .iter()
++            .filter_map(|account_slot_id| global::AccountId::parse(account_slot_id))
++            .collect::<Vec<_>>();
++        let current_account_id = current_account_slot_id.and_then(global::AccountId::parse);
++        let last_committed_account_id =
++            last_committed_account_slot_id.and_then(global::AccountId::parse);
++        let mut account_ids = automatic_account_ids.clone();
++        account_ids.extend(fixed_account_id);
++        account_ids.sort_unstable();
++        account_ids.dedup();
++        let mut runtimes = HashMap::new();
++        let mut credential_readiness = Vec::with_capacity(account_ids.len());
++        for account_id in account_ids {
++            if let Ok(runtime) = self.global_runtime(account_id).await {
++                credential_readiness.push(global::CredentialReadiness {
++                    account_id,
++                    ready: true,
++                });
++                runtimes.insert(account_id, runtime);
++            }
++        }
++        let selected = self.global_catalog.select(global::CatalogSelectionRequest {
++            mode: match mode {
++                ThreadAccountRotationMode::Fixed => global::RotationMode::Fixed,
++                ThreadAccountRotationMode::QuotaAware => global::RotationMode::QuotaAware,
++                ThreadAccountRotationMode::RoundRobin => global::RotationMode::RoundRobin,
++                ThreadAccountRotationMode::ExhaustThenNext => global::RotationMode::ExhaustThenNext,
++            },
++            fixed_account_id,
++            automatic_account_ids: &automatic_account_ids,
++            current_account_id,
++            last_committed_account_id,
++            credential_readiness: &credential_readiness,
++            now: chrono::Utc::now().timestamp(),
++        });
++        let global::CatalogSelection::Selected(token) = selected else {
++            return Ok(None);
++        };
++        let Some(runtime) = runtimes.remove(&token.account_id) else {
++            return Ok(None);
++        };
++        if token.source_ref() != runtime.source_ref {
++            return Ok(None);
++        }
++        Ok(Some((token, runtime)))
++    }
++
+     async fn rotation_candidates(
+         self: &Arc<Self>,
+         thread_id: ThreadId,
+diff --git a/codex-rs/app-server/src/account_registry/rotation_tests.rs b/codex-rs/app-server/src/account_registry/rotation_tests.rs
+index 987fe43997..76e58b1597 100644
+--- a/codex-rs/app-server/src/account_registry/rotation_tests.rs
++++ b/codex-rs/app-server/src/account_registry/rotation_tests.rs
+@@ -1,4 +1,5 @@
+ use codex_app_server_protocol::RateLimitWindow;
++use codex_thread_store::ThreadAccountRotationPolicy;
+ 
+ use super::*;
+ 
+@@ -29,6 +30,23 @@ fn candidate(number: u32, used: i32, resets_at: i64) -> RotationCandidate {
+     }
+ }
+ 
++#[test]
++fn only_canonical_cn_policies_use_the_global_catalog() {
++    let fixed = |slot_id: &str| ThreadAccountRotationPolicy {
++        mode: StoreRotationMode::Fixed,
++        fixed_account_slot_id: Some(slot_id.to_string()),
++        automatic_account_slot_ids: Vec::new(),
++        revision: 0,
++        last_committed_account_slot_id: Some(slot_id.to_string()),
++    };
++
++    assert!(global_policy(&fixed("C2")));
++    assert!(!global_policy(&fixed("default")));
++    assert!(!global_policy(&fixed(
++        "019ff6cc-f375-7630-85bf-553126ffa0b6"
++    )));
++}
++
+ #[test]
+ fn quota_aware_uses_remaining_quota_per_reset_time() {
+     let candidates = vec![candidate(2, 20, 200), candidate(3, 50, 120)];
+diff --git a/codex-rs/app-server/src/account_registry_tests.rs b/codex-rs/app-server/src/account_registry_tests.rs
+index b349b137fa..2ddd498342 100644
+--- a/codex-rs/app-server/src/account_registry_tests.rs
++++ b/codex-rs/app-server/src/account_registry_tests.rs
+@@ -10,10 +10,31 @@ use codex_login::login_with_api_key;
+ use codex_login::logout;
+ use pretty_assertions::assert_eq;
+ use tempfile::tempdir;
++use wiremock::Mock;
++use wiremock::MockServer;
++use wiremock::ResponseTemplate;
++use wiremock::matchers::method;
++use wiremock::matchers::path;
+ 
+ const SECOND_SLOT_ID: &str = "11111111111141118111111111111111";
+ const THIRD_SLOT_ID: &str = "22222222222242228222222222222222";
+ 
++fn write_global_registry(user_home: &Path, entries: &[(u32, &Path)]) {
++    let config = user_home.join(".config");
++    std::fs::create_dir_all(&config).unwrap();
++    let registry = config.join("codex-accounts.tsv");
++    let contents = entries
++        .iter()
++        .map(|(number, home)| format!("{number}\t{}\n", home.display()))
++        .collect::<String>();
++    std::fs::write(&registry, contents).unwrap();
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::PermissionsExt;
++        std::fs::set_permissions(&registry, std::fs::Permissions::from_mode(0o600)).unwrap();
++    }
++}
++
+ #[test]
+ fn account_numbers_preserve_exact_labels_and_assign_legacy_slots_by_slot_id() {
+     let process_home = Path::new("/tmp/codex-account-number-test");
+@@ -132,6 +153,180 @@ async fn registry_for_home_and_store(
+     )
+ }
+ 
++#[tokio::test]
++async fn fresh_process_cn_binding_single_flights_initial_catalog_fetch() {
++    let process_home = tempdir().unwrap();
++    let user_home = tempdir().unwrap();
++    let mut registry = registry_for_home(process_home.path()).await;
++    write_global_registry(user_home.path(), &[(2, process_home.path())]);
++    registry.global_directory_user_home = Some(user_home.path().to_path_buf());
++
++    let server = MockServer::start().await;
++    Mock::given(method("GET"))
++        .and(path("/snapshots"))
++        .respond_with(
++            ResponseTemplate::new(200)
++                .set_delay(std::time::Duration::from_millis(25))
++                .set_body_json(serde_json::json!({
++                    "accounts": [{
++                        "label": "C2",
++                        "type": "codex-chatgpt",
++                        "sourceRef": "opaque",
++                        "fetchedAt": 100,
++                        "ok": true
++                    }]
++                })),
++        )
++        .expect(1)
++        .mount(&server)
++        .await;
++    let endpoint = url::Url::parse(&format!("{}/", server.uri())).unwrap();
++    registry.token_manager_client = Some(
++        global::TokenManagerClient::new(registry.config.http_client_factory(), endpoint).unwrap(),
++    );
++
++    let (first, second) = tokio::join!(
++        registry.ensure_global_catalog(),
++        registry.ensure_global_catalog()
++    );
++    assert_eq!((first.unwrap(), second.unwrap()), (1, 1));
++    assert_eq!(
++        registry.initial_binding_for_new_thread(),
++        ExecutionAccountBinding {
++            slot_id: "C2".to_string(),
++            generation: 1,
++        }
++    );
++}
++
++#[tokio::test]
++async fn registry_refresh_adds_new_account_home_without_restarting() {
++    let user_home = tempdir().unwrap();
++    let process_home = tempdir().unwrap();
++    let added_home = tempdir().unwrap();
++    let mut registry = registry_for_home(process_home.path()).await;
++    registry.global_directory_user_home = Some(user_home.path().to_path_buf());
++    write_global_registry(user_home.path(), &[(1, process_home.path())]);
++
++    assert_eq!(
++        registry.refresh_global_directory().process_account_id,
++        global::AccountId::parse("C1")
++    );
++    write_global_registry(
++        user_home.path(),
++        &[(1, process_home.path()), (2, added_home.path())],
++    );
++    let refreshed = registry.refresh_global_directory();
++
++    assert_eq!(
++        refreshed
++            .homes
++            .get(&global::AccountId::parse("C2").unwrap()),
++        Some(&std::fs::canonicalize(added_home.path()).unwrap())
++    );
++}
++
++#[tokio::test]
++async fn unavailable_initial_global_catalog_falls_back_to_legacy_domain() {
++    let user_home = tempdir().unwrap();
++    let process_home = tempdir().unwrap();
++    let mut registry = registry_for_home(process_home.path()).await;
++    registry.global_directory_user_home = Some(user_home.path().to_path_buf());
++    write_global_registry(user_home.path(), &[(1, process_home.path())]);
++    let server = MockServer::start().await;
++    Mock::given(method("GET"))
++        .and(path("/snapshots"))
++        .respond_with(ResponseTemplate::new(503))
++        .mount(&server)
++        .await;
++    registry.token_manager_client = Some(
++        global::TokenManagerClient::new(
++            registry.config.http_client_factory(),
++            url::Url::parse(&format!("{}/", server.uri())).unwrap(),
++        )
++        .unwrap(),
++    );
++
++    let response = registry
++        .list(AccountSlotListParams {
++            cursor: None,
++            limit: None,
++        })
++        .await
++        .unwrap();
++    assert_eq!(response.catalog_kind, AccountSlotCatalogKind::Legacy);
++    assert_eq!(response.data[0].account_slot_id, DEFAULT_SLOT_ID);
++    assert_eq!(
++        registry.initial_binding_for_new_thread().slot_id,
++        DEFAULT_SLOT_ID
++    );
++
++    registry.global_catalog.replace(Vec::new()).unwrap();
++    let empty = registry
++        .list(AccountSlotListParams {
++            cursor: None,
++            limit: None,
++        })
++        .await
++        .unwrap();
++    assert_eq!(empty.catalog_kind, AccountSlotCatalogKind::Legacy);
++    assert_eq!(
++        registry.initial_binding_for_new_thread().slot_id,
++        DEFAULT_SLOT_ID
++    );
++}
++
++#[tokio::test]
++async fn removing_process_mapping_returns_to_legacy_catalog_domain() {
++    let user_home = tempdir().unwrap();
++    let process_home = tempdir().unwrap();
++    let mut registry = registry_for_home(process_home.path()).await;
++    registry.global_directory_user_home = Some(user_home.path().to_path_buf());
++    write_global_registry(user_home.path(), &[(1, process_home.path())]);
++    registry
++        .global_catalog
++        .replace(vec![global::RawSnapshot {
++            label: "C1".to_string(),
++            provider_type: "codex-chatgpt".to_string(),
++            source_ref: Some("source".to_string()),
++            fetched_at: chrono::Utc::now().timestamp(),
++            ok: true,
++            rate_limit: None,
++        }])
++        .unwrap();
++
++    let global = registry
++        .list(AccountSlotListParams {
++            cursor: None,
++            limit: None,
++        })
++        .await
++        .unwrap();
++    write_global_registry(user_home.path(), &[]);
++    let legacy = registry
++        .list(AccountSlotListParams {
++            cursor: None,
++            limit: None,
++        })
++        .await
++        .unwrap();
++
++    assert_eq!(
++        (
++            global.catalog_kind,
++            global.data[0].account_slot_id.as_str(),
++            legacy.catalog_kind,
++            legacy.data[0].account_slot_id.as_str(),
++        ),
++        (
++            AccountSlotCatalogKind::Global,
++            "C1",
++            AccountSlotCatalogKind::Legacy,
++            DEFAULT_SLOT_ID,
++        )
++    );
++}
++
+ fn manifest(process_home: &Path, revision: u64) -> AccountSlotsManifest {
+     AccountSlotsManifest {
+         schema_version: MANIFEST_SCHEMA_VERSION,
+diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
+index 4b1a404ea8..2fb7b23851 100644
+--- a/codex-rs/app-server/src/message_processor.rs
++++ b/codex-rs/app-server/src/message_processor.rs
+@@ -317,6 +317,7 @@ impl MessageProcessor {
+             Arc::clone(&default_models_manager),
+             Arc::clone(&thread_store),
+         ));
++        account_registry.spawn_global_catalog(outgoing.clone());
+         let startup_account_registry = Arc::clone(&account_registry);
+         tokio::spawn(async move {
+             if let Err(error) = startup_account_registry.reconcile().await {
+diff --git a/codex-rs/app-server/src/request_processors/account_processor.rs b/codex-rs/app-server/src/request_processors/account_processor.rs
+index 9a86315f3d..4842f60299 100644
+--- a/codex-rs/app-server/src/request_processors/account_processor.rs
++++ b/codex-rs/app-server/src/request_processors/account_processor.rs
+@@ -177,6 +177,12 @@ impl AccountRequestProcessor {
+         &self,
+         params: AccountSlotRateLimitsReadParams,
+     ) -> Result<AccountSlotRateLimitsReadResponse, JSONRPCErrorError> {
++        if let Some(response) = self
++            .account_registry
++            .global_rate_limits(&params.account_slot_id)
++        {
++            return response;
++        }
+         let (key, auth_manager) = self
+             .account_registry
+             .slot_quota_subject(&params.account_slot_id)
+-- 
+2.50.1 (Apple Git-155)

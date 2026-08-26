@@ -1,0 +1,1673 @@
+From e4097ed864ecb0d2f1c4ca4431eacb09a9fab5f0 Mon Sep 17 00:00:00 2001
+From: patch-verifier <patch-verifier@localhost>
+Date: Thu, 27 Aug 2026 03:41:16 +0900
+Subject: [PATCH 17/17] P017 consume TokenManager account snapshots
+
+---
+ .../src/account_registry/global/directory.rs  | 134 ++++++
+ .../global/directory_tests.rs                 |  75 ++++
+ .../src/account_registry/global/identity.rs   |  33 ++
+ .../account_registry/global/identity_tests.rs |  11 +
+ .../src/account_registry/global/runtime.rs    | 415 ++++++++++++++++++
+ .../account_registry/global/runtime_tests.rs  | 141 ++++++
+ .../src/account_registry/global/selection.rs  | 225 ++++++++++
+ .../global/selection_tests.rs                 | 199 +++++++++
+ .../account_registry/global/token_manager.rs  | 282 ++++++++++++
+ .../global/token_manager_tests.rs             |  68 +++
+ 10 files changed, 1583 insertions(+)
+ create mode 100644 codex-rs/app-server/src/account_registry/global/directory.rs
+ create mode 100644 codex-rs/app-server/src/account_registry/global/directory_tests.rs
+ create mode 100644 codex-rs/app-server/src/account_registry/global/identity.rs
+ create mode 100644 codex-rs/app-server/src/account_registry/global/identity_tests.rs
+ create mode 100644 codex-rs/app-server/src/account_registry/global/runtime.rs
+ create mode 100644 codex-rs/app-server/src/account_registry/global/runtime_tests.rs
+ create mode 100644 codex-rs/app-server/src/account_registry/global/selection.rs
+ create mode 100644 codex-rs/app-server/src/account_registry/global/selection_tests.rs
+ create mode 100644 codex-rs/app-server/src/account_registry/global/token_manager.rs
+ create mode 100644 codex-rs/app-server/src/account_registry/global/token_manager_tests.rs
+
+diff --git a/codex-rs/app-server/src/account_registry/global/directory.rs b/codex-rs/app-server/src/account_registry/global/directory.rs
+new file mode 100644
+index 0000000000..68a56dbe51
+--- /dev/null
++++ b/codex-rs/app-server/src/account_registry/global/directory.rs
+@@ -0,0 +1,134 @@
++use std::collections::BTreeMap;
++use std::collections::HashSet;
++use std::fs::OpenOptions;
++use std::io::Read;
++use std::path::Path;
++use std::path::PathBuf;
++
++#[cfg(unix)]
++use std::os::unix::fs::MetadataExt;
++#[cfg(unix)]
++use std::os::unix::fs::OpenOptionsExt;
++
++use base64::Engine;
++use base64::engine::general_purpose::URL_SAFE_NO_PAD;
++use sha2::Digest;
++use sha2::Sha256;
++
++use super::AccountId;
++
++const ACCOUNT_REGISTRY_FILE: &str = ".config/codex-accounts.tsv";
++const SOURCE_REF_CONTEXT: &str = "llm-bridge.subscription-source-ref/v1";
++const SOURCE_REF_PREFIX: &str = "subscription-source-v1:";
++
++#[derive(Clone, Default)]
++pub(crate) struct GlobalAccountDirectory {
++    pub(crate) homes: BTreeMap<AccountId, PathBuf>,
++    pub(crate) process_account_id: Option<AccountId>,
++}
++
++impl GlobalAccountDirectory {
++    pub(crate) fn user_home() -> Option<PathBuf> {
++        std::env::var_os("HOME").map(PathBuf::from)
++    }
++
++    pub(crate) fn load_from(user_home: &Path, process_home: &Path) -> Self {
++        let registry_path = user_home.join(ACCOUNT_REGISTRY_FILE);
++        let Some(contents) = read_registry(&registry_path) else {
++            return Self::default();
++        };
++        let mut homes = BTreeMap::new();
++        let mut unique_homes = HashSet::new();
++        for line in contents.lines() {
++            let line = line.trim();
++            if line.is_empty() || line.starts_with('#') {
++                continue;
++            }
++            let mut fields = line.split('\t');
++            let (Some(number), Some(home), None) = (fields.next(), fields.next(), fields.next())
++            else {
++                return Self::default();
++            };
++            let Ok(number) = number.parse::<u32>() else {
++                return Self::default();
++            };
++            let Some(account_id) = AccountId::parse(&format!("C{number}")) else {
++                return Self::default();
++            };
++            let home = match home.strip_prefix("~/") {
++                Some(relative) => user_home.join(relative),
++                None => PathBuf::from(home),
++            };
++            let Ok(home) = std::fs::canonicalize(home) else {
++                continue;
++            };
++            if !unique_homes.insert(home.clone()) || homes.insert(account_id, home).is_some() {
++                return Self::default();
++            }
++        }
++        let process_home = std::fs::canonicalize(process_home).ok();
++        let process_account_id = process_home.as_ref().and_then(|process_home| {
++            homes
++                .iter()
++                .find_map(|(account_id, home)| (home == process_home).then_some(*account_id))
++        });
++        Self {
++            homes,
++            process_account_id,
++        }
++    }
++}
++
++fn read_registry(path: &Path) -> Option<String> {
++    let mut options = OpenOptions::new();
++    options.read(true);
++    #[cfg(any(target_os = "macos", target_os = "ios"))]
++    options.custom_flags(0x0000_0100);
++    #[cfg(any(target_os = "linux", target_os = "android"))]
++    options.custom_flags(0x0002_0000);
++    let mut file = options.open(path).ok()?;
++    let metadata = file.metadata().ok()?;
++    if !metadata.is_file() {
++        return None;
++    }
++    #[cfg(unix)]
++    if metadata.mode() & 0o777 != 0o600 || metadata.uid() != effective_uid() {
++        return None;
++    }
++    let mut contents = String::new();
++    file.read_to_string(&mut contents).ok()?;
++    Some(contents)
++}
++
++#[cfg(unix)]
++fn effective_uid() -> u32 {
++    unsafe extern "C" {
++        fn geteuid() -> u32;
++    }
++    // SAFETY: `geteuid` takes no arguments and has no failure mode.
++    unsafe { geteuid() }
++}
++
++pub(crate) fn subscription_source_ref(
++    account_identity: &str,
++    canonical_home: &Path,
++) -> Option<String> {
++    let canonical_home = canonical_home.to_str()?;
++    if account_identity.is_empty() || !Path::new(canonical_home).is_absolute() {
++        return None;
++    }
++    let mut digest = Sha256::new();
++    digest.update(SOURCE_REF_CONTEXT.as_bytes());
++    digest.update(b"\0codex-cli\0");
++    digest.update(account_identity.as_bytes());
++    digest.update(b"\0");
++    digest.update(canonical_home.as_bytes());
++    Some(format!(
++        "{SOURCE_REF_PREFIX}{}",
++        URL_SAFE_NO_PAD.encode(digest.finalize())
++    ))
++}
++
++#[cfg(test)]
++#[path = "directory_tests.rs"]
++mod tests;
+diff --git a/codex-rs/app-server/src/account_registry/global/directory_tests.rs b/codex-rs/app-server/src/account_registry/global/directory_tests.rs
+new file mode 100644
+index 0000000000..6e91ce66e3
+--- /dev/null
++++ b/codex-rs/app-server/src/account_registry/global/directory_tests.rs
+@@ -0,0 +1,75 @@
++use super::*;
++use pretty_assertions::assert_eq;
++
++#[cfg(unix)]
++use std::os::unix::fs::PermissionsExt;
++
++fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
++    let home = tempfile::tempdir().unwrap();
++    let config = home.path().join(".config");
++    std::fs::create_dir(&config).unwrap();
++    let c1 = home.path().join("account1");
++    let c2 = home.path().join("account2");
++    std::fs::create_dir(&c1).unwrap();
++    std::fs::create_dir(&c2).unwrap();
++    (home, config, c1, c2)
++}
++
++#[test]
++fn source_ref_matches_token_manager_v1_vector() {
++    assert_eq!(
++        subscription_source_ref(
++            "synthetic-codex-account",
++            Path::new("/safe/provider-home/codex/account1"),
++        ),
++        Some("subscription-source-v1:G-fhAxUyHw3v9ePvf2wsKBzaJdC2qS__7m3wjsHrE-A".to_string())
++    );
++}
++
++#[cfg(unix)]
++#[test]
++fn valid_private_two_field_registry_resolves_process_account() {
++    let (home, config, c1, c2) = fixture();
++    let registry = config.join("codex-accounts.tsv");
++    std::fs::write(
++        &registry,
++        format!("1\t{}\n2\t{}\n", c1.display(), c2.display()),
++    )
++    .unwrap();
++    std::fs::set_permissions(&registry, std::fs::Permissions::from_mode(0o600)).unwrap();
++
++    let directory = GlobalAccountDirectory::load_from(home.path(), &c2);
++    assert_eq!(directory.homes.len(), 2);
++    assert_eq!(directory.process_account_id, AccountId::parse("C2"));
++}
++
++#[cfg(unix)]
++#[test]
++fn unsafe_registry_mode_is_rejected() {
++    let (home, config, c1, _) = fixture();
++    let registry = config.join("codex-accounts.tsv");
++    std::fs::write(&registry, format!("1\t{}\n", c1.display())).unwrap();
++    std::fs::set_permissions(&registry, std::fs::Permissions::from_mode(0o644)).unwrap();
++
++    assert_eq!(
++        GlobalAccountDirectory::load_from(home.path(), &c1).homes,
++        BTreeMap::new()
++    );
++}
++
++#[cfg(unix)]
++#[test]
++fn registry_symlink_is_rejected() {
++    use std::os::unix::fs::symlink;
++
++    let (home, config, c1, _) = fixture();
++    let target = home.path().join("registry-target");
++    std::fs::write(&target, format!("1\t{}\n", c1.display())).unwrap();
++    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
++    symlink(target, config.join("codex-accounts.tsv")).unwrap();
++
++    assert_eq!(
++        GlobalAccountDirectory::load_from(home.path(), &c1).homes,
++        BTreeMap::new()
++    );
++}
+diff --git a/codex-rs/app-server/src/account_registry/global/identity.rs b/codex-rs/app-server/src/account_registry/global/identity.rs
+new file mode 100644
+index 0000000000..16098c6e72
+--- /dev/null
++++ b/codex-rs/app-server/src/account_registry/global/identity.rs
+@@ -0,0 +1,33 @@
++use std::fmt;
++
++const ACCOUNT_PREFIX: char = 'C';
++
++#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
++pub(crate) struct AccountId(u32);
++
++impl AccountId {
++    pub(crate) fn parse(value: &str) -> Option<Self> {
++        let number = value.strip_prefix(ACCOUNT_PREFIX)?.parse::<u32>().ok()?;
++        (number > 0 && value == format!("{ACCOUNT_PREFIX}{number}")).then_some(Self(number))
++    }
++
++    pub(crate) const fn number(self) -> u32 {
++        self.0
++    }
++}
++
++impl fmt::Debug for AccountId {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        fmt::Display::fmt(self, f)
++    }
++}
++
++impl fmt::Display for AccountId {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        write!(f, "{ACCOUNT_PREFIX}{}", self.0)
++    }
++}
++
++#[cfg(test)]
++#[path = "identity_tests.rs"]
++mod tests;
+diff --git a/codex-rs/app-server/src/account_registry/global/identity_tests.rs b/codex-rs/app-server/src/account_registry/global/identity_tests.rs
+new file mode 100644
+index 0000000000..a4be44fac9
+--- /dev/null
++++ b/codex-rs/app-server/src/account_registry/global/identity_tests.rs
+@@ -0,0 +1,11 @@
++use super::AccountId;
++use pretty_assertions::assert_eq;
++
++#[test]
++fn account_id_accepts_only_canonical_codex_labels() {
++    assert_eq!(AccountId::parse("C1").map(AccountId::number), Some(1));
++    assert_eq!(AccountId::parse("C42").map(AccountId::number), Some(42));
++    for rejected in ["C0", "C01", "CX1", "A1", "c1", "C", ""] {
++        assert_eq!(AccountId::parse(rejected), None, "accepted {rejected}");
++    }
++}
+diff --git a/codex-rs/app-server/src/account_registry/global/runtime.rs b/codex-rs/app-server/src/account_registry/global/runtime.rs
+new file mode 100644
+index 0000000000..f638267132
+--- /dev/null
++++ b/codex-rs/app-server/src/account_registry/global/runtime.rs
+@@ -0,0 +1,415 @@
++use std::cmp::Ordering;
++use std::collections::BTreeMap;
++use std::collections::HashMap;
++use std::collections::HashSet;
++use std::sync::RwLock;
++
++use serde::Serialize;
++
++use super::identity::AccountId;
++use super::selection::CatalogSelection;
++use super::selection::CatalogSelectionRequest;
++use super::token_manager::CatalogError;
++use super::token_manager::MAX_ACCOUNTS;
++use super::token_manager::MAX_METERS;
++use super::token_manager::RawMeter;
++use super::token_manager::RawRateLimit;
++use super::token_manager::RawSnapshot;
++use super::token_manager::TokenManagerEvent;
++
++const PROVIDER_TYPE: &str = "codex-chatgpt";
++pub(super) const FRESHNESS_SECONDS: i64 = 180;
++
++#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub(crate) enum CatalogProjectionHealth {
++    Healthy,
++    Degraded,
++    Unavailable,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub(crate) struct CatalogQuotaMeterProjection {
++    pub(crate) id: String,
++    pub(crate) label: Option<String>,
++    pub(crate) remaining_percent: u32,
++    pub(crate) resets_at: Option<i64>,
++    pub(crate) observed_at: i64,
++    pub(crate) stale_at: i64,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub(crate) struct CatalogAccountProjection {
++    pub(crate) account_slot_id: String,
++    pub(crate) account_number: u32,
++    pub(crate) fetched_at: i64,
++    pub(crate) health: CatalogProjectionHealth,
++    pub(crate) meters: Vec<CatalogQuotaMeterProjection>,
++}
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub(crate) enum ApplyOutcome {
++    Applied { generation: u64 },
++    Unchanged { generation: u64 },
++    ResyncRequired { generation: u64 },
++}
++
++#[derive(Clone, PartialEq)]
++pub(super) struct CatalogAccount {
++    pub(super) id: AccountId,
++    pub(super) source_ref: Option<String>,
++    fetched_at: i64,
++    pub(super) ok: bool,
++    pub(super) quota_status: QuotaStatus,
++    pub(super) meters: Vec<CatalogMeter>,
++}
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub(super) enum QuotaStatus {
++    Allowed,
++    Warning,
++    Rejected,
++    Unknown,
++}
++
++#[derive(Clone, PartialEq)]
++pub(super) struct CatalogMeter {
++    id: String,
++    label: Option<String>,
++    pub(super) utilization: f64,
++    pub(super) reset_at: Option<i64>,
++    observed_at: i64,
++    pub(super) utilization_observed_at: i64,
++    state: MeterState,
++}
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub(super) enum MeterState {
++    Normal,
++    Warning,
++    Exhausted,
++    Unknown,
++}
++
++#[derive(Default)]
++pub(super) struct CatalogState {
++    initialized: bool,
++    pub(super) generation: u64,
++    pub(super) accounts: BTreeMap<AccountId, CatalogAccount>,
++}
++
++#[derive(Default)]
++pub(crate) struct GlobalAccountCatalog {
++    state: RwLock<CatalogState>,
++}
++
++impl GlobalAccountCatalog {
++    pub(crate) fn generation(&self) -> u64 {
++        self.state.read().map_or(0, |state| state.generation)
++    }
++
++    pub(crate) fn apply_event(
++        &self,
++        event: TokenManagerEvent,
++    ) -> Result<ApplyOutcome, CatalogError> {
++        match event {
++            TokenManagerEvent::Initial(accounts) => self.replace(accounts),
++            TokenManagerEvent::Snapshot(account) => self.upsert(account),
++        }
++    }
++
++    pub(crate) fn replace(
++        &self,
++        snapshots: Vec<RawSnapshot>,
++    ) -> Result<ApplyOutcome, CatalogError> {
++        if snapshots.len() > MAX_ACCOUNTS {
++            return Err(CatalogError::InvalidPayload);
++        }
++        let mut accounts = BTreeMap::new();
++        let mut source_refs = HashSet::new();
++        for snapshot in snapshots {
++            let Some(account) = normalize(snapshot)? else {
++                continue;
++            };
++            if account
++                .source_ref
++                .as_ref()
++                .is_some_and(|source_ref| !source_refs.insert(source_ref.clone()))
++            {
++                return Err(CatalogError::InvalidPayload);
++            }
++            if accounts.insert(account.id, account).is_some() {
++                return Err(CatalogError::InvalidPayload);
++            }
++        }
++        let mut state = self
++            .state
++            .write()
++            .map_err(|_| CatalogError::InvalidPayload)?;
++        if state.initialized && state.accounts == accounts {
++            return Ok(ApplyOutcome::Unchanged {
++                generation: state.generation,
++            });
++        }
++        state.initialized = true;
++        state.generation = state.generation.saturating_add(1);
++        state.accounts = accounts;
++        Ok(ApplyOutcome::Applied {
++            generation: state.generation,
++        })
++    }
++
++    pub(crate) fn upsert(&self, snapshot: RawSnapshot) -> Result<ApplyOutcome, CatalogError> {
++        let Some(mut incoming) = normalize(snapshot)? else {
++            return Ok(ApplyOutcome::Unchanged {
++                generation: self.generation(),
++            });
++        };
++        let mut state = self
++            .state
++            .write()
++            .map_err(|_| CatalogError::InvalidPayload)?;
++        if !state.initialized {
++            return Ok(ApplyOutcome::ResyncRequired {
++                generation: state.generation,
++            });
++        }
++        if incoming.source_ref.as_ref().is_some_and(|source_ref| {
++            state.accounts.values().any(|account| {
++                account.id != incoming.id && account.source_ref.as_ref() == Some(source_ref)
++            })
++        }) {
++            return Ok(ApplyOutcome::ResyncRequired {
++                generation: state.generation,
++            });
++        }
++        let Some(current) = state.accounts.get(&incoming.id) else {
++            if state.accounts.len() >= MAX_ACCOUNTS {
++                return Ok(ApplyOutcome::ResyncRequired {
++                    generation: state.generation,
++                });
++            }
++            state.generation = state.generation.saturating_add(1);
++            let generation = state.generation;
++            state.accounts.insert(incoming.id, incoming);
++            return Ok(ApplyOutcome::Applied { generation });
++        };
++        if current.source_ref != incoming.source_ref {
++            return Ok(ApplyOutcome::ResyncRequired {
++                generation: state.generation,
++            });
++        }
++        match incoming.fetched_at.cmp(&current.fetched_at) {
++            Ordering::Less => {
++                return Ok(ApplyOutcome::Unchanged {
++                    generation: state.generation,
++                });
++            }
++            Ordering::Equal if &incoming == current => {
++                return Ok(ApplyOutcome::Unchanged {
++                    generation: state.generation,
++                });
++            }
++            Ordering::Equal => {
++                return Ok(ApplyOutcome::ResyncRequired {
++                    generation: state.generation,
++                });
++            }
++            Ordering::Greater => {}
++        }
++        if !merge_monotonic_meters(&mut incoming, current) {
++            return Ok(ApplyOutcome::ResyncRequired {
++                generation: state.generation,
++            });
++        }
++        if &incoming == current {
++            return Ok(ApplyOutcome::Unchanged {
++                generation: state.generation,
++            });
++        }
++        state.generation = state.generation.saturating_add(1);
++        let generation = state.generation;
++        state.accounts.insert(incoming.id, incoming);
++        Ok(ApplyOutcome::Applied { generation })
++    }
++
++    pub(crate) fn projection(&self, now: i64) -> Vec<CatalogAccountProjection> {
++        self.state.read().map_or_else(
++            |_| Vec::new(),
++            |state| {
++                state
++                    .accounts
++                    .values()
++                    .map(|account| account.projection(now))
++                    .collect()
++            },
++        )
++    }
++
++    pub(crate) fn select(&self, request: CatalogSelectionRequest<'_>) -> CatalogSelection {
++        let Ok(state) = self.state.read() else {
++            return CatalogSelection::Unavailable;
++        };
++        super::selection::select_catalog(&state, request)
++    }
++}
++
++impl CatalogAccount {
++    pub(super) fn fresh(&self, now: i64) -> bool {
++        self.fetched_at <= now && now - self.fetched_at <= FRESHNESS_SECONDS
++    }
++
++    fn projection(&self, now: i64) -> CatalogAccountProjection {
++        CatalogAccountProjection {
++            account_slot_id: self.id.to_string(),
++            account_number: self.id.number(),
++            fetched_at: self.fetched_at,
++            health: if self.source_ref.is_none() {
++                CatalogProjectionHealth::Unavailable
++            } else if self.ok && self.fresh(now) {
++                CatalogProjectionHealth::Healthy
++            } else {
++                CatalogProjectionHealth::Degraded
++            },
++            meters: self
++                .meters
++                .iter()
++                .map(|meter| CatalogQuotaMeterProjection {
++                    id: meter.id.clone(),
++                    label: meter.label.clone(),
++                    remaining_percent: ((1.0 - meter.utilization) * 100.0).round() as u32,
++                    resets_at: meter.reset_at,
++                    observed_at: meter.utilization_observed_at,
++                    stale_at: meter
++                        .utilization_observed_at
++                        .saturating_add(FRESHNESS_SECONDS),
++                })
++                .collect(),
++        }
++    }
++
++    pub(super) fn hard_exhausted(&self, now: i64) -> bool {
++        self.quota_status == QuotaStatus::Rejected
++            || self.meters.iter().any(|meter| {
++                let reset_is_current = meter.reset_at.is_none_or(|reset_at| reset_at > now);
++                (meter.state == MeterState::Exhausted
++                    && meter.observed_at <= now
++                    && now.saturating_sub(meter.observed_at) <= FRESHNESS_SECONDS
++                    && reset_is_current)
++                    || (meter.utilization >= 1.0
++                        && meter.utilization_observed_at <= now
++                        && now.saturating_sub(meter.utilization_observed_at) <= FRESHNESS_SECONDS
++                        && reset_is_current)
++            })
++    }
++}
++
++fn normalize(snapshot: RawSnapshot) -> Result<Option<CatalogAccount>, CatalogError> {
++    if snapshot.provider_type != PROVIDER_TYPE {
++        return Ok(None);
++    }
++    let Some(id) = AccountId::parse(&snapshot.label) else {
++        return Ok(None);
++    };
++    if snapshot.fetched_at <= 0 {
++        return Err(CatalogError::InvalidPayload);
++    }
++    let RawRateLimit { meters, status } = snapshot.rate_limit.unwrap_or(RawRateLimit {
++        meters: Vec::new(),
++        status: String::new(),
++    });
++    if meters.len() > MAX_METERS {
++        return Err(CatalogError::InvalidPayload);
++    }
++    let mut meter_ids = HashSet::new();
++    let meters = meters
++        .into_iter()
++        .map(|meter| normalize_meter(meter, &mut meter_ids))
++        .collect::<Result<Vec<_>, _>>()?;
++    Ok(Some(CatalogAccount {
++        id,
++        source_ref: snapshot.source_ref.filter(|value| !value.is_empty()),
++        fetched_at: snapshot.fetched_at,
++        ok: snapshot.ok,
++        quota_status: match status.as_str() {
++            "allowed" => QuotaStatus::Allowed,
++            "allowed_warning" => QuotaStatus::Warning,
++            "rejected" => QuotaStatus::Rejected,
++            "" | "unknown" => QuotaStatus::Unknown,
++            _ => return Err(CatalogError::InvalidPayload),
++        },
++        meters,
++    }))
++}
++
++fn normalize_meter(
++    meter: RawMeter,
++    meter_ids: &mut HashSet<String>,
++) -> Result<CatalogMeter, CatalogError> {
++    if meter.id.is_empty()
++        || !meter_ids.insert(meter.id.clone())
++        || !meter.utilization.is_finite()
++        || !(0.0..=1.0).contains(&meter.utilization)
++    {
++        return Err(CatalogError::InvalidPayload);
++    }
++    Ok(CatalogMeter {
++        id: meter.id,
++        label: (!meter.label.is_empty()).then_some(meter.label),
++        utilization: meter.utilization,
++        reset_at: (meter.reset_at > 0).then_some(meter.reset_at),
++        observed_at: meter.observed_at,
++        utilization_observed_at: meter.utilization_observed_at,
++        state: match meter.state.as_str() {
++            "normal" => MeterState::Normal,
++            "warning" => MeterState::Warning,
++            "exhausted" => MeterState::Exhausted,
++            "" | "unknown" => MeterState::Unknown,
++            _ => return Err(CatalogError::InvalidPayload),
++        },
++    })
++}
++
++fn merge_monotonic_meters(incoming: &mut CatalogAccount, current: &CatalogAccount) -> bool {
++    let current_meters = current
++        .meters
++        .iter()
++        .map(|meter| (meter.id.as_str(), meter))
++        .collect::<HashMap<_, _>>();
++    for meter in &mut incoming.meters {
++        let Some(previous) = current_meters.get(meter.id.as_str()) else {
++            continue;
++        };
++        match meter
++            .utilization_observed_at
++            .cmp(&previous.utilization_observed_at)
++        {
++            Ordering::Less => {
++                meter.utilization = previous.utilization;
++                meter.utilization_observed_at = previous.utilization_observed_at;
++            }
++            Ordering::Equal if meter.utilization != previous.utilization => return false,
++            Ordering::Equal | Ordering::Greater => {}
++        }
++        match meter.observed_at.cmp(&previous.observed_at) {
++            Ordering::Less => {
++                meter.reset_at = previous.reset_at;
++                meter.observed_at = previous.observed_at;
++                meter.state = previous.state;
++            }
++            Ordering::Equal
++                if meter.reset_at != previous.reset_at || meter.state != previous.state =>
++            {
++                return false;
++            }
++            Ordering::Equal | Ordering::Greater => {}
++        }
++    }
++    true
++}
++
++#[cfg(test)]
++#[path = "runtime_tests.rs"]
++mod tests;
+diff --git a/codex-rs/app-server/src/account_registry/global/runtime_tests.rs b/codex-rs/app-server/src/account_registry/global/runtime_tests.rs
+new file mode 100644
+index 0000000000..26020efb06
+--- /dev/null
++++ b/codex-rs/app-server/src/account_registry/global/runtime_tests.rs
+@@ -0,0 +1,141 @@
++use super::*;
++use crate::account_registry::global::token_manager::RawMeter;
++use crate::account_registry::global::token_manager::RawRateLimit;
++use crate::account_registry::global::token_manager::RawSnapshot;
++use pretty_assertions::assert_eq;
++
++const NOW: i64 = 10_000;
++
++fn meter(id: &str, utilization: f64, reset_at: i64, observed_at: i64) -> RawMeter {
++    RawMeter {
++        id: id.to_string(),
++        label: id.to_uppercase(),
++        utilization,
++        reset_at,
++        observed_at,
++        utilization_observed_at: observed_at,
++        state: "normal".to_string(),
++    }
++}
++
++fn snapshot(
++    label: &str,
++    fetched_at: i64,
++    source_ref: &str,
++    utilization: f64,
++    reset_at: i64,
++) -> RawSnapshot {
++    RawSnapshot {
++        label: label.to_string(),
++        provider_type: "codex-chatgpt".to_string(),
++        source_ref: Some(source_ref.to_string()),
++        fetched_at,
++        ok: true,
++        rate_limit: Some(RawRateLimit {
++            meters: vec![meter("7d", utilization, reset_at, fetched_at)],
++            status: "allowed".to_string(),
++        }),
++    }
++}
++
++#[test]
++fn full_replace_filters_and_naturally_orders_without_generation_churn() {
++    let catalog = GlobalAccountCatalog::default();
++    let mut ignored = snapshot("A1", NOW, "ignored", 0.1, NOW + 100);
++    ignored.provider_type = "claude-oauth".to_string();
++    let accounts = vec![
++        snapshot("C10", NOW, "ten", 0.2, NOW + 100),
++        ignored,
++        snapshot("C2", NOW, "two", 0.3, NOW + 100),
++    ];
++    assert_eq!(
++        catalog.replace(accounts.clone()).unwrap(),
++        ApplyOutcome::Applied { generation: 1 }
++    );
++    assert_eq!(
++        catalog.replace(accounts).unwrap(),
++        ApplyOutcome::Unchanged { generation: 1 }
++    );
++    assert_eq!(
++        catalog
++            .projection(NOW)
++            .into_iter()
++            .map(|account| account.account_slot_id)
++            .collect::<Vec<_>>(),
++        vec!["C2", "C10"]
++    );
++}
++
++#[test]
++fn upsert_is_monotonic_and_conflicts_require_full_resync() {
++    let catalog = GlobalAccountCatalog::default();
++    catalog
++        .replace(vec![snapshot("C1", NOW - 2, "identity-a", 0.2, NOW + 100)])
++        .unwrap();
++
++    assert_eq!(
++        catalog
++            .upsert(snapshot("C1", NOW - 3, "identity-a", 0.9, NOW + 100))
++            .unwrap(),
++        ApplyOutcome::Unchanged { generation: 1 }
++    );
++    assert_eq!(
++        catalog
++            .upsert(snapshot("C1", NOW - 2, "identity-a", 0.3, NOW + 100))
++            .unwrap(),
++        ApplyOutcome::ResyncRequired { generation: 1 }
++    );
++    assert_eq!(
++        catalog
++            .upsert(snapshot("C1", NOW, "identity-b", 0.3, NOW + 100))
++            .unwrap(),
++        ApplyOutcome::ResyncRequired { generation: 1 }
++    );
++
++    let mut newer = snapshot("C1", NOW, "identity-a", 0.9, NOW + 200);
++    newer.rate_limit.as_mut().unwrap().meters[0].utilization_observed_at = NOW - 3;
++    assert_eq!(
++        catalog.upsert(newer).unwrap(),
++        ApplyOutcome::Applied { generation: 2 }
++    );
++    assert_eq!(catalog.projection(NOW)[0].meters[0].remaining_percent, 80);
++}
++
++#[test]
++fn catalog_rejects_invalid_bounds() {
++    let catalog = GlobalAccountCatalog::default();
++    let mut too_many_meters = snapshot("C1", NOW, "one", 0.2, NOW + 100);
++    too_many_meters.rate_limit.as_mut().unwrap().meters = (0..=MAX_METERS)
++        .map(|index| meter(&format!("m{index}"), 0.1, NOW + 100, NOW))
++        .collect();
++    assert!(matches!(
++        catalog.replace(vec![too_many_meters]),
++        Err(CatalogError::InvalidPayload)
++    ));
++
++    let too_many_accounts = (1..=MAX_ACCOUNTS + 1)
++        .map(|number| snapshot(&format!("C{number}"), NOW, "identity", 0.1, NOW + 100))
++        .collect();
++    assert!(matches!(
++        catalog.replace(too_many_accounts),
++        Err(CatalogError::InvalidPayload)
++    ));
++}
++
++#[test]
++fn projection_is_bounded_fresh_and_redacted() {
++    let catalog = GlobalAccountCatalog::default();
++    catalog
++        .replace(vec![snapshot("C1", NOW, "owner-private", 0.25, NOW + 100)])
++        .unwrap();
++    let projection = catalog.projection(NOW);
++    assert_eq!(projection[0].health, CatalogProjectionHealth::Healthy);
++    assert_eq!(
++        catalog.projection(NOW + FRESHNESS_SECONDS + 1)[0].health,
++        CatalogProjectionHealth::Degraded
++    );
++    let json = serde_json::to_string(&projection).unwrap();
++    assert!(!json.contains("owner-private"));
++    assert!(!json.contains("sourceRef"));
++    assert_eq!(projection[0].meters[0].remaining_percent, 75);
++}
+diff --git a/codex-rs/app-server/src/account_registry/global/selection.rs b/codex-rs/app-server/src/account_registry/global/selection.rs
+new file mode 100644
+index 0000000000..b3f9718fe6
+--- /dev/null
++++ b/codex-rs/app-server/src/account_registry/global/selection.rs
+@@ -0,0 +1,225 @@
++use std::collections::HashMap;
++use std::collections::HashSet;
++use std::fmt;
++
++use super::identity::AccountId;
++use super::runtime::CatalogAccount;
++use super::runtime::CatalogState;
++use super::runtime::FRESHNESS_SECONDS;
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub(crate) enum RotationMode {
++    Fixed,
++    QuotaAware,
++    RoundRobin,
++    ExhaustThenNext,
++}
++
++pub(crate) struct CatalogSelectionRequest<'a> {
++    pub(crate) mode: RotationMode,
++    pub(crate) fixed_account_id: Option<AccountId>,
++    pub(crate) automatic_account_ids: &'a [AccountId],
++    pub(crate) current_account_id: Option<AccountId>,
++    pub(crate) last_committed_account_id: Option<AccountId>,
++    pub(crate) credential_readiness: &'a [CredentialReadiness],
++    pub(crate) now: i64,
++}
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub(crate) struct CredentialReadiness {
++    pub(crate) account_id: AccountId,
++    pub(crate) ready: bool,
++}
++
++#[derive(Clone, Eq, PartialEq)]
++pub(crate) struct CatalogSelectionToken {
++    pub(crate) generation: u64,
++    pub(crate) account_id: AccountId,
++    source_ref: String,
++}
++
++impl fmt::Debug for CatalogSelectionToken {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.debug_struct("CatalogSelectionToken")
++            .field("generation", &self.generation)
++            .field("account_id", &self.account_id)
++            .field("source_ref", &"<redacted>")
++            .finish()
++    }
++}
++
++impl CatalogSelectionToken {
++    pub(crate) fn source_ref(&self) -> &str {
++        &self.source_ref
++    }
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub(crate) enum CatalogSelection {
++    Selected(CatalogSelectionToken),
++    Unavailable,
++}
++
++pub(super) fn select_catalog(
++    state: &CatalogState,
++    request: CatalogSelectionRequest<'_>,
++) -> CatalogSelection {
++    let readiness = request
++        .credential_readiness
++        .iter()
++        .map(|entry| (entry.account_id, *entry))
++        .collect::<HashMap<_, _>>();
++    let selected = match request.mode {
++        RotationMode::Fixed => request.fixed_account_id.filter(|account_id| {
++            state
++                .accounts
++                .get(account_id)
++                .is_some_and(|account| fixed_eligible(account, readiness.get(account_id)))
++        }),
++        RotationMode::QuotaAware => select_quota_aware(
++            state,
++            request.automatic_account_ids,
++            &readiness,
++            request.now,
++        ),
++        RotationMode::RoundRobin => select_round_robin(
++            state,
++            request.automatic_account_ids,
++            &readiness,
++            request
++                .last_committed_account_id
++                .or(request.current_account_id),
++            request.now,
++        ),
++        RotationMode::ExhaustThenNext => select_exhaust_then_next(
++            state,
++            request.automatic_account_ids,
++            &readiness,
++            request
++                .last_committed_account_id
++                .or(request.current_account_id),
++            request.now,
++        ),
++    };
++    let Some(account_id) = selected else {
++        return CatalogSelection::Unavailable;
++    };
++    let account = &state.accounts[&account_id];
++    CatalogSelection::Selected(CatalogSelectionToken {
++        generation: state.generation,
++        account_id,
++        source_ref: account.source_ref.clone().unwrap_or_default(),
++    })
++}
++
++fn fixed_eligible(account: &CatalogAccount, readiness: Option<&CredentialReadiness>) -> bool {
++    account.source_ref.is_some() && readiness.is_some_and(|entry| entry.ready)
++}
++
++fn automatic_ready(
++    account: &CatalogAccount,
++    readiness: Option<&CredentialReadiness>,
++    now: i64,
++) -> bool {
++    fixed_eligible(account, readiness) && account.ok && account.fresh(now)
++}
++
++fn automatic_ready_candidates<'a>(
++    state: &'a CatalogState,
++    membership: &[AccountId],
++    readiness: &HashMap<AccountId, CredentialReadiness>,
++    now: i64,
++) -> Vec<&'a CatalogAccount> {
++    let membership = membership.iter().copied().collect::<HashSet<_>>();
++    state
++        .accounts
++        .values()
++        .filter(|account| {
++            membership.contains(&account.id)
++                && automatic_ready(account, readiness.get(&account.id), now)
++        })
++        .collect()
++}
++
++fn select_quota_aware(
++    state: &CatalogState,
++    membership: &[AccountId],
++    readiness: &HashMap<AccountId, CredentialReadiness>,
++    now: i64,
++) -> Option<AccountId> {
++    automatic_ready_candidates(state, membership, readiness, now)
++        .into_iter()
++        .filter(|account| !account.hard_exhausted(now))
++        .filter_map(|account| bottleneck_score(account, now).map(|score| (account.id, score)))
++        .max_by(|(left_id, left), (right_id, right)| {
++            left.total_cmp(right).then_with(|| right_id.cmp(left_id))
++        })
++        .map(|(account_id, _)| account_id)
++}
++
++fn bottleneck_score(account: &CatalogAccount, now: i64) -> Option<f64> {
++    if account.meters.is_empty() {
++        return None;
++    }
++    account
++        .meters
++        .iter()
++        .map(|meter| {
++            let reset_at = meter.reset_at?;
++            (reset_at > now
++                && meter.utilization_observed_at <= now
++                && now - meter.utilization_observed_at <= FRESHNESS_SECONDS)
++                .then_some((1.0 - meter.utilization) / (reset_at - now) as f64)
++        })
++        .collect::<Option<Vec<_>>>()?
++        .into_iter()
++        .min_by(f64::total_cmp)
++}
++
++fn select_round_robin(
++    state: &CatalogState,
++    membership: &[AccountId],
++    readiness: &HashMap<AccountId, CredentialReadiness>,
++    anchor: Option<AccountId>,
++    now: i64,
++) -> Option<AccountId> {
++    let candidates = automatic_ready_candidates(state, membership, readiness, now);
++    next_after_anchor(&candidates, anchor)
++}
++
++fn select_exhaust_then_next(
++    state: &CatalogState,
++    membership: &[AccountId],
++    readiness: &HashMap<AccountId, CredentialReadiness>,
++    anchor: Option<AccountId>,
++    now: i64,
++) -> Option<AccountId> {
++    let candidates = automatic_ready_candidates(state, membership, readiness, now);
++    if anchor.is_some_and(|anchor| {
++        candidates
++            .iter()
++            .any(|candidate| candidate.id == anchor && !candidate.hard_exhausted(now))
++    }) {
++        return anchor;
++    }
++    let eligible = candidates
++        .into_iter()
++        .filter(|candidate| !candidate.hard_exhausted(now))
++        .collect::<Vec<_>>();
++    next_after_anchor(&eligible, anchor)
++}
++
++fn next_after_anchor(
++    candidates: &[&CatalogAccount],
++    anchor: Option<AccountId>,
++) -> Option<AccountId> {
++    candidates
++        .iter()
++        .find(|candidate| anchor.is_none_or(|anchor| candidate.id > anchor))
++        .or_else(|| candidates.first())
++        .map(|candidate| candidate.id)
++}
++
++#[cfg(test)]
++#[path = "selection_tests.rs"]
++mod tests;
+diff --git a/codex-rs/app-server/src/account_registry/global/selection_tests.rs b/codex-rs/app-server/src/account_registry/global/selection_tests.rs
+new file mode 100644
+index 0000000000..24f413752c
+--- /dev/null
++++ b/codex-rs/app-server/src/account_registry/global/selection_tests.rs
+@@ -0,0 +1,199 @@
++use super::*;
++use crate::account_registry::global::runtime::GlobalAccountCatalog;
++use crate::account_registry::global::token_manager::RawMeter;
++use crate::account_registry::global::token_manager::RawRateLimit;
++use crate::account_registry::global::token_manager::RawSnapshot;
++use pretty_assertions::assert_eq;
++
++const NOW: i64 = 10_000;
++
++fn account_id(number: u32) -> AccountId {
++    AccountId::parse(&format!("C{number}")).unwrap()
++}
++
++fn meter(id: &str, utilization: f64, reset_at: i64, observed_at: i64) -> RawMeter {
++    RawMeter {
++        id: id.to_string(),
++        label: id.to_uppercase(),
++        utilization,
++        reset_at,
++        observed_at,
++        utilization_observed_at: observed_at,
++        state: "normal".to_string(),
++    }
++}
++
++fn snapshot(
++    label: &str,
++    fetched_at: i64,
++    source_ref: &str,
++    utilization: f64,
++    reset_at: i64,
++) -> RawSnapshot {
++    RawSnapshot {
++        label: label.to_string(),
++        provider_type: "codex-chatgpt".to_string(),
++        source_ref: Some(source_ref.to_string()),
++        fetched_at,
++        ok: true,
++        rate_limit: Some(RawRateLimit {
++            meters: vec![meter("7d", utilization, reset_at, fetched_at)],
++            status: "allowed".to_string(),
++        }),
++    }
++}
++
++fn readiness(ids: &[u32]) -> Vec<CredentialReadiness> {
++    ids.iter()
++        .map(|number| CredentialReadiness {
++            account_id: account_id(*number),
++            ready: true,
++        })
++        .collect()
++}
++
++fn selected_id(selection: CatalogSelection) -> Option<AccountId> {
++    match selection {
++        CatalogSelection::Selected(token) => Some(token.account_id),
++        CatalogSelection::Unavailable => None,
++    }
++}
++
++#[test]
++fn fixed_uses_matching_identity_and_auth_without_quota_freshness_gate() {
++    let catalog = GlobalAccountCatalog::default();
++    let mut exhausted = snapshot(
++        "C1",
++        NOW - FRESHNESS_SECONDS - 1,
++        "identity",
++        1.0,
++        NOW + 100,
++    );
++    exhausted.ok = false;
++    exhausted.rate_limit.as_mut().unwrap().status = "rejected".to_string();
++    catalog.replace(vec![exhausted]).unwrap();
++    let ready = readiness(&[1]);
++    let CatalogSelection::Selected(token) = catalog.select(CatalogSelectionRequest {
++        mode: RotationMode::Fixed,
++        fixed_account_id: AccountId::parse("C1"),
++        automatic_account_ids: &[],
++        current_account_id: None,
++        last_committed_account_id: None,
++        credential_readiness: &ready,
++        now: NOW,
++    }) else {
++        panic!("fixed selection failed");
++    };
++    assert_eq!(token.account_id, account_id(1));
++    assert_eq!(token.generation, 1);
++    assert_eq!(token.source_ref(), "identity");
++    assert!(!format!("{token:?}").contains("identity"));
++}
++
++#[test]
++fn quota_aware_uses_bottleneck_ratio_and_natural_tie_break() {
++    let catalog = GlobalAccountCatalog::default();
++    let mut c1 = snapshot("C1", NOW, "one", 0.2, NOW + 100);
++    c1.rate_limit
++        .as_mut()
++        .unwrap()
++        .meters
++        .push(meter("5h", 0.8, NOW + 100, NOW));
++    let c2 = snapshot("C2", NOW, "two", 0.2, NOW + 200);
++    let c3 = snapshot("C3", NOW, "three", 0.2, NOW + 200);
++    catalog.replace(vec![c3, c1, c2]).unwrap();
++    let ready = readiness(&[1, 2, 3]);
++    let membership = [account_id(1), account_id(2), account_id(3)];
++    assert_eq!(
++        selected_id(catalog.select(CatalogSelectionRequest {
++            mode: RotationMode::QuotaAware,
++            fixed_account_id: None,
++            automatic_account_ids: &membership,
++            current_account_id: None,
++            last_committed_account_id: None,
++            credential_readiness: &ready,
++            now: NOW,
++        })),
++        Some(account_id(2))
++    );
++}
++
++#[test]
++fn quota_aware_rejects_stale_utilization() {
++    let catalog = GlobalAccountCatalog::default();
++    let mut stale = snapshot("C1", NOW, "one", 0.2, NOW + 100);
++    stale.rate_limit.as_mut().unwrap().meters[0].utilization_observed_at =
++        NOW - FRESHNESS_SECONDS - 1;
++    catalog.replace(vec![stale]).unwrap();
++    let ready = readiness(&[1]);
++    assert_eq!(
++        catalog.select(CatalogSelectionRequest {
++            mode: RotationMode::QuotaAware,
++            fixed_account_id: None,
++            automatic_account_ids: &[account_id(1)],
++            current_account_id: None,
++            last_committed_account_id: None,
++            credential_readiness: &ready,
++            now: NOW,
++        }),
++        CatalogSelection::Unavailable
++    );
++}
++
++#[test]
++fn sequential_modes_respect_membership_and_skip_exhausted_accounts() {
++    let catalog = GlobalAccountCatalog::default();
++    let c1 = snapshot("C1", NOW, "one", 0.1, NOW + 100);
++    let mut c2 = snapshot("C2", NOW, "two", 1.0, NOW + 100);
++    c2.rate_limit.as_mut().unwrap().meters[0].state = "exhausted".to_string();
++    let c3 = snapshot("C3", NOW, "three", 0.1, NOW + 100);
++    catalog.replace(vec![c1, c2, c3]).unwrap();
++    let ready = readiness(&[1, 2, 3]);
++    let membership = [account_id(1), account_id(2), account_id(3)];
++
++    let select = |mode, anchor| {
++        selected_id(catalog.select(CatalogSelectionRequest {
++            mode,
++            fixed_account_id: None,
++            automatic_account_ids: &membership,
++            current_account_id: anchor,
++            last_committed_account_id: None,
++            credential_readiness: &ready,
++            now: NOW,
++        }))
++    };
++    assert_eq!(
++        select(RotationMode::RoundRobin, Some(account_id(1))),
++        Some(account_id(2))
++    );
++    assert_eq!(
++        select(RotationMode::ExhaustThenNext, Some(account_id(1))),
++        Some(account_id(1))
++    );
++    assert_eq!(
++        select(RotationMode::ExhaustThenNext, Some(account_id(2))),
++        Some(account_id(3))
++    );
++}
++
++#[test]
++fn exhaust_then_next_does_not_reuse_expired_exhaustion_evidence() {
++    let catalog = GlobalAccountCatalog::default();
++    let mut reset = snapshot("C1", NOW, "one", 1.0, NOW - 1);
++    reset.rate_limit.as_mut().unwrap().meters[0].state = "exhausted".to_string();
++    catalog.replace(vec![reset]).unwrap();
++    let ready = readiness(&[1]);
++
++    assert_eq!(
++        selected_id(catalog.select(CatalogSelectionRequest {
++            mode: RotationMode::ExhaustThenNext,
++            fixed_account_id: None,
++            automatic_account_ids: &[account_id(1)],
++            current_account_id: Some(account_id(1)),
++            last_committed_account_id: None,
++            credential_readiness: &ready,
++            now: NOW,
++        })),
++        Some(account_id(1))
++    );
++}
+diff --git a/codex-rs/app-server/src/account_registry/global/token_manager.rs b/codex-rs/app-server/src/account_registry/global/token_manager.rs
+new file mode 100644
+index 0000000000..005c18c720
+--- /dev/null
++++ b/codex-rs/app-server/src/account_registry/global/token_manager.rs
+@@ -0,0 +1,282 @@
++use std::time::Duration;
++
++use codex_http_client::ClientRouteClass;
++use codex_http_client::HttpClient;
++use codex_http_client::HttpClientFactory;
++use serde::Deserialize;
++use serde_json::Value;
++use thiserror::Error;
++use tokio::sync::mpsc;
++use url::Url;
++
++use super::identity::AccountId;
++
++pub(super) const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
++pub(super) const MAX_ACCOUNTS: usize = 100;
++pub(super) const MAX_METERS: usize = 32;
++pub(super) const MAX_STRING_BYTES: usize = 256;
++pub(crate) const FULL_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
++const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
++const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(75);
++const SSE_CHANNEL_CAPACITY: usize = 32;
++
++#[derive(Debug, Error)]
++pub(crate) enum CatalogError {
++    #[error("TokenManager endpoint must be local HTTP")]
++    InvalidEndpoint,
++    #[error("TokenManager request failed")]
++    Request,
++    #[error("TokenManager returned a non-success status")]
++    Status,
++    #[error("TokenManager response exceeded the bounded size")]
++    ResponseTooLarge,
++    #[error("TokenManager response is invalid")]
++    InvalidPayload,
++    #[error("TokenManager event stream was idle")]
++    EventStreamIdle,
++    #[error("TokenManager event stream ended")]
++    EventStreamEnded,
++}
++
++#[derive(Clone, Deserialize, PartialEq)]
++#[serde(rename_all = "camelCase")]
++pub(crate) struct RawSnapshotEnvelope {
++    pub(super) accounts: Vec<RawSnapshot>,
++}
++
++#[derive(Clone, Deserialize, PartialEq)]
++#[serde(rename_all = "camelCase")]
++pub(crate) struct RawSnapshot {
++    pub(crate) label: String,
++    #[serde(rename = "type")]
++    pub(crate) provider_type: String,
++    pub(crate) source_ref: Option<String>,
++    pub(crate) fetched_at: i64,
++    pub(crate) ok: bool,
++    pub(crate) rate_limit: Option<RawRateLimit>,
++}
++
++#[derive(Clone, Deserialize, PartialEq)]
++#[serde(rename_all = "camelCase")]
++pub(crate) struct RawRateLimit {
++    #[serde(default)]
++    pub(super) meters: Vec<RawMeter>,
++    #[serde(default)]
++    pub(super) status: String,
++}
++
++#[derive(Clone, Deserialize, PartialEq)]
++#[serde(rename_all = "camelCase")]
++pub(crate) struct RawMeter {
++    pub(super) id: String,
++    #[serde(default)]
++    pub(super) label: String,
++    pub(super) utilization: f64,
++    #[serde(default)]
++    pub(super) reset_at: i64,
++    #[serde(default)]
++    pub(super) observed_at: i64,
++    #[serde(default)]
++    pub(super) utilization_observed_at: i64,
++    #[serde(default)]
++    pub(super) state: String,
++}
++
++#[derive(Clone, PartialEq)]
++pub(crate) enum TokenManagerEvent {
++    Initial(Vec<RawSnapshot>),
++    Snapshot(RawSnapshot),
++}
++
++impl TokenManagerEvent {
++    pub(crate) fn snapshot_account_id(&self) -> Option<AccountId> {
++        match self {
++            Self::Initial(_) => None,
++            Self::Snapshot(snapshot) => AccountId::parse(&snapshot.label),
++        }
++    }
++}
++
++#[derive(Clone, Debug)]
++pub(crate) struct TokenManagerClient {
++    client: HttpClient,
++    snapshots_url: Url,
++    events_url: Url,
++}
++
++impl TokenManagerClient {
++    pub(crate) fn new(
++        http_client_factory: HttpClientFactory,
++        base_url: Url,
++    ) -> Result<Self, CatalogError> {
++        if base_url.scheme() != "http"
++            || !base_url.username().is_empty()
++            || base_url.password().is_some()
++            || base_url.query().is_some()
++            || base_url.fragment().is_some()
++            || !base_url.host_str().is_some_and(|host| {
++                host == "localhost"
++                    || host
++                        .parse::<std::net::IpAddr>()
++                        .is_ok_and(|address| address.is_loopback())
++            })
++        {
++            return Err(CatalogError::InvalidEndpoint);
++        }
++        let snapshots_url = base_url
++            .join("snapshots")
++            .map_err(|_| CatalogError::InvalidEndpoint)?;
++        let events_url = base_url
++            .join("events")
++            .map_err(|_| CatalogError::InvalidEndpoint)?;
++        let client = http_client_factory
++            .build_reqwest_client(
++                Default::default(),
++                base_url.as_str(),
++                ClientRouteClass::Other,
++            )
++            .map(HttpClient::new)
++            .map_err(|_| CatalogError::Request)?;
++        Ok(Self {
++            client,
++            snapshots_url,
++            events_url,
++        })
++    }
++
++    pub(crate) async fn fetch_full(&self) -> Result<Vec<RawSnapshot>, CatalogError> {
++        let mut response = tokio::time::timeout(
++            REQUEST_TIMEOUT,
++            self.client.get(self.snapshots_url.clone()).send(),
++        )
++        .await
++        .map_err(|_| CatalogError::Request)?
++        .map_err(|_| CatalogError::Request)?;
++        if !response.status().is_success() {
++            return Err(CatalogError::Status);
++        }
++        let bytes = tokio::time::timeout(REQUEST_TIMEOUT, async {
++            let mut output = Vec::new();
++            while let Some(chunk) = response.chunk().await.map_err(|_| CatalogError::Request)? {
++                if output.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
++                    return Err(CatalogError::ResponseTooLarge);
++                }
++                output.extend_from_slice(&chunk);
++            }
++            Ok(output)
++        })
++        .await
++        .map_err(|_| CatalogError::Request)??;
++        decode_json::<RawSnapshotEnvelope>(&bytes).map(|payload| payload.accounts)
++    }
++
++    pub(crate) async fn subscribe(
++        &self,
++    ) -> Result<mpsc::Receiver<Result<TokenManagerEvent, CatalogError>>, CatalogError> {
++        let mut response = tokio::time::timeout(
++            REQUEST_TIMEOUT,
++            self.client.get(self.events_url.clone()).send(),
++        )
++        .await
++        .map_err(|_| CatalogError::Request)?
++        .map_err(|_| CatalogError::Request)?;
++        if !response.status().is_success() {
++            return Err(CatalogError::Status);
++        }
++        let (tx, rx) = mpsc::channel(SSE_CHANNEL_CAPACITY);
++        tokio::spawn(async move {
++            let mut pending = Vec::new();
++            loop {
++                let chunk = match tokio::time::timeout(SSE_IDLE_TIMEOUT, response.chunk()).await {
++                    Ok(Ok(Some(chunk))) => chunk,
++                    Ok(Ok(None)) => {
++                        let _ = tx.send(Err(CatalogError::EventStreamEnded)).await;
++                        return;
++                    }
++                    Ok(Err(_)) => {
++                        let _ = tx.send(Err(CatalogError::Request)).await;
++                        return;
++                    }
++                    Err(_) => {
++                        let _ = tx.send(Err(CatalogError::EventStreamIdle)).await;
++                        return;
++                    }
++                };
++                if pending.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
++                    let _ = tx.send(Err(CatalogError::ResponseTooLarge)).await;
++                    return;
++                }
++                pending.extend_from_slice(&chunk);
++                while let Some(end) = pending.windows(2).position(|window| window == b"\n\n") {
++                    let frame = pending.drain(..end + 2).collect::<Vec<_>>();
++                    match decode_sse_frame(&frame) {
++                        Ok(Some(event)) => {
++                            if tx.send(Ok(event)).await.is_err() {
++                                return;
++                            }
++                        }
++                        Ok(None) => {}
++                        Err(error) => {
++                            let _ = tx.send(Err(error)).await;
++                            return;
++                        }
++                    }
++                }
++            }
++        });
++        Ok(rx)
++    }
++}
++
++pub(super) fn decode_sse_frame(frame: &[u8]) -> Result<Option<TokenManagerEvent>, CatalogError> {
++    let text = std::str::from_utf8(frame).map_err(|_| CatalogError::InvalidPayload)?;
++    let mut event_type = None;
++    let mut data = String::new();
++    for line in text.lines() {
++        if let Some(value) = line.strip_prefix("event:") {
++            event_type = Some(value.trim());
++        } else if let Some(value) = line.strip_prefix("data:") {
++            if !data.is_empty() {
++                data.push('\n');
++            }
++            data.push_str(value.trim_start());
++        }
++    }
++    match (event_type, data.is_empty()) {
++        (_, true) => Ok(None),
++        (Some("initial"), false) => decode_json(data.as_bytes())
++            .map(TokenManagerEvent::Initial)
++            .map(Some),
++        (Some("snapshot"), false) => decode_json(data.as_bytes())
++            .map(TokenManagerEvent::Snapshot)
++            .map(Some),
++        (Some(_) | None, false) => Ok(None),
++    }
++}
++
++fn decode_json<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, CatalogError> {
++    if bytes.len() > MAX_RESPONSE_BYTES {
++        return Err(CatalogError::ResponseTooLarge);
++    }
++    let value: Value = serde_json::from_slice(bytes).map_err(|_| CatalogError::InvalidPayload)?;
++    validate_string_bounds(&value)?;
++    serde_json::from_value(value).map_err(|_| CatalogError::InvalidPayload)
++}
++
++fn validate_string_bounds(value: &Value) -> Result<(), CatalogError> {
++    match value {
++        Value::String(value) if value.len() > MAX_STRING_BYTES => Err(CatalogError::InvalidPayload),
++        Value::Array(values) => values.iter().try_for_each(validate_string_bounds),
++        Value::Object(values) => values.iter().try_for_each(|(key, value)| {
++            if key.len() > MAX_STRING_BYTES {
++                return Err(CatalogError::InvalidPayload);
++            }
++            validate_string_bounds(value)
++        }),
++        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => Ok(()),
++    }
++}
++
++#[cfg(test)]
++#[path = "token_manager_tests.rs"]
++mod tests;
+diff --git a/codex-rs/app-server/src/account_registry/global/token_manager_tests.rs b/codex-rs/app-server/src/account_registry/global/token_manager_tests.rs
+new file mode 100644
+index 0000000000..abbcb4c4a8
+--- /dev/null
++++ b/codex-rs/app-server/src/account_registry/global/token_manager_tests.rs
+@@ -0,0 +1,68 @@
++use super::CatalogError;
++use super::MAX_STRING_BYTES;
++use super::TokenManagerEvent;
++use super::decode_sse_frame;
++use crate::account_registry::global::AccountId;
++
++#[test]
++fn decodes_frames_and_identifies_only_canonical_snapshot_notification_targets() {
++    let initial = br#"event: initial
++data: [{"label":"C2","type":"codex-chatgpt","sourceRef":"opaque","fetchedAt":100,"ok":true,"rateLimit":{"status":"allowed","meters":[{"id":"weekly-7d","label":"7D","utilization":0.25,"resetAt":200,"observedAt":100,"utilizationObservedAt":100,"state":"normal"}]}},{"label":"A1","type":"claude-oauth","fetchedAt":100,"ok":true}]
++
++"#;
++    let event = decode_sse_frame(initial).expect("decode initial");
++    assert_eq!(
++        event
++            .as_ref()
++            .and_then(TokenManagerEvent::snapshot_account_id),
++        None
++    );
++    assert!(matches!(event, Some(TokenManagerEvent::Initial(accounts)) if accounts.len() == 2));
++
++    let snapshot = br#"event: snapshot
++data: {"label":"C2","type":"codex-chatgpt","sourceRef":"opaque","fetchedAt":101,"ok":true}
++
++"#;
++    let event = decode_sse_frame(snapshot).expect("decode snapshot");
++    assert_eq!(
++        event
++            .as_ref()
++            .and_then(TokenManagerEvent::snapshot_account_id),
++        AccountId::parse("C2")
++    );
++    assert!(matches!(event, Some(TokenManagerEvent::Snapshot(account)) if account.label == "C2"));
++
++    let non_codex = br#"event: snapshot
++data: {"label":"A1","type":"claude-oauth","fetchedAt":101,"ok":true}
++
++"#;
++    let event = decode_sse_frame(non_codex).expect("decode non-Codex snapshot");
++    assert_eq!(
++        event
++            .as_ref()
++            .and_then(TokenManagerEvent::snapshot_account_id),
++        None
++    );
++}
++
++#[test]
++fn ignores_keepalives_and_unknown_events() {
++    assert!(decode_sse_frame(b": ping\n\n").unwrap().is_none());
++    assert!(
++        decode_sse_frame(b"event: removed\ndata: {}\n\n")
++            .unwrap()
++            .is_none()
++    );
++}
++
++#[test]
++fn rejects_oversized_strings_before_typed_decode() {
++    let oversized = "x".repeat(MAX_STRING_BYTES + 1);
++    let frame = format!(
++        "event: snapshot\ndata: {{\"label\":\"C1\",\"type\":\"codex-chatgpt\",\"sourceRef\":\"{oversized}\",\"fetchedAt\":100,\"ok\":true}}\n\n"
++    );
++    assert!(matches!(
++        decode_sse_frame(frame.as_bytes()),
++        Err(CatalogError::InvalidPayload)
++    ));
++}
+-- 
+2.50.1 (Apple Git-155)

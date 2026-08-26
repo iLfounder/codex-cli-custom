@@ -1,7 +1,7 @@
 schema_version = 1
 applies_to = "rust-v0.149.0"
 base_commit = "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0"
-final_tree = "b18ccc6c50f9332b7dcab17d9ffa687f48f81fd1"
+final_tree = "85dbbad8ec9ffde70c82f115a9822bd7771c6dcd"
 
 [[patches]]
 number = "P001"
@@ -67,3 +67,33 @@ sha256 = "4360ff5f904071676ef8ccc90497920c07f1abcfdbf56cc4d7bf6ec6cc3734bf"
 number = "P013"
 file = "0013-P013-hot-account-rotation-and-rollout-repair.patch"
 sha256 = "a079369ab7c6cf79a8eb4d4926d36d458ca1cbd06a0186961f9a683c314d1afe"
+
+[[patches]]
+number = "P014"
+file = "0014-P014-add-read-only-sibling-auth-runtimes.patch"
+sha256 = "630ef05d9b918f874af0014c66e1829a660ad3b5c64537ae94d675c1e0963591"
+
+[[patches]]
+number = "P015"
+file = "0015-P015-bind-account-runtimes-at-root-turn-admission.patch"
+sha256 = "d8798ab33e880439eaf1a48243af402118765cf2d3da54f3678b57f1bba806e3"
+
+[[patches]]
+number = "P016"
+file = "0016-P016-expose-TokenManager-account-catalog-protocol.patch"
+sha256 = "719d0fbbf50466824a747797dbf14090cc4d2018284fa784bfb2d3b2adf86f81"
+
+[[patches]]
+number = "P017"
+file = "0017-P017-consume-TokenManager-account-snapshots.patch"
+sha256 = "88b3fad4f8d0a0ef258cbd63e649f7f00400dacba9508ae49d687d129f5c063f"
+
+[[patches]]
+number = "P018"
+file = "0018-P018-integrate-global-account-rotation-runtimes.patch"
+sha256 = "17494a5ae1b2992a9784be1065851e0652822fc594d22d7a98481abeb3dca2ce"
+
+[[patches]]
+number = "P019"
+file = "0019-P019-add-global-account-rotation-controls-to-TUI.patch"
+sha256 = "3e5b2cce19c95eeb4ab655ab77cdefa459c6aa41f8008ddf60c19535b5b8760d"

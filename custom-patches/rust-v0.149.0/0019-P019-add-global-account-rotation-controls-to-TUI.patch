@@ -1,0 +1,1314 @@
+From 5c6b40c5f63ec8cc88c56d29a172f6f8cfdd4f76 Mon Sep 17 00:00:00 2001
+From: patch-verifier <patch-verifier@localhost>
+Date: Thu, 27 Aug 2026 03:41:40 +0900
+Subject: [PATCH 19/19] P019 add global account rotation controls to TUI
+
+---
+ codex-rs/tui/src/app.rs                       |   2 +
+ codex-rs/tui/src/app/account_controls.rs      |  31 ++-
+ codex-rs/tui/src/app/account_picker.rs        |   5 +
+ codex-rs/tui/src/app/account_picker_tests.rs  |  71 +++++
+ codex-rs/tui/src/app/account_picker_view.rs   | 258 +++++++++---------
+ .../tui/src/app/account_picker_view_tests.rs  | 128 ++++++---
+ codex-rs/tui/src/app/account_rotation.rs      |  44 ++-
+ .../tui/src/app/account_rotation_tests.rs     |  39 +++
+ codex-rs/tui/src/app/account_rotation_view.rs |  39 ++-
+ .../src/app/account_rotation_view_tests.rs    |  58 ++--
+ codex-rs/tui/src/app/account_validation.rs    |  19 ++
+ .../tui/src/app/account_validation_tests.rs   |  57 +++-
+ .../tui/src/app/app_server_event_targets.rs   |   1 +
+ codex-rs/tui/src/app/app_server_events.rs     |   4 +
+ codex-rs/tui/src/app/startup.rs               |   1 +
+ codex-rs/tui/src/app/test_support.rs          |   1 +
+ codex-rs/tui/src/app/tests.rs                 |   2 +
+ codex-rs/tui/src/app_server_session.rs        |   7 +
+ codex-rs/tui/src/chatwidget/protocol.rs       |   1 +
+ 19 files changed, 543 insertions(+), 225 deletions(-)
+ create mode 100644 codex-rs/tui/src/app/account_rotation_tests.rs
+
+diff --git a/codex-rs/tui/src/app.rs b/codex-rs/tui/src/app.rs
+index 13e33a207c..6e7b6fb04a 100644
+--- a/codex-rs/tui/src/app.rs
++++ b/codex-rs/tui/src/app.rs
+@@ -92,6 +92,7 @@ use codex_ansi_escape::ansi_escape_line;
+ use codex_app_server_client::AppServerRequestHandle;
+ use codex_app_server_client::TypedRequestError;
+ use codex_app_server_protocol::AccountSlotCapability;
++use codex_app_server_protocol::AccountSlotCatalogKind;
+ use codex_app_server_protocol::AccountSlotSnapshot;
+ use codex_app_server_protocol::AddCreditsNudgeCreditType;
+ use codex_app_server_protocol::AskForApproval;
+@@ -598,6 +599,7 @@ pub(crate) struct App {
+     shutdown_lookup_in_flight: bool,
+     shutdown_force_exit_armed: bool,
+     account_slots: Vec<AccountSlotSnapshot>,
++    account_catalog_kind: Option<AccountSlotCatalogKind>,
+     account_slot_capability: Option<AccountSlotCapability>,
+     account_registry_revision: u64,
+     account_runtime: Option<(String, SessionRuntimeSnapshot)>,
+diff --git a/codex-rs/tui/src/app/account_controls.rs b/codex-rs/tui/src/app/account_controls.rs
+index 35ab367b27..4adc6bb736 100644
+--- a/codex-rs/tui/src/app/account_controls.rs
++++ b/codex-rs/tui/src/app/account_controls.rs
+@@ -77,24 +77,31 @@ impl App {
+                 return;
+             }
+         };
+-        if !revision_meets_lower_bound(
+-            snapshot.slots.registry_revision,
+-            self.account_registry_revision,
+-        ) || !runtime_revision_meets_lower_bound(
+-            self.account_runtime
+-                .as_ref()
+-                .map(|(epoch, runtime)| (epoch.as_str(), runtime.state_revision)),
+-            (
+-                snapshot.runtime.instance_epoch.as_str(),
+-                snapshot.runtime.snapshot.state_revision,
+-            ),
+-        ) {
++        let catalog_changed = self
++            .account_catalog_kind
++            .is_some_and(|catalog_kind| catalog_kind != snapshot.slots.catalog_kind);
++        if (!catalog_changed
++            && !revision_meets_lower_bound(
++                snapshot.slots.registry_revision,
++                self.account_registry_revision,
++            ))
++            || !runtime_revision_meets_lower_bound(
++                self.account_runtime
++                    .as_ref()
++                    .map(|(epoch, runtime)| (epoch.as_str(), runtime.state_revision)),
++                (
++                    snapshot.runtime.instance_epoch.as_str(),
++                    snapshot.runtime.snapshot.state_revision,
++                ),
++            )
++        {
+             self.chat_widget.add_error_message(
+                 "Account state changed before the request. Select the action again.".to_string(),
+             );
+             return;
+         }
+         self.account_registry_revision = snapshot.slots.registry_revision;
++        self.account_catalog_kind = Some(snapshot.slots.catalog_kind);
+         self.account_slots = snapshot.slots.data;
+         self.account_slot_capability = Some(snapshot.slots.multi_account);
+         let instance_epoch = snapshot.runtime.instance_epoch;
+diff --git a/codex-rs/tui/src/app/account_picker.rs b/codex-rs/tui/src/app/account_picker.rs
+index 10fb91a3df..390f1c3025 100644
+--- a/codex-rs/tui/src/app/account_picker.rs
++++ b/codex-rs/tui/src/app/account_picker.rs
+@@ -217,7 +217,11 @@ impl App {
+             .account_runtime
+             .as_ref()
+             .is_some_and(|(epoch, _)| epoch == &snapshot.runtime.instance_epoch);
++        let catalog_changed = self
++            .account_catalog_kind
++            .is_some_and(|catalog_kind| catalog_kind != snapshot.slots.catalog_kind);
+         let slots_are_fresh = !same_runtime_epoch
++            || catalog_changed
+             || super::account_validation::revision_meets_lower_bound(
+                 snapshot.slots.registry_revision,
+                 self.account_registry_revision,
+@@ -234,6 +238,7 @@ impl App {
+             );
+         if slots_are_fresh {
+             self.account_registry_revision = snapshot.slots.registry_revision;
++            self.account_catalog_kind = Some(snapshot.slots.catalog_kind);
+             self.account_slots = snapshot.slots.data;
+             self.account_slot_capability = Some(snapshot.slots.multi_account);
+         }
+diff --git a/codex-rs/tui/src/app/account_picker_tests.rs b/codex-rs/tui/src/app/account_picker_tests.rs
+index a121d9bf8c..5871eea38d 100644
+--- a/codex-rs/tui/src/app/account_picker_tests.rs
++++ b/codex-rs/tui/src/app/account_picker_tests.rs
+@@ -1,6 +1,10 @@
+ use super::*;
+ use crate::app::test_support::make_test_app;
+ use codex_app_server_protocol::AccountSlotCapability;
++use codex_app_server_protocol::AccountSlotCatalogKind;
++use codex_app_server_protocol::AccountSlotHealth;
++use codex_app_server_protocol::AccountSlotSnapshot;
++use codex_app_server_protocol::AccountSlotStatus;
+ use codex_app_server_protocol::SESSION_RUNTIME_ACCOUNT_ROTATION_CAPABILITY;
+ use codex_app_server_protocol::SessionRuntimeAccountBinding;
+ use codex_app_server_protocol::SessionRuntimeAccountSwitchState;
+@@ -78,6 +82,7 @@ fn picker_snapshot(
+         slots: AccountSlotsSnapshot {
+             data: Vec::new(),
+             registry_revision,
++            catalog_kind: AccountSlotCatalogKind::Global,
+             multi_account: AccountSlotCapability {
+                 available: true,
+                 deny_reason: None,
+@@ -91,6 +96,72 @@ fn picker_snapshot(
+     }
+ }
+ 
++fn listed_account(account_slot_id: &str, account_number: u32) -> AccountSlotSnapshot {
++    AccountSlotSnapshot {
++        account_slot_id: account_slot_id.to_string(),
++        account_number,
++        label: account_slot_id.to_string(),
++        is_default: account_number == 1,
++        status: AccountSlotStatus::Ready,
++        health: AccountSlotHealth::Healthy,
++        quota: None,
++        auth_mode: None,
++        attempt_generation: 1,
++        registry_revision: 1,
++        active_login_operation_id: None,
++        error_code: None,
++        actions: Vec::new(),
++        updated_at: 0,
++    }
++}
++
++#[tokio::test]
++async fn account_snapshot_preserves_the_authoritative_catalog_domain() {
++    let mut app = make_test_app().await;
++    let mut snapshot = picker_snapshot("epoch-a", 1, 1);
++    snapshot.slots.data = vec![
++        listed_account("default", 1),
++        listed_account("C1", 1),
++        listed_account("C2", 2),
++        listed_account("slot-uuid", 3),
++    ];
++
++    assert_eq!(app.apply_account_snapshot(snapshot), true);
++    assert_eq!(
++        app.account_slots
++            .iter()
++            .map(|slot| slot.account_slot_id.as_str())
++            .collect::<Vec<_>>(),
++        vec!["default", "C1", "C2", "slot-uuid"]
++    );
++}
++
++#[tokio::test]
++async fn authoritative_catalog_domain_change_resets_the_revision_comparison() {
++    let mut app = make_test_app().await;
++    app.account_catalog_kind = Some(AccountSlotCatalogKind::Legacy);
++    app.account_registry_revision = 50;
++    app.account_runtime = Some(("epoch-a".to_string(), runtime_snapshot("thread-1", 1)));
++    let mut global = picker_snapshot("epoch-a", 1, 1);
++    global.slots.data = vec![listed_account("C1", 1)];
++
++    assert_eq!(app.apply_account_snapshot(global), true);
++    assert_eq!(
++        (app.account_catalog_kind, app.account_registry_revision),
++        (Some(AccountSlotCatalogKind::Global), 1)
++    );
++
++    let mut legacy = picker_snapshot("epoch-a", 70, 1);
++    legacy.slots.catalog_kind = AccountSlotCatalogKind::Legacy;
++    legacy.slots.registry_revision = 0;
++    legacy.slots.data = vec![listed_account("default", 1)];
++    assert_eq!(app.apply_account_snapshot(legacy), true);
++    assert_eq!(
++        (app.account_catalog_kind, app.account_registry_revision),
++        (Some(AccountSlotCatalogKind::Legacy), 0)
++    );
++}
++
+ #[tokio::test]
+ async fn new_runtime_epoch_accepts_authoritative_revision_reset() {
+     let mut app = make_test_app().await;
+diff --git a/codex-rs/tui/src/app/account_picker_view.rs b/codex-rs/tui/src/app/account_picker_view.rs
+index 9efb773a89..6f004e93dc 100644
+--- a/codex-rs/tui/src/app/account_picker_view.rs
++++ b/codex-rs/tui/src/app/account_picker_view.rs
+@@ -4,6 +4,7 @@ use super::account_rotation::AccountRotationEdit;
+ use super::*;
+ use codex_app_server_protocol::AccountSlotAction;
+ use codex_app_server_protocol::AccountSlotActionAvailability;
++use codex_app_server_protocol::AccountSlotHealth;
+ use codex_app_server_protocol::AccountSlotSnapshot;
+ use codex_app_server_protocol::AccountSlotStatus;
+ use codex_app_server_protocol::SessionRuntimeAction;
+@@ -49,33 +50,13 @@ impl App {
+                 ..Default::default()
+             }
+         }));
+-        let add_allowed = self
+-            .account_slot_capability
+-            .as_ref()
+-            .is_some_and(|capability| capability.available);
+-        items.push(SelectionItem {
+-            name: "Add account".to_string(),
+-            description: Some("Sign in with a browser or device code".to_string()),
+-            is_disabled: !add_allowed,
+-            disabled_reason: self
+-                .account_slot_capability
+-                .as_ref()
+-                .and_then(|capability| capability.deny_reason.clone()),
+-            actions: add_allowed
+-                .then(|| {
+-                    Box::new(|tx: &AppEventSender| {
+-                        tx.send(AppEvent::OpenAccountLoginMethods { slot_id: None });
+-                    }) as crate::bottom_pane::SelectionAction
+-                })
+-                .into_iter()
+-                .collect(),
+-            dismiss_on_select: true,
+-            ..Default::default()
+-        });
+         SelectionViewParams {
+             view_id: Some(ACCOUNT_PICKER_VIEW_ID),
+             title: Some("Accounts".to_string()),
+-            subtitle: Some("Select an account to view its available actions.".to_string()),
++            subtitle: Some(
++                "Global accounts from TokenManager; selection policy and current execution are shown separately."
++                    .to_string(),
++            ),
+             items,
+             initial_selected_idx,
+             ..Default::default()
+@@ -85,92 +66,94 @@ impl App {
+     fn account_detail_view_params(&self, slot: &AccountSlotSnapshot) -> SelectionViewParams {
+         let is_current = self.current_account_slot_id() == Some(slot.account_slot_id.as_str());
+         let mut items = Vec::new();
+-        let login = action_availability(slot, AccountSlotAction::Login);
+-        let login_allowed = slot.status == AccountSlotStatus::LoginRequired
+-            && login.is_some_and(|action| action.allowed);
+-        let login_reason = status_action_deny_reason(
+-            slot,
+-            AccountSlotStatus::LoginRequired,
+-            login,
+-            "Account does not require login",
+-        );
+-        let slot_id = slot.account_slot_id.clone();
+-        push_account_action(
+-            &mut items,
+-            "Log in",
+-            "Authenticate this account",
+-            login_allowed,
+-            login_reason,
+-            move |tx| {
+-                tx.send(AppEvent::OpenAccountLoginMethods {
+-                    slot_id: Some(slot_id.clone()),
+-                });
+-            },
+-        );
+-
+-        let retry = action_availability(slot, AccountSlotAction::RetryLogin);
+-        let retry_allowed =
+-            slot.status == AccountSlotStatus::Failed && retry.is_some_and(|action| action.allowed);
+-        let retry_reason = status_action_deny_reason(
+-            slot,
+-            AccountSlotStatus::Failed,
+-            retry,
+-            "No failed login to retry",
+-        );
+-        let slot_id = slot.account_slot_id.clone();
+-        push_account_action(
+-            &mut items,
+-            "Retry login",
+-            "Retry the failed sign-in",
+-            retry_allowed,
+-            retry_reason,
+-            move |tx| {
+-                tx.send(AppEvent::OpenAccountLoginMethods {
+-                    slot_id: Some(slot_id.clone()),
+-                });
+-            },
+-        );
++        if slot.is_default {
++            let login = action_availability(slot, AccountSlotAction::Login);
++            let login_allowed = slot.status == AccountSlotStatus::LoginRequired
++                && login.is_some_and(|action| action.allowed);
++            let login_reason = status_action_deny_reason(
++                slot,
++                AccountSlotStatus::LoginRequired,
++                login,
++                "Account does not require login",
++            );
++            let slot_id = slot.account_slot_id.clone();
++            push_account_action(
++                &mut items,
++                "Log in",
++                "Authenticate this local account",
++                login_allowed,
++                login_reason,
++                move |tx| {
++                    tx.send(AppEvent::OpenAccountLoginMethods {
++                        slot_id: Some(slot_id.clone()),
++                    });
++                },
++            );
+ 
+-        let reauthenticate_allowed =
+-            slot.status == AccountSlotStatus::Ready && retry.is_some_and(|action| action.allowed);
+-        let reauthenticate_reason = status_action_deny_reason(
+-            slot,
+-            AccountSlotStatus::Ready,
+-            retry,
+-            "Account is not ready",
+-        );
+-        let slot_id = slot.account_slot_id.clone();
+-        push_account_action(
+-            &mut items,
+-            "Sign in again",
+-            "Replace this account's credentials",
+-            reauthenticate_allowed,
+-            reauthenticate_reason,
+-            move |tx| {
+-                tx.send(AppEvent::OpenAccountLoginMethods {
+-                    slot_id: Some(slot_id.clone()),
+-                });
+-            },
+-        );
++            let retry = action_availability(slot, AccountSlotAction::RetryLogin);
++            let retry_allowed = slot.status == AccountSlotStatus::Failed
++                && retry.is_some_and(|action| action.allowed);
++            let retry_reason = status_action_deny_reason(
++                slot,
++                AccountSlotStatus::Failed,
++                retry,
++                "No failed login to retry",
++            );
++            let slot_id = slot.account_slot_id.clone();
++            push_account_action(
++                &mut items,
++                "Retry login",
++                "Retry the failed local sign-in",
++                retry_allowed,
++                retry_reason,
++                move |tx| {
++                    tx.send(AppEvent::OpenAccountLoginMethods {
++                        slot_id: Some(slot_id.clone()),
++                    });
++                },
++            );
+ 
+-        let active_login = slot.active_login_operation_id.clone();
+-        let cancel_allowed = active_login.is_some();
+-        let slot_id = slot.account_slot_id.clone();
+-        push_account_action(
+-            &mut items,
+-            "Cancel login",
+-            "Stop the active sign-in attempt",
+-            cancel_allowed,
+-            (!cancel_allowed).then(|| "No login is in progress".to_string()),
+-            move |tx| {
+-                if let Some(login_id) = &active_login {
+-                    tx.send(AppEvent::CancelAccountLogin {
+-                        slot_id: slot_id.clone(),
+-                        login_id: login_id.clone(),
++            let reauthenticate_allowed = slot.status == AccountSlotStatus::Ready
++                && retry.is_some_and(|action| action.allowed);
++            let reauthenticate_reason = status_action_deny_reason(
++                slot,
++                AccountSlotStatus::Ready,
++                retry,
++                "Account is not ready",
++            );
++            let slot_id = slot.account_slot_id.clone();
++            push_account_action(
++                &mut items,
++                "Sign in again",
++                "Replace this local account's credentials",
++                reauthenticate_allowed,
++                reauthenticate_reason,
++                move |tx| {
++                    tx.send(AppEvent::OpenAccountLoginMethods {
++                        slot_id: Some(slot_id.clone()),
+                     });
+-                }
+-            },
+-        );
++                },
++            );
++
++            let active_login = slot.active_login_operation_id.clone();
++            let cancel_allowed = active_login.is_some();
++            let slot_id = slot.account_slot_id.clone();
++            push_account_action(
++                &mut items,
++                "Cancel login",
++                "Stop the active local sign-in attempt",
++                cancel_allowed,
++                (!cancel_allowed).then(|| "No login is in progress".to_string()),
++                move |tx| {
++                    if let Some(login_id) = &active_login {
++                        tx.send(AppEvent::CancelAccountLogin {
++                            slot_id: slot_id.clone(),
++                            login_id: login_id.clone(),
++                        });
++                    }
++                },
++            );
++        }
+ 
+         let slot_switch = action_availability(slot, AccountSlotAction::SwitchTo);
+         let runtime_switch = self.account_runtime.as_ref().and_then(|(_, runtime)| {
+@@ -221,26 +204,28 @@ impl App {
+             );
+         }
+ 
+-        let logout = action_availability(slot, AccountSlotAction::Logout);
+-        let logout_allowed = logout.is_some_and(|action| action.allowed);
+-        let logout_reason = logout
+-            .and_then(|action| action.deny_reason.clone())
+-            .or_else(|| (!logout_allowed).then(|| "Logout is unavailable".to_string()));
+-        let slot_id = slot.account_slot_id.clone();
+-        push_account_action(
+-            &mut items,
+-            "Log out",
+-            "Remove this account's credentials",
+-            logout_allowed,
+-            logout_reason,
+-            move |tx| {
+-                tx.send(AppEvent::PrepareAccountControl {
+-                    intent: AccountControlIntent::Logout {
+-                        slot_id: slot_id.clone(),
+-                    },
+-                });
+-            },
+-        );
++        if slot.is_default {
++            let logout = action_availability(slot, AccountSlotAction::Logout);
++            let logout_allowed = logout.is_some_and(|action| action.allowed);
++            let logout_reason = logout
++                .and_then(|action| action.deny_reason.clone())
++                .or_else(|| (!logout_allowed).then(|| "Logout is unavailable".to_string()));
++            let slot_id = slot.account_slot_id.clone();
++            push_account_action(
++                &mut items,
++                "Log out",
++                "Remove this local account's credentials",
++                logout_allowed,
++                logout_reason,
++                move |tx| {
++                    tx.send(AppEvent::PrepareAccountControl {
++                        intent: AccountControlIntent::Logout {
++                            slot_id: slot_id.clone(),
++                        },
++                    });
++                },
++            );
++        }
+ 
+         SelectionViewParams {
+             view_id: Some(ACCOUNT_DETAIL_VIEW_ID),
+@@ -249,9 +234,9 @@ impl App {
+                 "{} · {}{}",
+                 account_slot_status_label(slot),
+                 if slot.is_default {
+-                    "Default account"
++                    "Local account"
+                 } else {
+-                    "Secondary account"
++                    "Global account"
+                 },
+                 if is_current { " · Current" } else { "" }
+             )),
+@@ -377,6 +362,21 @@ pub(super) fn account_slot_status_label(slot: &AccountSlotSnapshot) -> String {
+     if let Some(error_code) = &slot.error_code {
+         status.push_str(&format!(" · Error: {error_code}"));
+     }
++    status.push_str(match slot.health {
++        AccountSlotHealth::Healthy => " · Projection healthy",
++        AccountSlotHealth::Degraded => " · Projection stale",
++        AccountSlotHealth::Unavailable => " · Projection unavailable",
++    });
++    if let Some(quota) = &slot.quota {
++        for meter in &quota.meters {
++            let label = meter.label.as_deref().unwrap_or(&meter.id);
++            status.push_str(&format!(" · {label} {}% left", meter.remaining_percent));
++            if let Some(resets_at) = meter.resets_at {
++                status.push_str(&format!(", resets at {resets_at}"));
++            }
++        }
++        status.push_str(&format!(" · quota fresh until {}", quota.stale_at));
++    }
+     status
+ }
+ 
+diff --git a/codex-rs/tui/src/app/account_picker_view_tests.rs b/codex-rs/tui/src/app/account_picker_view_tests.rs
+index 4091409237..99359a7f6e 100644
+--- a/codex-rs/tui/src/app/account_picker_view_tests.rs
++++ b/codex-rs/tui/src/app/account_picker_view_tests.rs
+@@ -1,7 +1,10 @@
+ use super::*;
+ use crate::app::account_login::login_challenge_params;
+ use crate::app::test_support::make_test_app;
++use codex_app_server_protocol::AccountSlotHealth;
+ use codex_app_server_protocol::AccountSlotLoginChallenge;
++use codex_app_server_protocol::AccountSlotQuotaMeter;
++use codex_app_server_protocol::AccountSlotQuotaSnapshot;
+ use insta::assert_snapshot;
+ use pretty_assertions::assert_eq;
+ fn slot(
+@@ -12,15 +15,28 @@ fn slot(
+ ) -> AccountSlotSnapshot {
+     AccountSlotSnapshot {
+         account_slot_id: id.to_string(),
+-        account_number: match id {
+-            "default" => 1,
+-            "secondary" | "failed" => 2,
+-            "active" => 3,
+-            _ => 4,
+-        },
++        account_number: id
++            .strip_prefix('C')
++            .and_then(|number| number.parse().ok())
++            .unwrap_or(99),
+         label: id.to_string(),
+-        is_default: id == "default",
++        is_default: id == "C1",
+         status,
++        health: match status {
++            AccountSlotStatus::Ready => AccountSlotHealth::Healthy,
++            AccountSlotStatus::Failed => AccountSlotHealth::Degraded,
++            AccountSlotStatus::LoginRequired => AccountSlotHealth::Unavailable,
++        },
++        quota: (status == AccountSlotStatus::Ready).then(|| AccountSlotQuotaSnapshot {
++            meters: vec![AccountSlotQuotaMeter {
++                id: "weekly".to_string(),
++                label: Some("Weekly".to_string()),
++                remaining_percent: 72,
++                resets_at: Some(1_800_000_000),
++            }],
++            observed_at: 1_700_000_000,
++            stale_at: 1_700_000_300,
++        }),
+         auth_mode: None,
+         attempt_generation: 1,
+         registry_revision: 7,
+@@ -80,27 +96,21 @@ fn login_challenge_requires_explicit_browser_or_cancel_selection() {
+ async fn account_rows_are_always_selectable_and_report_active_login() {
+     let mut app = make_test_app().await;
+     app.account_slots = vec![
+-        slot("default", AccountSlotStatus::Ready, None, &[]),
+-        slot("failed", AccountSlotStatus::Failed, None, &[]),
+-        slot(
+-            "active",
+-            AccountSlotStatus::LoginRequired,
+-            Some("login-1"),
+-            &[],
+-        ),
++        slot("C1", AccountSlotStatus::Ready, None, &[]),
++        slot("C2", AccountSlotStatus::Failed, None, &[]),
++        slot("C3", AccountSlotStatus::LoginRequired, Some("login-1"), &[]),
+     ];
+     assert_snapshot!(rendered_items(&app.account_selection_view_params(None)), @r"
+-    1. default | Ready · Error: oauth_failed | enabled
+-    2. failed | Login failed · Error: oauth_failed | enabled
+-    3. active | Login required · Login in progress · Error: oauth_failed | enabled
+-    Add account | Sign in with a browser or device code | disabled
++    1. C1 | Ready · Error: oauth_failed · Projection healthy · Weekly 72% left, resets at 1800000000 · quota fresh until 1700000300 | enabled
++    2. C2 | Login failed · Error: oauth_failed · Projection stale | enabled
++    3. C3 | Login required · Login in progress · Error: oauth_failed · Projection unavailable | enabled
+     ");
+ }
+ #[tokio::test]
+-async fn account_detail_disables_only_unavailable_actions() {
++async fn global_account_detail_exposes_selection_but_not_local_credential_actions() {
+     let app = make_test_app().await;
+     let ready = slot(
+-        "secondary",
++        "C2",
+         AccountSlotStatus::Ready,
+         None,
+         &[
+@@ -110,21 +120,18 @@ async fn account_detail_disables_only_unavailable_actions() {
+         ],
+     );
+     assert_snapshot!(rendered_items(&app.account_detail_view_params(&ready)), @r"
+-    Log in | Authenticate this account | disabled (Account does not require login)
+-    Retry login | Retry the failed sign-in | disabled (No failed login to retry)
+-    Sign in again | Replace this account's credentials | disabled (policy)
+-    Cancel login | Stop the active sign-in attempt | disabled (No login is in progress)
+     Use for this session | Switch the next turn to this account | disabled (Account switching is unavailable)
+-    Log out | Remove this account's credentials | enabled
+     ");
+     let ready_params = app.account_detail_view_params(&ready);
+     assert_eq!(
+         ready_params.subtitle.as_deref(),
+-        Some("Ready · Error: oauth_failed · Secondary account")
++        Some(
++            "Ready · Error: oauth_failed · Projection healthy · Weekly 72% left, resets at 1800000000 · quota fresh until 1700000300 · Global account"
++        )
+     );
+ 
+     let failed = slot(
+-        "secondary",
++        "C2",
+         AccountSlotStatus::Failed,
+         None,
+         &[
+@@ -142,16 +149,11 @@ async fn account_detail_disables_only_unavailable_actions() {
+         ],
+     );
+     assert_snapshot!(rendered_items(&app.account_detail_view_params(&failed)), @r"
+-    Log in | Authenticate this account | disabled (Account does not require login)
+-    Retry login | Retry the failed sign-in | enabled
+-    Sign in again | Replace this account's credentials | disabled (Account is not ready)
+-    Cancel login | Stop the active sign-in attempt | disabled (No login is in progress)
+     Use for this session | Switch the next turn to this account | disabled (Account is not ready)
+-    Log out | Remove this account's credentials | disabled (Account is not ready)
+     ");
+ 
+     let active = slot(
+-        "secondary",
++        "C2",
+         AccountSlotStatus::LoginRequired,
+         Some("login-1"),
+         &[
+@@ -178,12 +180,48 @@ async fn account_detail_disables_only_unavailable_actions() {
+         ],
+     );
+     assert_snapshot!(rendered_items(&app.account_detail_view_params(&active)), @r"
+-    Log in | Authenticate this account | disabled (Login already in progress)
+-    Retry login | Retry the failed sign-in | disabled (No failed login to retry)
+-    Sign in again | Replace this account's credentials | disabled (Account is not ready)
+-    Cancel login | Stop the active sign-in attempt | enabled
+     Use for this session | Switch the next turn to this account | disabled (Login already in progress)
+-    Log out | Remove this account's credentials | disabled (Login already in progress)
++    ");
++}
++
++#[tokio::test]
++async fn local_account_detail_keeps_local_login_cancel_and_logout_actions() {
++    let app = make_test_app().await;
++    let local = slot(
++        "C1",
++        AccountSlotStatus::LoginRequired,
++        Some("login-1"),
++        &[
++            (
++                AccountSlotAction::Login,
++                false,
++                Some("Login already in progress"),
++            ),
++            (
++                AccountSlotAction::RetryLogin,
++                false,
++                Some("Login already in progress"),
++            ),
++            (
++                AccountSlotAction::SwitchTo,
++                false,
++                Some("Login already in progress"),
++            ),
++            (
++                AccountSlotAction::Logout,
++                false,
++                Some("Login already in progress"),
++            ),
++        ],
++    );
++
++    assert_snapshot!(rendered_items(&app.account_detail_view_params(&local)), @r"
++    Log in | Authenticate this local account | disabled (Login already in progress)
++    Retry login | Retry the failed local sign-in | disabled (No failed login to retry)
++    Sign in again | Replace this local account's credentials | disabled (Account is not ready)
++    Cancel login | Stop the active local sign-in attempt | enabled
++    Use for this session | Switch the next turn to this account | disabled (Login already in progress)
++    Log out | Remove this local account's credentials | disabled (Login already in progress)
+     ");
+ }
+ 
+@@ -191,11 +229,11 @@ async fn account_detail_disables_only_unavailable_actions() {
+ async fn selection_is_preserved_by_account_slot_identity() {
+     let mut app = make_test_app().await;
+     app.account_slots = vec![
+-        slot("default", AccountSlotStatus::Ready, None, &[]),
+-        slot("secondary", AccountSlotStatus::Ready, None, &[]),
++        slot("C1", AccountSlotStatus::Ready, None, &[]),
++        slot("C2", AccountSlotStatus::Ready, None, &[]),
+     ];
+     assert_eq!(
+-        app.account_selection_view_params(Some("secondary"))
++        app.account_selection_view_params(Some("C2"))
+             .initial_selected_idx,
+         Some(1)
+     );
+@@ -204,17 +242,17 @@ async fn selection_is_preserved_by_account_slot_identity() {
+ #[tokio::test]
+ async fn replacing_a_closed_picker_updates_no_ui() {
+     let mut app = make_test_app().await;
+-    app.account_slots = vec![slot("default", AccountSlotStatus::Ready, None, &[])];
++    app.account_slots = vec![slot("C1", AccountSlotStatus::Ready, None, &[])];
+     assert_eq!(app.replace_account_picker_if_present(None), false);
+     assert_eq!(app.chat_widget.no_modal_or_popup_active(), true);
+ }
+ 
+ #[test]
+ fn exact_status_and_error_code_are_both_visible() {
+-    let mut unavailable = slot("secondary", AccountSlotStatus::Failed, None, &[]);
++    let mut unavailable = slot("C2", AccountSlotStatus::Failed, None, &[]);
+     unavailable.error_code = Some("authUnavailable".to_string());
+     assert_eq!(
+         account_slot_status_label(&unavailable),
+-        "Login failed · Error: authUnavailable"
++        "Login failed · Error: authUnavailable · Projection stale"
+     );
+ }
+diff --git a/codex-rs/tui/src/app/account_rotation.rs b/codex-rs/tui/src/app/account_rotation.rs
+index e6c5e1a1e9..4d9ac0f216 100644
+--- a/codex-rs/tui/src/app/account_rotation.rs
++++ b/codex-rs/tui/src/app/account_rotation.rs
+@@ -4,6 +4,7 @@ use super::account_rotation_view::account_rotation_loading_view_params;
+ use super::*;
+ use crate::app_server_session::read_thread_account_rotation;
+ use crate::app_server_session::update_thread_account_rotation;
++use codex_app_server_protocol::AccountSlotSnapshot;
+ use codex_app_server_protocol::ThreadAccountRotationMode;
+ use codex_app_server_protocol::ThreadAccountRotationSnapshot;
+ use codex_app_server_protocol::ThreadAccountRotationUpdateParams;
+@@ -104,20 +105,12 @@ impl App {
+                 fixed_account_slot_id = Some(slot_id);
+             }
+             AccountRotationEdit::AutomaticMembership { slot_id, enabled } => {
+-                let mut selected = automatic_account_slot_ids
+-                    .into_iter()
+-                    .collect::<HashSet<_>>();
+-                if enabled {
+-                    selected.insert(slot_id);
+-                } else {
+-                    selected.remove(&slot_id);
+-                }
+-                automatic_account_slot_ids = self
+-                    .account_slots
+-                    .iter()
+-                    .filter(|slot| selected.contains(&slot.account_slot_id))
+-                    .map(|slot| slot.account_slot_id.clone())
+-                    .collect();
++                automatic_account_slot_ids = edited_automatic_membership(
++                    &self.account_slots,
++                    automatic_account_slot_ids,
++                    slot_id,
++                    enabled,
++                );
+             }
+         }
+         let params = ThreadAccountRotationUpdateParams {
+@@ -191,3 +184,26 @@ impl App {
+         runtime.account.rotation = Some(rotation);
+     }
+ }
++
++fn edited_automatic_membership(
++    visible_slots: &[AccountSlotSnapshot],
++    existing: Vec<String>,
++    target_slot_id: String,
++    enabled: bool,
++) -> Vec<String> {
++    let mut selected = existing.iter().cloned().collect::<HashSet<_>>();
++    if enabled {
++        selected.insert(target_slot_id);
++    } else {
++        selected.remove(&target_slot_id);
++    }
++    visible_slots
++        .iter()
++        .filter(|slot| selected.contains(&slot.account_slot_id))
++        .map(|slot| slot.account_slot_id.clone())
++        .collect()
++}
++
++#[cfg(test)]
++#[path = "account_rotation_tests.rs"]
++mod tests;
+diff --git a/codex-rs/tui/src/app/account_rotation_tests.rs b/codex-rs/tui/src/app/account_rotation_tests.rs
+new file mode 100644
+index 0000000000..d7d58378fc
+--- /dev/null
++++ b/codex-rs/tui/src/app/account_rotation_tests.rs
+@@ -0,0 +1,39 @@
++use super::edited_automatic_membership;
++use codex_app_server_protocol::AccountSlotHealth;
++use codex_app_server_protocol::AccountSlotSnapshot;
++use codex_app_server_protocol::AccountSlotStatus;
++use pretty_assertions::assert_eq;
++
++fn global_slot(number: u32) -> AccountSlotSnapshot {
++    AccountSlotSnapshot {
++        account_slot_id: format!("C{number}"),
++        account_number: number,
++        label: format!("Account {number}"),
++        is_default: number == 1,
++        status: AccountSlotStatus::Ready,
++        health: AccountSlotHealth::Healthy,
++        quota: None,
++        auth_mode: None,
++        attempt_generation: 1,
++        registry_revision: 1,
++        active_login_operation_id: None,
++        error_code: None,
++        actions: Vec::new(),
++        updated_at: 0,
++    }
++}
++
++#[test]
++fn automatic_membership_edit_converges_to_the_visible_global_account_set() {
++    let visible = vec![global_slot(1), global_slot(2), global_slot(3)];
++    let existing = vec!["C1".to_string(), "default".to_string()];
++
++    assert_eq!(
++        edited_automatic_membership(&visible, existing.clone(), "C2".to_string(), true),
++        vec!["C1", "C2"]
++    );
++    assert_eq!(
++        edited_automatic_membership(&visible, existing, "C1".to_string(), false),
++        Vec::<String>::new()
++    );
++}
+diff --git a/codex-rs/tui/src/app/account_rotation_view.rs b/codex-rs/tui/src/app/account_rotation_view.rs
+index a855c6ec2f..2e7a0f3e21 100644
+--- a/codex-rs/tui/src/app/account_rotation_view.rs
++++ b/codex-rs/tui/src/app/account_rotation_view.rs
+@@ -5,6 +5,9 @@ use super::account_picker_view::account_slot_status_label;
+ use super::account_rotation::AccountRotationEdit;
+ use super::*;
+ use crate::bottom_pane::SelectionToggle;
++use codex_app_server_protocol::AccountSlotHealth;
++use codex_app_server_protocol::AccountSlotSnapshot;
++use codex_app_server_protocol::AccountSlotStatus;
+ use codex_app_server_protocol::ThreadAccountRotationMode;
+ 
+ pub(super) const ACCOUNT_ROTATION_VIEW_ID: &str = "account-rotation";
+@@ -13,8 +16,9 @@ impl App {
+     pub(super) fn account_rotation_summary(&self) -> Option<String> {
+         let rotation = self.account_rotation_snapshot()?;
+         Some(format!(
+-            "{} · {} automatic account{}",
++            "Desired: {} · Actual: {} · {} automatic account{}",
+             account_rotation_mode_label(rotation.mode),
++            self.current_account_slot_id().unwrap_or("unbound"),
+             rotation.automatic_account_slot_ids.len(),
+             if rotation.automatic_account_slot_ids.len() == 1 {
+                 ""
+@@ -108,13 +112,21 @@ impl App {
+         }
+         for slot in &self.account_slots {
+             let slot_id = slot.account_slot_id.clone();
++            let is_member = rotation
++                .automatic_account_slot_ids
++                .contains(&slot.account_slot_id);
++            let automatic_deny_reason = automatic_account_deny_reason(slot);
+             items.push(SelectionItem {
+                 name: format!("Automatic: {}", account_slot_display_name(slot)),
+                 description: Some(account_slot_status_label(slot)),
++                is_disabled: automatic_deny_reason.is_some() && !is_member,
++                disabled_reason: if is_member {
++                    None
++                } else {
++                    automatic_deny_reason
++                },
+                 toggle: Some(SelectionToggle {
+-                    is_on: rotation
+-                        .automatic_account_slot_ids
+-                        .contains(&slot.account_slot_id),
++                    is_on: is_member,
+                     action: Box::new(move |enabled, tx: &AppEventSender| {
+                         tx.send(AppEvent::EditAccountRotation {
+                             edit: AccountRotationEdit::AutomaticMembership {
+@@ -131,8 +143,8 @@ impl App {
+             view_id: Some(ACCOUNT_ROTATION_VIEW_ID),
+             title: Some("Account rotation".to_string()),
+             subtitle: Some(format!(
+-                "Revision {} · fixed target and automatic membership are independent",
+-                rotation.revision
++                "Desired revision {} · actual execution changes only when a turn starts",
++                rotation.revision,
+             )),
+             items,
+             ..Default::default()
+@@ -148,6 +160,21 @@ impl App {
+     }
+ }
+ 
++fn automatic_account_deny_reason(slot: &AccountSlotSnapshot) -> Option<String> {
++    if slot.status != AccountSlotStatus::Ready {
++        return Some("Automatic selection requires a logged-in account".to_string());
++    }
++    match slot.health {
++        AccountSlotHealth::Healthy => None,
++        AccountSlotHealth::Degraded => {
++            Some("Automatic selection is paused while this projection is stale".to_string())
++        }
++        AccountSlotHealth::Unavailable => {
++            Some("Automatic selection is unavailable for this account".to_string())
++        }
++    }
++}
++
+ pub(super) fn account_rotation_loading_view_params() -> SelectionViewParams {
+     SelectionViewParams {
+         view_id: Some(ACCOUNT_ROTATION_VIEW_ID),
+diff --git a/codex-rs/tui/src/app/account_rotation_view_tests.rs b/codex-rs/tui/src/app/account_rotation_view_tests.rs
+index 16e949ffe5..da59ca70d2 100644
+--- a/codex-rs/tui/src/app/account_rotation_view_tests.rs
++++ b/codex-rs/tui/src/app/account_rotation_view_tests.rs
+@@ -1,5 +1,8 @@
+ use super::*;
+ use crate::app::test_support::make_test_app;
++use codex_app_server_protocol::AccountSlotHealth;
++use codex_app_server_protocol::AccountSlotQuotaMeter;
++use codex_app_server_protocol::AccountSlotQuotaSnapshot;
+ use codex_app_server_protocol::AccountSlotSnapshot;
+ use codex_app_server_protocol::AccountSlotStatus;
+ use codex_app_server_protocol::SessionRuntimeAccountBinding;
+@@ -15,6 +18,7 @@ use codex_app_server_protocol::SessionRuntimeWriter;
+ use codex_app_server_protocol::SessionRuntimeWriterState;
+ use codex_app_server_protocol::ThreadAccountRotationSnapshot;
+ use insta::assert_snapshot;
++use pretty_assertions::assert_eq;
+ 
+ fn slot(
+     account_number: u32,
+@@ -28,6 +32,21 @@ fn slot(
+         label: id.to_string(),
+         is_default: account_number == 1,
+         status,
++        health: match status {
++            AccountSlotStatus::Ready => AccountSlotHealth::Healthy,
++            AccountSlotStatus::Failed => AccountSlotHealth::Degraded,
++            AccountSlotStatus::LoginRequired => AccountSlotHealth::Unavailable,
++        },
++        quota: (status == AccountSlotStatus::Ready).then(|| AccountSlotQuotaSnapshot {
++            meters: vec![AccountSlotQuotaMeter {
++                id: "weekly".to_string(),
++                label: Some("Weekly".to_string()),
++                remaining_percent: 72,
++                resets_at: Some(1_800_000_000),
++            }],
++            observed_at: 1_700_000_000,
++            stale_at: 1_700_000_300,
++        }),
+         auth_mode: None,
+         attempt_generation: 1,
+         registry_revision: 9,
+@@ -79,7 +98,7 @@ fn runtime(rotation: ThreadAccountRotationSnapshot) -> SessionRuntimeSnapshot {
+         },
+         account: SessionRuntimeAccountBinding {
+             current: Some(SessionRuntimeAccountRef {
+-                account_slot_id: "default".to_string(),
++                account_slot_id: "C1".to_string(),
+                 execution_generation: 2,
+             }),
+             active_turn: None,
+@@ -122,38 +141,41 @@ fn rendered_items(params: &SelectionViewParams) -> String {
+ async fn rotation_editor_keeps_fixed_target_and_automatic_membership_independent() {
+     let mut app = make_test_app().await;
+     app.account_slots = vec![
+-        slot(1, "default", AccountSlotStatus::Ready, None),
+-        slot(2, "failed", AccountSlotStatus::Failed, None),
+-        slot(
+-            3,
+-            "new-busy",
+-            AccountSlotStatus::LoginRequired,
+-            Some("login-1"),
+-        ),
++        slot(1, "C1", AccountSlotStatus::Ready, None),
++        slot(2, "C2", AccountSlotStatus::Failed, None),
++        slot(3, "C3", AccountSlotStatus::LoginRequired, Some("login-1")),
+     ];
+     app.account_rotation_available = true;
+     app.account_runtime = Some((
+         "epoch-a".to_string(),
+         runtime(ThreadAccountRotationSnapshot {
+             mode: ThreadAccountRotationMode::QuotaAware,
+-            fixed_account_slot_id: Some("failed".to_string()),
+-            automatic_account_slot_ids: vec!["default".to_string(), "failed".to_string()],
++            fixed_account_slot_id: Some("C2".to_string()),
++            automatic_account_slot_ids: vec!["C1".to_string(), "C2".to_string()],
+             revision: 4,
+-            last_committed_account_slot_id: Some("default".to_string()),
++            last_committed_account_slot_id: Some("C1".to_string()),
+         }),
+     ));
+ 
+     let params = app.account_rotation_view_params().expect("rotation view");
++    assert_eq!(
++        app.account_rotation_summary().as_deref(),
++        Some("Desired: Quota aware · Actual: C1 · 2 automatic accounts")
++    );
++    assert_eq!(
++        params.subtitle.as_deref(),
++        Some("Desired revision 4 · actual execution changes only when a turn starts")
++    );
+     assert_snapshot!(rendered_items(&params), @r"
+     Mode: Fixed | Use this mode starting with the next user turn | enabled | - | -
+     Mode: Quota aware | Selected rotation mode | enabled | current | -
+     Mode: Round robin | Use this mode starting with the next user turn | enabled | - | -
+     Mode: Exhaust then next | Use this mode starting with the next user turn | enabled | - | -
+-    Fixed: 1. default | Ready · Current runtime | enabled | - | -
+-    Fixed: 2. failed | Login failed · Error: refreshUnavailable | enabled | current | -
+-    Fixed: 3. new-busy | Login required · Login in progress | enabled | - | -
+-    Automatic: 1. default | Ready | enabled | - | on
+-    Automatic: 2. failed | Login failed · Error: refreshUnavailable | enabled | - | on
+-    Automatic: 3. new-busy | Login required · Login in progress | enabled | - | off
++    Fixed: 1. C1 | Ready · Projection healthy · Weekly 72% left, resets at 1800000000 · quota fresh until 1700000300 · Current runtime | enabled | - | -
++    Fixed: 2. C2 | Login failed · Error: refreshUnavailable · Projection stale | enabled | current | -
++    Fixed: 3. C3 | Login required · Login in progress · Projection unavailable | enabled | - | -
++    Automatic: 1. C1 | Ready · Projection healthy · Weekly 72% left, resets at 1800000000 · quota fresh until 1700000300 | enabled | - | on
++    Automatic: 2. C2 | Login failed · Error: refreshUnavailable · Projection stale | enabled | - | on
++    Automatic: 3. C3 | Login required · Login in progress · Projection unavailable | disabled | - | off
+     ");
+ }
+diff --git a/codex-rs/tui/src/app/account_validation.rs b/codex-rs/tui/src/app/account_validation.rs
+index cf05ca1afa..218063f9c8 100644
+--- a/codex-rs/tui/src/app/account_validation.rs
++++ b/codex-rs/tui/src/app/account_validation.rs
+@@ -2,6 +2,7 @@
+ 
+ use super::account_picker::PendingAccountControl;
+ use super::*;
++use codex_app_server_protocol::AccountSlotCatalogKind;
+ use codex_app_server_protocol::AccountSlotSnapshot;
+ use codex_app_server_protocol::AccountSlotStatus;
+ use codex_app_server_protocol::SessionRuntimeAccountSwitchState;
+@@ -27,6 +28,13 @@ pub(super) enum AccountSlotUpdateDisposition {
+     Gap,
+ }
+ 
++pub(super) fn is_global_account_slot_id(account_slot_id: &str) -> bool {
++    account_slot_id
++        .strip_prefix('C')
++        .and_then(|number| number.parse::<u32>().ok())
++        .is_some_and(|number| number > 0 && account_slot_id == format!("C{number}"))
++}
++
+ impl App {
+     pub(super) fn finish_account_control_validation(&mut self) {
+         let Some(pending) = self.pending_account_control.take() else {
+@@ -143,6 +151,17 @@ impl App {
+         registry_revision: u64,
+         slot: AccountSlotSnapshot,
+     ) -> AccountSlotUpdateDisposition {
++        let notification_kind = if is_global_account_slot_id(&slot.account_slot_id) {
++            AccountSlotCatalogKind::Global
++        } else {
++            AccountSlotCatalogKind::Legacy
++        };
++        if self
++            .account_catalog_kind
++            .is_some_and(|catalog_kind| catalog_kind != notification_kind)
++        {
++            return AccountSlotUpdateDisposition::Stale;
++        }
+         let selected_slot_id = self.selected_account_slot_id();
+         if registry_revision <= self.account_registry_revision {
+             return AccountSlotUpdateDisposition::Stale;
+diff --git a/codex-rs/tui/src/app/account_validation_tests.rs b/codex-rs/tui/src/app/account_validation_tests.rs
+index b55a3df280..59eca2fc9b 100644
+--- a/codex-rs/tui/src/app/account_validation_tests.rs
++++ b/codex-rs/tui/src/app/account_validation_tests.rs
+@@ -2,6 +2,8 @@ use super::AccountSlotUpdateDisposition;
+ use super::revision_meets_lower_bound;
+ use super::runtime_revision_meets_lower_bound;
+ use crate::app::test_support::make_test_app;
++use codex_app_server_protocol::AccountSlotCatalogKind;
++use codex_app_server_protocol::AccountSlotHealth;
+ use codex_app_server_protocol::AccountSlotSnapshot;
+ use codex_app_server_protocol::AccountSlotStatus;
+ use pretty_assertions::assert_eq;
+@@ -31,11 +33,13 @@ fn runtime_revision_may_restart_with_a_new_epoch_but_not_regress_within_an_epoch
+ }
+ fn snapshot(revision: u64, label: &str) -> AccountSlotSnapshot {
+     AccountSlotSnapshot {
+-        account_slot_id: "secondary".to_string(),
++        account_slot_id: "C2".to_string(),
+         account_number: 2,
+         label: label.to_string(),
+         is_default: false,
+         status: AccountSlotStatus::Ready,
++        health: AccountSlotHealth::Healthy,
++        quota: None,
+         auth_mode: None,
+         attempt_generation: 1,
+         registry_revision: revision,
+@@ -45,6 +49,57 @@ fn snapshot(revision: u64, label: &str) -> AccountSlotSnapshot {
+         updated_at: 0,
+     }
+ }
++
++#[tokio::test]
++async fn legacy_slot_update_cannot_advance_global_revision_or_block_a_canonical_successor() {
++    let mut app = make_test_app().await;
++    app.account_catalog_kind = Some(AccountSlotCatalogKind::Global);
++    app.account_registry_revision = 5;
++    app.account_slots = vec![snapshot(5, "global")];
++    let mut legacy = snapshot(99, "legacy");
++    legacy.account_slot_id = "default".to_string();
++    let legacy_disposition = app.handle_account_slot_changed(99, legacy);
++    let successor_disposition = app.handle_account_slot_changed(6, snapshot(6, "successor"));
++
++    assert_eq!(
++        (
++            legacy_disposition,
++            successor_disposition,
++            app.account_registry_revision,
++            app.account_slots
++                .iter()
++                .map(|slot| (slot.account_slot_id.as_str(), slot.label.as_str()))
++                .collect::<Vec<_>>(),
++        ),
++        (
++            AccountSlotUpdateDisposition::Stale,
++            AccountSlotUpdateDisposition::Successor,
++            6,
++            vec![("C2", "successor")],
++        )
++    );
++}
++
++#[tokio::test]
++async fn legacy_catalog_accepts_legacy_slot_successors() {
++    let mut app = make_test_app().await;
++    app.account_catalog_kind = Some(AccountSlotCatalogKind::Legacy);
++    app.account_registry_revision = 5;
++    let mut original = snapshot(5, "original");
++    original.account_slot_id = "default".to_string();
++    app.account_slots = vec![original];
++    let mut successor = snapshot(6, "successor");
++    successor.account_slot_id = "default".to_string();
++
++    assert_eq!(
++        (
++            app.handle_account_slot_changed(6, successor),
++            app.account_registry_revision,
++            app.account_slots[0].label.as_str(),
++        ),
++        (AccountSlotUpdateDisposition::Successor, 6, "successor")
++    );
++}
+ #[tokio::test]
+ async fn slot_updates_apply_only_exact_successors_without_reopening_closed_ui() {
+     let mut app = make_test_app().await;
+diff --git a/codex-rs/tui/src/app/app_server_event_targets.rs b/codex-rs/tui/src/app/app_server_event_targets.rs
+index 49129c6ca8..4fce7fb329 100644
+--- a/codex-rs/tui/src/app/app_server_event_targets.rs
++++ b/codex-rs/tui/src/app/app_server_event_targets.rs
+@@ -195,6 +195,7 @@ pub(super) fn server_notification_thread_target(
+         | ServerNotification::McpServerOauthLoginCompleted(_)
+         | ServerNotification::AccountUpdated(_)
+         | ServerNotification::AccountSlotChanged(_)
++        | ServerNotification::AccountSlotInventoryChanged(_)
+         | ServerNotification::EnvironmentConnected(_)
+         | ServerNotification::EnvironmentDisconnected(_)
+         | ServerNotification::RemoteControlStatusChanged(_)
+diff --git a/codex-rs/tui/src/app/app_server_events.rs b/codex-rs/tui/src/app/app_server_events.rs
+index 7dbdd79dc3..4c04c36f40 100644
+--- a/codex-rs/tui/src/app/app_server_events.rs
++++ b/codex-rs/tui/src/app/app_server_events.rs
+@@ -153,6 +153,10 @@ impl App {
+                 }
+                 return;
+             }
++            ServerNotification::AccountSlotInventoryChanged(_) => {
++                self.refresh_account_state(app_server_client);
++                return;
++            }
+             ServerNotification::AccountLoginCompleted(_) => {
+                 self.refresh_account_state(app_server_client);
+                 return;
+diff --git a/codex-rs/tui/src/app/startup.rs b/codex-rs/tui/src/app/startup.rs
+index 9ebbcba2f8..f30fce3b64 100644
+--- a/codex-rs/tui/src/app/startup.rs
++++ b/codex-rs/tui/src/app/startup.rs
+@@ -480,6 +480,7 @@ See the Codex keymap documentation for supported actions and examples."
+             shutdown_lookup_in_flight: false,
+             shutdown_force_exit_armed: false,
+             account_slots: Vec::new(),
++            account_catalog_kind: None,
+             account_slot_capability: None,
+             account_registry_revision: 0,
+             account_runtime: None,
+diff --git a/codex-rs/tui/src/app/test_support.rs b/codex-rs/tui/src/app/test_support.rs
+index e07f30a1cf..ce0fdd807f 100644
+--- a/codex-rs/tui/src/app/test_support.rs
++++ b/codex-rs/tui/src/app/test_support.rs
+@@ -61,6 +61,7 @@ pub(super) async fn make_test_app() -> App {
+         shutdown_lookup_in_flight: false,
+         shutdown_force_exit_armed: false,
+         account_slots: Vec::new(),
++        account_catalog_kind: None,
+         account_slot_capability: None,
+         account_registry_revision: 0,
+         account_runtime: None,
+diff --git a/codex-rs/tui/src/app/tests.rs b/codex-rs/tui/src/app/tests.rs
+index b368dccf56..6de908959c 100644
+--- a/codex-rs/tui/src/app/tests.rs
++++ b/codex-rs/tui/src/app/tests.rs
+@@ -5304,6 +5304,7 @@ async fn make_test_app() -> App {
+         shutdown_lookup_in_flight: false,
+         shutdown_force_exit_armed: false,
+         account_slots: Vec::new(),
++        account_catalog_kind: None,
+         account_slot_capability: None,
+         account_registry_revision: 0,
+         account_runtime: None,
+@@ -5394,6 +5395,7 @@ async fn make_test_app_with_channels() -> (
+             shutdown_lookup_in_flight: false,
+             shutdown_force_exit_armed: false,
+             account_slots: Vec::new(),
++            account_catalog_kind: None,
+             account_slot_capability: None,
+             account_registry_revision: 0,
+             account_runtime: None,
+diff --git a/codex-rs/tui/src/app_server_session.rs b/codex-rs/tui/src/app_server_session.rs
+index 126874b455..17bf901d5b 100644
+--- a/codex-rs/tui/src/app_server_session.rs
++++ b/codex-rs/tui/src/app_server_session.rs
+@@ -198,6 +198,7 @@ const PLUGIN_COMMAND_MAX_PAGES: usize = 64;
+ pub(crate) struct AccountSlotsSnapshot {
+     pub(crate) data: Vec<AccountSlotSnapshot>,
+     pub(crate) registry_revision: u64,
++    pub(crate) catalog_kind: codex_app_server_protocol::AccountSlotCatalogKind,
+     pub(crate) multi_account: AccountSlotCapability,
+ }
+ 
+@@ -1778,6 +1779,7 @@ pub(crate) async fn list_account_slots(
+     let mut cursor = None;
+     let mut data = Vec::new();
+     let mut expected_revision = None;
++    let mut expected_catalog_kind = None;
+     let mut expected_capability = None;
+     for _ in 0..ACCOUNT_SLOT_MAX_PAGES {
+         let response: AccountSlotListResponse = request_handle
+@@ -1790,6 +1792,9 @@ pub(crate) async fn list_account_slots(
+             })
+             .await?;
+         if expected_revision.is_some_and(|revision| revision != response.registry_revision)
++            || expected_catalog_kind
++                .as_ref()
++                .is_some_and(|catalog_kind| catalog_kind != &response.catalog_kind)
+             || expected_capability
+                 .as_ref()
+                 .is_some_and(|capability| capability != &response.multi_account)
+@@ -1799,6 +1804,7 @@ pub(crate) async fn list_account_slots(
+             ));
+         }
+         expected_revision = Some(response.registry_revision);
++        expected_catalog_kind = Some(response.catalog_kind);
+         expected_capability = Some(response.multi_account.clone());
+         data.extend(response.data);
+         let Some(next_cursor) = response.next_cursor else {
+@@ -1810,6 +1816,7 @@ pub(crate) async fn list_account_slots(
+             return Ok(AccountSlotsSnapshot {
+                 data,
+                 registry_revision: response.registry_revision,
++                catalog_kind: response.catalog_kind,
+                 multi_account: response.multi_account,
+             });
+         };
+diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
+index 97c4d92923..02ea1432ad 100644
+--- a/codex-rs/tui/src/chatwidget/protocol.rs
++++ b/codex-rs/tui/src/chatwidget/protocol.rs
+@@ -211,6 +211,7 @@ impl ChatWidget {
+             | ServerNotification::AccountUpdated(_)
+             | ServerNotification::AccountRateLimitsUpdated(_)
+             | ServerNotification::AccountSlotChanged(_)
++            | ServerNotification::AccountSlotInventoryChanged(_)
+             | ServerNotification::SessionRuntimeChanged(_)
+             | ServerNotification::SessionRuntimeOperationUpdated(_)
+             | ServerNotification::ThreadPresentationAppended(_)
+-- 
+2.50.1 (Apple Git-155)

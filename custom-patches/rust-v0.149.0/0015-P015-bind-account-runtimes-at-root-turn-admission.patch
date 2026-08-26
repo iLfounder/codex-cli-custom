@@ -1,0 +1,542 @@
+From 6488d6077a82c00b134c4f013f3a31aa731ca924 Mon Sep 17 00:00:00 2001
+From: patch-verifier <patch-verifier@localhost>
+Date: Thu, 27 Aug 2026 03:40:49 +0900
+Subject: [PATCH 15/15] P015 bind account runtimes at root turn admission
+
+---
+ codex-rs/core/src/execution_account.rs        |  21 ++
+ codex-rs/core/src/execution_account_tests.rs  |   1 +
+ codex-rs/core/src/session/turn_input.rs       |  21 +-
+ codex-rs/core/src/session/turn_input_tests.rs | 239 ++++++++++++++++++
+ codex-rs/core/src/thread_manager.rs           |   6 +-
+ codex-rs/core/src/thread_manager_tests.rs     | 133 ++++++++++
+ 6 files changed, 410 insertions(+), 11 deletions(-)
+
+diff --git a/codex-rs/core/src/execution_account.rs b/codex-rs/core/src/execution_account.rs
+index 7ab22706b9..946e923662 100644
+--- a/codex-rs/core/src/execution_account.rs
++++ b/codex-rs/core/src/execution_account.rs
+@@ -32,6 +32,10 @@ pub struct ExecutionAccountServices {
+ pub struct TurnExecutionAccountSelection {
+     pub thread_id: ThreadId,
+     pub current_binding: ExecutionAccountBinding,
++    /// Opaque identity of the exact credential snapshot captured by this thread runtime.
++    ///
++    /// Selectors may compare it with host state but must not render or export it.
++    pub credential_revision: Option<codex_login::CredentialRevision>,
+ }
+ 
+ /// Account choice made for one newly admitted user turn.
+@@ -47,6 +51,12 @@ pub enum TurnExecutionAccountDecision {
+         target_slot_id: String,
+         policy_revision: u64,
+     },
++    /// Rebuild the current slot runtime under the returned policy revision.
++    ///
++    /// Hosts use this when the logical slot remains selected but its credentials or other
++    /// host-owned runtime inputs changed. Core prepares a fresh runtime and advances the durable
++    /// execution generation before starting the turn.
++    ReprepareCurrent { policy_revision: u64 },
+ }
+ 
+ /// Future returned by [`TurnExecutionAccountSelector`] without async-trait machinery.
+@@ -212,6 +222,17 @@ pub type ExecutionAccountTransitionResolverFuture<'a> =
+ 
+ /// Resolves host-managed account slots into immutable execution resources.
+ pub trait ExecutionAccountResolver: Send + Sync {
++    /// Returns the binding used when a brand-new root thread has no inherited or stored binding.
++    ///
++    /// Resume, fork, and explicitly bound starts bypass this fallback. Host resolvers may override
++    /// it to choose their process-local initial slot without reinterpreting stored bindings.
++    fn initial_binding_for_new_thread(&self) -> ExecutionAccountBinding {
++        ExecutionAccountBinding {
++            slot_id: "default".to_string(),
++            generation: 1,
++        }
++    }
++
+     fn resolve(&self, binding: ExecutionAccountBinding) -> ExecutionAccountResolverFuture<'_>;
+ 
+     fn resolve_for_transition(
+diff --git a/codex-rs/core/src/execution_account_tests.rs b/codex-rs/core/src/execution_account_tests.rs
+index aa99558c76..65f78017dd 100644
+--- a/codex-rs/core/src/execution_account_tests.rs
++++ b/codex-rs/core/src/execution_account_tests.rs
+@@ -10,6 +10,7 @@ async fn default_turn_execution_account_selector_keeps_current_binding() {
+             slot_id: "default".to_string(),
+             generation: 1,
+         },
++        credential_revision: None,
+     };
+ 
+     assert_eq!(
+diff --git a/codex-rs/core/src/session/turn_input.rs b/codex-rs/core/src/session/turn_input.rs
+index 48eba46505..378f21b027 100644
+--- a/codex-rs/core/src/session/turn_input.rs
++++ b/codex-rs/core/src/session/turn_input.rs
+@@ -169,18 +169,25 @@ async fn select_root_execution_account(
+                 TurnExecutionAccountSelection {
+                     thread_id: session.thread_id(),
+                     current_binding: initial_binding.clone(),
++                    credential_revision: session
++                        .execution_account()
++                        .auth_manager
++                        .credential_revision(),
+                 }
+             ) => decision?,
+         };
+-        let TurnExecutionAccountDecision::Select {
+-            target_slot_id,
+-            policy_revision,
+-        } = decision
+-        else {
+-            return Ok((initial_binding, None));
++        let (target_slot_id, policy_revision, reprepare_current) = match decision {
++            TurnExecutionAccountDecision::Keep => return Ok((initial_binding, None)),
++            TurnExecutionAccountDecision::Select {
++                target_slot_id,
++                policy_revision,
++            } => (target_slot_id, policy_revision, false),
++            TurnExecutionAccountDecision::ReprepareCurrent { policy_revision } => {
++                (initial_binding.slot_id.clone(), policy_revision, true)
++            }
+         };
+ 
+-        if target_slot_id == initial_binding.slot_id {
++        if target_slot_id == initial_binding.slot_id && !reprepare_current {
+             let policy = tokio::select! {
+                 _ = cancellation.cancelled() => {
+                     return Err(execution_account_admission_error(ExecutionAccountSwitchError::ThreadBusy));
+diff --git a/codex-rs/core/src/session/turn_input_tests.rs b/codex-rs/core/src/session/turn_input_tests.rs
+index aa7addc435..8289bc69ec 100644
+--- a/codex-rs/core/src/session/turn_input_tests.rs
++++ b/codex-rs/core/src/session/turn_input_tests.rs
+@@ -51,6 +51,10 @@ struct BlockingExecutionAccountSelector {
+     started: async_channel::Sender<()>,
+ }
+ 
++struct RecordingExecutionAccountSelector {
++    selected: async_channel::Sender<TurnExecutionAccountSelection>,
++}
++
+ impl TurnExecutionAccountSelector for BlockingExecutionAccountSelector {
+     fn select(
+         &self,
+@@ -76,6 +80,21 @@ impl TurnExecutionAccountSelector for StaticExecutionAccountSelector {
+     }
+ }
+ 
++impl TurnExecutionAccountSelector for RecordingExecutionAccountSelector {
++    fn select(
++        &self,
++        selection: TurnExecutionAccountSelection,
++    ) -> TurnExecutionAccountSelectorFuture<'_> {
++        Box::pin(async move {
++            self.selected
++                .send(selection)
++                .await
++                .expect("selection observer remains open");
++            Ok(TurnExecutionAccountDecision::Keep)
++        })
++    }
++}
++
+ struct TestReadinessLease {
+     dropped: Arc<AtomicBool>,
+ }
+@@ -207,6 +226,226 @@ async fn same_target_selection_skips_resolution_and_commits_cursor_after_start()
+     session.abort_all_tasks(TurnAbortReason::Interrupted).await;
+ }
+ 
++#[tokio::test]
++async fn selector_receives_each_same_slot_threads_exact_credential_revision() {
++    let mut captured = Vec::new();
++    for (index, api_key) in ["sk-thread-one", "sk-thread-two"].into_iter().enumerate() {
++        let (session, _store, binding, _policy_revision) = make_rotation_test_session().await;
++        let auth_home = tempfile::tempdir().expect("auth home");
++        codex_login::login_with_api_key(
++            auth_home.path(),
++            api_key,
++            codex_login::AuthCredentialsStoreMode::File,
++            codex_login::AuthKeyringBackendKind::default(),
++        )
++        .expect("write test credentials");
++        let auth_manager = Arc::new(
++            codex_login::AuthManager::new(
++                auth_home.path().to_path_buf(),
++                /*enable_codex_api_key_env*/ false,
++                codex_login::AuthCredentialsStoreMode::File,
++                /*forced_chatgpt_workspace_id*/ None,
++                /*chatgpt_base_url*/ None,
++                codex_login::AuthKeyringBackendKind::default(),
++                codex_login::test_support::transport_default_auth_route_config(),
++            )
++            .await,
++        );
++        let current = session.execution_account();
++        let runtime = session.execution_account_runtime();
++        let target = Arc::new(ExecutionAccountContext {
++            binding: ExecutionAccountBinding {
++                slot_id: binding.slot_id.clone(),
++                generation: binding.generation + 1,
++            },
++            auth_manager: Arc::clone(&auth_manager),
++            models_manager: Arc::clone(&current.models_manager),
++        });
++        let accepted = session
++            .switch_execution_account(binding, Arc::clone(&target), runtime.services.clone())
++            .await
++            .expect("publish exact thread credential runtime");
++        let (selected_tx, selected_rx) = async_channel::bounded(1);
++        session.set_turn_execution_account_selector(Arc::new(RecordingExecutionAccountSelector {
++            selected: selected_tx,
++        }));
++
++        let turn_id = format!("credential-revision-turn-{index}");
++        let submission = handle(
++            &session,
++            root_turn_request(),
++            TurnInputMode::StartIfIdle,
++            turn_id.clone(),
++        )
++        .await
++        .expect("start same-slot thread turn");
++        let selection = selected_rx.recv().await.expect("capture selection");
++
++        assert_eq!(
++            (submission, selection.clone()),
++            (
++                TurnInputSubmission::Started { turn_id },
++                TurnExecutionAccountSelection {
++                    thread_id: session.thread_id(),
++                    current_binding: accepted,
++                    credential_revision: auth_manager.credential_revision(),
++                },
++            )
++        );
++        captured.push(selection);
++        session.abort_all_tasks(TurnAbortReason::Interrupted).await;
++    }
++
++    assert_eq!(captured[0].current_binding, captured[1].current_binding);
++    assert_ne!(
++        captured[0].credential_revision,
++        captured[1].credential_revision
++    );
++}
++
++#[tokio::test]
++async fn same_slot_reprepare_prepares_once_and_advances_execution_generation() {
++    let (session, store, binding, policy_revision) = make_rotation_test_session().await;
++    let calls = Arc::new(AtomicUsize::new(0));
++    let lease_dropped = Arc::new(AtomicBool::new(false));
++    let current = session.execution_account();
++    let runtime = session.execution_account_runtime();
++    let target = Arc::new(ExecutionAccountContext {
++        binding: ExecutionAccountBinding {
++            slot_id: binding.slot_id.clone(),
++            generation: binding.generation + 1,
++        },
++        auth_manager: Arc::clone(&current.auth_manager),
++        models_manager: Arc::clone(&current.models_manager),
++    });
++    session.set_turn_execution_account_selector(Arc::new(StaticExecutionAccountSelector {
++        decision: TurnExecutionAccountDecision::ReprepareCurrent { policy_revision },
++    }));
++    session.set_turn_execution_account_transition_resolver(Arc::new(
++        RecordingExecutionAccountTransitionResolver {
++            target: Arc::clone(&target),
++            services: runtime.services.clone(),
++            calls: Arc::clone(&calls),
++            lease_dropped: Arc::clone(&lease_dropped),
++        },
++    ));
++
++    let submission = handle(
++        &session,
++        root_turn_request(),
++        TurnInputMode::StartIfIdle,
++        "same-slot-reprepare-turn".to_string(),
++    )
++    .await
++    .expect("same-slot reprepare starts");
++
++    assert_eq!(
++        (
++            submission,
++            calls.load(Ordering::Relaxed),
++            lease_dropped.load(Ordering::Acquire),
++            session.execution_account().binding.clone(),
++        ),
++        (
++            TurnInputSubmission::Started {
++                turn_id: "same-slot-reprepare-turn".to_string(),
++            },
++            1,
++            true,
++            target.binding.clone(),
++        )
++    );
++    let policy = store
++        .thread_account_rotation_policy(session.thread_id())
++        .await
++        .expect("read preserved rotation policy");
++    assert_eq!(
++        (
++            policy.mode,
++            policy.fixed_account_slot_id,
++            policy.last_committed_account_slot_id,
++        ),
++        (
++            ThreadAccountRotationMode::RoundRobin,
++            None,
++            Some(binding.slot_id),
++        )
++    );
++    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
++}
++
++#[tokio::test]
++async fn stale_same_slot_reprepare_is_rechecked_once_without_starting() {
++    let (session, store, binding, stale_policy_revision) = make_rotation_test_session().await;
++    let current_policy = store
++        .compare_and_swap_thread_account_rotation_policy(
++            session.thread_id(),
++            stale_policy_revision,
++            ThreadAccountRotationPolicyUpdate {
++                mode: ThreadAccountRotationMode::RoundRobin,
++                fixed_account_slot_id: None,
++                automatic_account_slot_ids: vec![binding.slot_id.clone()],
++            },
++        )
++        .await
++        .expect("update rotation policy")
++        .expect("policy revision matches");
++    let calls = Arc::new(AtomicUsize::new(0));
++    let current = session.execution_account();
++    let runtime = session.execution_account_runtime();
++    session.set_turn_execution_account_selector(Arc::new(StaticExecutionAccountSelector {
++        decision: TurnExecutionAccountDecision::ReprepareCurrent {
++            policy_revision: stale_policy_revision,
++        },
++    }));
++    session.set_turn_execution_account_transition_resolver(Arc::new(
++        RecordingExecutionAccountTransitionResolver {
++            target: Arc::new(ExecutionAccountContext {
++                binding: ExecutionAccountBinding {
++                    slot_id: binding.slot_id.clone(),
++                    generation: binding.generation + 1,
++                },
++                auth_manager: Arc::clone(&current.auth_manager),
++                models_manager: Arc::clone(&current.models_manager),
++            }),
++            services: runtime.services.clone(),
++            calls: Arc::clone(&calls),
++            lease_dropped: Arc::new(AtomicBool::new(false)),
++        },
++    ));
++
++    let error = handle(
++        &session,
++        root_turn_request(),
++        TurnInputMode::StartIfIdle,
++        "stale-same-slot-reprepare".to_string(),
++    )
++    .await
++    .expect_err("stale policy cannot start");
++
++    let active_turn_is_none = session.active_turn.lock().await.is_none();
++    let unchanged_policy = store
++        .thread_account_rotation_policy(session.thread_id())
++        .await
++        .expect("read unchanged current policy");
++    assert_eq!(
++        (
++            error.to_string(),
++            calls.load(Ordering::Relaxed),
++            session.execution_account().binding.clone(),
++            active_turn_is_none,
++            unchanged_policy,
++        ),
++        (
++            ExecutionAccountSwitchError::StaleGeneration.to_string(),
++            2,
++            binding,
++            true,
++            current_policy,
++        )
++    );
++}
++
+ #[tokio::test]
+ async fn different_target_selection_preserves_rotation_and_holds_readiness_through_switch() {
+     let (session, store, binding, policy_revision) = make_rotation_test_session().await;
+diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
+index cd13f01ceb..0f0bfb1dbb 100644
+--- a/codex-rs/core/src/thread_manager.rs
++++ b/codex-rs/core/src/thread_manager.rs
+@@ -2337,10 +2337,8 @@ impl ThreadManagerState {
+                 }
+             }
+         } else {
+-            ExecutionAccountBinding {
+-                slot_id: "default".to_string(),
+-                generation: 1,
+-            }
++            self.execution_account_resolver
++                .initial_binding_for_new_thread()
+         };
+         let execution_account_transition = self
+             .execution_account_resolver
+diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
+index c573ddea65..1b473caf81 100644
+--- a/codex-rs/core/src/thread_manager_tests.rs
++++ b/codex-rs/core/src/thread_manager_tests.rs
+@@ -42,12 +42,145 @@ use core_test_support::PathExt;
+ use core_test_support::responses::mount_models_once;
+ use core_test_support::responses::strip_response_item_ids_from_json;
+ use pretty_assertions::assert_eq;
++use std::sync::atomic::AtomicUsize;
+ use std::time::Duration;
+ use tempfile::tempdir;
+ use wiremock::MockServer;
+ 
+ const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
+ 
++struct InitialBindingExecutionAccountResolver {
++    initial_binding: ExecutionAccountBinding,
++    initial_binding_calls: AtomicUsize,
++    auth_manager: Arc<AuthManager>,
++    models_manager: SharedModelsManager,
++}
++
++impl ExecutionAccountResolver for InitialBindingExecutionAccountResolver {
++    fn initial_binding_for_new_thread(&self) -> ExecutionAccountBinding {
++        self.initial_binding_calls.fetch_add(1, Ordering::Relaxed);
++        self.initial_binding.clone()
++    }
++
++    fn resolve(
++        &self,
++        binding: ExecutionAccountBinding,
++    ) -> crate::execution_account::ExecutionAccountResolverFuture<'_> {
++        let auth_manager = Arc::clone(&self.auth_manager);
++        let models_manager = Arc::clone(&self.models_manager);
++        Box::pin(async move {
++            Ok(Arc::new(ExecutionAccountContext {
++                binding,
++                auth_manager,
++                models_manager,
++            }))
++        })
++    }
++}
++
++#[tokio::test]
++async fn resolver_initial_binding_applies_only_to_fresh_threads() {
++    let temp_dir = tempdir().expect("tempdir");
++    let mut config = test_config().await;
++    config.codex_home = temp_dir.path().join("codex-home").abs();
++    config.cwd = config.codex_home.abs();
++    config.experimental_thread_store = ThreadStoreConfig::InMemory {
++        id: format!("initial-binding-{}", uuid::Uuid::new_v4()),
++    };
++    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
++    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
++    let manager = ThreadManager::new(
++        &config,
++        Arc::clone(&auth_manager),
++        build_models_manager(&config, auth_manager),
++        crate::CodexAppsToolsCache::default(),
++        SessionSource::Exec,
++        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
++        empty_extension_registry(),
++        Arc::new(crate::test_support::EmptyUserInstructionsProvider),
++        /*analytics_events_client*/ None,
++        thread_store_from_config(&config, /*state_db*/ None),
++        /*agent_graph_store*/ None,
++        TEST_INSTALLATION_ID.to_string(),
++        /*attestation_provider*/ None,
++        /*external_time_provider*/ None,
++    );
++    let initial_binding = ExecutionAccountBinding {
++        slot_id: "C2".to_string(),
++        generation: 1,
++    };
++    let resolver = Arc::new(InitialBindingExecutionAccountResolver {
++        initial_binding: initial_binding.clone(),
++        initial_binding_calls: AtomicUsize::new(0),
++        auth_manager: Arc::clone(&manager.state.auth_manager),
++        models_manager: Arc::clone(&manager.state.models_manager),
++    });
++    let manager = manager.with_execution_account_resolver(resolver.clone());
++
++    let fresh = manager
++        .start_thread(StartThreadOptions::new(config.clone()))
++        .await
++        .expect("start fresh thread");
++    let forked = manager
++        .fork_thread_from_history(
++            ForkSnapshot::Interrupted,
++            config.clone(),
++            InitialHistory::Resumed(ResumedHistory {
++                conversation_id: fresh.thread_id,
++                history: Arc::new(Vec::new()),
++                rollout_path: fresh.thread.rollout_path(),
++            }),
++            /*thread_source*/ None,
++            /*parent_trace*/ None,
++            ClientMcpExtensions::default(),
++            /*reserved_thread_id*/ None,
++        )
++        .await
++        .expect("fork fresh thread");
++    fresh
++        .thread
++        .shutdown_and_wait()
++        .await
++        .expect("shutdown fresh thread");
++    let _ = manager.remove_thread(&fresh.thread_id).await;
++    let mut resumed_options = StartThreadOptions::new(config);
++    resumed_options.initial_history = InitialHistory::Resumed(ResumedHistory {
++        conversation_id: fresh.thread_id,
++        history: Arc::new(Vec::new()),
++        rollout_path: fresh.thread.rollout_path(),
++    });
++    let resumed = manager
++        .start_thread(resumed_options)
++        .await
++        .expect("resume fresh thread");
++
++    assert_eq!(
++        (
++            fresh.thread.execution_account().binding.clone(),
++            forked.thread.execution_account().binding.clone(),
++            resumed.thread.execution_account().binding.clone(),
++            resolver.initial_binding_calls.load(Ordering::Relaxed),
++        ),
++        (
++            initial_binding.clone(),
++            initial_binding.clone(),
++            initial_binding,
++            1,
++        )
++    );
++
++    forked
++        .thread
++        .shutdown_and_wait()
++        .await
++        .expect("shutdown forked thread");
++    resumed
++        .thread
++        .shutdown_and_wait()
++        .await
++        .expect("shutdown resumed thread");
++}
++
+ #[tokio::test]
+ async fn account_services_replace_same_slot_when_auth_runtime_changes() {
+     let manager = ThreadManager::with_models_provider_for_tests(
+-- 
+2.50.1 (Apple Git-155)
