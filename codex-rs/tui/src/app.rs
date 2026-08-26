@@ -92,6 +92,7 @@ use codex_ansi_escape::ansi_escape_line;
 use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::AccountSlotCapability;
+use codex_app_server_protocol::AccountSlotCatalogKind;
 use codex_app_server_protocol::AccountSlotSnapshot;
 use codex_app_server_protocol::AddCreditsNudgeCreditType;
 use codex_app_server_protocol::AskForApproval;
@@ -598,6 +599,7 @@ pub(crate) struct App {
     shutdown_lookup_in_flight: bool,
     shutdown_force_exit_armed: bool,
     account_slots: Vec<AccountSlotSnapshot>,
+    account_catalog_kind: Option<AccountSlotCatalogKind>,
     account_slot_capability: Option<AccountSlotCapability>,
     account_registry_revision: u64,
     account_runtime: Option<(String, SessionRuntimeSnapshot)>,

@@ -153,6 +153,10 @@ impl App {
                 }
                 return;
             }
+            ServerNotification::AccountSlotInventoryChanged(_) => {
+                self.refresh_account_state(app_server_client);
+                return;
+            }
             ServerNotification::AccountLoginCompleted(_) => {
                 self.refresh_account_state(app_server_client);
                 return;

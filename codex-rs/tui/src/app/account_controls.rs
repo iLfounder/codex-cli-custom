@@ -77,24 +77,31 @@ impl App {
                 return;
             }
         };
-        if !revision_meets_lower_bound(
-            snapshot.slots.registry_revision,
-            self.account_registry_revision,
-        ) || !runtime_revision_meets_lower_bound(
-            self.account_runtime
-                .as_ref()
-                .map(|(epoch, runtime)| (epoch.as_str(), runtime.state_revision)),
-            (
-                snapshot.runtime.instance_epoch.as_str(),
-                snapshot.runtime.snapshot.state_revision,
-            ),
-        ) {
+        let catalog_changed = self
+            .account_catalog_kind
+            .is_some_and(|catalog_kind| catalog_kind != snapshot.slots.catalog_kind);
+        if (!catalog_changed
+            && !revision_meets_lower_bound(
+                snapshot.slots.registry_revision,
+                self.account_registry_revision,
+            ))
+            || !runtime_revision_meets_lower_bound(
+                self.account_runtime
+                    .as_ref()
+                    .map(|(epoch, runtime)| (epoch.as_str(), runtime.state_revision)),
+                (
+                    snapshot.runtime.instance_epoch.as_str(),
+                    snapshot.runtime.snapshot.state_revision,
+                ),
+            )
+        {
             self.chat_widget.add_error_message(
                 "Account state changed before the request. Select the action again.".to_string(),
             );
             return;
         }
         self.account_registry_revision = snapshot.slots.registry_revision;
+        self.account_catalog_kind = Some(snapshot.slots.catalog_kind);
         self.account_slots = snapshot.slots.data;
         self.account_slot_capability = Some(snapshot.slots.multi_account);
         let instance_epoch = snapshot.runtime.instance_epoch;

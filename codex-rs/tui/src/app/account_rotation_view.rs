@@ -5,6 +5,9 @@ use super::account_picker_view::account_slot_status_label;
 use super::account_rotation::AccountRotationEdit;
 use super::*;
 use crate::bottom_pane::SelectionToggle;
+use codex_app_server_protocol::AccountSlotHealth;
+use codex_app_server_protocol::AccountSlotSnapshot;
+use codex_app_server_protocol::AccountSlotStatus;
 use codex_app_server_protocol::ThreadAccountRotationMode;
 
 pub(super) const ACCOUNT_ROTATION_VIEW_ID: &str = "account-rotation";
@@ -13,8 +16,9 @@ impl App {
     pub(super) fn account_rotation_summary(&self) -> Option<String> {
         let rotation = self.account_rotation_snapshot()?;
         Some(format!(
-            "{} · {} automatic account{}",
+            "Desired: {} · Actual: {} · {} automatic account{}",
             account_rotation_mode_label(rotation.mode),
+            self.current_account_slot_id().unwrap_or("unbound"),
             rotation.automatic_account_slot_ids.len(),
             if rotation.automatic_account_slot_ids.len() == 1 {
                 ""
@@ -108,13 +112,21 @@ impl App {
         }
         for slot in &self.account_slots {
             let slot_id = slot.account_slot_id.clone();
+            let is_member = rotation
+                .automatic_account_slot_ids
+                .contains(&slot.account_slot_id);
+            let automatic_deny_reason = automatic_account_deny_reason(slot);
             items.push(SelectionItem {
                 name: format!("Automatic: {}", account_slot_display_name(slot)),
                 description: Some(account_slot_status_label(slot)),
+                is_disabled: automatic_deny_reason.is_some() && !is_member,
+                disabled_reason: if is_member {
+                    None
+                } else {
+                    automatic_deny_reason
+                },
                 toggle: Some(SelectionToggle {
-                    is_on: rotation
-                        .automatic_account_slot_ids
-                        .contains(&slot.account_slot_id),
+                    is_on: is_member,
                     action: Box::new(move |enabled, tx: &AppEventSender| {
                         tx.send(AppEvent::EditAccountRotation {
                             edit: AccountRotationEdit::AutomaticMembership {
@@ -131,8 +143,8 @@ impl App {
             view_id: Some(ACCOUNT_ROTATION_VIEW_ID),
             title: Some("Account rotation".to_string()),
             subtitle: Some(format!(
-                "Revision {} · fixed target and automatic membership are independent",
-                rotation.revision
+                "Desired revision {} · actual execution changes only when a turn starts",
+                rotation.revision,
             )),
             items,
             ..Default::default()
@@ -145,6 +157,21 @@ impl App {
             .unwrap_or_else(account_rotation_unavailable_view_params);
         self.chat_widget
             .replace_selection_view_if_present(ACCOUNT_ROTATION_VIEW_ID, params)
+    }
+}
+
+fn automatic_account_deny_reason(slot: &AccountSlotSnapshot) -> Option<String> {
+    if slot.status != AccountSlotStatus::Ready {
+        return Some("Automatic selection requires a logged-in account".to_string());
+    }
+    match slot.health {
+        AccountSlotHealth::Healthy => None,
+        AccountSlotHealth::Degraded => {
+            Some("Automatic selection is paused while this projection is stale".to_string())
+        }
+        AccountSlotHealth::Unavailable => {
+            Some("Automatic selection is unavailable for this account".to_string())
+        }
     }
 }
 

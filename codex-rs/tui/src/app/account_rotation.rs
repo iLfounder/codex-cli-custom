@@ -4,6 +4,7 @@ use super::account_rotation_view::account_rotation_loading_view_params;
 use super::*;
 use crate::app_server_session::read_thread_account_rotation;
 use crate::app_server_session::update_thread_account_rotation;
+use codex_app_server_protocol::AccountSlotSnapshot;
 use codex_app_server_protocol::ThreadAccountRotationMode;
 use codex_app_server_protocol::ThreadAccountRotationSnapshot;
 use codex_app_server_protocol::ThreadAccountRotationUpdateParams;
@@ -104,20 +105,12 @@ impl App {
                 fixed_account_slot_id = Some(slot_id);
             }
             AccountRotationEdit::AutomaticMembership { slot_id, enabled } => {
-                let mut selected = automatic_account_slot_ids
-                    .into_iter()
-                    .collect::<HashSet<_>>();
-                if enabled {
-                    selected.insert(slot_id);
-                } else {
-                    selected.remove(&slot_id);
-                }
-                automatic_account_slot_ids = self
-                    .account_slots
-                    .iter()
-                    .filter(|slot| selected.contains(&slot.account_slot_id))
-                    .map(|slot| slot.account_slot_id.clone())
-                    .collect();
+                automatic_account_slot_ids = edited_automatic_membership(
+                    &self.account_slots,
+                    automatic_account_slot_ids,
+                    slot_id,
+                    enabled,
+                );
             }
         }
         let params = ThreadAccountRotationUpdateParams {
@@ -191,3 +184,26 @@ impl App {
         runtime.account.rotation = Some(rotation);
     }
 }
+
+fn edited_automatic_membership(
+    visible_slots: &[AccountSlotSnapshot],
+    existing: Vec<String>,
+    target_slot_id: String,
+    enabled: bool,
+) -> Vec<String> {
+    let mut selected = existing.iter().cloned().collect::<HashSet<_>>();
+    if enabled {
+        selected.insert(target_slot_id);
+    } else {
+        selected.remove(&target_slot_id);
+    }
+    visible_slots
+        .iter()
+        .filter(|slot| selected.contains(&slot.account_slot_id))
+        .map(|slot| slot.account_slot_id.clone())
+        .collect()
+}
+
+#[cfg(test)]
+#[path = "account_rotation_tests.rs"]
+mod tests;

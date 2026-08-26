@@ -195,6 +195,7 @@ pub(super) fn server_notification_thread_target(
         | ServerNotification::McpServerOauthLoginCompleted(_)
         | ServerNotification::AccountUpdated(_)
         | ServerNotification::AccountSlotChanged(_)
+        | ServerNotification::AccountSlotInventoryChanged(_)
         | ServerNotification::EnvironmentConnected(_)
         | ServerNotification::EnvironmentDisconnected(_)
         | ServerNotification::RemoteControlStatusChanged(_)

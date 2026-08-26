@@ -1,6 +1,10 @@
 use super::*;
 use crate::app::test_support::make_test_app;
 use codex_app_server_protocol::AccountSlotCapability;
+use codex_app_server_protocol::AccountSlotCatalogKind;
+use codex_app_server_protocol::AccountSlotHealth;
+use codex_app_server_protocol::AccountSlotSnapshot;
+use codex_app_server_protocol::AccountSlotStatus;
 use codex_app_server_protocol::SESSION_RUNTIME_ACCOUNT_ROTATION_CAPABILITY;
 use codex_app_server_protocol::SessionRuntimeAccountBinding;
 use codex_app_server_protocol::SessionRuntimeAccountSwitchState;
@@ -78,6 +82,7 @@ fn picker_snapshot(
         slots: AccountSlotsSnapshot {
             data: Vec::new(),
             registry_revision,
+            catalog_kind: AccountSlotCatalogKind::Global,
             multi_account: AccountSlotCapability {
                 available: true,
                 deny_reason: None,
@@ -89,6 +94,72 @@ fn picker_snapshot(
             capabilities: Vec::new(),
         },
     }
+}
+
+fn listed_account(account_slot_id: &str, account_number: u32) -> AccountSlotSnapshot {
+    AccountSlotSnapshot {
+        account_slot_id: account_slot_id.to_string(),
+        account_number,
+        label: account_slot_id.to_string(),
+        is_default: account_number == 1,
+        status: AccountSlotStatus::Ready,
+        health: AccountSlotHealth::Healthy,
+        quota: None,
+        auth_mode: None,
+        attempt_generation: 1,
+        registry_revision: 1,
+        active_login_operation_id: None,
+        error_code: None,
+        actions: Vec::new(),
+        updated_at: 0,
+    }
+}
+
+#[tokio::test]
+async fn account_snapshot_preserves_the_authoritative_catalog_domain() {
+    let mut app = make_test_app().await;
+    let mut snapshot = picker_snapshot("epoch-a", 1, 1);
+    snapshot.slots.data = vec![
+        listed_account("default", 1),
+        listed_account("C1", 1),
+        listed_account("C2", 2),
+        listed_account("slot-uuid", 3),
+    ];
+
+    assert_eq!(app.apply_account_snapshot(snapshot), true);
+    assert_eq!(
+        app.account_slots
+            .iter()
+            .map(|slot| slot.account_slot_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["default", "C1", "C2", "slot-uuid"]
+    );
+}
+
+#[tokio::test]
+async fn authoritative_catalog_domain_change_resets_the_revision_comparison() {
+    let mut app = make_test_app().await;
+    app.account_catalog_kind = Some(AccountSlotCatalogKind::Legacy);
+    app.account_registry_revision = 50;
+    app.account_runtime = Some(("epoch-a".to_string(), runtime_snapshot("thread-1", 1)));
+    let mut global = picker_snapshot("epoch-a", 1, 1);
+    global.slots.data = vec![listed_account("C1", 1)];
+
+    assert_eq!(app.apply_account_snapshot(global), true);
+    assert_eq!(
+        (app.account_catalog_kind, app.account_registry_revision),
+        (Some(AccountSlotCatalogKind::Global), 1)
+    );
+
+    let mut legacy = picker_snapshot("epoch-a", 70, 1);
+    legacy.slots.catalog_kind = AccountSlotCatalogKind::Legacy;
+    legacy.slots.registry_revision = 0;
+    legacy.slots.data = vec![listed_account("default", 1)];
+    assert_eq!(app.apply_account_snapshot(legacy), true);
+    assert_eq!(
+        (app.account_catalog_kind, app.account_registry_revision),
+        (Some(AccountSlotCatalogKind::Legacy), 0)
+    );
 }
 
 #[tokio::test]

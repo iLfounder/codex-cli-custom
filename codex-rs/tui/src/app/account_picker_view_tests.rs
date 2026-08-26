@@ -1,7 +1,10 @@
 use super::*;
 use crate::app::account_login::login_challenge_params;
 use crate::app::test_support::make_test_app;
+use codex_app_server_protocol::AccountSlotHealth;
 use codex_app_server_protocol::AccountSlotLoginChallenge;
+use codex_app_server_protocol::AccountSlotQuotaMeter;
+use codex_app_server_protocol::AccountSlotQuotaSnapshot;
 use insta::assert_snapshot;
 use pretty_assertions::assert_eq;
 fn slot(
@@ -12,15 +15,28 @@ fn slot(
 ) -> AccountSlotSnapshot {
     AccountSlotSnapshot {
         account_slot_id: id.to_string(),
-        account_number: match id {
-            "default" => 1,
-            "secondary" | "failed" => 2,
-            "active" => 3,
-            _ => 4,
-        },
+        account_number: id
+            .strip_prefix('C')
+            .and_then(|number| number.parse().ok())
+            .unwrap_or(99),
         label: id.to_string(),
-        is_default: id == "default",
+        is_default: id == "C1",
         status,
+        health: match status {
+            AccountSlotStatus::Ready => AccountSlotHealth::Healthy,
+            AccountSlotStatus::Failed => AccountSlotHealth::Degraded,
+            AccountSlotStatus::LoginRequired => AccountSlotHealth::Unavailable,
+        },
+        quota: (status == AccountSlotStatus::Ready).then(|| AccountSlotQuotaSnapshot {
+            meters: vec![AccountSlotQuotaMeter {
+                id: "weekly".to_string(),
+                label: Some("Weekly".to_string()),
+                remaining_percent: 72,
+                resets_at: Some(1_800_000_000),
+            }],
+            observed_at: 1_700_000_000,
+            stale_at: 1_700_000_300,
+        }),
         auth_mode: None,
         attempt_generation: 1,
         registry_revision: 7,
@@ -80,27 +96,21 @@ fn login_challenge_requires_explicit_browser_or_cancel_selection() {
 async fn account_rows_are_always_selectable_and_report_active_login() {
     let mut app = make_test_app().await;
     app.account_slots = vec![
-        slot("default", AccountSlotStatus::Ready, None, &[]),
-        slot("failed", AccountSlotStatus::Failed, None, &[]),
-        slot(
-            "active",
-            AccountSlotStatus::LoginRequired,
-            Some("login-1"),
-            &[],
-        ),
+        slot("C1", AccountSlotStatus::Ready, None, &[]),
+        slot("C2", AccountSlotStatus::Failed, None, &[]),
+        slot("C3", AccountSlotStatus::LoginRequired, Some("login-1"), &[]),
     ];
     assert_snapshot!(rendered_items(&app.account_selection_view_params(None)), @r"
-    1. default | Ready · Error: oauth_failed | enabled
-    2. failed | Login failed · Error: oauth_failed | enabled
-    3. active | Login required · Login in progress · Error: oauth_failed | enabled
-    Add account | Sign in with a browser or device code | disabled
+    1. C1 | Ready · Error: oauth_failed · Projection healthy · Weekly 72% left, resets at 1800000000 · quota fresh until 1700000300 | enabled
+    2. C2 | Login failed · Error: oauth_failed · Projection stale | enabled
+    3. C3 | Login required · Login in progress · Error: oauth_failed · Projection unavailable | enabled
     ");
 }
 #[tokio::test]
-async fn account_detail_disables_only_unavailable_actions() {
+async fn global_account_detail_exposes_selection_but_not_local_credential_actions() {
     let app = make_test_app().await;
     let ready = slot(
-        "secondary",
+        "C2",
         AccountSlotStatus::Ready,
         None,
         &[
@@ -110,21 +120,18 @@ async fn account_detail_disables_only_unavailable_actions() {
         ],
     );
     assert_snapshot!(rendered_items(&app.account_detail_view_params(&ready)), @r"
-    Log in | Authenticate this account | disabled (Account does not require login)
-    Retry login | Retry the failed sign-in | disabled (No failed login to retry)
-    Sign in again | Replace this account's credentials | disabled (policy)
-    Cancel login | Stop the active sign-in attempt | disabled (No login is in progress)
     Use for this session | Switch the next turn to this account | disabled (Account switching is unavailable)
-    Log out | Remove this account's credentials | enabled
     ");
     let ready_params = app.account_detail_view_params(&ready);
     assert_eq!(
         ready_params.subtitle.as_deref(),
-        Some("Ready · Error: oauth_failed · Secondary account")
+        Some(
+            "Ready · Error: oauth_failed · Projection healthy · Weekly 72% left, resets at 1800000000 · quota fresh until 1700000300 · Global account"
+        )
     );
 
     let failed = slot(
-        "secondary",
+        "C2",
         AccountSlotStatus::Failed,
         None,
         &[
@@ -142,16 +149,11 @@ async fn account_detail_disables_only_unavailable_actions() {
         ],
     );
     assert_snapshot!(rendered_items(&app.account_detail_view_params(&failed)), @r"
-    Log in | Authenticate this account | disabled (Account does not require login)
-    Retry login | Retry the failed sign-in | enabled
-    Sign in again | Replace this account's credentials | disabled (Account is not ready)
-    Cancel login | Stop the active sign-in attempt | disabled (No login is in progress)
     Use for this session | Switch the next turn to this account | disabled (Account is not ready)
-    Log out | Remove this account's credentials | disabled (Account is not ready)
     ");
 
     let active = slot(
-        "secondary",
+        "C2",
         AccountSlotStatus::LoginRequired,
         Some("login-1"),
         &[
@@ -178,12 +180,48 @@ async fn account_detail_disables_only_unavailable_actions() {
         ],
     );
     assert_snapshot!(rendered_items(&app.account_detail_view_params(&active)), @r"
-    Log in | Authenticate this account | disabled (Login already in progress)
-    Retry login | Retry the failed sign-in | disabled (No failed login to retry)
-    Sign in again | Replace this account's credentials | disabled (Account is not ready)
-    Cancel login | Stop the active sign-in attempt | enabled
     Use for this session | Switch the next turn to this account | disabled (Login already in progress)
-    Log out | Remove this account's credentials | disabled (Login already in progress)
+    ");
+}
+
+#[tokio::test]
+async fn local_account_detail_keeps_local_login_cancel_and_logout_actions() {
+    let app = make_test_app().await;
+    let local = slot(
+        "C1",
+        AccountSlotStatus::LoginRequired,
+        Some("login-1"),
+        &[
+            (
+                AccountSlotAction::Login,
+                false,
+                Some("Login already in progress"),
+            ),
+            (
+                AccountSlotAction::RetryLogin,
+                false,
+                Some("Login already in progress"),
+            ),
+            (
+                AccountSlotAction::SwitchTo,
+                false,
+                Some("Login already in progress"),
+            ),
+            (
+                AccountSlotAction::Logout,
+                false,
+                Some("Login already in progress"),
+            ),
+        ],
+    );
+
+    assert_snapshot!(rendered_items(&app.account_detail_view_params(&local)), @r"
+    Log in | Authenticate this local account | disabled (Login already in progress)
+    Retry login | Retry the failed local sign-in | disabled (No failed login to retry)
+    Sign in again | Replace this local account's credentials | disabled (Account is not ready)
+    Cancel login | Stop the active local sign-in attempt | enabled
+    Use for this session | Switch the next turn to this account | disabled (Login already in progress)
+    Log out | Remove this local account's credentials | disabled (Login already in progress)
     ");
 }
 
@@ -191,11 +229,11 @@ async fn account_detail_disables_only_unavailable_actions() {
 async fn selection_is_preserved_by_account_slot_identity() {
     let mut app = make_test_app().await;
     app.account_slots = vec![
-        slot("default", AccountSlotStatus::Ready, None, &[]),
-        slot("secondary", AccountSlotStatus::Ready, None, &[]),
+        slot("C1", AccountSlotStatus::Ready, None, &[]),
+        slot("C2", AccountSlotStatus::Ready, None, &[]),
     ];
     assert_eq!(
-        app.account_selection_view_params(Some("secondary"))
+        app.account_selection_view_params(Some("C2"))
             .initial_selected_idx,
         Some(1)
     );
@@ -204,17 +242,17 @@ async fn selection_is_preserved_by_account_slot_identity() {
 #[tokio::test]
 async fn replacing_a_closed_picker_updates_no_ui() {
     let mut app = make_test_app().await;
-    app.account_slots = vec![slot("default", AccountSlotStatus::Ready, None, &[])];
+    app.account_slots = vec![slot("C1", AccountSlotStatus::Ready, None, &[])];
     assert_eq!(app.replace_account_picker_if_present(None), false);
     assert_eq!(app.chat_widget.no_modal_or_popup_active(), true);
 }
 
 #[test]
 fn exact_status_and_error_code_are_both_visible() {
-    let mut unavailable = slot("secondary", AccountSlotStatus::Failed, None, &[]);
+    let mut unavailable = slot("C2", AccountSlotStatus::Failed, None, &[]);
     unavailable.error_code = Some("authUnavailable".to_string());
     assert_eq!(
         account_slot_status_label(&unavailable),
-        "Login failed · Error: authUnavailable"
+        "Login failed · Error: authUnavailable · Projection stale"
     );
 }

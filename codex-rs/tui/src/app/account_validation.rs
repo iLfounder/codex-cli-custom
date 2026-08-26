@@ -2,6 +2,7 @@
 
 use super::account_picker::PendingAccountControl;
 use super::*;
+use codex_app_server_protocol::AccountSlotCatalogKind;
 use codex_app_server_protocol::AccountSlotSnapshot;
 use codex_app_server_protocol::AccountSlotStatus;
 use codex_app_server_protocol::SessionRuntimeAccountSwitchState;
@@ -25,6 +26,13 @@ pub(super) enum AccountSlotUpdateDisposition {
     Stale,
     Successor,
     Gap,
+}
+
+pub(super) fn is_global_account_slot_id(account_slot_id: &str) -> bool {
+    account_slot_id
+        .strip_prefix('C')
+        .and_then(|number| number.parse::<u32>().ok())
+        .is_some_and(|number| number > 0 && account_slot_id == format!("C{number}"))
 }
 
 impl App {
@@ -143,6 +151,17 @@ impl App {
         registry_revision: u64,
         slot: AccountSlotSnapshot,
     ) -> AccountSlotUpdateDisposition {
+        let notification_kind = if is_global_account_slot_id(&slot.account_slot_id) {
+            AccountSlotCatalogKind::Global
+        } else {
+            AccountSlotCatalogKind::Legacy
+        };
+        if self
+            .account_catalog_kind
+            .is_some_and(|catalog_kind| catalog_kind != notification_kind)
+        {
+            return AccountSlotUpdateDisposition::Stale;
+        }
         let selected_slot_id = self.selected_account_slot_id();
         if registry_revision <= self.account_registry_revision {
             return AccountSlotUpdateDisposition::Stale;

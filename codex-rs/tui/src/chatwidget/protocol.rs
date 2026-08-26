@@ -211,6 +211,7 @@ impl ChatWidget {
             | ServerNotification::AccountUpdated(_)
             | ServerNotification::AccountRateLimitsUpdated(_)
             | ServerNotification::AccountSlotChanged(_)
+            | ServerNotification::AccountSlotInventoryChanged(_)
             | ServerNotification::SessionRuntimeChanged(_)
             | ServerNotification::SessionRuntimeOperationUpdated(_)
             | ServerNotification::ThreadPresentationAppended(_)

@@ -198,6 +198,7 @@ const PLUGIN_COMMAND_MAX_PAGES: usize = 64;
 pub(crate) struct AccountSlotsSnapshot {
     pub(crate) data: Vec<AccountSlotSnapshot>,
     pub(crate) registry_revision: u64,
+    pub(crate) catalog_kind: codex_app_server_protocol::AccountSlotCatalogKind,
     pub(crate) multi_account: AccountSlotCapability,
 }
 
@@ -1778,6 +1779,7 @@ pub(crate) async fn list_account_slots(
     let mut cursor = None;
     let mut data = Vec::new();
     let mut expected_revision = None;
+    let mut expected_catalog_kind = None;
     let mut expected_capability = None;
     for _ in 0..ACCOUNT_SLOT_MAX_PAGES {
         let response: AccountSlotListResponse = request_handle
@@ -1790,6 +1792,9 @@ pub(crate) async fn list_account_slots(
             })
             .await?;
         if expected_revision.is_some_and(|revision| revision != response.registry_revision)
+            || expected_catalog_kind
+                .as_ref()
+                .is_some_and(|catalog_kind| catalog_kind != &response.catalog_kind)
             || expected_capability
                 .as_ref()
                 .is_some_and(|capability| capability != &response.multi_account)
@@ -1799,6 +1804,7 @@ pub(crate) async fn list_account_slots(
             ));
         }
         expected_revision = Some(response.registry_revision);
+        expected_catalog_kind = Some(response.catalog_kind);
         expected_capability = Some(response.multi_account.clone());
         data.extend(response.data);
         let Some(next_cursor) = response.next_cursor else {
@@ -1810,6 +1816,7 @@ pub(crate) async fn list_account_slots(
             return Ok(AccountSlotsSnapshot {
                 data,
                 registry_revision: response.registry_revision,
+                catalog_kind: response.catalog_kind,
                 multi_account: response.multi_account,
             });
         };
