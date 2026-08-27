@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -158,7 +159,250 @@ jobs:
                   github_env.write(f"{name}={value}\n")
           PY
 
+      - name: Compute exact build identity
+        id: build_identity
+        shell: bash
+        env:
+          BUILD_RECIPE_ID: macos15-arm64-release-v2
+        run: |
+          set -euo pipefail
+          identity_dir="$RUNNER_TEMP/codex-build-identity"
+          mkdir -p "$identity_dir"
+
+          (
+            cd upstream-codex/codex-rs
+            rustc -vV
+            cargo -V
+          ) > "$identity_dir/toolchain.txt"
+          python3 -VV >> "$identity_dir/toolchain.txt" 2>&1
+          toolchain_sha256=$(shasum -a 256 "$identity_dir/toolchain.txt" | awk '{print $1}')
+
+          {
+            printf 'image_os=%s\n' "${ImageOS:-unknown}"
+            printf 'image_version=%s\n' "${ImageVersion:-unknown}"
+            sw_vers
+            xcodebuild -version
+            xcrun --sdk macosx --show-sdk-build-version
+            clang --version
+          } > "$identity_dir/platform.txt"
+          platform_sha256=$(shasum -a 256 "$identity_dir/platform.txt" | awk '{print $1}')
+
+          {
+            shasum -a 256 upstream-codex/scripts/build_codex_package.py
+            shasum -a 256 LICENSE NOTICE
+            shasum -a 256 .github/workflows/build-custom-macos-arm64.yml
+          } > "$identity_dir/package-inputs.txt"
+          package_inputs_sha256=$(shasum -a 256 "$identity_dir/package-inputs.txt" | awk '{print $1}')
+
+          {
+            printf 'schema=1\n'
+            printf 'build_recipe_id=%s\n' "$BUILD_RECIPE_ID"
+            printf 'compiled_tree=%s\n' "$COMPILED_TREE"
+            printf 'compiled_cargo_lock_sha256=%s\n' "$COMPILED_LOCK_SHA256"
+            printf 'toolchain_sha256=%s\n' "$toolchain_sha256"
+            printf 'platform_sha256=%s\n' "$platform_sha256"
+            printf 'package_inputs_sha256=%s\n' "$package_inputs_sha256"
+            printf 'target=aarch64-apple-darwin\n'
+            printf 'profile=release\n'
+            printf 'incremental=false\n'
+            printf 'lto=false\n'
+            printf 'codegen_units=8\n'
+            printf 'debug=line-tables-only\n'
+            printf 'rusty_v8_version=%s\n' "$CODEX_V8_VERSION"
+            printf 'rusty_v8_archive_sha256=%s\n' "$CODEX_V8_ARCHIVE_SHA256"
+            printf 'rusty_v8_binding_sha256=%s\n' "$CODEX_V8_BINDING_SHA256"
+            printf 'cargo_targets=codex,codex-app-server,codex-code-mode-host,codex-responses-api-proxy\n'
+          } > "$identity_dir/build-inputs.txt"
+          build_id=$(shasum -a 256 "$identity_dir/build-inputs.txt" | awk '{print $1}')
+          artifact_name="codex-custom-rust-v0.149.0-macos-arm64-$build_id"
+
+          printf 'BUILD_RECIPE_ID=%s\n' "$BUILD_RECIPE_ID" >> "$GITHUB_ENV"
+          printf 'BUILD_ID=%s\n' "$build_id" >> "$GITHUB_ENV"
+          printf 'BUILD_TOOLCHAIN_SHA256=%s\n' "$toolchain_sha256" >> "$GITHUB_ENV"
+          printf 'BUILD_PLATFORM_SHA256=%s\n' "$platform_sha256" >> "$GITHUB_ENV"
+          printf 'PACKAGE_INPUTS_SHA256=%s\n' "$package_inputs_sha256" >> "$GITHUB_ENV"
+          printf 'ARTIFACT_NAME=%s\n' "$artifact_name" >> "$GITHUB_ENV"
+          printf 'build_id=%s\n' "$build_id" >> "$GITHUB_OUTPUT"
+          printf 'artifact_name=%s\n' "$artifact_name" >> "$GITHUB_OUTPUT"
+
+      - name: Reuse exact verified artifact
+        id: reuse_artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf 'hit=false\n' >> "$GITHUB_OUTPUT"
+
+          if ! current_run_json=$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" 2>/dev/null) \
+            || ! current_workflow_id=$(jq -er '.workflow_id' <<<"$current_run_json") \
+            || ! repository_id=$(jq -er '.repository.id' <<<"$current_run_json") \
+            || ! jq -e \
+              --arg branch "$GITHUB_REF_NAME" \
+              '.event == "workflow_dispatch"
+               and .head_branch == $branch
+               and .repository.id == .head_repository.id' \
+              <<<"$current_run_json" >/dev/null; then
+            printf '%s\n' '::warning::Current workflow identity is unavailable; compiling normally.'
+            exit 0
+          fi
+          if ! artifact_json=$(gh api \
+            "/repos/$GITHUB_REPOSITORY/actions/artifacts?name=$ARTIFACT_NAME&per_page=100" \
+            2>/dev/null) \
+            || ! artifact_id=$(jq -r \
+              --arg branch "$GITHUB_REF_NAME" \
+              --argjson repository_id "$repository_id" \
+              '[.artifacts[]? | select(
+                 .expired == false
+                 and .workflow_run.head_branch == $branch
+                 and .workflow_run.repository_id == $repository_id
+                 and .workflow_run.head_repository_id == $repository_id
+               )] | sort_by(.created_at) | reverse | .[0].id // empty' \
+              <<<"$artifact_json"); then
+            printf '%s\n' '::warning::Exact artifact lookup failed; compiling normally.'
+            exit 0
+          fi
+
+          if [[ -z "$artifact_id" ]]; then
+            printf '%s\n' 'No exact prior artifact; compiling normally.'
+            exit 0
+          fi
+          if ! candidate_run_id=$(jq -er \
+              --argjson id "$artifact_id" \
+              '.artifacts[]? | select(.id == $id) | .workflow_run.id' \
+              <<<"$artifact_json") \
+            || ! artifact_size=$(jq -er \
+              --argjson id "$artifact_id" \
+              '.artifacts[]? | select(.id == $id) | .size_in_bytes' \
+              <<<"$artifact_json") \
+            || ! archive_url=$(jq -er \
+              --argjson id "$artifact_id" \
+              '.artifacts[]? | select(.id == $id) | .archive_download_url' \
+              <<<"$artifact_json") \
+            || ! candidate_run_json=$(gh api \
+              "/repos/$GITHUB_REPOSITORY/actions/runs/$candidate_run_id" 2>/dev/null) \
+            || ! jq -e \
+              --arg branch "$GITHUB_REF_NAME" \
+              --argjson workflow_id "$current_workflow_id" \
+              --argjson repository_id "$repository_id" \
+              '.workflow_id == $workflow_id
+               and .event == "workflow_dispatch"
+               and .conclusion == "success"
+               and .head_branch == $branch
+               and .repository.id == $repository_id
+               and .head_repository.id == $repository_id' \
+              <<<"$candidate_run_json" >/dev/null; then
+            printf '%s\n' '::warning::Exact artifact producer validation failed; compiling normally.'
+            exit 0
+          fi
+          if [[ ! "$artifact_size" =~ ^[0-9]+$ ]] || (( artifact_size > 268435456 )); then
+            printf '%s\n' '::warning::Exact artifact exceeds the 256 MiB bound; compiling normally.'
+            exit 0
+          fi
+
+          candidate_dir=$(mktemp -d "$RUNNER_TEMP/codex-artifact.XXXXXX")
+          archive_path="$candidate_dir/artifact.zip"
+          unpacked_dir="$candidate_dir/unpacked"
+          mkdir -p "$unpacked_dir"
+
+          if ! curl -fsSL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "$archive_url" -o "$archive_path" \
+            || ! unzip -q "$archive_path" -d "$unpacked_dir"; then
+            printf '%s\n' '::warning::Exact artifact download failed; compiling normally.'
+            find "$candidate_dir" -depth -delete
+            exit 0
+          fi
+
+          expected_files=$(printf '%s\n' \
+            BUILD-METADATA.txt \
+            LICENSE \
+            NOTICE \
+            SHA256SUMS \
+            codex-app-server-package-aarch64-apple-darwin.tar.gz \
+            codex-package-aarch64-apple-darwin.tar.gz \
+            codex-responses-api-proxy | LC_ALL=C sort)
+          actual_files=$(find "$unpacked_dir" -mindepth 1 -maxdepth 1 \
+            -exec basename {} \; | LC_ALL=C sort)
+
+          verified=true
+          if [[ "$actual_files" != "$expected_files" ]] \
+            || [[ -n "$(find "$unpacked_dir" -mindepth 1 -maxdepth 1 ! -type f -print -quit)" ]] \
+            || ! (cd "$unpacked_dir" && shasum -a 256 -c SHA256SUMS >/dev/null) \
+            || ! grep -Fxq "build_id=$BUILD_ID" "$unpacked_dir/BUILD-METADATA.txt" \
+            || ! grep -Fxq "build_recipe_id=$BUILD_RECIPE_ID" "$unpacked_dir/BUILD-METADATA.txt" \
+            || ! grep -Fxq "compiled_tree=$COMPILED_TREE" "$unpacked_dir/BUILD-METADATA.txt" \
+            || ! grep -Fxq "compiled_cargo_lock_sha256=$COMPILED_LOCK_SHA256" "$unpacked_dir/BUILD-METADATA.txt" \
+            || ! grep -Fxq "toolchain_sha256=$BUILD_TOOLCHAIN_SHA256" "$unpacked_dir/BUILD-METADATA.txt" \
+            || ! grep -Fxq "platform_sha256=$BUILD_PLATFORM_SHA256" "$unpacked_dir/BUILD-METADATA.txt" \
+            || ! grep -Fxq "package_inputs_sha256=$PACKAGE_INPUTS_SHA256" "$unpacked_dir/BUILD-METADATA.txt" \
+            || ! file "$unpacked_dir/codex-responses-api-proxy" | grep -Fq 'Mach-O 64-bit executable arm64'; then
+            verified=false
+          fi
+
+          verify_primary="$candidate_dir/verify-primary"
+          verify_app_server="$candidate_dir/verify-app-server"
+          mkdir -p "$verify_primary" "$verify_app_server"
+          if [[ "$verified" == true ]] \
+            && { ! tar -xzf "$unpacked_dir/codex-package-aarch64-apple-darwin.tar.gz" -C "$verify_primary" \
+              || ! tar -xzf "$unpacked_dir/codex-app-server-package-aarch64-apple-darwin.tar.gz" -C "$verify_app_server"; }; then
+            verified=false
+          fi
+          if [[ "$verified" == true ]]; then
+            if ! file "$verify_primary/bin/codex" | grep -Fq 'Mach-O 64-bit executable arm64' \
+              || ! file "$verify_primary/bin/codex-code-mode-host" | grep -Fq 'Mach-O 64-bit executable arm64' \
+              || ! file "$verify_app_server/bin/codex-app-server" | grep -Fq 'Mach-O 64-bit executable arm64' \
+              || [[ ! -x "$verify_primary/codex-path/rg" ]] \
+              || [[ ! -x "$verify_primary/codex-resources/zsh/bin/zsh" ]] \
+              || [[ ! -x "$verify_app_server/codex-path/rg" ]] \
+              || [[ ! -x "$verify_app_server/codex-resources/zsh/bin/zsh" ]] \
+              || ! cmp -s "$verify_primary/bin/codex-code-mode-host" "$verify_app_server/bin/codex-code-mode-host"; then
+              verified=false
+            fi
+          fi
+          if [[ "$verified" == true ]] && ! python3 - \
+            "$verify_primary/codex-package.json" \
+            "$verify_app_server/codex-package.json" <<'PY'
+          import json
+          import sys
+
+          expected = (
+              ("codex", "bin/codex"),
+              ("codex-app-server", "bin/codex-app-server"),
+          )
+          for path, (variant, entrypoint) in zip(sys.argv[1:], expected):
+              with open(path, encoding="utf-8") as package_file:
+                  package = json.load(package_file)
+              assert package == {
+                  "layoutVersion": 1,
+                  "version": "0.149.0",
+                  "target": "aarch64-apple-darwin",
+                  "variant": variant,
+                  "entrypoint": entrypoint,
+                  "resourcesDir": "codex-resources",
+                  "pathDir": "codex-path",
+              }
+          PY
+          then
+            verified=false
+          fi
+
+          if [[ "$verified" != true ]]; then
+            printf '%s\n' '::warning::Exact artifact validation failed; compiling normally.'
+            find "$candidate_dir" -depth -delete
+            exit 0
+          fi
+
+          mkdir -p dist
+          cp "$unpacked_dir"/* dist/
+          find "$candidate_dir" -depth -delete
+          printf 'hit=true\n' >> "$GITHUB_OUTPUT"
+          printf 'Reused exact verified artifact %s.\n' "$artifact_id"
+
       - name: Build release binaries
+        if: steps.reuse_artifact.outputs.hit != 'true'
         working-directory: upstream-codex/codex-rs
         shell: bash
         run: |
@@ -182,6 +426,7 @@ jobs:
           SCCACHE_INSTALL_OUTCOME: ${{ steps.install_sccache.outcome }}
           CARGO_CACHE_OUTCOME: ${{ steps.cargo_downloads.outcome }}
           CARGO_CACHE_HIT: ${{ steps.cargo_downloads.outputs.cache-hit }}
+          EXACT_ARTIFACT_HIT: ${{ steps.reuse_artifact.outputs.hit }}
         run: |
           set -u
           stats='sccache disabled; rustc compiled directly'
@@ -198,12 +443,14 @@ jobs:
             printf -- '- sccache enabled: `%s`\n' "${SCCACHE_ENABLED:-false}"
             printf -- '- Cargo cache action: `%s`\n' "$CARGO_CACHE_OUTCOME"
             printf -- '- Cargo exact-key hit: `%s`\n\n' "${CARGO_CACHE_HIT:-false}"
+            printf -- '- Exact artifact hit: `%s`\n\n' "${EXACT_ARTIFACT_HIT:-false}"
             printf '```text\n'
             printf '%s\n' "$stats"
             printf '```\n'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Assemble canonical packages and provenance
+        if: steps.reuse_artifact.outputs.hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -240,12 +487,21 @@ jobs:
             printf 'patched_tree=%s\n' "$PATCH_TREE"
             printf 'compiled_tree=%s\n' "$COMPILED_TREE"
             printf 'compiled_cargo_lock_sha256=%s\n' "$COMPILED_LOCK_SHA256"
+            printf 'build_id=%s\n' "$BUILD_ID"
+            printf 'build_recipe_id=%s\n' "$BUILD_RECIPE_ID"
+            printf 'toolchain_sha256=%s\n' "$BUILD_TOOLCHAIN_SHA256"
+            printf 'platform_sha256=%s\n' "$BUILD_PLATFORM_SHA256"
+            printf 'package_inputs_sha256=%s\n' "$PACKAGE_INPUTS_SHA256"
             printf 'rusty_v8_version=%s\n' "$CODEX_V8_VERSION"
             printf 'rusty_v8_archive_sha256=%s\n' "$CODEX_V8_ARCHIVE_SHA256"
             printf 'rusty_v8_binding_sha256=%s\n' "$CODEX_V8_BINDING_SHA256"
             printf 'runner_arch=%s\n' "$(uname -m)"
-            rustc --version
-            cargo --version
+            (
+              cd upstream-codex/codex-rs
+              rustc --version
+              cargo --version
+            )
+            python3 -VV 2>&1
             sw_vers
           } > dist/BUILD-METADATA.txt
 
@@ -303,7 +559,7 @@ jobs:
       - name: Upload macOS arm64 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: codex-custom-rust-v0.149.0-macos-arm64
+          name: ${{ steps.build_identity.outputs.artifact_name }}
           path: dist/
           if-no-files-found: error
           retention-days: 14
