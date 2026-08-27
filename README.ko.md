@@ -27,6 +27,15 @@
 | P011 | 설치 가능한 `/namespace:name` plugin command와 ephemeral card, notice, progress presentation을 제공한다. |
 | P012 | 검수된 live-session control 보정과 canonical account login, 취소, 실시간 reconciliation, 선택 가능한 TUI 계정 상태를 제공한다. |
 | P013 | Thread별 고정·자동 계정 순환, 실시간 quota 기반 선택, 정확한 rollout ordinal 복구를 제공한다. |
+| P014 | 다른 account의 credential을 수정하지 않으면서 변경을 감지하는 read-only sibling authentication runtime을 제공한다. |
+| P015 | 각 root turn이 실행 전에 선택된 account runtime과 정확한 credential revision을 capture한다. |
+| P016 | TokenManager 기반 account를 위한 sanitize된 global account catalog, health, quota, inventory change 계약을 제공한다. |
+| P017 | 실시간 TokenManager snapshot을 revisioned global catalog로 만들고 fixed, quota-aware, fallback account 선택을 제공한다. |
+| P018 | Global account를 격리된 execution runtime으로 해석해 account 목록, binding, rotation에 통합한다. |
+| P019 | TUI account picker와 rotation editor가 global account의 health와 quota를 표시하되 local credential action은 제공하지 않는다. |
+| P020 | Turn interrupt race, 현재 account projection, archive visibility, TUI `Esc` interrupt 전반에서 session lifecycle과 control의 일관성을 유지한다. |
+| P021 | Goal edit 중 accounting-only revision drift는 authoritative refresh로 회복하고, 충돌하는 semantic change는 거부한다. |
+| P022 | `codex exec --json`이 compact된 content를 노출하지 않고 context compaction의 시작, 완료, 미완료 compaction의 `outcome_unknown` 결과와 native token telemetry를 JSONL로 전달한다. |
 
 App-server는 opaque account reference와 sanitize된 session state만 노출한다. 외부 workflow role, group ID, 사용자 handle은 저장하지 않는다.
 
@@ -34,6 +43,7 @@ App-server는 opaque account reference와 sanitize된 session state만 노출한
 
 - session 목록과 상태: `sessionRuntime/list`, `sessionRuntime/changed`
 - account 관리: `accountSlot/list`, `accountSlot/login/start`, `accountSlot/logout`
+- global account inventory: `accountSlot/inventoryChanged`, `accountSlot/list`의 health·quota projection
 - account 전환: `thread/account/switch`
 - account 순환: `thread/account/rotation/read`, `thread/account/rotation/update`, `accountSlot/rateLimits/read`
 - writer 반환: `thread/relinquish`
@@ -41,19 +51,20 @@ App-server는 opaque account reference와 sanitize된 session state만 노출한
 - Goal state: `thread/goal/get`, `thread/goal/create`, `thread/goal/set`, `thread/goal/replace`, `thread/goal/clear`
 - plugin command: `pluginCommand/list`, `pluginCommand/invoke`
 - ephemeral UI output: `thread/presentation/append`
+- `codex exec --json`의 context compaction: `context_compaction` item을 담은 `item.started`, `item.updated`, `item.completed` event
 
 Patch에는 생성된 Rust, JSON Schema, TypeScript 정의가 `codex-rs/app-server-protocol/schema/` 아래에 포함된다.
 
 ## 적용과 build
 
-정확한 upstream commit에만 열세 개 patch를 적용한다.
+정확한 upstream commit에만 스물두 개 patch를 적용한다.
 
 ```sh
 git checkout 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
 /path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD"
 ```
 
-Applier는 clean tree를 요구하고 각 patch digest를 검증한 뒤 P001–P013을 순서대로 적용하고 최종 Git tree를 확인한다. POSIX shell, Git, `sed`, `awk`, `shasum` 또는 `sha256sum`이 필요하다.
+Applier는 clean tree를 요구하고 각 patch digest를 검증한 뒤 P001–P022를 순서대로 적용하고 최종 Git tree를 확인한다. POSIX shell, Git, `sed`, `awk`, `shasum` 또는 `sha256sum`이 필요하다.
 
 `codex-rs`에서 로컬 build:
 

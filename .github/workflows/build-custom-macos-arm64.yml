@@ -29,7 +29,7 @@ jobs:
       SCCACHE_IDLE_TIMEOUT: "0"
       SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
       SOURCE_COMMIT: 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
-      PATCH_TREE: 85dbbad8ec9ffde70c82f115a9822bd7771c6dcd
+      PATCH_TREE: dd22b2a1ab598c67ca9c356b49c72bd0c4f1755b
 
     steps:
       - name: Check out patch repository

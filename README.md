@@ -27,6 +27,15 @@ The fork makes account selection, thread ownership, session handoff, and externa
 | P011 | Installable `/namespace:name` plugin commands and ephemeral card, notice, and progress presentation. |
 | P012 | Reviewed live-session control fixes plus canonical account login, cancellation, reconciliation, and selectable TUI account status. |
 | P013 | Per-thread fixed and automatic account rotation, live quota-aware selection, and exact rollout ordinal repair. |
+| P014 | Read-only authentication runtimes for sibling accounts, with credential changes detected without allowing the fork to rewrite those credentials. |
+| P015 | Each root turn captures the selected account runtime and its exact credential revision before execution begins. |
+| P016 | Sanitized global account catalog, health, quota, and inventory-change contracts for TokenManager-backed accounts. |
+| P017 | Live TokenManager snapshots become a revisioned global catalog with fixed, quota-aware, and fallback account selection. |
+| P018 | Global accounts are resolved into isolated execution runtimes and integrated with account listing, binding, and rotation. |
+| P019 | The TUI account picker and rotation editor show global account health and quota while keeping local credential actions unavailable. |
+| P020 | Session lifecycle and controls stay consistent across turn-interrupt races, current-account projection, archive visibility, and TUI `Esc` interrupts. |
+| P021 | Goal edits recover from accounting-only revision drift through an authoritative refresh, while conflicting semantic changes are rejected. |
+| P022 | `codex exec --json` reports context-compaction start, completion, unknown outcomes for unfinished compactions, and native token telemetry as JSONL without exposing compacted content. |
 
 The app-server exposes opaque account references and sanitized session state. It never stores external workflow roles, group IDs, or user handles.
 
@@ -34,6 +43,7 @@ The app-server exposes opaque account references and sanitized session state. It
 
 - session inventory and state: `sessionRuntime/list`, `sessionRuntime/changed`
 - account management: `accountSlot/list`, `accountSlot/login/start`, `accountSlot/logout`
+- global account inventory: `accountSlot/inventoryChanged`, plus health and quota projections in `accountSlot/list`
 - account switching: `thread/account/switch`
 - account rotation: `thread/account/rotation/read`, `thread/account/rotation/update`, `accountSlot/rateLimits/read`
 - writer release: `thread/relinquish`
@@ -41,19 +51,20 @@ The app-server exposes opaque account references and sanitized session state. It
 - Goal state: `thread/goal/get`, `thread/goal/create`, `thread/goal/set`, `thread/goal/replace`, `thread/goal/clear`
 - plugin commands: `pluginCommand/list`, `pluginCommand/invoke`
 - ephemeral UI output: `thread/presentation/append`
+- context compaction in `codex exec --json`: `item.started`, `item.updated`, and `item.completed` events with a `context_compaction` item
 
 Generated Rust, JSON Schema, and TypeScript definitions are included by the patches under `codex-rs/app-server-protocol/schema/`.
 
 ## Apply and build
 
-Apply the thirteen patches only to the exact upstream commit:
+Apply the twenty-two patches only to the exact upstream commit:
 
 ```sh
 git checkout 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
 /path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD"
 ```
 
-The applier requires a clean tree, verifies every patch digest, applies P001–P013 in order, and verifies the final Git tree. It needs a POSIX shell, Git, `sed`, `awk`, and either `shasum` or `sha256sum`.
+The applier requires a clean tree, verifies every patch digest, applies P001–P022 in order, and verifies the final Git tree. It needs a POSIX shell, Git, `sed`, `awk`, and either `shasum` or `sha256sum`.
 
 Build locally from `codex-rs`:
 

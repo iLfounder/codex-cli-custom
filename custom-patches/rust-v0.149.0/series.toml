@@ -1,7 +1,7 @@
 schema_version = 1
 applies_to = "rust-v0.149.0"
 base_commit = "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0"
-final_tree = "85dbbad8ec9ffde70c82f115a9822bd7771c6dcd"
+final_tree = "dd22b2a1ab598c67ca9c356b49c72bd0c4f1755b"
 
 [[patches]]
 number = "P001"
@@ -97,3 +97,18 @@ sha256 = "17494a5ae1b2992a9784be1065851e0652822fc594d22d7a98481abeb3dca2ce"
 number = "P019"
 file = "0019-P019-add-global-account-rotation-controls-to-TUI.patch"
 sha256 = "3e5b2cce19c95eeb4ab655ab77cdefa459c6aa41f8008ddf60c19535b5b8760d"
+
+[[patches]]
+number = "P020"
+file = "0020-P020-harden-session-lifecycle-and-control-consistency.patch"
+sha256 = "3414267f55f3fcf031be46890b177527d71d020a78b37775abaa0be5f0436faa"
+
+[[patches]]
+number = "P021"
+file = "0021-P021-preserve-semantic-goal-edits-across-accounting-updates.patch"
+sha256 = "3700bdfa62403cba0f06e5cb7e420c1229805ff573ac4e49b2ca6bf8a5b80970"
+
+[[patches]]
+number = "P022"
+file = "0022-P022-expose-context-compaction-lifecycle-in-JSONL-and-TypeScript.patch"
+sha256 = "6bc3cde7973530b67e0cb716507df99adc08d226be949c62cab231d0492d53b6"

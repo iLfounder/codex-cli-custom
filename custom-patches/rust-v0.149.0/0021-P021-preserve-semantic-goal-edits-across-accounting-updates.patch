@@ -1,0 +1,562 @@
+From d32389199b7c39bfe52f54bafd6c945d45530e44 Mon Sep 17 00:00:00 2001
+From: patch-verifier <patch-verifier@localhost>
+Date: Fri, 28 Aug 2026 02:46:23 +0900
+Subject: [PATCH] P021 preserve semantic goal edits across accounting updates
+
+---
+ codex-rs/tui/src/app/tests.rs                 | 160 +++++++++++++++++-
+ codex-rs/tui/src/app/thread_goal_actions.rs   | 147 ++++++++++++----
+ codex-rs/tui/src/app_event.rs                 |  35 +++-
+ codex-rs/tui/src/chatwidget/goal_menu.rs      |  12 +-
+ .../tui/src/chatwidget/tests/goal_menu.rs     |  17 +-
+ 5 files changed, 320 insertions(+), 51 deletions(-)
+
+diff --git a/codex-rs/tui/src/app/tests.rs b/codex-rs/tui/src/app/tests.rs
+index 6de908959c..b335ebfa29 100644
+--- a/codex-rs/tui/src/app/tests.rs
++++ b/codex-rs/tui/src/app/tests.rs
+@@ -5432,6 +5432,158 @@ async fn make_test_app_with_channels() -> (
+     )
+ }
+ 
++async fn start_goal_cas_test() -> Result<(App, AppServerSession, ThreadId, tempfile::TempDir)> {
++    let mut app = make_test_app().await;
++    let codex_home = tempdir()?;
++    app.config.codex_home = codex_home.path().to_path_buf().abs();
++    app.config.sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.path().abs());
++    let mut app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
++    let started = app_server.start_thread(&app.config).await?;
++    let thread_id = started.session.thread_id;
++    app.enqueue_primary_thread_session(started.session, started.turns)
++        .await?;
++    Ok((app, app_server, thread_id, codex_home))
++}
++
++async fn create_goal_for_cas_test(
++    app_server: &mut AppServerSession,
++    thread_id: ThreadId,
++) -> Result<codex_app_server_protocol::ThreadGoal> {
++    let expected_revision = app_server.thread_goal_get(thread_id).await?.revision;
++    Ok(app_server
++        .thread_goal_create(
++            thread_id,
++            expected_revision,
++            "original goal".to_string(),
++            /*token_budget*/ None,
++        )
++        .await?
++        .goal)
++}
++
++#[tokio::test]
++async fn edit_goal_refreshes_accounting_only_revision_drift() -> Result<()> {
++    let (mut app, mut app_server, thread_id, _codex_home) = start_goal_cas_test().await?;
++    let original = create_goal_for_cas_test(&mut app_server, thread_id).await?;
++    let snapshot = crate::app_event::ThreadGoalSemanticSnapshot::from(&original);
++    let state_db = codex_state::StateRuntime::init(
++        app.config.sqlite.clone(),
++        app.config.model_provider_id.clone(),
++    )
++    .await
++    .expect("state db should initialize");
++    state_db
++        .thread_goals()
++        .account_thread_goal_usage(
++            thread_id,
++            /*time_delta_seconds*/ 12,
++            /*token_delta*/ 50,
++            codex_state::GoalAccountingMode::ActiveOnly,
++            Some(&original.goal_id),
++        )
++        .await
++        .expect("goal accounting should succeed");
++
++    app.set_thread_goal_draft(
++        &mut app_server,
++        thread_id,
++        goal_files::GoalDraft {
++            objective: "edited goal".to_string(),
++            ..Default::default()
++        },
++        crate::app_event::ThreadGoalSetMode::UpdateExisting {
++            snapshot,
++            status: original.status,
++            token_budget: original.token_budget,
++        },
++    )
++    .await;
++
++    let updated = app_server
++        .thread_goal_get(thread_id)
++        .await?
++        .goal
++        .expect("goal should still exist");
++    assert_eq!(updated.objective, "edited goal");
++    assert_eq!(updated.tokens_used, 50);
++    assert_eq!(updated.time_used_seconds, 12);
++    app_server.shutdown().await?;
++    Ok(())
++}
++
++#[tokio::test]
++async fn replace_goal_rejects_semantic_drift_and_cleans_materialized_files() -> Result<()> {
++    let (mut app, mut app_server, thread_id, codex_home) = start_goal_cas_test().await?;
++    let original = create_goal_for_cas_test(&mut app_server, thread_id).await?;
++    let snapshot = crate::app_event::ThreadGoalSemanticSnapshot::from(&original);
++    let concurrent = app_server
++        .thread_goal_set(
++            thread_id,
++            Some("concurrent goal".to_string()),
++            /*status*/ None,
++            /*token_budget*/ None,
++            Some((&original.goal_id, original.revision)),
++        )
++        .await?
++        .goal;
++
++    app.set_thread_goal_draft(
++        &mut app_server,
++        thread_id,
++        goal_files::GoalDraft {
++            objective: "x".repeat(MAX_THREAD_GOAL_OBJECTIVE_CHARS + 1),
++            ..Default::default()
++        },
++        crate::app_event::ThreadGoalSetMode::ReplaceExistingExact { snapshot },
++    )
++    .await;
++
++    assert_eq!(
++        app_server.thread_goal_get(thread_id).await?.goal,
++        Some(concurrent)
++    );
++    assert_eq!(
++        std::fs::read_dir(codex_home.path().join("attachments"))?.count(),
++        0
++    );
++    app_server.shutdown().await?;
++    Ok(())
++}
++
++#[tokio::test]
++async fn edit_goal_rejects_disappearance_and_cleans_materialized_files() -> Result<()> {
++    let (mut app, mut app_server, thread_id, codex_home) = start_goal_cas_test().await?;
++    let original = create_goal_for_cas_test(&mut app_server, thread_id).await?;
++    let snapshot = crate::app_event::ThreadGoalSemanticSnapshot::from(&original);
++    app_server
++        .thread_goal_clear(thread_id, Some((&original.goal_id, original.revision)))
++        .await?;
++    let cleared = app_server.thread_goal_get(thread_id).await?;
++
++    app.set_thread_goal_draft(
++        &mut app_server,
++        thread_id,
++        goal_files::GoalDraft {
++            objective: "x".repeat(MAX_THREAD_GOAL_OBJECTIVE_CHARS + 1),
++            ..Default::default()
++        },
++        crate::app_event::ThreadGoalSetMode::UpdateExisting {
++            snapshot,
++            status: original.status,
++            token_budget: original.token_budget,
++        },
++    )
++    .await;
++
++    assert_eq!(app_server.thread_goal_get(thread_id).await?, cleared);
++    assert_eq!(
++        std::fs::read_dir(codex_home.path().join("attachments"))?.count(),
++        0
++    );
++    app_server.shutdown().await?;
++    Ok(())
++}
++
+ #[tokio::test]
+ async fn set_thread_goal_draft_materializes_long_objective_and_confirms_before_paste() -> Result<()>
+ {
+@@ -5645,8 +5797,12 @@ async fn replace_goal_confirmation_snapshot() {
+             objective: "New goal".to_string(),
+             ..Default::default()
+         },
+-        "goal-test".to_string(),
+-        1,
++        crate::app_event::ThreadGoalSemanticSnapshot {
++            goal_id: "goal-test".to_string(),
++            objective: "Old goal".to_string(),
++            status: codex_app_server_protocol::ThreadGoalStatus::Active,
++            token_budget: None,
++        },
+     );
+     assert_app_snapshot!(
+         "replace_goal_confirmation",
+diff --git a/codex-rs/tui/src/app/thread_goal_actions.rs b/codex-rs/tui/src/app/thread_goal_actions.rs
+index e55e0101d5..f88a44fbb2 100644
+--- a/codex-rs/tui/src/app/thread_goal_actions.rs
++++ b/codex-rs/tui/src/app/thread_goal_actions.rs
+@@ -1,5 +1,6 @@
+ use super::App;
+ use crate::app_event::AppEvent;
++use crate::app_event::ThreadGoalSemanticSnapshot;
+ use crate::app_event::ThreadGoalSetMode;
+ use crate::app_server_session::AppServerSession;
+ use crate::bottom_pane::SelectionAction;
+@@ -11,6 +12,7 @@ use crate::goal_display::goal_status_label;
+ use crate::goal_display::goal_usage_summary;
+ use crate::goal_files;
+ use crate::text_formatting::truncate_text;
++use codex_app_server_client::TypedRequestError;
+ use codex_app_server_protocol::ThreadGoal;
+ use codex_app_server_protocol::ThreadGoalStatus;
+ use codex_protocol::ThreadId;
+@@ -113,6 +115,7 @@ impl App {
+             self.show_no_thread_goal_to_edit();
+             return;
+         };
++        let snapshot = ThreadGoalSemanticSnapshot::from(&goal);
+ 
+         let codex_home = app_server.codex_home_path(&self.config.codex_home);
+         match goal_files::objective_text_for_edit(app_server, codex_home.as_ref(), &goal.objective)
+@@ -126,7 +129,8 @@ impl App {
+         if self.current_displayed_thread_id() != Some(thread_id) {
+             return;
+         }
+-        self.chat_widget.show_goal_edit_prompt(thread_id, goal);
++        self.chat_widget
++            .show_goal_edit_prompt_for_snapshot(thread_id, goal, snapshot);
+     }
+ 
+     pub(super) async fn set_thread_goal_draft(
+@@ -153,14 +157,12 @@ impl App {
+                         self.show_replace_thread_goal_confirmation(
+                             thread_id,
+                             draft,
+-                            goal.goal_id.clone(),
+-                            goal.revision,
++                            ThreadGoalSemanticSnapshot::from(goal),
+                         );
+                         return;
+                     }
+                     Some(goal) => ThreadGoalSetMode::ReplaceExistingExact {
+-                        expected_goal_id: goal.goal_id.clone(),
+-                        expected_revision: goal.revision,
++                        snapshot: ThreadGoalSemanticSnapshot::from(goal),
+                     },
+                     None => ThreadGoalSetMode::Create {
+                         expected_revision: response.revision,
+@@ -214,33 +216,80 @@ impl App {
+                 )
+                 .await
+                 .map(|response| response.goal),
+-            ThreadGoalSetMode::ReplaceExistingExact {
+-                expected_goal_id,
+-                expected_revision,
+-            } => app_server
+-                .thread_goal_replace(
+-                    thread_id,
+-                    expected_goal_id,
+-                    expected_revision,
+-                    objective,
+-                    /*token_budget*/ None,
+-                )
+-                .await
+-                .map(|response| response.goal),
+-            ThreadGoalSetMode::UpdateExisting {
+-                expected_goal_id,
+-                expected_revision,
+-                ..
+-            } => app_server
+-                .thread_goal_set(
+-                    thread_id,
+-                    Some(objective),
+-                    Some(status),
+-                    token_budget,
+-                    Some((&expected_goal_id, expected_revision)),
+-                )
+-                .await
+-                .map(|response| response.goal),
++            ThreadGoalSetMode::ReplaceExistingExact { snapshot } => {
++                match refresh_thread_goal_revision(app_server, thread_id, &snapshot).await {
++                    Ok(expected_revision) => {
++                        let result = app_server
++                            .thread_goal_replace(
++                                thread_id,
++                                snapshot.goal_id.clone(),
++                                expected_revision,
++                                objective.clone(),
++                                /*token_budget*/ None,
++                            )
++                            .await
++                            .map(|response| response.goal);
++                        match result {
++                            Err(err) if is_goal_revision_conflict(&err) => {
++                                match refresh_thread_goal_revision(app_server, thread_id, &snapshot)
++                                    .await
++                                {
++                                    Ok(retry_revision) => app_server
++                                        .thread_goal_replace(
++                                            thread_id,
++                                            snapshot.goal_id,
++                                            retry_revision,
++                                            objective,
++                                            /*token_budget*/ None,
++                                        )
++                                        .await
++                                        .map(|response| response.goal),
++                                    Err(err) => Err(err),
++                                }
++                            }
++                            result => result,
++                        }
++                    }
++                    Err(err) => Err(err),
++                }
++            }
++            ThreadGoalSetMode::UpdateExisting { snapshot, .. } => {
++                match refresh_thread_goal_revision(app_server, thread_id, &snapshot).await {
++                    Ok(expected_revision) => {
++                        let result = app_server
++                            .thread_goal_set(
++                                thread_id,
++                                Some(objective.clone()),
++                                Some(status),
++                                token_budget,
++                                Some((&snapshot.goal_id, expected_revision)),
++                            )
++                            .await
++                            .map(|response| response.goal);
++                        match result {
++                            Err(err) if is_goal_revision_conflict(&err) => {
++                                match refresh_thread_goal_revision(app_server, thread_id, &snapshot)
++                                    .await
++                                {
++                                    Ok(retry_revision) => app_server
++                                        .thread_goal_set(
++                                            thread_id,
++                                            Some(objective),
++                                            Some(status),
++                                            token_budget,
++                                            Some((&snapshot.goal_id, retry_revision)),
++                                        )
++                                        .await
++                                        .map(|response| response.goal),
++                                    Err(err) => Err(err),
++                                }
++                            }
++                            result => result,
++                        }
++                    }
++                    Err(err) => Err(err),
++                }
++            }
+             ThreadGoalSetMode::ConfirmIfExists | ThreadGoalSetMode::ReplaceExisting => {
+                 unreachable!("goal lookup resolves set mode")
+             }
+@@ -355,8 +404,7 @@ impl App {
+         &mut self,
+         thread_id: ThreadId,
+         draft: goal_files::GoalDraft,
+-        expected_goal_id: String,
+-        expected_revision: i64,
++        snapshot: ThreadGoalSemanticSnapshot,
+     ) {
+         let objective = draft.objective.clone();
+         let replace_draft = draft;
+@@ -365,8 +413,7 @@ impl App {
+                 thread_id,
+                 draft: replace_draft.clone(),
+                 mode: ThreadGoalSetMode::ReplaceExistingExact {
+-                    expected_goal_id: expected_goal_id.clone(),
+-                    expected_revision,
++                    snapshot: snapshot.clone(),
+                 },
+             });
+         })];
+@@ -407,6 +454,34 @@ impl App {
+     }
+ }
+ 
++async fn refresh_thread_goal_revision(
++    app_server: &mut AppServerSession,
++    thread_id: ThreadId,
++    snapshot: &ThreadGoalSemanticSnapshot,
++) -> color_eyre::Result<i64> {
++    let Some(goal) = app_server.thread_goal_get(thread_id).await?.goal else {
++        return Err(color_eyre::eyre::eyre!("goal revision conflict"));
++    };
++    if !snapshot.matches(&goal) {
++        return Err(color_eyre::eyre::eyre!("goal revision conflict"));
++    }
++    Ok(goal.revision)
++}
++
++fn is_goal_revision_conflict(err: &color_eyre::Report) -> bool {
++    matches!(
++        err.downcast_ref::<TypedRequestError>(),
++        Some(TypedRequestError::Server { method, source })
++            if matches!(method.as_str(), "thread/goal/replace" | "thread/goal/set")
++                && source
++                    .data
++                    .as_ref()
++                    .and_then(|data| data.get("reason"))
++                    .and_then(serde_json::Value::as_str)
++                    == Some("goal_revision_conflict")
++    )
++}
++
+ async fn cleanup_materialized_goal_files(
+     app_server: &mut AppServerSession,
+     output_dir: Option<goal_files::GoalFilePath>,
+diff --git a/codex-rs/tui/src/app_event.rs b/codex-rs/tui/src/app_event.rs
+index 8cb7b68a0d..3ff7337f9c 100644
+--- a/codex-rs/tui/src/app_event.rs
++++ b/codex-rs/tui/src/app_event.rs
+@@ -39,6 +39,7 @@ use codex_app_server_protocol::SkillsListResponse;
+ use codex_app_server_protocol::Thread;
+ use codex_app_server_protocol::ThreadAccountRotationReadResponse;
+ use codex_app_server_protocol::ThreadAccountRotationUpdateResponse;
++use codex_app_server_protocol::ThreadGoal;
+ use codex_app_server_protocol::ThreadGoalStatus;
+ use codex_app_server_protocol::ThreadItemsListResponse;
+ use codex_app_server_protocol::ThreadPresentation;
+@@ -77,6 +78,34 @@ use codex_protocol::openai_models::ReasoningEffort;
+ 
+ use crate::history_cell::HistoryCell;
+ 
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub(crate) struct ThreadGoalSemanticSnapshot {
++    pub(crate) goal_id: String,
++    pub(crate) objective: String,
++    pub(crate) status: ThreadGoalStatus,
++    pub(crate) token_budget: Option<i64>,
++}
++
++impl ThreadGoalSemanticSnapshot {
++    pub(crate) fn matches(&self, goal: &ThreadGoal) -> bool {
++        self.goal_id == goal.goal_id
++            && self.objective == goal.objective
++            && self.status == goal.status
++            && self.token_budget == goal.token_budget
++    }
++}
++
++impl From<&ThreadGoal> for ThreadGoalSemanticSnapshot {
++    fn from(goal: &ThreadGoal) -> Self {
++        Self {
++            goal_id: goal.goal_id.clone(),
++            objective: goal.objective.clone(),
++            status: goal.status,
++            token_budget: goal.token_budget,
++        }
++    }
++}
++
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub(crate) enum ThreadGoalSetMode {
+     ConfirmIfExists,
+@@ -86,12 +115,10 @@ pub(crate) enum ThreadGoalSetMode {
+     #[cfg_attr(not(test), allow(dead_code))]
+     ReplaceExisting,
+     ReplaceExistingExact {
+-        expected_goal_id: String,
+-        expected_revision: i64,
++        snapshot: ThreadGoalSemanticSnapshot,
+     },
+     UpdateExisting {
+-        expected_goal_id: String,
+-        expected_revision: i64,
++        snapshot: ThreadGoalSemanticSnapshot,
+         status: ThreadGoalStatus,
+         token_budget: Option<i64>,
+     },
+diff --git a/codex-rs/tui/src/chatwidget/goal_menu.rs b/codex-rs/tui/src/chatwidget/goal_menu.rs
+index 178c75f432..3adf46ea6c 100644
+--- a/codex-rs/tui/src/chatwidget/goal_menu.rs
++++ b/codex-rs/tui/src/chatwidget/goal_menu.rs
+@@ -10,12 +10,15 @@ impl ChatWidget {
+         self.add_plain_history_lines(goal_summary_lines(&goal));
+     }
+ 
+-    pub(crate) fn show_goal_edit_prompt(&mut self, thread_id: ThreadId, goal: AppThreadGoal) {
++    pub(crate) fn show_goal_edit_prompt_for_snapshot(
++        &mut self,
++        thread_id: ThreadId,
++        goal: AppThreadGoal,
++        snapshot: crate::app_event::ThreadGoalSemanticSnapshot,
++    ) {
+         let tx = self.app_event_tx.clone();
+         let status = edited_goal_status(goal.status);
+         let token_budget = goal.token_budget;
+-        let expected_goal_id = goal.goal_id.clone();
+-        let expected_revision = goal.revision;
+         let view = CustomPromptView::new(
+             "Edit goal".to_string(),
+             "Type a goal objective and press Enter".to_string(),
+@@ -29,8 +32,7 @@ impl ChatWidget {
+                         ..Default::default()
+                     },
+                     mode: crate::app_event::ThreadGoalSetMode::UpdateExisting {
+-                        expected_goal_id: expected_goal_id.clone(),
+-                        expected_revision,
++                        snapshot: snapshot.clone(),
+                         status,
+                         token_budget,
+                     },
+diff --git a/codex-rs/tui/src/chatwidget/tests/goal_menu.rs b/codex-rs/tui/src/chatwidget/tests/goal_menu.rs
+index dfb44d6082..a088582b70 100644
+--- a/codex-rs/tui/src/chatwidget/tests/goal_menu.rs
++++ b/codex-rs/tui/src/chatwidget/tests/goal_menu.rs
+@@ -91,7 +91,8 @@ async fn goal_edit_prompt_snapshot() {
+     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+     let thread_id = ThreadId::new();
+ 
+-    chat.show_goal_edit_prompt(
++    show_goal_edit_prompt_for_test(
++        &mut chat,
+         thread_id,
+         test_goal(
+             thread_id,
+@@ -111,7 +112,8 @@ async fn goal_edit_prompt_submits_preserved_status_and_budget() {
+     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+     let thread_id = ThreadId::new();
+ 
+-    chat.show_goal_edit_prompt(
++    show_goal_edit_prompt_for_test(
++        &mut chat,
+         thread_id,
+         test_goal(
+             thread_id,
+@@ -155,7 +157,8 @@ async fn goal_edit_prompt_preserves_resumable_stopped_statuses() {
+         let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+         let thread_id = ThreadId::new();
+ 
+-        chat.show_goal_edit_prompt(
++        show_goal_edit_prompt_for_test(
++            &mut chat,
+             thread_id,
+             test_goal(
+                 thread_id,
+@@ -194,7 +197,8 @@ async fn goal_edit_prompt_resets_terminal_status_to_active() {
+         let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+         let thread_id = ThreadId::new();
+ 
+-        chat.show_goal_edit_prompt(
++        show_goal_edit_prompt_for_test(
++            &mut chat,
+             thread_id,
+             test_goal(
+                 thread_id,
+@@ -276,6 +280,11 @@ fn test_goal(
+     }
+ }
+ 
++fn show_goal_edit_prompt_for_test(chat: &mut ChatWidget, thread_id: ThreadId, goal: AppThreadGoal) {
++    let snapshot = crate::app_event::ThreadGoalSemanticSnapshot::from(&goal);
++    chat.show_goal_edit_prompt_for_snapshot(thread_id, goal, snapshot);
++}
++
+ fn rendered_goal_summary(
+     rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::app_event::AppEvent>,
+ ) -> String {
+-- 
+2.50.1 (Apple Git-155)
+
