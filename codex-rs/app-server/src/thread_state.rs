@@ -33,7 +33,13 @@ use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tracing::error;
 
-type PendingInterruptQueue = Vec<ConnectionRequestId>;
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PendingInterrupt {
+    pub(crate) request_id: ConnectionRequestId,
+    pub(crate) turn_id: String,
+}
+
+type PendingInterruptQueue = Vec<PendingInterrupt>;
 
 pub(crate) struct PendingThreadResumeRequest {
     pub(crate) request_id: ConnectionRequestId,
@@ -102,6 +108,7 @@ pub(crate) struct ThreadState {
     pub(crate) pending_rollbacks: Option<ConnectionRequestId>,
     pub(crate) turn_summary: TurnSummary,
     pub(crate) last_terminal_turn_id: Option<String>,
+    admitted_turn_id: Option<String>,
     /// Lets an internal runtime replacement wait until the old listener has processed Core's
     /// `ShutdownComplete` event before that listener is superseded.
     shutdown_drain_waiter: Option<oneshot::Sender<()>>,
@@ -199,6 +206,7 @@ impl ThreadState {
         watch_registration: WatchRegistration,
         thread_settings_baseline: ThreadSettings,
     ) -> (mpsc::UnboundedReceiver<ThreadListenerCommand>, u64) {
+        self.admitted_turn_id = None;
         if let Some(previous) = self.cancel_tx.replace(cancel_tx) {
             let _ = previous.send(());
         }
@@ -216,6 +224,7 @@ impl ThreadState {
             let _ = cancel_tx.send(());
         }
         self.shutdown_drain_waiter = None;
+        self.admitted_turn_id = None;
         self.listener_command_tx = None;
         self.current_turn_history.reset();
         self.listener_thread = None;
@@ -234,6 +243,28 @@ impl ThreadState {
 
     pub(crate) fn active_turn_snapshot(&self) -> Option<Turn> {
         self.current_turn_history.active_turn_snapshot()
+    }
+
+    pub(crate) fn register_admitted_turn(&mut self, turn_id: String) {
+        self.admitted_turn_id = None;
+        if self.last_terminal_turn_id.as_deref() == Some(turn_id.as_str())
+            || (self.current_turn_history.has_active_turn()
+                && self.current_turn_history.active_turn_id() == Some(turn_id.as_str()))
+        {
+            return;
+        }
+        self.admitted_turn_id = Some(turn_id);
+    }
+
+    pub(crate) fn interruptible_turn_id(&self) -> Option<&str> {
+        if let Some(turn_id) = self.admitted_turn_id.as_deref() {
+            return Some(turn_id);
+        }
+        if self.current_turn_history.has_active_turn() {
+            self.current_turn_history.active_turn_id()
+        } else {
+            None
+        }
     }
 
     pub(crate) fn register_shutdown_drain_waiter(&mut self) -> oneshot::Receiver<()> {
@@ -261,8 +292,16 @@ impl ThreadState {
                 Some(ThreadItem::from(CoreTurnItem::AgentMessage(item.clone())));
         }
         self.current_turn_history.handle_event(event);
+        if let EventMsg::TurnStarted(payload) = event
+            && self.admitted_turn_id.as_deref() == Some(payload.turn_id.as_str())
+        {
+            self.admitted_turn_id = None;
+        }
         if matches!(event, EventMsg::TurnAborted(_) | EventMsg::TurnComplete(_)) {
             self.last_terminal_turn_id = Some(event_turn_id.to_string());
+            if self.admitted_turn_id.as_deref() == Some(event_turn_id) {
+                self.admitted_turn_id = None;
+            }
             if !self.current_turn_history.has_active_turn() {
                 self.current_turn_history.reset();
             }
@@ -275,6 +314,10 @@ impl ThreadState {
         changed
     }
 }
+
+#[cfg(test)]
+#[path = "thread_state_tests.rs"]
+mod turn_admission_tests;
 
 pub(crate) async fn resolve_server_request_on_thread_listener(
     thread_state: &Arc<Mutex<ThreadState>>,

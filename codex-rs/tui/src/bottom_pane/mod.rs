@@ -683,14 +683,11 @@ impl BottomPane {
             self.request_redraw();
             InputResult::None
         } else {
-            // If a task is running and a status line is visible, allow the
-            // configured action to interrupt even while the composer has focus.
+            // If a task is running, allow the configured action to interrupt
+            // even while the composer has focus.
             // When a popup is active, prefer dismissing it over interrupting the task.
-            if self.should_interrupt_running_task(key_event)
-                && let Some(status) = &self.status
-            {
-                // Send Op::Interrupt
-                status.interrupt();
+            if self.should_interrupt_running_task(key_event) {
+                self.app_event_tx.interrupt();
                 self.request_redraw();
                 return InputResult::None;
             }
@@ -1071,7 +1068,6 @@ impl BottomPane {
             if !was_running {
                 if self.status.is_none() {
                     self.status = Some(StatusIndicatorWidget::new(
-                        self.app_event_tx.clone(),
                         self.frame_requester.clone(),
                         self.animations_enabled,
                     ));
@@ -1106,7 +1102,6 @@ impl BottomPane {
     pub(crate) fn ensure_status_indicator(&mut self) {
         if self.status.is_none() {
             self.status = Some(StatusIndicatorWidget::new(
-                self.app_event_tx.clone(),
                 self.frame_requester.clone(),
                 self.animations_enabled,
             ));
@@ -1415,7 +1410,6 @@ impl BottomPane {
             && !(is_agent_command && key_event.code == KeyCode::Esc)
             && self.no_modal_or_popup_active()
             && !self.composer_should_handle_vim_insert_escape(key_event)
-            && self.status.is_some()
     }
 
     pub(crate) fn terminal_title_requires_action(&self) -> bool {
@@ -2905,12 +2899,17 @@ mod tests {
         });
 
         pane.set_task_running(/*running*/ true);
+        pane.hide_status_indicator();
 
         pane.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
         assert!(
             matches!(rx.try_recv(), Ok(AppEvent::CodexOp(Op::Interrupt))),
             "expected Esc to send Op::Interrupt while a task is running"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "expected Esc to send exactly one Op::Interrupt"
         );
     }
 
