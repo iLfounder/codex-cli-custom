@@ -5432,6 +5432,158 @@ async fn make_test_app_with_channels() -> (
     )
 }
 
+async fn start_goal_cas_test() -> Result<(App, AppServerSession, ThreadId, tempfile::TempDir)> {
+    let mut app = make_test_app().await;
+    let codex_home = tempdir()?;
+    app.config.codex_home = codex_home.path().to_path_buf().abs();
+    app.config.sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.path().abs());
+    let mut app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
+    let started = app_server.start_thread(&app.config).await?;
+    let thread_id = started.session.thread_id;
+    app.enqueue_primary_thread_session(started.session, started.turns)
+        .await?;
+    Ok((app, app_server, thread_id, codex_home))
+}
+
+async fn create_goal_for_cas_test(
+    app_server: &mut AppServerSession,
+    thread_id: ThreadId,
+) -> Result<codex_app_server_protocol::ThreadGoal> {
+    let expected_revision = app_server.thread_goal_get(thread_id).await?.revision;
+    Ok(app_server
+        .thread_goal_create(
+            thread_id,
+            expected_revision,
+            "original goal".to_string(),
+            /*token_budget*/ None,
+        )
+        .await?
+        .goal)
+}
+
+#[tokio::test]
+async fn edit_goal_refreshes_accounting_only_revision_drift() -> Result<()> {
+    let (mut app, mut app_server, thread_id, _codex_home) = start_goal_cas_test().await?;
+    let original = create_goal_for_cas_test(&mut app_server, thread_id).await?;
+    let snapshot = crate::app_event::ThreadGoalSemanticSnapshot::from(&original);
+    let state_db = codex_state::StateRuntime::init(
+        app.config.sqlite.clone(),
+        app.config.model_provider_id.clone(),
+    )
+    .await
+    .expect("state db should initialize");
+    state_db
+        .thread_goals()
+        .account_thread_goal_usage(
+            thread_id,
+            /*time_delta_seconds*/ 12,
+            /*token_delta*/ 50,
+            codex_state::GoalAccountingMode::ActiveOnly,
+            Some(&original.goal_id),
+        )
+        .await
+        .expect("goal accounting should succeed");
+
+    app.set_thread_goal_draft(
+        &mut app_server,
+        thread_id,
+        goal_files::GoalDraft {
+            objective: "edited goal".to_string(),
+            ..Default::default()
+        },
+        crate::app_event::ThreadGoalSetMode::UpdateExisting {
+            snapshot,
+            status: original.status,
+            token_budget: original.token_budget,
+        },
+    )
+    .await;
+
+    let updated = app_server
+        .thread_goal_get(thread_id)
+        .await?
+        .goal
+        .expect("goal should still exist");
+    assert_eq!(updated.objective, "edited goal");
+    assert_eq!(updated.tokens_used, 50);
+    assert_eq!(updated.time_used_seconds, 12);
+    app_server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn replace_goal_rejects_semantic_drift_and_cleans_materialized_files() -> Result<()> {
+    let (mut app, mut app_server, thread_id, codex_home) = start_goal_cas_test().await?;
+    let original = create_goal_for_cas_test(&mut app_server, thread_id).await?;
+    let snapshot = crate::app_event::ThreadGoalSemanticSnapshot::from(&original);
+    let concurrent = app_server
+        .thread_goal_set(
+            thread_id,
+            Some("concurrent goal".to_string()),
+            /*status*/ None,
+            /*token_budget*/ None,
+            Some((&original.goal_id, original.revision)),
+        )
+        .await?
+        .goal;
+
+    app.set_thread_goal_draft(
+        &mut app_server,
+        thread_id,
+        goal_files::GoalDraft {
+            objective: "x".repeat(MAX_THREAD_GOAL_OBJECTIVE_CHARS + 1),
+            ..Default::default()
+        },
+        crate::app_event::ThreadGoalSetMode::ReplaceExistingExact { snapshot },
+    )
+    .await;
+
+    assert_eq!(
+        app_server.thread_goal_get(thread_id).await?.goal,
+        Some(concurrent)
+    );
+    assert_eq!(
+        std::fs::read_dir(codex_home.path().join("attachments"))?.count(),
+        0
+    );
+    app_server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn edit_goal_rejects_disappearance_and_cleans_materialized_files() -> Result<()> {
+    let (mut app, mut app_server, thread_id, codex_home) = start_goal_cas_test().await?;
+    let original = create_goal_for_cas_test(&mut app_server, thread_id).await?;
+    let snapshot = crate::app_event::ThreadGoalSemanticSnapshot::from(&original);
+    app_server
+        .thread_goal_clear(thread_id, Some((&original.goal_id, original.revision)))
+        .await?;
+    let cleared = app_server.thread_goal_get(thread_id).await?;
+
+    app.set_thread_goal_draft(
+        &mut app_server,
+        thread_id,
+        goal_files::GoalDraft {
+            objective: "x".repeat(MAX_THREAD_GOAL_OBJECTIVE_CHARS + 1),
+            ..Default::default()
+        },
+        crate::app_event::ThreadGoalSetMode::UpdateExisting {
+            snapshot,
+            status: original.status,
+            token_budget: original.token_budget,
+        },
+    )
+    .await;
+
+    assert_eq!(app_server.thread_goal_get(thread_id).await?, cleared);
+    assert_eq!(
+        std::fs::read_dir(codex_home.path().join("attachments"))?.count(),
+        0
+    );
+    app_server.shutdown().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn set_thread_goal_draft_materializes_long_objective_and_confirms_before_paste() -> Result<()>
 {
@@ -5645,8 +5797,12 @@ async fn replace_goal_confirmation_snapshot() {
             objective: "New goal".to_string(),
             ..Default::default()
         },
-        "goal-test".to_string(),
-        1,
+        crate::app_event::ThreadGoalSemanticSnapshot {
+            goal_id: "goal-test".to_string(),
+            objective: "Old goal".to_string(),
+            status: codex_app_server_protocol::ThreadGoalStatus::Active,
+            token_budget: None,
+        },
     );
     assert_app_snapshot!(
         "replace_goal_confirmation",

@@ -10,12 +10,15 @@ impl ChatWidget {
         self.add_plain_history_lines(goal_summary_lines(&goal));
     }
 
-    pub(crate) fn show_goal_edit_prompt(&mut self, thread_id: ThreadId, goal: AppThreadGoal) {
+    pub(crate) fn show_goal_edit_prompt_for_snapshot(
+        &mut self,
+        thread_id: ThreadId,
+        goal: AppThreadGoal,
+        snapshot: crate::app_event::ThreadGoalSemanticSnapshot,
+    ) {
         let tx = self.app_event_tx.clone();
         let status = edited_goal_status(goal.status);
         let token_budget = goal.token_budget;
-        let expected_goal_id = goal.goal_id.clone();
-        let expected_revision = goal.revision;
         let view = CustomPromptView::new(
             "Edit goal".to_string(),
             "Type a goal objective and press Enter".to_string(),
@@ -29,8 +32,7 @@ impl ChatWidget {
                         ..Default::default()
                     },
                     mode: crate::app_event::ThreadGoalSetMode::UpdateExisting {
-                        expected_goal_id: expected_goal_id.clone(),
-                        expected_revision,
+                        snapshot: snapshot.clone(),
                         status,
                         token_budget,
                     },

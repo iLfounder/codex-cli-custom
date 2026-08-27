@@ -91,7 +91,8 @@ async fn goal_edit_prompt_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let thread_id = ThreadId::new();
 
-    chat.show_goal_edit_prompt(
+    show_goal_edit_prompt_for_test(
+        &mut chat,
         thread_id,
         test_goal(
             thread_id,
@@ -111,7 +112,8 @@ async fn goal_edit_prompt_submits_preserved_status_and_budget() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let thread_id = ThreadId::new();
 
-    chat.show_goal_edit_prompt(
+    show_goal_edit_prompt_for_test(
+        &mut chat,
         thread_id,
         test_goal(
             thread_id,
@@ -155,7 +157,8 @@ async fn goal_edit_prompt_preserves_resumable_stopped_statuses() {
         let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
         let thread_id = ThreadId::new();
 
-        chat.show_goal_edit_prompt(
+        show_goal_edit_prompt_for_test(
+            &mut chat,
             thread_id,
             test_goal(
                 thread_id,
@@ -194,7 +197,8 @@ async fn goal_edit_prompt_resets_terminal_status_to_active() {
         let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
         let thread_id = ThreadId::new();
 
-        chat.show_goal_edit_prompt(
+        show_goal_edit_prompt_for_test(
+            &mut chat,
             thread_id,
             test_goal(
                 thread_id,
@@ -274,6 +278,11 @@ fn test_goal(
         created_at: 1_776_272_400,
         updated_at: 1_776_272_460,
     }
+}
+
+fn show_goal_edit_prompt_for_test(chat: &mut ChatWidget, thread_id: ThreadId, goal: AppThreadGoal) {
+    let snapshot = crate::app_event::ThreadGoalSemanticSnapshot::from(&goal);
+    chat.show_goal_edit_prompt_for_snapshot(thread_id, goal, snapshot);
 }
 
 fn rendered_goal_summary(
