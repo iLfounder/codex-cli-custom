@@ -49,6 +49,9 @@ use codex_exec::CollabToolCallStatus;
 use codex_exec::CollectedThreadEvents;
 use codex_exec::CommandExecutionItem;
 use codex_exec::CommandExecutionStatus;
+use codex_exec::ContextCompactionItem;
+use codex_exec::ContextCompactionStatus;
+use codex_exec::ContextCompactionUsage;
 use codex_exec::ErrorItem;
 use codex_exec::EventProcessorWithJsonOutput;
 use codex_exec::ExecThreadItem;
@@ -70,6 +73,7 @@ use codex_exec::ThreadItemDetails;
 use codex_exec::ThreadStartedEvent;
 use codex_exec::TodoItem;
 use codex_exec::TodoListItem;
+use codex_exec::TokenUsageBreakdown as ExecTokenUsageBreakdown;
 use codex_exec::TurnCompletedEvent;
 use codex_exec::TurnFailedEvent;
 use codex_exec::TurnStartedEvent;
@@ -1296,6 +1300,53 @@ fn token_usage_update_is_emitted_on_turn_completion() {
             })],
             status: CodexStatus::InitiateShutdown,
         }
+    );
+}
+
+#[test]
+fn context_compaction_wire_round_trips_through_public_thread_item_union() {
+    let event = ThreadEvent::ItemCompleted(ItemCompletedEvent {
+        item: ExecThreadItem {
+            id: "item_0".to_string(),
+            details: ThreadItemDetails::ContextCompaction(ContextCompactionItem {
+                status: ContextCompactionStatus::Completed,
+                started_at_ms: Some(1_000),
+                completed_at_ms: Some(7_500),
+                duration_ms: Some(6_500),
+                before: None,
+                latest_reported: Some(ContextCompactionUsage {
+                    reported_last_usage: ExecTokenUsageBreakdown {
+                        total_tokens: 18_000,
+                        input_tokens: 0,
+                        cached_input_tokens: 0,
+                        cache_write_input_tokens: 0,
+                        output_tokens: 0,
+                        reasoning_output_tokens: 0,
+                    },
+                    reported_total_usage: ExecTokenUsageBreakdown {
+                        total_tokens: 157_600,
+                        input_tokens: 150_000,
+                        cached_input_tokens: 90_000,
+                        cache_write_input_tokens: 0,
+                        output_tokens: 6_500,
+                        reasoning_output_tokens: 1_100,
+                    },
+                    model_context_window: Some(128_000),
+                }),
+            }),
+        },
+    });
+
+    let wire = serde_json::to_value(&event).expect("serialize compaction event");
+    assert_eq!(wire["type"], "item.completed");
+    assert_eq!(wire["item"]["type"], "context_compaction");
+    assert_eq!(wire["item"]["status"], "completed");
+    assert!(wire["item"].get("prompt").is_none());
+    assert!(wire["item"].get("summary").is_none());
+    assert!(wire["item"].get("account_id").is_none());
+    assert_eq!(
+        serde_json::from_value::<ThreadEvent>(wire).expect("deserialize compaction event"),
+        event
     );
 }
 

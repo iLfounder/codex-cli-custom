@@ -130,6 +130,45 @@ pub enum ThreadItemDetails {
     TodoList(TodoListItem),
     /// Describes a non-fatal error surfaced as an item.
     Error(ErrorItem),
+    /// Observes a context compaction lifecycle without exposing compacted content.
+    ContextCompaction(ContextCompactionItem),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextCompactionStatus {
+    Compacting,
+    Completed,
+    OutcomeUnknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+pub struct TokenUsageBreakdown {
+    pub total_tokens: i64,
+    pub input_tokens: i64,
+    pub cached_input_tokens: i64,
+    #[serde(default)]
+    pub cache_write_input_tokens: i64,
+    pub output_tokens: i64,
+    pub reasoning_output_tokens: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+pub struct ContextCompactionUsage {
+    pub reported_last_usage: TokenUsageBreakdown,
+    pub reported_total_usage: TokenUsageBreakdown,
+    pub model_context_window: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+pub struct ContextCompactionItem {
+    pub status: ContextCompactionStatus,
+    pub started_at_ms: Option<i64>,
+    pub completed_at_ms: Option<i64>,
+    pub duration_ms: Option<i64>,
+    /// Present only when same-thread, same-turn token usage was observed before compaction began.
+    pub before: Option<ContextCompactionUsage>,
+    pub latest_reported: Option<ContextCompactionUsage>,
 }
 
 /// Response from the agent.

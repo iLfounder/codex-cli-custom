@@ -86,6 +86,39 @@ export type ReasoningItem = {
   text: string;
 };
 
+/** Source-observed lifecycle state for context compaction. */
+export type ContextCompactionStatus = "compacting" | "completed" | "outcome_unknown";
+
+/** Complete native token usage breakdown reported by Codex. */
+export type TokenUsageBreakdown = {
+  total_tokens: number;
+  input_tokens: number;
+  cached_input_tokens: number;
+  cache_write_input_tokens: number;
+  output_tokens: number;
+  reasoning_output_tokens: number;
+};
+
+/** Provenance-preserving native token usage snapshot observed by the exec stream. */
+export type ContextCompactionUsage = {
+  reported_last_usage: TokenUsageBreakdown;
+  reported_total_usage: TokenUsageBreakdown;
+  model_context_window: number | null;
+};
+
+/** Observes context compaction without exposing compacted semantic content. */
+export type ContextCompactionItem = {
+  id: string;
+  type: "context_compaction";
+  status: ContextCompactionStatus;
+  started_at_ms: number | null;
+  completed_at_ms: number | null;
+  duration_ms: number | null;
+  /** Same-thread, same-turn usage observed before compaction, or null for a first model call. */
+  before: ContextCompactionUsage | null;
+  latest_reported: ContextCompactionUsage | null;
+};
+
 /** Captures a web search request. Completes when results are returned to the agent. */
 export type WebSearchItem = {
   id: string;
@@ -120,6 +153,7 @@ export type TodoListItem = {
 export type ThreadItem =
   | AgentMessageItem
   | ReasoningItem
+  | ContextCompactionItem
   | CommandExecutionItem
   | FileChangeItem
   | McpToolCallItem

@@ -6,6 +6,7 @@
 #![deny(clippy::print_stdout)]
 
 mod cli;
+mod compaction_observer;
 mod event_processor;
 mod event_processor_with_human_output;
 pub(crate) mod event_processor_with_jsonl_output;
@@ -118,6 +119,9 @@ pub use exec_events::CollabToolCallItem;
 pub use exec_events::CollabToolCallStatus;
 pub use exec_events::CommandExecutionItem;
 pub use exec_events::CommandExecutionStatus;
+pub use exec_events::ContextCompactionItem;
+pub use exec_events::ContextCompactionStatus;
+pub use exec_events::ContextCompactionUsage;
 pub use exec_events::ErrorItem;
 pub use exec_events::FileChangeItem;
 pub use exec_events::FileUpdateChange;
@@ -138,6 +142,7 @@ pub use exec_events::ThreadItemDetails;
 pub use exec_events::ThreadStartedEvent;
 pub use exec_events::TodoItem;
 pub use exec_events::TodoListItem;
+pub use exec_events::TokenUsageBreakdown;
 pub use exec_events::TurnCompletedEvent;
 pub use exec_events::TurnFailedEvent;
 pub use exec_events::TurnStartedEvent;
