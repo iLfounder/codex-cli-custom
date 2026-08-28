@@ -8,6 +8,7 @@ mod model_context;
 mod move_thread_to_section;
 mod paginated_fork;
 mod pending_thread_metadata;
+mod prepared_resume;
 mod projects;
 mod read_thread;
 mod revert_thread;
@@ -79,7 +80,10 @@ use crate::MoveProjectParams;
 use crate::MoveThreadToSectionParams;
 use crate::PersistContext;
 use crate::PrepareForkParams;
+use crate::PrepareThreadResumeParams;
 use crate::PreparedFork;
+use crate::PreparedThreadResume;
+use crate::PreparedThreadResumeAuthority;
 use crate::ProjectMoveOutcome;
 use crate::ReadThreadByRolloutPathParams;
 use crate::ReadThreadParams;
@@ -1101,6 +1105,21 @@ impl ThreadStore for LocalThreadStore {
         Box::pin(async move { live_writer::resume_thread(self, params).await })
     }
 
+    fn prepare_thread_resume(
+        &self,
+        params: PrepareThreadResumeParams,
+    ) -> ThreadStoreFuture<'_, PreparedThreadResume> {
+        Box::pin(async move { prepared_resume::prepare(self, params).await })
+    }
+
+    fn activate_prepared_thread_resume(
+        &self,
+        authority: PreparedThreadResumeAuthority,
+        metadata: crate::ThreadPersistenceMetadata,
+    ) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move { prepared_resume::activate(self, authority, metadata).await })
+    }
+
     fn append_items(&self, params: AppendThreadItemsParams) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move { live_writer::append_items(self, params).await })
     }
@@ -1345,6 +1364,9 @@ impl ThreadStore for LocalThreadStore {
 
 #[cfg(test)]
 mod tests {
+    #[path = "prepared_resume_tests.rs"]
+    mod prepared_resume_tests;
+
     #[path = "relinquish_tests.rs"]
     mod relinquish_tests;
 

@@ -1569,6 +1569,7 @@ impl Session {
         tx_event: Sender<Event>,
         agent_status: watch::Sender<AgentStatus>,
         mut initial_history: InitialHistory,
+        mut prepared_resume: Option<codex_thread_store::PreparedThreadResumeAuthority>,
         fork_persistence: ForkPersistence,
         session_source: SessionSource,
         skills_service: Arc<HostSkillsService>,
@@ -1741,6 +1742,11 @@ impl Session {
             } else {
                 let live_thread = match &initial_history {
                     InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => {
+                        if prepared_resume.is_some() {
+                            return Err(anyhow::anyhow!(
+                                "prepared resume authority requires resumed history"
+                            ));
+                        }
                         let params = CreateThreadParams {
                             session_id,
                             thread_id,
@@ -1806,12 +1812,25 @@ impl Session {
                                 },
                             },
                         };
-                        LiveThread::resume(
-                            Arc::clone(&thread_store),
-                            session_configuration.history_mode,
-                            params,
-                        )
-                        .await?
+                        match prepared_resume.take() {
+                            Some(authority) => {
+                                LiveThread::resume_prepared(
+                                    Arc::clone(&thread_store),
+                                    session_configuration.history_mode,
+                                    authority,
+                                    params,
+                                )
+                                .await?
+                            }
+                            None => {
+                                LiveThread::resume(
+                                    Arc::clone(&thread_store),
+                                    session_configuration.history_mode,
+                                    params,
+                                )
+                                .await?
+                            }
+                        }
                     }
                 };
                 Ok(Some(live_thread))

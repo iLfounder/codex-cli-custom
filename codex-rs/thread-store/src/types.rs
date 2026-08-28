@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -119,6 +120,93 @@ pub struct ResumeThreadParams {
     pub include_archived: bool,
     /// Metadata for future writes appended to the resumed live thread.
     pub metadata: ThreadPersistenceMetadata,
+}
+
+/// Storage-neutral target used to prepare a cold thread resume.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PrepareThreadResumeTarget {
+    /// Resolve the current rollout selected for an existing thread ID.
+    ThreadId(ThreadId),
+    /// Resolve the thread represented by one exact rollout path.
+    RolloutPath(PathBuf),
+}
+
+/// Parameters for acquiring writer authority and reading one consistent resume snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrepareThreadResumeParams {
+    pub target: PrepareThreadResumeTarget,
+    pub include_archived: bool,
+}
+
+/// Opaque exact writer authority acquired before a cold-resume history read.
+pub struct PreparedThreadResumeAuthority {
+    thread_id: ThreadId,
+    inner: Box<dyn Any + Send>,
+}
+
+impl std::fmt::Debug for PreparedThreadResumeAuthority {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedThreadResumeAuthority")
+            .field("thread_id", &self.thread_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PreparedThreadResumeAuthority {
+    pub(crate) fn new(thread_id: ThreadId, inner: impl Any + Send) -> Self {
+        Self {
+            thread_id,
+            inner: Box::new(inner),
+        }
+    }
+
+    pub fn thread_id(&self) -> ThreadId {
+        self.thread_id
+    }
+
+    pub(crate) fn downcast<T: Any + Send>(self) -> crate::ThreadStoreResult<Box<T>> {
+        self.inner
+            .downcast::<T>()
+            .map_err(|_| crate::ThreadStoreError::InvalidRequest {
+                message: format!(
+                    "prepared resume authority for thread {} belongs to a different store",
+                    self.thread_id
+                ),
+            })
+    }
+}
+
+/// A history snapshot and the exact writer authority that fenced its read.
+#[derive(Debug)]
+pub struct PreparedThreadResume {
+    stored_thread: StoredThread,
+    initial_history: Arc<Vec<RolloutItem>>,
+    authority: PreparedThreadResumeAuthority,
+}
+
+impl PreparedThreadResume {
+    pub(crate) fn new(
+        stored_thread: StoredThread,
+        initial_history: Arc<Vec<RolloutItem>>,
+        authority: PreparedThreadResumeAuthority,
+    ) -> Self {
+        Self {
+            stored_thread,
+            initial_history,
+            authority,
+        }
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        StoredThread,
+        Arc<Vec<RolloutItem>>,
+        PreparedThreadResumeAuthority,
+    ) {
+        (self.stored_thread, self.initial_history, self.authority)
+    }
 }
 
 pub(crate) fn canonical_history_mode_from_rollout_items(

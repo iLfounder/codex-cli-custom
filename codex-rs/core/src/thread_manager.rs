@@ -84,7 +84,11 @@ use codex_thread_store::LoadThreadHistoryParams;
 use codex_thread_store::LocalThreadStore;
 use codex_thread_store::LocalThreadStoreConfig;
 use codex_thread_store::MoveThreadToSectionParams;
+use codex_thread_store::PrepareThreadResumeParams;
+use codex_thread_store::PrepareThreadResumeTarget;
 use codex_thread_store::PreparedFork;
+use codex_thread_store::PreparedThreadResume;
+use codex_thread_store::PreparedThreadResumeAuthority;
 use codex_thread_store::ReadThreadByRolloutPathParams;
 use codex_thread_store::ReadThreadParams;
 use codex_thread_store::StoredModelContext;
@@ -244,6 +248,7 @@ pub struct StartThreadOptions {
     pub environments: Option<Vec<TurnEnvironmentSelection>>,
     pub thread_extension_init: ExtensionDataInit,
     pub client_mcp_extensions: ClientMcpExtensions,
+    pub prepared_resume: Option<PreparedThreadResumeAuthority>,
     /// Thread ID reserved before startup so the caller can associate host-owned state with it.
     pub reserved_thread_id: Option<ThreadId>,
 }
@@ -263,6 +268,7 @@ impl StartThreadOptions {
             environments: None,
             thread_extension_init: ExtensionDataInit::default(),
             client_mcp_extensions: ClientMcpExtensions::default(),
+            prepared_resume: None,
             reserved_thread_id: None,
         }
     }
@@ -341,6 +347,7 @@ pub(crate) struct ResumeThreadWithHistoryOptions {
     pub(crate) environment_selections: Option<Vec<TurnEnvironmentSelection>>,
     pub(crate) inherited_environments: Option<TurnEnvironmentSnapshot>,
     pub(crate) inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
+    pub(crate) prepared_resume: PreparedThreadResumeAuthority,
 }
 
 /// Shared, `Arc`-owned state for [`ThreadManager`]. This `Arc` is required to have a single
@@ -1396,10 +1403,15 @@ impl ThreadManager {
         parent_trace: Option<W3cTraceContext>,
         client_mcp_extensions: ClientMcpExtensions,
     ) -> CodexResult<NewThread> {
-        let initial_history = self.initial_history_from_rollout_path(rollout_path).await?;
-        Box::pin(self.resume_thread_with_history(
+        let prepared = self
+            .state
+            .prepare_thread_resume(PrepareThreadResumeTarget::RolloutPath(rollout_path))
+            .await?;
+        let (initial_history, prepared_resume) = prepared_resume_to_initial_history(prepared)?;
+        Box::pin(self.resume_prepared_thread_with_history(
             config,
             initial_history,
+            prepared_resume,
             auth_manager,
             Vec::new(),
             parent_trace,
@@ -1418,6 +1430,55 @@ impl ThreadManager {
         parent_trace: Option<W3cTraceContext>,
         client_mcp_extensions: ClientMcpExtensions,
     ) -> CodexResult<NewThread> {
+        self.resume_thread_with_history_inner(
+            config,
+            initial_history,
+            /*prepared_resume*/ None,
+            auth_manager,
+            dynamic_tools,
+            parent_trace,
+            client_mcp_extensions,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn resume_prepared_thread_with_history(
+        &self,
+        config: Config,
+        initial_history: InitialHistory,
+        prepared_resume: PreparedThreadResumeAuthority,
+        auth_manager: Arc<AuthManager>,
+        dynamic_tools: Vec<codex_protocol::dynamic_tools::DynamicToolSpec>,
+        parent_trace: Option<W3cTraceContext>,
+        client_mcp_extensions: ClientMcpExtensions,
+    ) -> CodexResult<NewThread> {
+        self.resume_thread_with_history_inner(
+            config,
+            initial_history,
+            Some(prepared_resume),
+            auth_manager,
+            dynamic_tools,
+            parent_trace,
+            client_mcp_extensions,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn resume_thread_with_history_inner(
+        &self,
+        config: Config,
+        initial_history: InitialHistory,
+        prepared_resume: Option<PreparedThreadResumeAuthority>,
+        auth_manager: Arc<AuthManager>,
+        dynamic_tools: Vec<codex_protocol::dynamic_tools::DynamicToolSpec>,
+        parent_trace: Option<W3cTraceContext>,
+        client_mcp_extensions: ClientMcpExtensions,
+    ) -> CodexResult<NewThread> {
+        let prepared_resume = self
+            .prepare_resume_authority_if_needed(&initial_history, prepared_resume)
+            .await?;
         let agent_control = self.agent_control_for_config(&config);
         let (session_source, thread_source) = initial_history
             .get_resumed_session_sources()
@@ -1432,6 +1493,7 @@ impl ThreadManager {
         }
         let options = StartThreadOptions {
             initial_history,
+            prepared_resume,
             session_source: Some(session_source),
             thread_source,
             dynamic_tools,
@@ -1457,6 +1519,55 @@ impl ThreadManager {
         parent_trace: Option<W3cTraceContext>,
         client_mcp_extensions: ClientMcpExtensions,
     ) -> CodexResult<NewThread> {
+        self.resume_thread_with_history_and_execution_account_inner(
+            config,
+            initial_history,
+            /*prepared_resume*/ None,
+            execution_account,
+            dynamic_tools,
+            parent_trace,
+            client_mcp_extensions,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn resume_prepared_thread_with_history_and_execution_account(
+        &self,
+        config: Config,
+        initial_history: InitialHistory,
+        prepared_resume: PreparedThreadResumeAuthority,
+        execution_account: Arc<ExecutionAccountContext>,
+        dynamic_tools: Vec<codex_protocol::dynamic_tools::DynamicToolSpec>,
+        parent_trace: Option<W3cTraceContext>,
+        client_mcp_extensions: ClientMcpExtensions,
+    ) -> CodexResult<NewThread> {
+        self.resume_thread_with_history_and_execution_account_inner(
+            config,
+            initial_history,
+            Some(prepared_resume),
+            execution_account,
+            dynamic_tools,
+            parent_trace,
+            client_mcp_extensions,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn resume_thread_with_history_and_execution_account_inner(
+        &self,
+        config: Config,
+        initial_history: InitialHistory,
+        prepared_resume: Option<PreparedThreadResumeAuthority>,
+        execution_account: Arc<ExecutionAccountContext>,
+        dynamic_tools: Vec<codex_protocol::dynamic_tools::DynamicToolSpec>,
+        parent_trace: Option<W3cTraceContext>,
+        client_mcp_extensions: ClientMcpExtensions,
+    ) -> CodexResult<NewThread> {
+        let prepared_resume = self
+            .prepare_resume_authority_if_needed(&initial_history, prepared_resume)
+            .await?;
         let agent_control = self.agent_control_for_config(&config);
         let (session_source, thread_source) = initial_history
             .get_resumed_session_sources()
@@ -1471,6 +1582,7 @@ impl ThreadManager {
         }
         let options = StartThreadOptions {
             initial_history,
+            prepared_resume,
             session_source: Some(session_source),
             thread_source,
             dynamic_tools,
@@ -1485,6 +1597,31 @@ impl ThreadManager {
         );
         request.execution_account = Some(execution_account);
         Box::pin(self.state.spawn_thread(request)).await
+    }
+
+    async fn prepare_resume_authority_if_needed(
+        &self,
+        initial_history: &InitialHistory,
+        prepared_resume: Option<PreparedThreadResumeAuthority>,
+    ) -> CodexResult<Option<PreparedThreadResumeAuthority>> {
+        if prepared_resume.is_some() {
+            return Ok(prepared_resume);
+        }
+        let InitialHistory::Resumed(resumed) = initial_history else {
+            return Ok(None);
+        };
+        let prepared = self
+            .state
+            .prepare_thread_resume(PrepareThreadResumeTarget::ThreadId(resumed.conversation_id))
+            .await?;
+        let (stored_thread, _, authority) = prepared.into_parts();
+        if stored_thread.thread_id != resumed.conversation_id {
+            return Err(CodexErr::Fatal(format!(
+                "prepared resume returned thread {}, not {}",
+                stored_thread.thread_id, resumed.conversation_id
+            )));
+        }
+        Ok(Some(authority))
     }
 
     pub(crate) async fn start_thread_with_user_shell_override_for_tests(
@@ -1513,12 +1650,17 @@ impl ThreadManager {
         client_mcp_extensions: ClientMcpExtensions,
     ) -> CodexResult<NewThread> {
         let agent_control = self.agent_control_for_config(&config);
-        let initial_history = self.initial_history_from_rollout_path(rollout_path).await?;
+        let prepared = self
+            .state
+            .prepare_thread_resume(PrepareThreadResumeTarget::RolloutPath(rollout_path))
+            .await?;
+        let (initial_history, prepared_resume) = prepared_resume_to_initial_history(prepared)?;
         let (session_source, thread_source) = initial_history
             .get_resumed_session_sources()
             .unwrap_or_else(|| (self.state.session_source.clone(), None));
         let options = StartThreadOptions {
             initial_history,
+            prepared_resume: Some(prepared_resume),
             session_source: Some(session_source),
             thread_source,
             client_mcp_extensions,
@@ -2153,6 +2295,7 @@ impl ThreadManagerState {
             environment_selections,
             inherited_environments,
             inherited_exec_policy,
+            prepared_resume,
         } = options;
         let client_mcp_extensions = self.client_mcp_extensions_for_child(parent_thread_id).await;
         let thread_source = initial_history.get_resumed_thread_source();
@@ -2163,6 +2306,7 @@ impl ThreadManagerState {
         });
         let options = StartThreadOptions {
             initial_history,
+            prepared_resume: Some(prepared_resume),
             session_source: Some(session_source),
             thread_source,
             environments,
@@ -2175,6 +2319,19 @@ impl ThreadManagerState {
         request.inherited_environments = inherited_environments;
         request.inherited_exec_policy = inherited_exec_policy;
         Box::pin(self.spawn_thread(request)).await
+    }
+
+    pub(crate) async fn prepare_thread_resume(
+        &self,
+        target: PrepareThreadResumeTarget,
+    ) -> CodexResult<PreparedThreadResume> {
+        self.thread_store
+            .prepare_thread_resume(PrepareThreadResumeParams {
+                target,
+                include_archived: true,
+            })
+            .await
+            .map_err(thread_store_resume_prepare_error)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2253,6 +2410,7 @@ impl ThreadManagerState {
             environments,
             thread_extension_init,
             client_mcp_extensions,
+            prepared_resume,
             reserved_thread_id,
         } = options;
         let session_source = session_source.unwrap_or_else(|| self.session_source.clone());
@@ -2409,6 +2567,7 @@ impl ThreadManagerState {
             code_mode_session_provider: Arc::clone(&self.code_mode_session_provider),
             extensions: Arc::clone(&self.extensions),
             conversation_history: initial_history,
+            prepared_resume,
             requested_history_mode: history_mode,
             fork_persistence,
             session_source,
@@ -2562,6 +2721,37 @@ fn stored_thread_to_initial_history(
         history: Arc::new(history.items),
         rollout_path: rollout_path.or(stored_thread.rollout_path),
     }))
+}
+
+pub(crate) fn prepared_resume_to_initial_history(
+    prepared: PreparedThreadResume,
+) -> CodexResult<(InitialHistory, PreparedThreadResumeAuthority)> {
+    let (stored_thread, history, authority) = prepared.into_parts();
+    let thread_id = stored_thread.thread_id;
+    if authority.thread_id() != thread_id {
+        return Err(CodexErr::Fatal(format!(
+            "prepared resume authority belongs to thread {}, not {thread_id}",
+            authority.thread_id()
+        )));
+    }
+    Ok((
+        InitialHistory::Resumed(ResumedHistory {
+            conversation_id: thread_id,
+            history,
+            rollout_path: stored_thread.rollout_path,
+        }),
+        authority,
+    ))
+}
+
+fn thread_store_resume_prepare_error(err: ThreadStoreError) -> CodexErr {
+    match err {
+        ThreadStoreError::ThreadNotFound { thread_id } => CodexErr::ThreadNotFound(thread_id),
+        ThreadStoreError::InvalidRequest { message } | ThreadStoreError::Conflict { message } => {
+            CodexErr::InvalidRequest(message)
+        }
+        err => CodexErr::Fatal(format!("failed to prepare thread resume: {err}")),
+    }
 }
 
 fn thread_store_rollout_read_error(err: ThreadStoreError) -> CodexErr {

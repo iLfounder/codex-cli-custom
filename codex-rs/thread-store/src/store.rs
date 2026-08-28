@@ -31,7 +31,10 @@ use crate::MarkThreadTransitionPrepared;
 use crate::MoveProjectParams;
 use crate::MoveThreadToSectionParams;
 use crate::PrepareForkParams;
+use crate::PrepareThreadResumeParams;
 use crate::PreparedFork;
+use crate::PreparedThreadResume;
+use crate::PreparedThreadResumeAuthority;
 use crate::ProjectMoveOutcome;
 use crate::ReadThreadByRolloutPathParams;
 use crate::ReadThreadParams;
@@ -418,6 +421,31 @@ pub trait ThreadStore: Any + Send + Sync {
 
     /// Reopens an existing thread for live appends.
     fn resume_thread(&self, params: ResumeThreadParams) -> ThreadStoreFuture<'_, ()>;
+
+    /// Acquires exact writer authority before reading the history used for a cold resume.
+    fn prepare_thread_resume(
+        &self,
+        _params: PrepareThreadResumeParams,
+    ) -> ThreadStoreFuture<'_, PreparedThreadResume> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "prepare_thread_resume",
+            })
+        })
+    }
+
+    /// Converts prepared authority into the live writer used by the resumed session.
+    fn activate_prepared_thread_resume(
+        &self,
+        _authority: PreparedThreadResumeAuthority,
+        _metadata: crate::ThreadPersistenceMetadata,
+    ) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "activate_prepared_thread_resume",
+            })
+        })
+    }
 
     /// Appends raw rollout items to a live thread.
     ///

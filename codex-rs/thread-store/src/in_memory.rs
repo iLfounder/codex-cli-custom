@@ -35,6 +35,10 @@ use crate::LoadThreadHistoryParams;
 use crate::MarkThreadTransitionPrepared;
 use crate::MoveThreadToSectionParams;
 use crate::PersistContext;
+use crate::PrepareThreadResumeParams;
+use crate::PrepareThreadResumeTarget;
+use crate::PreparedThreadResume;
+use crate::PreparedThreadResumeAuthority;
 use crate::ReadThreadByRolloutPathParams;
 use crate::ReadThreadParams;
 use crate::ResumeThreadParams;
@@ -670,7 +674,32 @@ pub struct InMemoryThreadStoreCalls {
 #[derive(Default)]
 pub struct InMemoryThreadStore {
     state: tokio::sync::Mutex<InMemoryThreadStoreState>,
+    resume_authorities: Arc<Mutex<HashSet<ThreadId>>>,
     omit_metadata_update_result: AtomicBool,
+}
+
+struct InMemoryPreparedResumeAuthority {
+    resume_authorities: Arc<Mutex<HashSet<ThreadId>>>,
+    thread_id: ThreadId,
+    activated: bool,
+}
+
+impl InMemoryPreparedResumeAuthority {
+    fn activate(&mut self) {
+        self.activated = true;
+    }
+}
+
+impl Drop for InMemoryPreparedResumeAuthority {
+    fn drop(&mut self) {
+        if self.activated {
+            return;
+        }
+        self.resume_authorities
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.thread_id);
+    }
 }
 
 #[derive(Default)]
@@ -1499,6 +1528,93 @@ impl ThreadStore for InMemoryThreadStore {
         Box::pin(InMemoryThreadStore::resume_thread(self, params))
     }
 
+    fn prepare_thread_resume(
+        &self,
+        params: PrepareThreadResumeParams,
+    ) -> ThreadStoreFuture<'_, PreparedThreadResume> {
+        Box::pin(async move {
+            let resolved_thread_id = match &params.target {
+                PrepareThreadResumeTarget::ThreadId(thread_id) => *thread_id,
+                PrepareThreadResumeTarget::RolloutPath(path) => {
+                    let state = self.state.lock().await;
+                    state.rollout_paths.get(path).copied().ok_or_else(|| {
+                        ThreadStoreError::InvalidRequest {
+                            message: format!(
+                                "in-memory thread store does not know rollout path {}",
+                                path.display()
+                            ),
+                        }
+                    })?
+                }
+            };
+            let authority = {
+                let mut authorities = self
+                    .resume_authorities
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if !authorities.insert(resolved_thread_id) {
+                    return Err(ThreadStoreError::Conflict {
+                        message: format!(
+                            "thread {resolved_thread_id} already has a prepared resume"
+                        ),
+                    });
+                }
+                InMemoryPreparedResumeAuthority {
+                    resume_authorities: Arc::clone(&self.resume_authorities),
+                    thread_id: resolved_thread_id,
+                    activated: false,
+                }
+            };
+            let mut state = self.state.lock().await;
+            let thread_id = match params.target {
+                PrepareThreadResumeTarget::ThreadId(thread_id) => {
+                    state.calls.read_thread += 1;
+                    thread_id
+                }
+                PrepareThreadResumeTarget::RolloutPath(path) => {
+                    state.calls.read_thread_by_rollout_path += 1;
+                    state.rollout_paths.get(&path).copied().ok_or_else(|| {
+                        ThreadStoreError::InvalidRequest {
+                            message: format!(
+                                "in-memory thread store does not know rollout path {}",
+                                path.display()
+                            ),
+                        }
+                    })?
+                }
+            };
+            let stored_thread = stored_thread_from_state(&state, thread_id, false)?;
+            if !params.include_archived && stored_thread.archived_at.is_some() {
+                return Err(ThreadStoreError::InvalidRequest {
+                    message: format!("thread {thread_id} is archived"),
+                });
+            }
+            let initial_history = state
+                .histories
+                .get(&thread_id)
+                .cloned()
+                .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
+            Ok(PreparedThreadResume::new(
+                stored_thread,
+                Arc::new(initial_history),
+                PreparedThreadResumeAuthority::new(thread_id, authority),
+            ))
+        })
+    }
+
+    fn activate_prepared_thread_resume(
+        &self,
+        authority: PreparedThreadResumeAuthority,
+        _metadata: crate::ThreadPersistenceMetadata,
+    ) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move {
+            let mut authority = authority.downcast::<InMemoryPreparedResumeAuthority>()?;
+            authority.activate();
+            self.state.lock().await.calls.resume_thread += 1;
+            Ok(())
+        })
+    }
+
     fn append_items(&self, params: AppendThreadItemsParams) -> ThreadStoreFuture<'_, ()> {
         Box::pin(InMemoryThreadStore::append_items(self, params))
     }
@@ -1521,8 +1637,12 @@ impl ThreadStore for InMemoryThreadStore {
         })
     }
 
-    fn shutdown_thread(&self, _thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+    fn shutdown_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move {
+            self.resume_authorities
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&thread_id);
             self.state.lock().await.calls.shutdown_thread += 1;
             Ok(())
         })
@@ -1548,8 +1668,12 @@ impl ThreadStore for InMemoryThreadStore {
         Box::pin(async { Ok(()) })
     }
 
-    fn discard_thread(&self, _thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+    fn discard_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move {
+            self.resume_authorities
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&thread_id);
             self.state.lock().await.calls.discard_thread += 1;
             Ok(())
         })

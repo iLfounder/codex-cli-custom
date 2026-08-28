@@ -151,6 +151,7 @@ use codex_thread_store::LiveThread;
 use codex_thread_store::LiveThreadInitGuard;
 use codex_thread_store::LocalThreadStore;
 use codex_thread_store::PersistContext;
+use codex_thread_store::PreparedThreadResumeAuthority;
 use codex_thread_store::ReadThreadParams;
 use codex_thread_store::ResumeThreadParams;
 use codex_thread_store::ThreadPersistenceMetadata;
@@ -404,6 +405,7 @@ pub(crate) struct SessionSpawnArgs {
     pub(crate) code_mode_session_provider: Arc<dyn codex_code_mode::CodeModeSessionProvider>,
     pub(crate) extensions: Arc<codex_extension_api::ExtensionRegistry<crate::config::Config>>,
     pub(crate) conversation_history: InitialHistory,
+    pub(crate) prepared_resume: Option<PreparedThreadResumeAuthority>,
     pub(crate) requested_history_mode: Option<ThreadHistoryMode>,
     pub(crate) fork_persistence: ForkPersistence,
     pub(crate) session_source: SessionSource,
@@ -502,6 +504,7 @@ impl Session {
             code_mode_session_provider,
             extensions,
             conversation_history,
+            prepared_resume,
             requested_history_mode,
             fork_persistence,
             session_source,
@@ -742,6 +745,7 @@ impl Session {
             tx_event.clone(),
             agent_status_tx.clone(),
             conversation_history,
+            prepared_resume,
             fork_persistence,
             session_source_clone,
             skills_service,
