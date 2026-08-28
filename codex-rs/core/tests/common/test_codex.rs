@@ -20,6 +20,8 @@ use codex_core::ThreadManager;
 use codex_core::TimeProvider;
 pub use codex_core::TurnInputRequest;
 use codex_core::config::Config;
+use codex_core::execution_account::ExecutionAccountResolver;
+use codex_core::execution_account::TurnExecutionAccountSelector;
 use codex_core::resolve_installation_id;
 use codex_core::shell::Shell;
 use codex_core::shell::get_shell_by_model_provided_path;
@@ -338,6 +340,8 @@ pub struct TestCodexBuilder {
     code_mode_host_program: Option<PathBuf>,
     history_mode: Option<ThreadHistoryMode>,
     models_manager: Option<SharedModelsManager>,
+    execution_account_resolver: Option<Arc<dyn ExecutionAccountResolver>>,
+    turn_execution_account_selector: Option<Arc<dyn TurnExecutionAccountSelector>>,
 }
 
 impl TestCodexBuilder {
@@ -356,6 +360,22 @@ impl TestCodexBuilder {
 
     pub fn with_models_manager(mut self, models_manager: SharedModelsManager) -> Self {
         self.models_manager = Some(models_manager);
+        self
+    }
+
+    pub fn with_execution_account_resolver(
+        mut self,
+        resolver: Arc<dyn ExecutionAccountResolver>,
+    ) -> Self {
+        self.execution_account_resolver = Some(resolver);
+        self
+    }
+
+    pub fn with_turn_execution_account_selector(
+        mut self,
+        selector: Arc<dyn TurnExecutionAccountSelector>,
+    ) -> Self {
+        self.turn_execution_account_selector = Some(selector);
         self
     }
 
@@ -685,7 +705,7 @@ impl TestCodexBuilder {
             .models_manager
             .clone()
             .unwrap_or_else(|| codex_core::build_models_manager(&config, auth_manager.clone()));
-        let thread_manager = ThreadManager::new(
+        let mut thread_manager = ThreadManager::new(
             &config,
             auth_manager.clone(),
             models_manager,
@@ -701,6 +721,12 @@ impl TestCodexBuilder {
             /*attestation_provider*/ None,
             /*external_time_provider*/ self.external_time_provider.clone(),
         );
+        if let Some(resolver) = self.execution_account_resolver.take() {
+            thread_manager = thread_manager.with_execution_account_resolver(resolver);
+        }
+        if let Some(selector) = self.turn_execution_account_selector.take() {
+            thread_manager = thread_manager.with_turn_execution_account_selector(selector);
+        }
         let code_mode_host_program = self
             .code_mode_host_program
             .take()
@@ -1354,6 +1380,8 @@ pub fn test_codex() -> TestCodexBuilder {
         code_mode_host_program: None,
         history_mode: None,
         models_manager: None,
+        execution_account_resolver: None,
+        turn_execution_account_selector: None,
     }
 }
 

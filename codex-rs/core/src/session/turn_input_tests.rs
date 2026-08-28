@@ -47,6 +47,10 @@ struct StaticExecutionAccountSelector {
     decision: TurnExecutionAccountDecision,
 }
 
+struct PreSemanticExecutionAccountSelector {
+    decision: TurnExecutionAccountDecision,
+}
+
 struct BlockingExecutionAccountSelector {
     started: async_channel::Sender<()>,
 }
@@ -77,6 +81,20 @@ impl TurnExecutionAccountSelector for StaticExecutionAccountSelector {
     ) -> TurnExecutionAccountSelectorFuture<'_> {
         let decision = self.decision.clone();
         Box::pin(async move { Ok(decision) })
+    }
+}
+
+impl TurnExecutionAccountSelector for PreSemanticExecutionAccountSelector {
+    fn select(
+        &self,
+        _selection: TurnExecutionAccountSelection,
+    ) -> TurnExecutionAccountSelectorFuture<'_> {
+        let decision = self.decision.clone();
+        Box::pin(async move { Ok(decision) })
+    }
+
+    fn pre_semantic_failover_enabled(&self) -> bool {
+        true
     }
 }
 
@@ -511,6 +529,79 @@ async fn different_target_selection_preserves_rotation_and_holds_readiness_throu
         )
     );
     session.abort_all_tasks(TurnAbortReason::Interrupted).await;
+}
+
+#[tokio::test]
+async fn pre_semantic_target_is_prepared_without_publishing_or_committing_cursor() {
+    let (session, store, binding, policy_revision) = make_rotation_test_session().await;
+    let initial_policy = store
+        .thread_account_rotation_policy(session.thread_id())
+        .await
+        .expect("read initial policy");
+    let current = session.execution_account();
+    let runtime = session.execution_account_runtime();
+    let lease_dropped = Arc::new(AtomicBool::new(false));
+    let target = Arc::new(ExecutionAccountContext {
+        binding: ExecutionAccountBinding {
+            slot_id: "target".to_string(),
+            generation: binding.generation + 1,
+        },
+        auth_manager: Arc::clone(&current.auth_manager),
+        models_manager: Arc::clone(&current.models_manager),
+    });
+    session.set_turn_execution_account_selector(Arc::new(PreSemanticExecutionAccountSelector {
+        decision: TurnExecutionAccountDecision::Select {
+            target_slot_id: target.binding.slot_id.clone(),
+            policy_revision,
+        },
+    }));
+    session.set_turn_execution_account_transition_resolver(Arc::new(
+        RecordingExecutionAccountTransitionResolver {
+            target: Arc::clone(&target),
+            services: runtime.services.clone(),
+            calls: Arc::new(AtomicUsize::new(0)),
+            lease_dropped: Arc::clone(&lease_dropped),
+        },
+    ));
+
+    let admission = prepare_root_execution_account_admission(&session, binding.clone())
+        .await
+        .expect("prepare provisional target");
+    let turn_context = session
+        .new_turn_with_sub_id(
+            "provisional-account-context".to_string(),
+            SessionSettingsUpdate::default(),
+        )
+        .await
+        .expect("construct provisional turn context");
+    admission.attach_failover(turn_context.as_ref());
+
+    assert_eq!(
+        (
+            admission.accepted_binding.clone(),
+            turn_context.to_turn_context_item().execution_account,
+            session.execution_account().binding.clone(),
+            store
+                .execution_account_binding(session.thread_id())
+                .await
+                .expect("read durable binding"),
+            store
+                .thread_account_rotation_policy(session.thread_id())
+                .await
+                .expect("read unchanged cursor"),
+        ),
+        (
+            target.binding.clone(),
+            None,
+            binding.clone(),
+            Some(binding),
+            initial_policy
+        )
+    );
+    drop(turn_context);
+    drop(admission);
+    tokio::task::yield_now().await;
+    assert!(lease_dropped.load(Ordering::Acquire));
 }
 
 #[tokio::test]
