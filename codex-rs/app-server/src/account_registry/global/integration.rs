@@ -477,6 +477,7 @@ impl AccountRegistry {
             automatic_account_ids: &[],
             current_account_id: None,
             last_committed_account_id: None,
+            excluded_account_ids: &[],
             credential_readiness: &[global::CredentialReadiness {
                 account_id,
                 ready: true,

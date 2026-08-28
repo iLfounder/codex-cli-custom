@@ -106,6 +106,18 @@ pub enum AccountBindingCommitIntent {
     PinFixed,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SuccessfulAccountBindingTransition {
+    Keep,
+    AdvanceGeneration,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SuccessfulAccountRotationCommit {
+    pub binding: ExecutionAccountBinding,
+    pub policy: ThreadAccountRotationPolicy,
+}
+
 impl StateRuntime {
     pub async fn thread_account_rotation_policy(
         &self,
@@ -217,6 +229,90 @@ impl StateRuntime {
             .context("thread account rotation policy disappeared after cursor commit")?;
         transaction.commit().await?;
         Ok(Some(committed))
+    }
+
+    pub async fn compare_and_swap_successful_account_rotation(
+        &self,
+        thread_id: ThreadId,
+        expected_binding: &ExecutionAccountBinding,
+        expected_policy_revision: u64,
+        accepted_account_slot_id: &str,
+        binding_transition: SuccessfulAccountBindingTransition,
+    ) -> anyhow::Result<Option<SuccessfulAccountRotationCommit>> {
+        if accepted_account_slot_id.is_empty() {
+            anyhow::bail!("accepted account slot must not be empty");
+        }
+        if binding_transition == SuccessfulAccountBindingTransition::Keep
+            && accepted_account_slot_id != expected_binding.slot_id
+        {
+            anyhow::bail!("kept execution account binding must match the accepted account slot");
+        }
+        let next_generation = match binding_transition {
+            SuccessfulAccountBindingTransition::Keep => expected_binding.generation,
+            SuccessfulAccountBindingTransition::AdvanceGeneration => expected_binding
+                .generation
+                .checked_add(1)
+                .context("execution account generation overflow")?,
+        };
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let current_binding = sqlx::query_as::<_, (String, i64)>(
+            "SELECT slot_id, generation FROM thread_execution_account_bindings \
+             WHERE thread_id = ?",
+        )
+        .bind(thread_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if current_binding
+            .as_ref()
+            .is_none_or(|(slot_id, generation)| {
+                slot_id != &expected_binding.slot_id
+                    || u64::try_from(*generation).ok() != Some(expected_binding.generation)
+            })
+        {
+            transaction.rollback().await?;
+            return Ok(None);
+        }
+
+        if binding_transition == SuccessfulAccountBindingTransition::AdvanceGeneration {
+            let updated = sqlx::query(
+                "UPDATE thread_execution_account_bindings SET slot_id = ?, generation = ? \
+                 WHERE thread_id = ? AND slot_id = ? AND generation = ?",
+            )
+            .bind(accepted_account_slot_id)
+            .bind(i64::try_from(next_generation)?)
+            .bind(thread_id.to_string())
+            .bind(&expected_binding.slot_id)
+            .bind(i64::try_from(expected_binding.generation)?)
+            .execute(&mut *transaction)
+            .await?;
+            if updated.rows_affected() != 1 {
+                transaction.rollback().await?;
+                return Ok(None);
+            }
+        }
+
+        let cursor_updated = sqlx::query(
+            "UPDATE thread_account_rotation_policies SET last_committed_slot_id = ?, \
+             updated_at = unixepoch() WHERE thread_id = ? AND revision = ?",
+        )
+        .bind(accepted_account_slot_id)
+        .bind(thread_id.to_string())
+        .bind(i64::try_from(expected_policy_revision)?)
+        .execute(&mut *transaction)
+        .await?;
+        if cursor_updated.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Ok(None);
+        }
+        let policy = read_policy(&mut *transaction, thread_id)
+            .await?
+            .context("thread account rotation policy disappeared after successful commit")?;
+        let binding = ExecutionAccountBinding {
+            slot_id: accepted_account_slot_id.to_string(),
+            generation: next_generation,
+        };
+        transaction.commit().await?;
+        Ok(Some(SuccessfulAccountRotationCommit { binding, policy }))
     }
 
     pub async fn remove_account_slot_from_automatic_rotation_policies(

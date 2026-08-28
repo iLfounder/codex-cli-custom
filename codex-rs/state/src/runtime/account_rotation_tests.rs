@@ -4,6 +4,8 @@ use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
 
 use super::AccountBindingCommitIntent;
+use super::SuccessfulAccountBindingTransition;
+use super::SuccessfulAccountRotationCommit;
 use super::ThreadAccountRotationMode;
 use super::ThreadAccountRotationPolicy;
 use super::ThreadAccountRotationPolicyUpdate;
@@ -158,6 +160,169 @@ async fn binding_commit_intent_preserves_or_atomically_pins_rotation() {
             revision: 2,
             last_committed_account_slot_id: Some("default".to_string()),
         }
+    );
+    runtime.close().await;
+}
+
+#[tokio::test]
+async fn successful_rotation_atomically_advances_binding_and_cursor() {
+    let (sqlite_home, runtime) = runtime().await;
+    let _cleanup = scopeguard::guard(sqlite_home, |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let thread_id = ThreadId::default();
+    let initial = ExecutionAccountBinding {
+        slot_id: "default".to_string(),
+        generation: 4,
+    };
+    runtime
+        .initialize_execution_account_binding(thread_id, &initial)
+        .await
+        .expect("initialize binding");
+    runtime
+        .compare_and_swap_thread_account_rotation_policy(thread_id, 0, &automatic_update())
+        .await
+        .expect("create policy")
+        .expect("policy commit");
+
+    assert_eq!(
+        runtime
+            .compare_and_swap_successful_account_rotation(
+                thread_id,
+                &initial,
+                1,
+                "secondary",
+                SuccessfulAccountBindingTransition::AdvanceGeneration,
+            )
+            .await
+            .expect("commit successful rotation"),
+        Some(SuccessfulAccountRotationCommit {
+            binding: ExecutionAccountBinding {
+                slot_id: "secondary".to_string(),
+                generation: 5,
+            },
+            policy: ThreadAccountRotationPolicy {
+                mode: ThreadAccountRotationMode::RoundRobin,
+                fixed_account_slot_id: Some("default".to_string()),
+                automatic_account_slot_ids: vec!["default".to_string(), "secondary".to_string(),],
+                revision: 1,
+                last_committed_account_slot_id: Some("secondary".to_string()),
+            },
+        })
+    );
+    runtime.close().await;
+}
+
+#[tokio::test]
+async fn successful_rotation_keeps_generation_for_the_current_account() {
+    let (sqlite_home, runtime) = runtime().await;
+    let _cleanup = scopeguard::guard(sqlite_home, |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let thread_id = ThreadId::default();
+    let initial = ExecutionAccountBinding {
+        slot_id: "default".to_string(),
+        generation: 4,
+    };
+    runtime
+        .initialize_execution_account_binding(thread_id, &initial)
+        .await
+        .expect("initialize binding");
+    runtime
+        .compare_and_swap_thread_account_rotation_policy(thread_id, 0, &automatic_update())
+        .await
+        .expect("create policy")
+        .expect("policy commit");
+
+    let committed = runtime
+        .compare_and_swap_successful_account_rotation(
+            thread_id,
+            &initial,
+            1,
+            "default",
+            SuccessfulAccountBindingTransition::Keep,
+        )
+        .await
+        .expect("commit successful rotation")
+        .expect("matching state");
+    assert_eq!(committed.binding, initial);
+    assert_eq!(
+        committed.policy.last_committed_account_slot_id,
+        Some("default".to_string())
+    );
+    runtime.close().await;
+}
+
+#[tokio::test]
+async fn successful_rotation_stale_policy_rolls_back_binding() {
+    let (sqlite_home, runtime) = runtime().await;
+    let _cleanup = scopeguard::guard(sqlite_home, |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let thread_id = ThreadId::default();
+    let initial = ExecutionAccountBinding {
+        slot_id: "default".to_string(),
+        generation: 4,
+    };
+    runtime
+        .initialize_execution_account_binding(thread_id, &initial)
+        .await
+        .expect("initialize binding");
+    let policy = runtime
+        .compare_and_swap_thread_account_rotation_policy(thread_id, 0, &automatic_update())
+        .await
+        .expect("create policy")
+        .expect("policy commit");
+
+    assert_eq!(
+        runtime
+            .compare_and_swap_successful_account_rotation(
+                thread_id,
+                &initial,
+                0,
+                "secondary",
+                SuccessfulAccountBindingTransition::AdvanceGeneration,
+            )
+            .await
+            .expect("reject stale policy"),
+        None
+    );
+    assert_eq!(
+        runtime
+            .execution_account_binding(thread_id)
+            .await
+            .expect("read binding"),
+        Some(initial)
+    );
+    assert_eq!(
+        runtime
+            .thread_account_rotation_policy(thread_id)
+            .await
+            .expect("read policy"),
+        policy
+    );
+    assert_eq!(
+        runtime
+            .compare_and_swap_successful_account_rotation(
+                thread_id,
+                &ExecutionAccountBinding {
+                    slot_id: "secondary".to_string(),
+                    generation: 5,
+                },
+                1,
+                "secondary",
+                SuccessfulAccountBindingTransition::Keep,
+            )
+            .await
+            .expect("reject stale binding"),
+        None
+    );
+    assert_eq!(
+        runtime
+            .thread_account_rotation_policy(thread_id)
+            .await
+            .expect("read policy after stale binding"),
+        policy
     );
     runtime.close().await;
 }

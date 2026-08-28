@@ -21,6 +21,7 @@ pub(crate) struct CatalogSelectionRequest<'a> {
     pub(crate) automatic_account_ids: &'a [AccountId],
     pub(crate) current_account_id: Option<AccountId>,
     pub(crate) last_committed_account_id: Option<AccountId>,
+    pub(crate) excluded_account_ids: &'a [AccountId],
     pub(crate) credential_readiness: &'a [CredentialReadiness],
     pub(crate) now: i64,
 }
@@ -71,20 +72,23 @@ pub(super) fn select_catalog(
         .collect::<HashMap<_, _>>();
     let selected = match request.mode {
         RotationMode::Fixed => request.fixed_account_id.filter(|account_id| {
-            state
-                .accounts
-                .get(account_id)
-                .is_some_and(|account| fixed_eligible(account, readiness.get(account_id)))
+            !request.excluded_account_ids.contains(account_id)
+                && state
+                    .accounts
+                    .get(account_id)
+                    .is_some_and(|account| fixed_eligible(account, readiness.get(account_id)))
         }),
         RotationMode::QuotaAware => select_quota_aware(
             state,
             request.automatic_account_ids,
+            request.excluded_account_ids,
             &readiness,
             request.now,
         ),
         RotationMode::RoundRobin => select_round_robin(
             state,
             request.automatic_account_ids,
+            request.excluded_account_ids,
             &readiness,
             request
                 .last_committed_account_id
@@ -94,6 +98,7 @@ pub(super) fn select_catalog(
         RotationMode::ExhaustThenNext => select_exhaust_then_next(
             state,
             request.automatic_account_ids,
+            request.excluded_account_ids,
             &readiness,
             request
                 .last_committed_account_id
@@ -127,6 +132,7 @@ fn automatic_ready(
 fn automatic_ready_candidates<'a>(
     state: &'a CatalogState,
     membership: &[AccountId],
+    excluded: &[AccountId],
     readiness: &HashMap<AccountId, CredentialReadiness>,
     now: i64,
 ) -> Vec<&'a CatalogAccount> {
@@ -136,6 +142,7 @@ fn automatic_ready_candidates<'a>(
         .values()
         .filter(|account| {
             membership.contains(&account.id)
+                && !excluded.contains(&account.id)
                 && automatic_ready(account, readiness.get(&account.id), now)
         })
         .collect()
@@ -144,10 +151,11 @@ fn automatic_ready_candidates<'a>(
 fn select_quota_aware(
     state: &CatalogState,
     membership: &[AccountId],
+    excluded: &[AccountId],
     readiness: &HashMap<AccountId, CredentialReadiness>,
     now: i64,
 ) -> Option<AccountId> {
-    automatic_ready_candidates(state, membership, readiness, now)
+    automatic_ready_candidates(state, membership, excluded, readiness, now)
         .into_iter()
         .filter(|account| !account.hard_exhausted(now))
         .filter_map(|account| bottleneck_score(account, now).map(|score| (account.id, score)))
@@ -179,22 +187,24 @@ fn bottleneck_score(account: &CatalogAccount, now: i64) -> Option<f64> {
 fn select_round_robin(
     state: &CatalogState,
     membership: &[AccountId],
+    excluded: &[AccountId],
     readiness: &HashMap<AccountId, CredentialReadiness>,
     anchor: Option<AccountId>,
     now: i64,
 ) -> Option<AccountId> {
-    let candidates = automatic_ready_candidates(state, membership, readiness, now);
+    let candidates = automatic_ready_candidates(state, membership, excluded, readiness, now);
     next_after_anchor(&candidates, anchor)
 }
 
 fn select_exhaust_then_next(
     state: &CatalogState,
     membership: &[AccountId],
+    excluded: &[AccountId],
     readiness: &HashMap<AccountId, CredentialReadiness>,
     anchor: Option<AccountId>,
     now: i64,
 ) -> Option<AccountId> {
-    let candidates = automatic_ready_candidates(state, membership, readiness, now);
+    let candidates = automatic_ready_candidates(state, membership, excluded, readiness, now);
     if anchor.is_some_and(|anchor| {
         candidates
             .iter()

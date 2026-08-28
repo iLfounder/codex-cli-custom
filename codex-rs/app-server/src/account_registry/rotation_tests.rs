@@ -59,6 +59,7 @@ fn quota_aware_uses_remaining_quota_per_reset_time() {
                 automatic_account_slot_ids: &membership,
                 current_account_slot_id: None,
                 last_committed_account_slot_id: None,
+                excluded_account_slot_ids: &[],
                 now: 100,
             },
             &candidates,
@@ -79,6 +80,7 @@ fn fixed_and_round_robin_obey_explicit_membership_rules() {
                 automatic_account_slot_ids: &[],
                 current_account_slot_id: None,
                 last_committed_account_slot_id: None,
+                excluded_account_slot_ids: &[],
                 now: 100,
             },
             &candidates,
@@ -93,6 +95,7 @@ fn fixed_and_round_robin_obey_explicit_membership_rules() {
                 automatic_account_slot_ids: &membership,
                 current_account_slot_id: Some("slot-2"),
                 last_committed_account_slot_id: None,
+                excluded_account_slot_ids: &[],
                 now: 100,
             },
             &candidates,
@@ -115,11 +118,66 @@ fn quota_aware_ignores_one_next_exhaustion_hint() {
                 automatic_account_slot_ids: &membership,
                 current_account_slot_id: None,
                 last_committed_account_slot_id: None,
+                excluded_account_slot_ids: &[],
                 now: 100,
             },
             &candidates,
         ),
         RotationSelection::Selected("slot-2".to_string())
+    );
+}
+
+#[test]
+fn selection_excludes_accounts_already_tried_by_the_execution() {
+    let candidates = vec![candidate(2, 10, 200), candidate(3, 90, 200)];
+    let membership = vec!["slot-2".to_string(), "slot-3".to_string()];
+    let excluded_slot_2 = vec!["slot-2".to_string()];
+    let excluded_slot_3 = vec!["slot-3".to_string()];
+
+    assert_eq!(
+        select_account(
+            RotationSelectionRequest {
+                mode: ThreadAccountRotationMode::QuotaAware,
+                fixed_account_slot_id: None,
+                automatic_account_slot_ids: &membership,
+                current_account_slot_id: None,
+                last_committed_account_slot_id: None,
+                excluded_account_slot_ids: &excluded_slot_2,
+                now: 100,
+            },
+            &candidates,
+        ),
+        RotationSelection::Selected("slot-3".to_string())
+    );
+    assert_eq!(
+        select_account(
+            RotationSelectionRequest {
+                mode: ThreadAccountRotationMode::RoundRobin,
+                fixed_account_slot_id: None,
+                automatic_account_slot_ids: &membership,
+                current_account_slot_id: Some("slot-2"),
+                last_committed_account_slot_id: None,
+                excluded_account_slot_ids: &excluded_slot_3,
+                now: 100,
+            },
+            &candidates,
+        ),
+        RotationSelection::Selected("slot-2".to_string())
+    );
+    assert_eq!(
+        select_account(
+            RotationSelectionRequest {
+                mode: ThreadAccountRotationMode::ExhaustThenNext,
+                fixed_account_slot_id: None,
+                automatic_account_slot_ids: &membership,
+                current_account_slot_id: Some("slot-2"),
+                last_committed_account_slot_id: None,
+                excluded_account_slot_ids: &excluded_slot_2,
+                now: 100,
+            },
+            &candidates,
+        ),
+        RotationSelection::Selected("slot-3".to_string())
     );
 }
 

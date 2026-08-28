@@ -83,6 +83,8 @@ pub use runtime::MemoryStore;
 pub use runtime::RemoteControlEnrollmentRecord;
 pub use runtime::RuntimeDbBackup;
 pub use runtime::SqliteQueueStore;
+pub use runtime::SuccessfulAccountBindingTransition;
+pub use runtime::SuccessfulAccountRotationCommit;
 pub use runtime::ThreadAccountRotationMode;
 pub use runtime::ThreadAccountRotationPolicy;
 pub use runtime::ThreadAccountRotationPolicyUpdate;
