@@ -60,26 +60,26 @@ pub(crate) struct RawSnapshot {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RawRateLimit {
     #[serde(default)]
-    pub(super) meters: Vec<RawMeter>,
+    pub(crate) meters: Vec<RawMeter>,
     #[serde(default)]
-    pub(super) status: String,
+    pub(crate) status: String,
 }
 
 #[derive(Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RawMeter {
-    pub(super) id: String,
+    pub(crate) id: String,
     #[serde(default)]
-    pub(super) label: String,
-    pub(super) utilization: f64,
+    pub(crate) label: String,
+    pub(crate) utilization: f64,
     #[serde(default)]
-    pub(super) reset_at: i64,
+    pub(crate) reset_at: i64,
     #[serde(default)]
-    pub(super) observed_at: i64,
+    pub(crate) observed_at: i64,
     #[serde(default)]
-    pub(super) utilization_observed_at: i64,
+    pub(crate) utilization_observed_at: i64,
     #[serde(default)]
-    pub(super) state: String,
+    pub(crate) state: String,
 }
 
 #[derive(Clone, PartialEq)]

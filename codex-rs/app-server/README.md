@@ -1648,6 +1648,7 @@ Because audio is intentionally separate from `ThreadItem`, clients can opt out o
 ### MCP server startup events
 
 - `mcpServer/startupStatus/updated` — `{ threadId, name, status, error, failureReason }` when app-server observes an MCP server startup transition. `threadId` identifies the owning thread when startup is thread-scoped and is `null` when startup is app-scoped. `status` is one of `starting`, `ready`, `failed`, or `cancelled`. `error` and `failureReason` are `null` except for `failed`; `failureReason` is `reauthenticationRequired` when stored OAuth credentials have expired and cannot be refreshed, so clients can prompt the user to reconnect the named server.
+- `mcpServer/startupCompleted` — `{ threadId, ready, failed, cancelled }` once Core finishes the thread's MCP startup round. `failed` contains `{ server, error }` entries. Clients should use this aggregate as the authoritative terminal boundary while retaining `mcpServer/startupStatus/updated` for live per-server progress.
 
 ### Turn events
 
@@ -2334,6 +2335,7 @@ Codex supports these authentication modes. The current mode is surfaced in `acco
 - `account/sendAddCreditsNudgeEmail` — ask ChatGPT to email the workspace owner about depleted credits or a reached usage limit.
 - `mcpServer/oauthLogin/completed` (notify) — emitted after a `mcpServer/oauth/login` flow finishes for a server; payload includes `{ name, threadId, success, error? }`.
 - `mcpServer/startupStatus/updated` (notify) — emitted when a configured MCP server's startup status changes; payload includes `{ threadId, name, status, error, failureReason }`, where `threadId` is the owning thread when startup is thread-scoped and `null` when it is app-scoped, and `status` is `starting`, `ready`, `failed`, or `cancelled`. `failureReason` is `reauthenticationRequired` when stored OAuth credentials have expired and cannot be refreshed, so clients can prompt the user to reconnect the named server.
+- `mcpServer/startupCompleted` (notify) — emitted once Core completes the thread's MCP startup round; payload is `{ threadId, ready, failed, cancelled }`, with `failed` entries shaped as `{ server, error }`. This aggregate is the authoritative terminal boundary; per-server status updates remain the progress stream.
 
 The session-runtime control contract is operation-based. `thread/account/switch` and `thread/relinquish` return an operation whose status distinguishes acknowledgement (`accepted` or `running`) from terminal completion (`ready`, `released`, or `failed`). `sessionRuntime/operation/updated` publishes later operation states, while `sessionRuntime/changed` publishes a complete changed-thread snapshot with an `instanceEpoch` and monotonic `sequence`. Operation ids are idempotent only within the same process epoch and only when the normalized request fingerprint is identical; reusing an id with a different thread, action, or arguments is invalid.
 

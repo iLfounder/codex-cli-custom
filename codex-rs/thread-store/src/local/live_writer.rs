@@ -19,6 +19,7 @@ use crate::AppendThreadItemsParams;
 use crate::CreateThreadParams;
 use crate::ReadThreadParams;
 use crate::ResumeThreadParams;
+use crate::RuntimePersistencePosition;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
 use crate::types::canonical_history_mode_from_rollout_items;
@@ -282,21 +283,42 @@ pub(super) async fn relinquish_thread(
     let rollout_path = recorder.rollout_path().to_path_buf();
 
     recorder.flush().await.map_err(thread_store_io_error)?;
-    recorder.progress().await.map_err(thread_store_io_error)?;
-    if !matches!(history_mode, ThreadHistoryMode::Legacy) {
-        super::thread_history_materialization::materialize_to_sqlite(
-            store,
-            rollout_id,
-            rollout_path.as_path(),
-        )
-        .await?;
-    }
+    let progress = recorder.progress().await.map_err(thread_store_io_error)?;
+    let projection_failed = if matches!(history_mode, ThreadHistoryMode::Legacy) {
+        false
+    } else if let Err(err) = super::thread_history_materialization::materialize_to_sqlite(
+        store,
+        rollout_id,
+        rollout_path.as_path(),
+    )
+    .await
+    {
+        warn!("failed to project durable rollout during relinquish for {thread_id}: {err}");
+        true
+    } else {
+        false
+    };
     sync_materialized_rollout_path_strict(store, thread_id, rollout_path.as_path()).await?;
-    recorder
+    let shutdown_progress = recorder
         .shutdown_with_progress()
         .await
         .map_err(thread_store_io_error)?;
     store.live_recorders.lock().await.remove(&thread_id);
+    let progress = shutdown_progress.or(progress);
+    let mut failures = store.projection_failures.lock().await;
+    if projection_failed {
+        failures.insert(
+            thread_id,
+            super::ProjectionFailureEvidence {
+                jsonl: progress.map(|progress| RuntimePersistencePosition {
+                    ordinal: progress.end_ordinal_exclusive,
+                    offset: progress.end_byte_offset,
+                }),
+            },
+        );
+    } else {
+        failures.remove(&thread_id);
+    }
     Ok(())
 }
 
@@ -315,7 +337,9 @@ pub(super) async fn discard_thread(
         .await
         .remove(&thread_id)
         .map(|_| ())
-        .ok_or(ThreadStoreError::ThreadNotFound { thread_id })
+        .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
+    store.projection_failures.lock().await.remove(&thread_id);
+    Ok(())
 }
 
 pub(super) async fn rollout_path(
@@ -478,6 +502,8 @@ async fn write_and_project(
         .await
         {
             warn!("failed to project durable rollout for {thread_id}: {err}");
+        } else {
+            store.projection_failures.lock().await.remove(&thread_id);
         }
     }
     if sync_rollout_path {

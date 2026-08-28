@@ -72,7 +72,9 @@ pub(super) async fn delete_thread(
     let thread_rollouts = ThreadRollouts::from_index(&reference_index, thread_id);
     ensure_no_external_references(&reference_index, std::slice::from_ref(&thread_rollouts))?;
     let mut writer_guards = store.acquire_writer_locks(&[thread_id]).await?;
-    delete_thread_after_reference_check(store, thread_rollouts, &mut writer_guards).await
+    delete_thread_after_reference_check(store, thread_rollouts, &mut writer_guards).await?;
+    store.projection_failures.lock().await.remove(&thread_id);
+    Ok(())
 }
 
 pub(super) async fn delete_threads(
@@ -105,9 +107,12 @@ pub(super) async fn delete_threads(
 
     let mut writer_guards = store.acquire_writer_locks(&lock_thread_ids).await?;
     for thread_rollouts in thread_rollouts {
+        let thread_id = thread_rollouts.thread_id;
         match delete_thread_after_reference_check(store, thread_rollouts, &mut writer_guards).await
         {
-            Ok(()) | Err(ThreadStoreError::ThreadNotFound { .. }) => {}
+            Ok(()) | Err(ThreadStoreError::ThreadNotFound { .. }) => {
+                store.projection_failures.lock().await.remove(&thread_id);
+            }
             Err(err) => return Err(err),
         }
     }
@@ -602,6 +607,45 @@ mod tests {
             .expect("delete rollout with unreadable metadata");
 
         assert!(!rollout_path.exists());
+    }
+
+    #[tokio::test]
+    async fn delete_threads_clears_completed_evidence_before_later_failure() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let first_uuid = Uuid::from_u128(314);
+        let first_thread_id =
+            ThreadId::from_string(&first_uuid.to_string()).expect("first thread id");
+        let first_path = write_session_file(home.path(), "2025-01-03T12-00-00", first_uuid)
+            .expect("first session file");
+        let second_uuid = Uuid::from_u128(315);
+        let second_thread_id =
+            ThreadId::from_string(&second_uuid.to_string()).expect("second thread id");
+        let second_path = write_session_file(home.path(), "2025-01-03T12-00-01", second_uuid)
+            .expect("second session file");
+        std::fs::create_dir(second_path.with_extension("jsonl.zst"))
+            .expect("blocking compressed path");
+        {
+            let mut failures = store.projection_failures.lock().await;
+            for thread_id in [first_thread_id, second_thread_id] {
+                failures.insert(
+                    thread_id,
+                    super::super::ProjectionFailureEvidence { jsonl: None },
+                );
+            }
+        }
+
+        store
+            .delete_threads(DeleteThreadsParams {
+                thread_ids: vec![first_thread_id, second_thread_id],
+            })
+            .await
+            .expect_err("second compressed path must fail deletion");
+
+        assert!(!first_path.exists());
+        let failures = store.projection_failures.lock().await;
+        assert!(!failures.contains_key(&first_thread_id));
+        assert!(failures.contains_key(&second_thread_id));
     }
 
     #[tokio::test]

@@ -141,6 +141,7 @@ const STATE_DB_POSITION_UNAVAILABLE_REASON: &str =
     "SQLite projection position requires the state database";
 const SQLITE_PROJECTION_UNAVAILABLE_REASON: &str =
     "paginated SQLite projection position is unavailable";
+const PROJECTION_FAILED_REASON: &str = "projection_failed";
 
 /// Local filesystem/SQLite-backed implementation of [`ThreadStore`].
 ///
@@ -164,6 +165,12 @@ pub struct LocalThreadStore {
     writer_lock_coordinator: Arc<WriterLockCoordinator>,
     state_db: Option<StateDbHandle>,
     thread_history_db: Arc<OnceCell<sqlx::SqlitePool>>,
+    projection_failures: Arc<Mutex<HashMap<ThreadId, ProjectionFailureEvidence>>>,
+}
+
+#[derive(Clone, Copy)]
+struct ProjectionFailureEvidence {
+    jsonl: Option<RuntimePersistencePosition>,
 }
 
 struct LiveRecorderEntry {
@@ -277,6 +284,7 @@ impl LocalThreadStore {
             writer_lock_coordinator,
             state_db,
             thread_history_db: Arc::new(OnceCell::new()),
+            projection_failures: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -548,6 +556,12 @@ impl ThreadStore for LocalThreadStore {
                     .get(&thread_id)
                     .map(|entry| (entry.recorder.clone(), entry.history_mode))
             };
+            let projection_failure = self
+                .projection_failures
+                .lock()
+                .await
+                .get(&thread_id)
+                .copied();
             let (jsonl, live_history_mode) =
                 match live {
                     Some((recorder, history_mode)) => {
@@ -566,9 +580,14 @@ impl ThreadStore for LocalThreadStore {
                             Some(history_mode),
                         )
                     }
-                    None => (None, None),
+                    None => (projection_failure.and_then(|failure| failure.jsonl), None),
                 };
-            let projection = thread_history::projection_state(self, thread_id).await?;
+            let relinquish_projection_failed = projection_failure.is_some();
+            let projection = match thread_history::projection_state(self, thread_id).await {
+                Ok(projection) => projection,
+                Err(_) if relinquish_projection_failed => None,
+                Err(err) => return Err(err),
+            };
             let sqlite = projection.as_ref().map(|state| RuntimePersistencePosition {
                 ordinal: state.next_ordinal,
                 offset: state.next_byte_offset,
@@ -586,7 +605,9 @@ impl ThreadStore for LocalThreadStore {
             } else {
                 None
             };
-            let persistence_deny_reason = if self.state_db.is_none() {
+            let persistence_deny_reason = if relinquish_projection_failed {
+                Some(PROJECTION_FAILED_REASON.to_string())
+            } else if self.state_db.is_none() {
                 Some(STATE_DB_POSITION_UNAVAILABLE_REASON.to_string())
             } else if jsonl.is_none() && matches!(history_mode, Some(ThreadHistoryMode::Legacy)) {
                 Some(LEGACY_POSITION_UNAVAILABLE_REASON.to_string())
@@ -620,7 +641,9 @@ impl ThreadStore for LocalThreadStore {
                 } else {
                     RuntimePersistenceHealth::Unknown
                 },
-                materialize_health: if sqlite.is_some() {
+                materialize_health: if relinquish_projection_failed {
+                    RuntimePersistenceHealth::Degraded
+                } else if sqlite.is_some() {
                     RuntimePersistenceHealth::Healthy
                 } else {
                     RuntimePersistenceHealth::Unknown

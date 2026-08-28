@@ -2730,6 +2730,36 @@ fn mcp_server_status_updated_serializes_failure_reason() {
 }
 
 #[test]
+fn mcp_server_startup_completed_serializes_aggregate() {
+    let notification =
+        ServerNotification::McpServerStartupCompleted(McpServerStartupCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            ready: vec!["ready-server".to_string()],
+            failed: vec![McpServerStartupFailure {
+                server: "failed-server".to_string(),
+                error: "safe startup error".to_string(),
+            }],
+            cancelled: vec!["cancelled-server".to_string()],
+        });
+
+    assert_eq!(
+        serde_json::to_value(notification).expect("notification should serialize"),
+        json!({
+            "method": "mcpServer/startupCompleted",
+            "params": {
+                "threadId": "thread-1",
+                "ready": ["ready-server"],
+                "failed": [{
+                    "server": "failed-server",
+                    "error": "safe startup error",
+                }],
+                "cancelled": ["cancelled-server"],
+            },
+        })
+    );
+}
+
+#[test]
 fn mcp_server_status_serializes_absent_server_info_metadata_as_null() {
     let response = ListMcpServerStatusResponse {
         data: vec![McpServerStatus {

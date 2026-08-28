@@ -69,6 +69,8 @@ use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::McpServerElicitationRequest;
 use codex_app_server_protocol::McpServerElicitationRequestParams;
+use codex_app_server_protocol::McpServerStartupCompletedNotification;
+use codex_app_server_protocol::McpServerStartupFailure;
 use codex_app_server_protocol::McpServerStartupState;
 use codex_app_server_protocol::McpServerStatusUpdatedNotification;
 use codex_app_server_protocol::NetworkApprovalContext as AppServerNetworkApprovalContext;
@@ -4585,7 +4587,7 @@ async fn side_thread_snapshot_skips_session_header_preamble() {
 }
 
 #[tokio::test]
-async fn primary_thread_ignores_child_mcp_startup_notifications() {
+async fn unknown_child_mcp_startup_round_survives_refresh_and_replay() {
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
     while app_event_rx.try_recv().is_ok() {}
     let sentry_config = toml::from_str::<toml::Value>("command = 'true'")
@@ -4620,6 +4622,21 @@ async fn primary_thread_ignores_child_mcp_startup_notifications() {
         )),
     )
     .await;
+    app.handle_app_server_event(
+        &app_server,
+        codex_app_server_client::AppServerEvent::ServerNotification(Box::new(
+            ServerNotification::McpServerStartupCompleted(McpServerStartupCompletedNotification {
+                thread_id: child_thread_id.to_string(),
+                ready: Vec::new(),
+                failed: vec![McpServerStartupFailure {
+                    server: "sentry".to_string(),
+                    error: "not logged in".to_string(),
+                }],
+                cancelled: Vec::new(),
+            }),
+        )),
+    )
+    .await;
 
     assert!(app_event_rx.try_recv().is_err());
     let mut child_snapshot = app
@@ -4631,15 +4648,20 @@ async fn primary_thread_ignores_child_mcp_startup_notifications() {
         .await
         .snapshot();
     assert!(
-        matches!(
-            child_snapshot.events.as_slice(),
-            [ThreadBufferedEvent::Notification(notification)]
-                if matches!(
-                    notification.as_ref(),
-                    ServerNotification::McpServerStatusUpdated(_)
-                )
-        ),
-        "child MCP startup notification should be buffered for the child thread"
+        child_snapshot.events.iter().any(|event| matches!(
+            event,
+            ThreadBufferedEvent::Notification(notification)
+                if matches!(notification.as_ref(), ServerNotification::McpServerStatusUpdated(_))
+        )),
+        "child MCP startup status should be buffered for the child thread"
+    );
+    assert!(
+        child_snapshot.events.iter().any(|event| matches!(
+            event,
+            ThreadBufferedEvent::Notification(notification)
+                if matches!(notification.as_ref(), ServerNotification::McpServerStartupCompleted(_))
+        )),
+        "child MCP startup aggregate should be buffered for the child thread"
     );
 
     app.apply_refreshed_snapshot_thread(
@@ -4663,6 +4685,7 @@ async fn primary_thread_ignores_child_mcp_startup_notifications() {
     let rendered = rendered_cells.join("\n");
     assert_eq!(app.chat_widget.thread_id(), Some(child_thread_id));
     assert_eq!(rendered.matches("sentry is not logged in").count(), 1);
+    assert_eq!(rendered.matches("not logged in").count(), 1);
     assert_eq!(
         rendered
             .matches("MCP startup incomplete (failed: sentry)")

@@ -61,6 +61,7 @@ impl ThreadEventStore {
                 ServerNotification::HookStarted(_)
                     | ServerNotification::HookCompleted(_)
                     | ServerNotification::McpServerStatusUpdated(_)
+                    | ServerNotification::McpServerStartupCompleted(_)
             ),
             ThreadBufferedEvent::HistoryEntryResponse(_) => false,
         }
@@ -683,7 +684,7 @@ mod tests {
     #[test]
     fn thread_event_store_rebase_preserves_mcp_startup_notifications() {
         let thread_id = ThreadId::new();
-        let notification = ServerNotification::McpServerStatusUpdated(
+        let status = ServerNotification::McpServerStatusUpdated(
             codex_app_server_protocol::McpServerStatusUpdatedNotification {
                 thread_id: Some(thread_id.to_string()),
                 name: "sentry".to_string(),
@@ -692,19 +693,40 @@ mod tests {
                 failure_reason: None,
             },
         );
+        let completed = ServerNotification::McpServerStartupCompleted(
+            codex_app_server_protocol::McpServerStartupCompletedNotification {
+                thread_id: thread_id.to_string(),
+                ready: Vec::new(),
+                failed: vec![codex_app_server_protocol::McpServerStartupFailure {
+                    server: "sentry".to_string(),
+                    error: "not logged in".to_string(),
+                }],
+                cancelled: Vec::new(),
+            },
+        );
         let mut store = ThreadEventStore::new(/*capacity*/ 8);
-        store.push_notification_ref(&notification);
+        store.push_notification_ref(&status);
+        store.push_notification_ref(&completed);
 
         store.rebase_buffer_after_session_refresh();
 
         let snapshot = store.snapshot();
-        let actual = match snapshot.events.as_slice() {
-            [ThreadBufferedEvent::Notification(actual)] => actual,
-            other => panic!("expected one buffered MCP notification, saw: {other:?}"),
-        };
+        let actual = snapshot
+            .events
+            .into_iter()
+            .map(|event| match event {
+                ThreadBufferedEvent::Notification(notification) => {
+                    serde_json::to_value(notification).expect("MCP notification should serialize")
+                }
+                other => panic!("expected buffered MCP notification, saw: {other:?}"),
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
-            serde_json::to_value(actual).expect("MCP notification should serialize"),
-            serde_json::to_value(notification).expect("MCP notification should serialize"),
+            actual,
+            vec![
+                serde_json::to_value(status).expect("MCP notification should serialize"),
+                serde_json::to_value(completed).expect("MCP notification should serialize"),
+            ],
         );
     }
 }

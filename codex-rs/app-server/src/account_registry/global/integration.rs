@@ -36,36 +36,56 @@ pub(crate) struct GlobalAccountRuntime {
 }
 
 impl AccountRegistry {
+    pub(crate) async fn notify_global_inventory_if_changed(
+        &self,
+        outgoing: &crate::outgoing_message::OutgoingMessageSender,
+    ) -> global::GlobalAccountDirectory {
+        let directory = self.refresh_global_directory();
+        let (_, update) = self
+            .global_inventory_snapshot(&directory, chrono::Utc::now().timestamp())
+            .await;
+        if self
+            .claim_global_inventory_notification(update.revision)
+            .is_some()
+        {
+            send_inventory_changed(outgoing, update.revision).await;
+        }
+        directory
+    }
+
     pub(crate) fn spawn_global_catalog(
         self: &Arc<Self>,
         outgoing: Arc<crate::outgoing_message::OutgoingMessageSender>,
     ) {
-        let Some(client) = self.token_manager_client.clone() else {
-            return;
-        };
+        let client = self.token_manager_client.clone();
         let registry = Arc::clone(self);
         tokio::spawn(async move {
             loop {
-                if registry
-                    .refresh_global_directory()
-                    .process_account_id
-                    .is_none()
-                {
+                let directory = registry.notify_global_inventory_if_changed(&outgoing).await;
+                if directory.process_account_id.is_none() {
                     tokio::time::sleep(global::FULL_REFRESH_INTERVAL).await;
                     continue;
                 }
-                match registry.refresh_global_catalog(&client).await {
+                let Some(client) = client.as_ref() else {
+                    tokio::time::sleep(global::FULL_REFRESH_INTERVAL).await;
+                    continue;
+                };
+                match registry.refresh_global_catalog(client).await {
                     Ok(outcome) => match outcome {
-                        global::ApplyOutcome::Applied { generation } => {
-                            outgoing
-                                .send_server_notification(
-                                    codex_app_server_protocol::ServerNotification::AccountSlotInventoryChanged(
-                                        codex_app_server_protocol::AccountSlotInventoryChangedNotification {
-                                            registry_revision: generation,
-                                        },
-                                    ),
+                        global::ApplyOutcome::Applied { .. } => {
+                            let directory = registry.refresh_global_directory();
+                            let (_, update) = registry
+                                .global_inventory_snapshot(
+                                    &directory,
+                                    chrono::Utc::now().timestamp(),
                                 )
                                 .await;
+                            if registry
+                                .claim_global_inventory_notification(update.revision)
+                                .is_some()
+                            {
+                                send_inventory_changed(&outgoing, update.revision).await;
+                            }
                         }
                         global::ApplyOutcome::Unchanged { .. } => {}
                         global::ApplyOutcome::ResyncRequired { .. } => unreachable!(
@@ -93,34 +113,28 @@ impl AccountRegistry {
                                 matches!(&event, TokenManagerEvent::Initial(_));
                             let changed_account_id = event.snapshot_account_id();
                             match registry.global_catalog.apply_event(event) {
-                                Ok(global::ApplyOutcome::Applied { generation }) => {
-                                    if is_full_replacement {
-                                        outgoing.send_server_notification(
-                                            codex_app_server_protocol::ServerNotification::AccountSlotInventoryChanged(
-                                                codex_app_server_protocol::AccountSlotInventoryChangedNotification {
-                                                    registry_revision: generation,
-                                                },
-                                            ),
-                                        ).await;
-                                    } else if let Some(account_id) = changed_account_id {
-                                        let now = chrono::Utc::now().timestamp();
-                                        let Some(projection) = registry
-                                            .global_catalog
-                                            .projection(now)
-                                            .into_iter()
-                                            .find(|projection| {
-                                                projection.account_slot_id == account_id.to_string()
-                                            })
-                                        else {
-                                            break false;
-                                        };
-                                        let slot = registry
-                                            .global_snapshot(projection, generation, now)
-                                            .await;
+                                Ok(global::ApplyOutcome::Applied { .. }) => {
+                                    let now = chrono::Utc::now().timestamp();
+                                    let directory = registry.refresh_global_directory();
+                                    let (snapshots, update) = registry
+                                        .global_inventory_snapshot(&directory, now)
+                                        .await;
+                                    let Some(directory_changed) = registry
+                                        .claim_global_inventory_notification(update.revision)
+                                    else {
+                                        continue;
+                                    };
+                                    if is_full_replacement || directory_changed {
+                                        send_inventory_changed(&outgoing, update.revision).await;
+                                    } else if let Some(slot) = changed_account_id.and_then(|account_id| {
+                                        snapshots.into_iter().find(|slot| {
+                                            slot.account_slot_id == account_id.to_string()
+                                        })
+                                    }) {
                                         outgoing.send_server_notification(
                                             codex_app_server_protocol::ServerNotification::AccountSlotChanged(
                                                 codex_app_server_protocol::AccountSlotChangedNotification {
-                                                    registry_revision: generation,
+                                                    registry_revision: update.revision,
                                                     slot,
                                                 },
                                             ),
@@ -243,64 +257,48 @@ impl AccountRegistry {
 
     pub(crate) async fn global_snapshot(
         &self,
-        projection: global::CatalogAccountProjection,
-        generation: u64,
+        account_id: global::AccountId,
+        is_default: bool,
+        registry_revision: u64,
         now: i64,
     ) -> AccountSlotSnapshot {
-        let account_id = global::AccountId::parse(&projection.account_slot_id);
-        let runtime = match account_id {
-            Some(account_id) => self.global_runtime(account_id).await.ok(),
-            None => None,
-        };
-        let ready = match (account_id, runtime.as_ref()) {
-            (Some(account_id), Some(runtime)) => matches!(
-                self.global_catalog.select(global::CatalogSelectionRequest {
-                    mode: global::RotationMode::Fixed,
-                    fixed_account_id: Some(account_id),
-                    automatic_account_ids: &[],
-                    current_account_id: None,
-                    last_committed_account_id: None,
-                    credential_readiness: &[global::CredentialReadiness {
-                        account_id,
-                        ready: true,
-                    }],
-                    now,
-                }),
-                global::CatalogSelection::Selected(token)
-                    if token.source_ref() == runtime.source_ref
-            ),
-            _ => false,
-        };
-        let quota = (!projection.meters.is_empty()).then(|| {
-            let observed_at = projection
-                .meters
-                .iter()
-                .map(|meter| meter.observed_at)
-                .min()
-                .unwrap_or(projection.fetched_at);
-            let stale_at = projection
-                .meters
-                .iter()
-                .map(|meter| meter.stale_at)
-                .min()
-                .unwrap_or(projection.fetched_at);
-            AccountSlotQuotaSnapshot {
-                meters: projection
-                    .meters
-                    .into_iter()
-                    .map(|meter| AccountSlotQuotaMeter {
-                        id: meter.id,
-                        label: meter.label,
-                        remaining_percent: meter.remaining_percent,
-                        resets_at: meter.resets_at,
-                    })
-                    .collect(),
-                observed_at,
-                stale_at,
-            }
+        let runtime = self.global_runtime(account_id).await.ok();
+        let projection = runtime.as_ref().and_then(|runtime| {
+            self.global_catalog
+                .projection_for(account_id, &runtime.source_ref, now)
         });
-        let process_account_id = self.refresh_global_directory().process_account_id;
-        let local_default = if account_id == process_account_id {
+        let quota = projection
+            .as_ref()
+            .filter(|projection| !projection.meters.is_empty())
+            .map(|projection| {
+                let observed_at = projection
+                    .meters
+                    .iter()
+                    .map(|meter| meter.observed_at)
+                    .min()
+                    .unwrap_or(projection.fetched_at);
+                let stale_at = projection
+                    .meters
+                    .iter()
+                    .map(|meter| meter.stale_at)
+                    .min()
+                    .unwrap_or(projection.fetched_at);
+                AccountSlotQuotaSnapshot {
+                    meters: projection
+                        .meters
+                        .iter()
+                        .map(|meter| AccountSlotQuotaMeter {
+                            id: meter.id.clone(),
+                            label: meter.label.clone(),
+                            remaining_percent: meter.remaining_percent,
+                            resets_at: meter.resets_at,
+                        })
+                        .collect(),
+                    observed_at,
+                    stale_at,
+                }
+            });
+        let local_default = if is_default {
             let (slot, manifest_error, revision) = self
                 .state
                 .read()
@@ -327,21 +325,37 @@ impl AccountRegistry {
         } else {
             None
         };
-        AccountSlotSnapshot {
-            account_slot_id: projection.account_slot_id.clone(),
-            account_number: projection.account_number,
-            label: projection.account_slot_id,
-            is_default: account_id == process_account_id,
-            status: if ready {
-                AccountSlotStatus::Ready
-            } else {
-                AccountSlotStatus::LoginRequired
+        let status = local_default.as_ref().map_or_else(
+            || {
+                if runtime.is_some() {
+                    AccountSlotStatus::Ready
+                } else {
+                    AccountSlotStatus::LoginRequired
+                }
             },
-            health: match projection.health {
+            |slot| slot.status,
+        );
+        let health = projection.as_ref().map_or_else(
+            || {
+                if status == AccountSlotStatus::Ready {
+                    AccountSlotHealth::Healthy
+                } else {
+                    AccountSlotHealth::Unavailable
+                }
+            },
+            |projection| match &projection.health {
                 global::CatalogProjectionHealth::Healthy => AccountSlotHealth::Healthy,
                 global::CatalogProjectionHealth::Degraded => AccountSlotHealth::Degraded,
                 global::CatalogProjectionHealth::Unavailable => AccountSlotHealth::Unavailable,
             },
+        );
+        AccountSlotSnapshot {
+            account_slot_id: account_id.to_string(),
+            account_number: account_id.number(),
+            label: account_id.to_string(),
+            is_default,
+            status,
+            health,
             quota,
             auth_mode: runtime
                 .as_ref()
@@ -350,28 +364,36 @@ impl AccountRegistry {
             attempt_generation: local_default
                 .as_ref()
                 .map_or(0, |slot| slot.attempt_generation),
-            registry_revision: generation,
+            registry_revision,
             active_login_operation_id: local_default
                 .as_ref()
                 .and_then(|slot| slot.active_login_operation_id.clone()),
             error_code: local_default
                 .as_ref()
                 .and_then(|slot| slot.error_code.clone()),
-            actions: local_default.map_or_else(Vec::new, |slot| slot.actions),
-            updated_at: projection.fetched_at,
+            actions: local_default
+                .as_ref()
+                .map_or_else(Vec::new, |slot| slot.actions.clone()),
+            updated_at: projection.as_ref().map_or_else(
+                || local_default.as_ref().map_or(0, |slot| slot.updated_at),
+                |projection| projection.fetched_at,
+            ),
         }
     }
 
-    pub(crate) fn global_rate_limits(
+    pub(crate) async fn global_rate_limits(
         &self,
         account_slot_id: &str,
     ) -> Option<Result<AccountSlotRateLimitsReadResponse, JSONRPCErrorError>> {
-        global::AccountId::parse(account_slot_id)?;
-        let projection = self
-            .global_catalog
-            .projection(chrono::Utc::now().timestamp())
-            .into_iter()
-            .find(|account| account.account_slot_id == account_slot_id);
+        let account_id = global::AccountId::parse(account_slot_id)?;
+        let projection = match self.global_runtime(account_id).await {
+            Ok(runtime) => self.global_catalog.projection_for(
+                account_id,
+                &runtime.source_ref,
+                chrono::Utc::now().timestamp(),
+            ),
+            Err(_) => None,
+        };
         Some(
             projection
                 .ok_or_else(|| invalid_request("account slot is unavailable"))
@@ -483,6 +505,21 @@ impl AccountRegistry {
             binding_transition,
         ))
     }
+}
+
+async fn send_inventory_changed(
+    outgoing: &crate::outgoing_message::OutgoingMessageSender,
+    registry_revision: u64,
+) {
+    outgoing
+        .send_server_notification(
+            codex_app_server_protocol::ServerNotification::AccountSlotInventoryChanged(
+                codex_app_server_protocol::AccountSlotInventoryChangedNotification {
+                    registry_revision,
+                },
+            ),
+        )
+        .await;
 }
 
 async fn wait_before_catalog_reconnect(refresh_elapsed: bool) {

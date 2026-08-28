@@ -152,3 +152,40 @@ async fn side_conversations_wait_for_every_configured_mcp_server() {
 
     assert!(app.chat_widget.is_task_running_for_test());
 }
+
+#[tokio::test]
+async fn aggregate_completion_settles_without_local_expected_set_heuristics() {
+    let mut app = make_test_app().await;
+    configure_mcp_servers(&mut app);
+    let thread_id = ThreadId::new();
+    app.primary_thread_id = Some(thread_id);
+    app.active_thread_id = Some(thread_id);
+    app.refresh_mcp_startup_expected_servers_from_config();
+
+    app.chat_widget.handle_server_notification(
+        ServerNotification::McpServerStatusUpdated(McpServerStatusUpdatedNotification {
+            thread_id: Some(thread_id.to_string()),
+            name: "eager".to_string(),
+            status: McpServerStartupState::Starting,
+            error: None,
+            failure_reason: None,
+        }),
+        /*replay_kind*/ None,
+    );
+    assert!(app.chat_widget.is_task_running_for_test());
+
+    app.chat_widget.handle_server_notification(
+        ServerNotification::McpServerStartupCompleted(
+            codex_app_server_protocol::McpServerStartupCompletedNotification {
+                thread_id: thread_id.to_string(),
+                ready: vec!["eager".to_string(), "executor-only".to_string()],
+                failed: Vec::new(),
+                cancelled: vec!["deferred".to_string()],
+            },
+        ),
+        /*replay_kind*/ None,
+    );
+
+    assert!(!app.chat_widget.is_task_running_for_test());
+    assert!(!render_bottom_popup(&app.chat_widget, /*width*/ 80).contains("Starting MCP servers"));
+}

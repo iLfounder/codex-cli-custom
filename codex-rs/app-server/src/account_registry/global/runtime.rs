@@ -235,6 +235,7 @@ impl GlobalAccountCatalog {
         Ok(ApplyOutcome::Applied { generation })
     }
 
+    #[cfg(test)]
     pub(crate) fn projection(&self, now: i64) -> Vec<CatalogAccountProjection> {
         self.state.read().map_or_else(
             |_| Vec::new(),
@@ -246,6 +247,21 @@ impl GlobalAccountCatalog {
                     .collect()
             },
         )
+    }
+
+    pub(crate) fn projection_for(
+        &self,
+        account_id: AccountId,
+        source_ref: &str,
+        now: i64,
+    ) -> Option<CatalogAccountProjection> {
+        self.state.read().ok().and_then(|state| {
+            state
+                .accounts
+                .get(&account_id)
+                .filter(|account| account.source_ref.as_deref() == Some(source_ref))
+                .map(|account| account.projection(now))
+        })
     }
 
     pub(crate) fn select(&self, request: CatalogSelectionRequest<'_>) -> CatalogSelection {

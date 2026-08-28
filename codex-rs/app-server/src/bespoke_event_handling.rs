@@ -38,6 +38,8 @@ use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::McpServerElicitationAction;
 use codex_app_server_protocol::McpServerElicitationRequestParams;
 use codex_app_server_protocol::McpServerElicitationRequestResponse;
+use codex_app_server_protocol::McpServerStartupCompletedNotification;
+use codex_app_server_protocol::McpServerStartupFailure;
 use codex_app_server_protocol::McpServerStartupState;
 use codex_app_server_protocol::McpServerStatusUpdatedNotification;
 use codex_app_server_protocol::ModelReroutedNotification;
@@ -232,6 +234,26 @@ pub(crate) async fn apply_bespoke_event_handling(
             };
             outgoing
                 .send_server_notification(ServerNotification::McpServerStatusUpdated(notification))
+                .await;
+        }
+        EventMsg::McpStartupComplete(startup) => {
+            let notification = McpServerStartupCompletedNotification {
+                thread_id: conversation_id.to_string(),
+                ready: startup.ready,
+                failed: startup
+                    .failed
+                    .into_iter()
+                    .map(|failure| McpServerStartupFailure {
+                        server: failure.server,
+                        error: failure.error,
+                    })
+                    .collect(),
+                cancelled: startup.cancelled,
+            };
+            outgoing
+                .send_server_notification(ServerNotification::McpServerStartupCompleted(
+                    notification,
+                ))
                 .await;
         }
         EventMsg::EnvironmentConnected(event) => {

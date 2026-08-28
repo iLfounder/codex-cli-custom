@@ -354,7 +354,11 @@ impl App {
                     && !self.thread_event_channels.contains_key(&thread_id)
                     && self.agent_navigation.get(&thread_id).is_none()
                     && !self.side_threads.contains_key(&thread_id)
-                    && !matches!(&notification, ServerNotification::McpServerStatusUpdated(_))
+                    && !matches!(
+                        &notification,
+                        ServerNotification::McpServerStatusUpdated(_)
+                            | ServerNotification::McpServerStartupCompleted(_)
+                    )
                     && !matches!(
                         &notification,
                         ServerNotification::ThreadStarted(started)

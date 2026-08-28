@@ -10728,6 +10728,55 @@
       "title": "McpServerRefreshResponse",
       "type": "object"
     },
+    "McpServerStartupCompletedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "cancelled": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "failed": {
+          "items": {
+            "$ref": "#/definitions/McpServerStartupFailure"
+          },
+          "type": "array"
+        },
+        "ready": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cancelled",
+        "failed",
+        "ready",
+        "threadId"
+      ],
+      "title": "McpServerStartupCompletedNotification",
+      "type": "object"
+    },
+    "McpServerStartupFailure": {
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "server": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "error",
+        "server"
+      ],
+      "type": "object"
+    },
     "McpServerStartupFailureReason": {
       "enum": [
         "reauthenticationRequired"
@@ -16803,6 +16852,26 @@
             "params"
           ],
           "title": "McpServer/startupStatus/updatedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "mcpServer/startupCompleted"
+              ],
+              "title": "McpServer/startupCompletedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/McpServerStartupCompletedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "McpServer/startupCompletedNotification",
           "type": "object"
         },
         {
