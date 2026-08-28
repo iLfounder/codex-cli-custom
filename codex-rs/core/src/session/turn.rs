@@ -605,7 +605,7 @@ pub(crate) async fn run_turn(
                     && failover.can_fail_over(&e)
                 {
                     match failover
-                        .prepare_next_turn_context(&sess, &turn_context, &e)
+                        .prepare_next_turn_context(&sess, &turn_context, &e, &cancellation_token)
                         .await
                     {
                         Ok(next_turn_context) => {
@@ -622,6 +622,9 @@ pub(crate) async fn run_turn(
                             continue;
                         }
                         Err(failover_error) => {
+                            if matches!(failover_error.details(), CodexErrorDetails::TurnAborted) {
+                                return Err(failover_error);
+                            }
                             info!("Account failover preparation failed: {failover_error:#}");
                         }
                     }
@@ -2370,6 +2373,16 @@ async fn try_run_sampling_request(
             .session_telemetry
             .record_responses(&handle_responses, &event);
         record_turn_ttft_metric(&turn_context, &event).await;
+
+        if !matches!(
+            &event,
+            ResponseEvent::Created | ResponseEvent::RateLimits(_) | ResponseEvent::ModelsEtag(_)
+        ) && let Some(failover) = turn_context
+            .extension_data
+            .get::<super::account_failover::PreSemanticAccountFailover>()
+        {
+            failover.mark_effect(super::account_failover::AttemptEffect::SemanticResponse);
+        }
 
         match event {
             ResponseEvent::Created => {

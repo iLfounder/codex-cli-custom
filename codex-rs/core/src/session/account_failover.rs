@@ -8,6 +8,7 @@ use crate::execution_account::TurnExecutionAccountDecision;
 use crate::execution_account::TurnExecutionAccountFailoverSelection;
 use crate::execution_account::TurnExecutionAccountSelection;
 use crate::execution_account::TurnExecutionAccountSuccessCommit;
+use codex_async_utils::OrCancelExt;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::protocol::ExecutionAccountBinding;
@@ -17,12 +18,14 @@ use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::Ordering;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Copy)]
 pub(crate) enum AttemptEffect {
     Hook = 1,
     Compaction = 2,
-    ResponseCreated = 3,
+    SemanticResponse = 3,
+    ResponseCreated = 4,
 }
 
 struct AccountAttemptCandidate {
@@ -239,6 +242,7 @@ impl PreSemanticAccountFailover {
         session: &Arc<Session>,
         previous: &Arc<TurnContext>,
         error: &CodexErr,
+        cancellation_token: &CancellationToken,
     ) -> CodexResult<Arc<TurnContext>> {
         let rejection_kind = error.account_rejection_kind().ok_or_else(|| {
             CodexErr::InvalidRequest("account failover requires a typed rejection".to_string())
@@ -251,7 +255,13 @@ impl PreSemanticAccountFailover {
             .binding
             .slot_id
             .clone();
-        self.discard_uncommitted_runtime().await;
+        if let Some(prepared) = self.take_uncommitted_runtime() {
+            let mut cleanup = tokio::spawn(cleanup_prepared_runtime(prepared));
+            tokio::select! {
+                _ = cancellation_token.cancelled() => return Err(CodexErr::TurnAborted),
+                _ = &mut cleanup => {}
+            }
+        }
         let excluded_account_slot_ids = self
             .inner
             .tried_slot_ids
@@ -270,8 +280,19 @@ impl PreSemanticAccountFailover {
                 rejection_kind,
                 excluded_account_slot_ids: excluded_account_slot_ids.clone(),
             })
-            .await?;
-        let candidate = prepare_candidate(session, &self.inner.initial_binding, decision).await?;
+            .or_cancel(cancellation_token)
+            .await
+            .map_err(|_| CodexErr::TurnAborted)??;
+        let mut candidate = prepare_candidate(session, &self.inner.initial_binding, decision)
+            .or_cancel(cancellation_token)
+            .await
+            .map_err(|_| CodexErr::TurnAborted)??;
+        if cancellation_token.is_cancelled() {
+            if let Some(prepared) = candidate.prepared.take() {
+                tokio::spawn(cleanup_prepared_runtime(prepared));
+            }
+            return Err(CodexErr::TurnAborted);
+        }
         if excluded_account_slot_ids.contains(&candidate.binding.slot_id) {
             return Err(CodexErr::InvalidRequest(
                 "account failover selector repeated an attempted account".to_string(),
@@ -293,13 +314,6 @@ impl PreSemanticAccountFailover {
             .await;
         next.extension_data.insert(self.clone());
         Ok(next)
-    }
-
-    pub(super) async fn discard_uncommitted_runtime(&self) {
-        let prepared = self.take_uncommitted_runtime();
-        if let Some(prepared) = prepared {
-            cleanup_prepared_runtime(prepared).await;
-        }
     }
 
     fn take_uncommitted_runtime(&self) -> Option<PreparedExecutionAccountRuntime> {
