@@ -35,7 +35,7 @@ The fork makes account selection, thread ownership, session handoff, and externa
 | P019 | The TUI account picker and rotation editor show global account health and quota while keeping local credential actions unavailable. |
 | P020 | Session lifecycle and controls stay consistent across turn-interrupt races, current-account projection, archive visibility, and TUI `Esc` interrupts. |
 | P021 | Goal edits recover from accounting-only revision drift through an authoritative refresh, while conflicting semantic changes are rejected. |
-| P022 | `codex exec --json` reports context-compaction start, completion, unknown outcomes for unfinished compactions, and native token telemetry as JSONL without exposing compacted content. |
+| P022 | Final 0.149 convergence: reliable writer release and exit retry, complete registered-account inventory with live quota overlays, terminal MCP startup reporting, and context-compaction JSONL telemetry without exposing compacted content. |
 
 The app-server exposes opaque account references and sanitized session state. It never stores external workflow roles, group IDs, or user handles.
 
@@ -44,6 +44,7 @@ The app-server exposes opaque account references and sanitized session state. It
 - session inventory and state: `sessionRuntime/list`, `sessionRuntime/changed`
 - account management: `accountSlot/list`, `accountSlot/login/start`, `accountSlot/logout`
 - global account inventory: `accountSlot/inventoryChanged`, plus health and quota projections in `accountSlot/list`
+- MCP startup completion: `mcpServer/startupCompleted` with ready, failed, and cancelled server lists
 - account switching: `thread/account/switch`
 - account rotation: `thread/account/rotation/read`, `thread/account/rotation/update`, `accountSlot/rateLimits/read`
 - writer release: `thread/relinquish`

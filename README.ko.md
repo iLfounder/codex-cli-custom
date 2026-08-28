@@ -35,7 +35,7 @@
 | P019 | TUI account picker와 rotation editor가 global account의 health와 quota를 표시하되 local credential action은 제공하지 않는다. |
 | P020 | Turn interrupt race, 현재 account projection, archive visibility, TUI `Esc` interrupt 전반에서 session lifecycle과 control의 일관성을 유지한다. |
 | P021 | Goal edit 중 accounting-only revision drift는 authoritative refresh로 회복하고, 충돌하는 semantic change는 거부한다. |
-| P022 | `codex exec --json`이 compact된 content를 노출하지 않고 context compaction의 시작, 완료, 미완료 compaction의 `outcome_unknown` 결과와 native token telemetry를 JSONL로 전달한다. |
+| P022 | 0.149를 최종 수렴한다. Writer 반환과 종료 재시도, 등록 계정 전체 목록과 실시간 quota overlay, MCP startup의 terminal 결과, compact된 content를 노출하지 않는 context-compaction JSONL telemetry를 제공한다. |
 
 App-server는 opaque account reference와 sanitize된 session state만 노출한다. 외부 workflow role, group ID, 사용자 handle은 저장하지 않는다.
 
@@ -44,6 +44,7 @@ App-server는 opaque account reference와 sanitize된 session state만 노출한
 - session 목록과 상태: `sessionRuntime/list`, `sessionRuntime/changed`
 - account 관리: `accountSlot/list`, `accountSlot/login/start`, `accountSlot/logout`
 - global account inventory: `accountSlot/inventoryChanged`, `accountSlot/list`의 health·quota projection
+- MCP startup 완료: ready, failed, cancelled server 목록을 담은 `mcpServer/startupCompleted`
 - account 전환: `thread/account/switch`
 - account 순환: `thread/account/rotation/read`, `thread/account/rotation/update`, `accountSlot/rateLimits/read`
 - writer 반환: `thread/relinquish`
