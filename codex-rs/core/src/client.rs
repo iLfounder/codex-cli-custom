@@ -133,6 +133,7 @@ use codex_model_provider::create_model_provider;
 use codex_model_provider_info::DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
+use codex_protocol::error::AccountRejectionKind;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
 use codex_response_debug_context::extract_response_debug_context;
@@ -2373,7 +2374,9 @@ async fn handle_unauthorized(
         debug.auth_error_code.as_deref(),
     );
 
-    Err(provider.map_api_error(ApiError::Transport(transport)))
+    Err(provider
+        .map_api_error(ApiError::Transport(transport))
+        .with_account_rejection(AccountRejectionKind::UnauthorizedFinal))
 }
 
 fn api_error_http_status(error: &ApiError) -> Option<u16> {
