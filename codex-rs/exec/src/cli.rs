@@ -59,6 +59,19 @@ pub struct Cli {
     )]
     pub json: bool,
 
+    /// Retry an account-rejected model attempt before any semantic effect is observed.
+    #[arg(
+        long = "account-failover",
+        value_enum,
+        default_value_t = AccountFailover::Disabled,
+        global = true
+    )]
+    pub account_failover: AccountFailover,
+
+    /// Configure the registered-account rotation policy before the first turn.
+    #[arg(long = "account-rotation", value_enum, global = true)]
+    pub account_rotation: Option<AccountRotation>,
+
     /// Specifies file where the last message from the agent should be written.
     #[arg(
         long = "output-last-message",
@@ -306,6 +319,22 @@ pub enum Color {
     Never,
     #[default]
     Auto,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum AccountFailover {
+    #[default]
+    Disabled,
+    PreSemantic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum AccountRotation {
+    QuotaAware,
+    RoundRobin,
+    ExhaustThenNext,
 }
 
 #[cfg(test)]

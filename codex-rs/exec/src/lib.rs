@@ -22,6 +22,9 @@ use codex_app_server_client::InProcessAppServerClient;
 use codex_app_server_client::InProcessClientStartArgs;
 use codex_app_server_client::InProcessServerEvent;
 use codex_app_server_client::TypedRequestError;
+use codex_app_server_protocol::AccountFailoverMode;
+use codex_app_server_protocol::AccountSlotListParams;
+use codex_app_server_protocol::AccountSlotListResponse;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ConfigWarningNotification;
 use codex_app_server_protocol::JSONRPCErrorError;
@@ -34,6 +37,11 @@ use codex_app_server_protocol::ReviewTarget as ApiReviewTarget;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::Thread as AppServerThread;
+use codex_app_server_protocol::ThreadAccountRotationMode;
+use codex_app_server_protocol::ThreadAccountRotationReadParams;
+use codex_app_server_protocol::ThreadAccountRotationReadResponse;
+use codex_app_server_protocol::ThreadAccountRotationUpdateParams;
+use codex_app_server_protocol::ThreadAccountRotationUpdateResponse;
 use codex_app_server_protocol::ThreadForkParams;
 use codex_app_server_protocol::ThreadForkResponse;
 use codex_app_server_protocol::ThreadHistoryMode;
@@ -150,6 +158,7 @@ pub use exec_events::Usage;
 pub use exec_events::WebSearchItem;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::future::Future;
 use std::io::IsTerminal;
 use std::io::Read;
@@ -213,6 +222,8 @@ impl RequestIdSequencer {
 }
 
 struct ExecRunArgs {
+    account_failover: cli::AccountFailover,
+    account_rotation: Option<cli::AccountRotation>,
     in_process_start_args: InProcessClientStartArgs,
     state_db: Option<StateDbHandle>,
     command: Option<ExecCommand>,
@@ -264,6 +275,8 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         color,
         last_message_file,
         json: json_mode,
+        account_failover,
+        account_rotation,
         prompt,
         output_schema: output_schema_path,
         mut config_overrides,
@@ -564,6 +577,8 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         channel_capacity: DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
     };
     run_exec_session(ExecRunArgs {
+        account_failover,
+        account_rotation,
         in_process_start_args,
         state_db,
         command,
@@ -662,6 +677,8 @@ async fn load_bootstrap_config_or_exit(
 
 async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     let ExecRunArgs {
+        account_failover,
+        account_rotation,
         in_process_start_args,
         state_db,
         command,
@@ -811,11 +828,12 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     }
 
     let mut request_ids = RequestIdSequencer::new();
-    let mut client = InProcessAppServerClient::start(in_process_start_args)
-        .await
-        .map_err(|err| {
-            anyhow::anyhow!("failed to initialize in-process app-server client: {err}")
-        })?;
+    let mut client = InProcessAppServerClient::start_for_exec(
+        in_process_start_args,
+        exec_account_failover_mode(account_failover),
+    )
+    .await
+    .map_err(|err| anyhow::anyhow!("failed to initialize in-process app-server client: {err}"))?;
 
     // Resolve resume and fork through existing app-server thread lifecycle APIs.
     let (primary_thread_id, fallback_session_configured) = if let Some(ExecCommand::Resume(args)) =
@@ -931,6 +949,19 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     // avoidable startup latency on the in-process path.
     let session_configured = fallback_session_configured;
 
+    if let Some(account_rotation) = account_rotation
+        && !matches!(&initial_operation, InitialOperation::UserTurn { .. })
+    {
+        bootstrap_account_rotation(
+            &client,
+            &mut request_ids,
+            primary_thread_id_for_span.as_str(),
+            account_rotation,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+    }
+
     exec_span.record("thread.id", primary_thread_id_for_span.as_str());
 
     // Print the effective configuration and initial request so users can see what Codex
@@ -969,35 +1000,33 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
             items,
             output_schema,
         } => {
-            let response: TurnStartResponse = send_request_with_response(
+            let response = start_turn_with_account_rotation(
                 &client,
-                ClientRequest::TurnStart {
-                    request_id: request_ids.next(),
-                    params: TurnStartParams {
-                        thread_id: primary_thread_id_for_span.clone(),
-                        expected_execution_account: None,
-                        client_user_message_id: None,
-                        input: items.into_iter().map(Into::into).collect(),
-                        responsesapi_client_metadata: None,
-                        additional_context: None,
-                        environments: None,
-                        cwd: Some(default_cwd),
-                        runtime_workspace_roots: None,
-                        approval_policy: Some(default_approval_policy.into()),
-                        approvals_reviewer: None,
-                        sandbox_policy: None,
-                        permissions: None,
-                        model: None,
-                        service_tier: None,
-                        effort: default_effort,
-                        summary: None,
-                        personality: None,
-                        output_schema,
-                        collaboration_mode: None,
-                        multi_agent_mode: None,
-                    },
+                &mut request_ids,
+                account_rotation.map(|mode| (primary_thread_id_for_span.as_str(), mode)),
+                TurnStartParams {
+                    thread_id: primary_thread_id_for_span.clone(),
+                    expected_execution_account: None,
+                    client_user_message_id: None,
+                    input: items.into_iter().map(Into::into).collect(),
+                    responsesapi_client_metadata: None,
+                    additional_context: None,
+                    environments: None,
+                    cwd: Some(default_cwd),
+                    runtime_workspace_roots: None,
+                    approval_policy: Some(default_approval_policy.into()),
+                    approvals_reviewer: None,
+                    sandbox_policy: None,
+                    permissions: None,
+                    model: None,
+                    service_tier: None,
+                    effort: default_effort,
+                    summary: None,
+                    personality: None,
+                    output_schema,
+                    collaboration_mode: None,
+                    multi_agent_mode: None,
                 },
-                "turn/start",
             )
             .await
             .map_err(anyhow::Error::msg)?;
@@ -1170,6 +1199,163 @@ async fn start_thread(
             Err(err) => return Err(format!("thread/start: {err}")),
         }
     }
+}
+
+fn exec_account_failover_mode(account_failover: cli::AccountFailover) -> AccountFailoverMode {
+    match account_failover {
+        cli::AccountFailover::Disabled => AccountFailoverMode::Disabled,
+        cli::AccountFailover::PreSemantic => AccountFailoverMode::PreSemantic,
+    }
+}
+
+/// Sends lifecycle requests for the exec account-rotation bootstrap.
+///
+/// Production uses the in-process app-server client; focused tests provide a scripted client so
+/// bootstrap ordering and fail-closed behavior can be observed without starting a model turn.
+trait ExecRequestClient {
+    fn request_typed<T>(
+        &self,
+        request: ClientRequest,
+    ) -> impl Future<Output = Result<T, TypedRequestError>> + Send
+    where
+        T: serde::de::DeserializeOwned + Send;
+}
+
+impl ExecRequestClient for InProcessAppServerClient {
+    async fn request_typed<T>(&self, request: ClientRequest) -> Result<T, TypedRequestError>
+    where
+        T: serde::de::DeserializeOwned + Send,
+    {
+        InProcessAppServerClient::request_typed(self, request).await
+    }
+}
+
+async fn send_exec_request_with_response<T, C>(
+    client: &C,
+    request: ClientRequest,
+    method: &str,
+) -> Result<T, String>
+where
+    T: serde::de::DeserializeOwned + Send,
+    C: ExecRequestClient,
+{
+    client.request_typed(request).await.map_err(|err| {
+        if method.is_empty() {
+            err.to_string()
+        } else {
+            format!("{method}: {err}")
+        }
+    })
+}
+
+async fn start_turn_with_account_rotation<C>(
+    client: &C,
+    request_ids: &mut RequestIdSequencer,
+    account_rotation: Option<(&str, cli::AccountRotation)>,
+    params: TurnStartParams,
+) -> Result<TurnStartResponse, String>
+where
+    C: ExecRequestClient,
+{
+    if let Some((thread_id, mode)) = account_rotation {
+        bootstrap_account_rotation(client, request_ids, thread_id, mode).await?;
+    }
+    send_exec_request_with_response(
+        client,
+        ClientRequest::TurnStart {
+            request_id: request_ids.next(),
+            params,
+        },
+        "turn/start",
+    )
+    .await
+}
+
+async fn bootstrap_account_rotation<C>(
+    client: &C,
+    request_ids: &mut RequestIdSequencer,
+    thread_id: &str,
+    mode: cli::AccountRotation,
+) -> Result<(), String>
+where
+    C: ExecRequestClient,
+{
+    let mut cursor = None;
+    let mut registry_revision = None;
+    let mut account_slots = Vec::new();
+    let mut seen_cursors = HashSet::new();
+    loop {
+        let response: AccountSlotListResponse = send_exec_request_with_response(
+            client,
+            ClientRequest::AccountSlotList {
+                request_id: request_ids.next(),
+                params: AccountSlotListParams {
+                    cursor,
+                    limit: Some(100),
+                },
+            },
+            "accountSlot/list",
+        )
+        .await?;
+        if registry_revision.is_some_and(|revision| revision != response.registry_revision) {
+            return Err("account rotation inventory changed during bootstrap".to_string());
+        }
+        registry_revision = Some(response.registry_revision);
+        account_slots.extend(
+            response
+                .data
+                .into_iter()
+                .map(|slot| (slot.account_number, slot.account_slot_id)),
+        );
+        let Some(next_cursor) = response.next_cursor else {
+            break;
+        };
+        if next_cursor.is_empty() || !seen_cursors.insert(next_cursor.clone()) {
+            return Err("account rotation inventory returned an invalid cursor".to_string());
+        }
+        cursor = Some(next_cursor);
+    }
+    if account_slots.is_empty() {
+        return Err("account rotation requires at least one registered account".to_string());
+    }
+    account_slots.sort_by_key(|(account_number, _)| *account_number);
+    let automatic_account_slot_ids = account_slots
+        .into_iter()
+        .map(|(_, account_slot_id)| account_slot_id)
+        .collect();
+    let current: ThreadAccountRotationReadResponse = send_exec_request_with_response(
+        client,
+        ClientRequest::ThreadAccountRotationRead {
+            request_id: request_ids.next(),
+            params: ThreadAccountRotationReadParams {
+                thread_id: thread_id.to_string(),
+            },
+        },
+        "thread/account/rotation/read",
+    )
+    .await?;
+    let _: ThreadAccountRotationUpdateResponse = send_exec_request_with_response(
+        client,
+        ClientRequest::ThreadAccountRotationUpdate {
+            request_id: request_ids.next(),
+            params: ThreadAccountRotationUpdateParams {
+                thread_id: thread_id.to_string(),
+                expected_rotation_revision: current.rotation.revision,
+                mode: match mode {
+                    cli::AccountRotation::QuotaAware => ThreadAccountRotationMode::QuotaAware,
+                    cli::AccountRotation::RoundRobin => ThreadAccountRotationMode::RoundRobin,
+                    cli::AccountRotation::ExhaustThenNext => {
+                        ThreadAccountRotationMode::ExhaustThenNext
+                    }
+                },
+                fixed_account_slot_id: current.rotation.fixed_account_slot_id,
+                automatic_account_slot_ids,
+            },
+        },
+        "thread/account/rotation/update",
+    )
+    .await?;
+    Ok(())
 }
 
 fn thread_start_params_from_config(config: &Config) -> ThreadStartParams {

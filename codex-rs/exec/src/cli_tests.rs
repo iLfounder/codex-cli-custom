@@ -99,6 +99,41 @@ fn parses_config_isolation_flags() {
 }
 
 #[test]
+fn account_failover_is_default_off_and_accepts_pre_semantic_opt_in() {
+    let default_cli = Cli::parse_from(["codex-exec", "summarize"]);
+    let opted_in_cli = Cli::parse_from([
+        "codex-exec",
+        "resume",
+        "--last",
+        "--account-failover=pre-semantic",
+    ]);
+
+    assert_eq!(default_cli.account_failover, AccountFailover::Disabled);
+    assert_eq!(opted_in_cli.account_failover, AccountFailover::PreSemantic);
+}
+
+#[test]
+fn account_rotation_is_optional_and_accepts_logical_modes() {
+    let default_cli = Cli::parse_from(["codex-exec", "summarize"]);
+    assert_eq!(default_cli.account_rotation, None);
+
+    for (value, expected) in [
+        ("quota-aware", AccountRotation::QuotaAware),
+        ("round-robin", AccountRotation::RoundRobin),
+        ("exhaust-then-next", AccountRotation::ExhaustThenNext),
+    ] {
+        let cli = Cli::parse_from([
+            "codex-exec",
+            "--account-failover=pre-semantic",
+            "--account-rotation",
+            value,
+            "summarize",
+        ]);
+        assert_eq!(cli.account_rotation, Some(expected));
+    }
+}
+
+#[test]
 fn approve_for_me_flag_applies_to_resume_when_passed_at_exec_root() {
     for flag in ["--approve-for-me", "--not-so-yolo"] {
         let cli = Cli::parse_from(["codex-exec", flag, "resume", "--last"]);

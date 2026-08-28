@@ -10,12 +10,96 @@ use opentelemetry::trace::TraceId;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use pretty_assertions::assert_eq;
+use std::collections::VecDeque;
 use std::io;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex;
 use tempfile::tempdir;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+struct ScriptedExecRequestClient {
+    responses: Mutex<VecDeque<Value>>,
+    requests: Mutex<Vec<ClientRequest>>,
+}
+
+impl ScriptedExecRequestClient {
+    fn new(responses: impl IntoIterator<Item = Value>) -> Self {
+        Self {
+            responses: Mutex::new(responses.into_iter().collect()),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn requests(&self) -> Vec<ClientRequest> {
+        self.requests.lock().expect("request lock").clone()
+    }
+}
+
+impl ExecRequestClient for ScriptedExecRequestClient {
+    fn request_typed<T>(
+        &self,
+        request: ClientRequest,
+    ) -> impl Future<Output = Result<T, TypedRequestError>> + Send
+    where
+        T: serde::de::DeserializeOwned + Send,
+    {
+        let method = request.method_name().to_string();
+        self.requests.lock().expect("request lock").push(request);
+        let response = self
+            .responses
+            .lock()
+            .expect("response lock")
+            .pop_front()
+            .unwrap_or_else(|| panic!("missing scripted response for {method}"));
+        async move {
+            serde_json::from_value(response)
+                .map_err(|source| TypedRequestError::Deserialize { method, source })
+        }
+    }
+}
+
+fn account_slot_page(
+    account_slot_id: &str,
+    account_number: u32,
+    registry_revision: u64,
+    next_cursor: Option<&str>,
+) -> Value {
+    serde_json::json!({
+        "data": [{
+            "accountSlotId": account_slot_id,
+            "accountNumber": account_number,
+            "label": account_slot_id,
+            "isDefault": account_number == 1,
+            "status": "ready",
+            "health": "healthy",
+            "quota": null,
+            "authMode": null,
+            "attemptGeneration": 1,
+            "registryRevision": registry_revision,
+            "activeLoginOperationId": null,
+            "errorCode": null,
+            "actions": [],
+            "updatedAt": 0
+        }],
+        "nextCursor": next_cursor,
+        "registryRevision": registry_revision,
+        "catalogKind": "global",
+        "multiAccount": {"available": true, "denyReason": null}
+    })
+}
+
+fn rotation_response(revision: u64) -> Value {
+    serde_json::json!({
+        "rotation": {
+            "mode": "fixed",
+            "fixedAccountSlotId": "C2",
+            "automaticAccountSlotIds": [],
+            "revision": revision,
+            "lastCommittedAccountSlotId": null
+        }
+    })
+}
 
 fn test_tracing_subscriber() -> impl tracing::Subscriber + Send + Sync {
     let provider = SdkTracerProvider::builder().build();
@@ -259,6 +343,145 @@ fn lagged_event_warning_message_is_explicit() {
     assert_eq!(
         lagged_event_warning_message(/*skipped*/ 7),
         "in-process app-server event stream lagged; dropped 7 events".to_string()
+    );
+}
+
+#[tokio::test]
+async fn exec_account_failover_bootstrap_precedes_first_turn_and_fails_closed() {
+    assert_eq!(
+        [
+            exec_account_failover_mode(cli::AccountFailover::Disabled),
+            exec_account_failover_mode(cli::AccountFailover::PreSemantic),
+        ],
+        [
+            AccountFailoverMode::Disabled,
+            AccountFailoverMode::PreSemantic,
+        ]
+    );
+
+    let client = ScriptedExecRequestClient::new([
+        account_slot_page(
+            "C2",
+            /*account_number*/ 2,
+            /*registry_revision*/ 41,
+            Some("page-2"),
+        ),
+        account_slot_page(
+            "C1", /*account_number*/ 1, /*registry_revision*/ 41,
+            /*next_cursor*/ None,
+        ),
+        rotation_response(/*revision*/ 7),
+        rotation_response(/*revision*/ 8),
+        serde_json::json!({
+            "turn": {
+                "id": "turn-1",
+                "items": [],
+                "itemsView": "full",
+                "status": "inProgress",
+                "error": null,
+                "startedAt": null,
+                "completedAt": null,
+                "durationMs": null
+            }
+        }),
+    ]);
+    let mut request_ids = RequestIdSequencer::new();
+    let response = start_turn_with_account_rotation(
+        &client,
+        &mut request_ids,
+        Some(("thread-1", cli::AccountRotation::RoundRobin)),
+        TurnStartParams {
+            thread_id: "thread-1".to_string(),
+            ..TurnStartParams::default()
+        },
+    )
+    .await
+    .expect("stable rotation bootstrap should start the turn");
+
+    assert_eq!(response.turn.id, "turn-1");
+    let requests = client.requests();
+    assert_eq!(
+        requests
+            .iter()
+            .map(ClientRequest::method_name)
+            .collect::<Vec<_>>(),
+        [
+            "accountSlot/list",
+            "accountSlot/list",
+            "thread/account/rotation/read",
+            "thread/account/rotation/update",
+            "turn/start",
+        ]
+    );
+    let ClientRequest::AccountSlotList { params, .. } = &requests[0] else {
+        panic!("first request should list account slots");
+    };
+    assert_eq!(
+        params,
+        &AccountSlotListParams {
+            cursor: None,
+            limit: Some(100),
+        }
+    );
+    let ClientRequest::AccountSlotList { params, .. } = &requests[1] else {
+        panic!("second request should continue account pagination");
+    };
+    assert_eq!(
+        params,
+        &AccountSlotListParams {
+            cursor: Some("page-2".to_string()),
+            limit: Some(100),
+        }
+    );
+    let ClientRequest::ThreadAccountRotationUpdate { params, .. } = &requests[3] else {
+        panic!("fourth request should update account rotation");
+    };
+    assert_eq!(
+        params,
+        &ThreadAccountRotationUpdateParams {
+            thread_id: "thread-1".to_string(),
+            expected_rotation_revision: 7,
+            mode: ThreadAccountRotationMode::RoundRobin,
+            fixed_account_slot_id: Some("C2".to_string()),
+            automatic_account_slot_ids: vec!["C1".to_string(), "C2".to_string()],
+        }
+    );
+
+    let client = ScriptedExecRequestClient::new([
+        account_slot_page(
+            "C1",
+            /*account_number*/ 1,
+            /*registry_revision*/ 41,
+            Some("page-2"),
+        ),
+        account_slot_page(
+            "C2", /*account_number*/ 2, /*registry_revision*/ 42,
+            /*next_cursor*/ None,
+        ),
+    ]);
+    let error = start_turn_with_account_rotation(
+        &client,
+        &mut RequestIdSequencer::new(),
+        Some(("thread-1", cli::AccountRotation::RoundRobin)),
+        TurnStartParams {
+            thread_id: "thread-1".to_string(),
+            ..TurnStartParams::default()
+        },
+    )
+    .await
+    .expect_err("registry revision drift should stop before turn/start");
+
+    assert_eq!(
+        error,
+        "account rotation inventory changed during bootstrap".to_string()
+    );
+    assert_eq!(
+        client
+            .requests()
+            .iter()
+            .map(ClientRequest::method_name)
+            .collect::<Vec<_>>(),
+        ["accountSlot/list", "accountSlot/list"]
     );
 }
 
