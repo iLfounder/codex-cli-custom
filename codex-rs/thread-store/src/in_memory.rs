@@ -1377,7 +1377,9 @@ impl ThreadStore for InMemoryThreadStore {
             let mut policy = policy.clone();
             policy.last_committed_account_slot_id = Some(accepted_account_slot_id);
             state.execution_accounts.insert(thread_id, binding.clone());
-            state.account_rotation_policies.insert(thread_id, policy.clone());
+            state
+                .account_rotation_policies
+                .insert(thread_id, policy.clone());
             Ok(Some(SuccessfulAccountRotationCommit { binding, policy }))
         })
     }
