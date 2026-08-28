@@ -7,6 +7,7 @@ use base64::Engine;
 use chrono::DateTime;
 use chrono::Utc;
 use codex_protocol::auth::PlanType;
+use codex_protocol::error::AccountRejectionKind;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::ConnectionFailedError;
@@ -20,8 +21,11 @@ use serde_json::Value;
 pub fn map_api_error(err: ApiError) -> CodexErr {
     match err {
         ApiError::ContextWindowExceeded => CodexErr::ContextWindowExceeded,
-        ApiError::QuotaExceeded => CodexErr::QuotaExceeded,
-        ApiError::UsageNotIncluded => CodexErr::UsageNotIncluded,
+        ApiError::QuotaExceeded => {
+            CodexErr::QuotaExceeded.with_account_rejection(AccountRejectionKind::UsageLimit)
+        }
+        ApiError::UsageNotIncluded => CodexErr::UsageNotIncluded
+            .with_account_rejection(AccountRejectionKind::UsageNotIncluded),
         ApiError::Retryable { message, delay } => {
             let error = CodexErr::Stream(message);
             match delay {
@@ -33,7 +37,7 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
         ApiError::ServerOverloaded => CodexErr::ServerOverloaded,
         ApiError::Api { status, message } => {
             let user_message = api_error_user_message(status, &message);
-            CodexErr::UnexpectedStatus(UnexpectedResponseError {
+            let error = CodexErr::UnexpectedStatus(UnexpectedResponseError {
                 status,
                 body: message,
                 user_message,
@@ -42,7 +46,8 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
                 request_id: None,
                 identity_authorization_error: None,
                 identity_error_code: None,
-            })
+            });
+            with_http_account_rejection(status, error)
         }
         ApiError::InvalidRequest { message } => CodexErr::InvalidRequest(message),
         ApiError::CyberPolicy { message } => {
@@ -141,9 +146,11 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
                                 rate_limits: rate_limits.map(Box::new),
                                 promo_message,
                                 rate_limit_reached_type,
-                            });
+                            })
+                            .with_account_rejection(AccountRejectionKind::UsageLimit);
                         } else if err.error.error_type.as_deref() == Some("usage_not_included") {
-                            return CodexErr::UsageNotIncluded;
+                            return CodexErr::UsageNotIncluded
+                                .with_account_rejection(AccountRejectionKind::UsageNotIncluded);
                         }
                     }
 
@@ -152,7 +159,7 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
                         request_id: extract_request_tracking_id(headers.as_ref()),
                     })
                 } else {
-                    CodexErr::UnexpectedStatus(UnexpectedResponseError {
+                    let error = CodexErr::UnexpectedStatus(UnexpectedResponseError {
                         status,
                         user_message: api_error_user_message(status, &body_text),
                         body: body_text,
@@ -164,7 +171,8 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
                             X_OPENAI_AUTHORIZATION_ERROR_HEADER,
                         ),
                         identity_error_code: extract_x_error_json_code(headers.as_ref()),
-                    })
+                    });
+                    with_http_account_rejection(status, error)
                 }
             }
             TransportError::RetryLimit => CodexErr::RetryLimit(RetryLimitReachedError {
@@ -178,6 +186,14 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
             TransportError::Network(msg) | TransportError::Build(msg) => CodexErr::Stream(msg),
         },
         ApiError::RateLimit(msg) => CodexErr::Stream(msg),
+    }
+}
+
+fn with_http_account_rejection(status: http::StatusCode, error: CodexErr) -> CodexErr {
+    if status == http::StatusCode::PAYMENT_REQUIRED {
+        error.with_account_rejection(AccountRejectionKind::PaymentRequired)
+    } else {
+        error
     }
 }
 
