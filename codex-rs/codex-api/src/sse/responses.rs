@@ -417,6 +417,8 @@ pub fn process_responses_event(
                         response_error = ApiError::QuotaExceeded;
                     } else if is_usage_not_included(&error) {
                         response_error = ApiError::UsageNotIncluded;
+                    } else if is_model_access_denied(&error) {
+                        response_error = ApiError::ModelAccessDenied;
                     } else if is_cyber_policy_error(&error) {
                         let message = cyber_policy_message(error.message);
                         response_error = ApiError::CyberPolicy { message };
@@ -687,6 +689,10 @@ fn is_quota_exceeded_error(error: &Error) -> bool {
 
 fn is_usage_not_included(error: &Error) -> bool {
     error.code.as_deref() == Some("usage_not_included")
+}
+
+fn is_model_access_denied(error: &Error) -> bool {
+    error.code.as_deref() == Some("model_not_found")
 }
 
 fn is_cyber_policy_error(error: &Error) -> bool {
@@ -1116,6 +1122,16 @@ mod tests {
         assert_eq!(events.len(), 1);
 
         assert_matches!(events[0], Err(ApiError::QuotaExceeded));
+    }
+
+    #[tokio::test]
+    async fn model_not_found_error_is_typed_model_access_denial() {
+        let raw_error = r#"{"type":"response.failed","response":{"id":"resp_model_denied","status":"failed","error":{"code":"model_not_found","message":"The requested model is unavailable."}}}"#;
+        let sse = format!("event: response.failed\ndata: {raw_error}\n\n");
+        let events = collect_events(&[sse.as_bytes()]).await;
+
+        assert_eq!(events.len(), 1);
+        assert_matches!(events[0], Err(ApiError::ModelAccessDenied));
     }
 
     #[tokio::test]

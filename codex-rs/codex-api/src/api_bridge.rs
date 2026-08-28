@@ -26,6 +26,8 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
         }
         ApiError::UsageNotIncluded => CodexErr::UsageNotIncluded
             .with_account_rejection(AccountRejectionKind::UsageNotIncluded),
+        ApiError::ModelAccessDenied => CodexErr::InvalidRequest("model access denied".to_string())
+            .with_account_rejection(AccountRejectionKind::ModelAccessDenied),
         ApiError::Retryable { message, delay } => {
             let error = CodexErr::Stream(message);
             match delay {
@@ -36,6 +38,7 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
         ApiError::Stream(msg) => CodexErr::Stream(msg),
         ApiError::ServerOverloaded => CodexErr::ServerOverloaded,
         ApiError::Api { status, message } => {
+            let model_access_denied = is_model_access_denied_body(&message);
             let user_message = api_error_user_message(status, &message);
             let error = CodexErr::UnexpectedStatus(UnexpectedResponseError {
                 status,
@@ -47,7 +50,7 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
                 identity_authorization_error: None,
                 identity_error_code: None,
             });
-            with_http_account_rejection(status, error)
+            with_http_account_rejection(status, model_access_denied, error)
         }
         ApiError::InvalidRequest { message } => CodexErr::InvalidRequest(message),
         ApiError::CyberPolicy { message } => {
@@ -159,6 +162,7 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
                         request_id: extract_request_tracking_id(headers.as_ref()),
                     })
                 } else {
+                    let model_access_denied = is_model_access_denied_body(&body_text);
                     let error = CodexErr::UnexpectedStatus(UnexpectedResponseError {
                         status,
                         user_message: api_error_user_message(status, &body_text),
@@ -172,7 +176,7 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
                         ),
                         identity_error_code: extract_x_error_json_code(headers.as_ref()),
                     });
-                    with_http_account_rejection(status, error)
+                    with_http_account_rejection(status, model_access_denied, error)
                 }
             }
             TransportError::RetryLimit => CodexErr::RetryLimit(RetryLimitReachedError {
@@ -189,12 +193,28 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
     }
 }
 
-fn with_http_account_rejection(status: http::StatusCode, error: CodexErr) -> CodexErr {
+fn with_http_account_rejection(
+    status: http::StatusCode,
+    model_access_denied: bool,
+    error: CodexErr,
+) -> CodexErr {
     if status == http::StatusCode::PAYMENT_REQUIRED {
         error.with_account_rejection(AccountRejectionKind::PaymentRequired)
+    } else if model_access_denied {
+        error.with_account_rejection(AccountRejectionKind::ModelAccessDenied)
     } else {
         error
     }
+}
+
+fn is_model_access_denied_body(body: &str) -> bool {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .as_ref()
+        .and_then(|value| value.get("error"))
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_str)
+        == Some(MODEL_NOT_FOUND_ERROR_CODE)
 }
 
 const ACTIVE_LIMIT_HEADER: &str = "x-codex-active-limit";
@@ -207,6 +227,7 @@ const CYBER_POLICY_ERROR_CODE: &str = "cyber_policy";
 const CYBER_POLICY_FALLBACK_MESSAGE: &str =
     "This request has been flagged for possible cybersecurity risk.";
 const MISALIGNMENT_POLICY_VIOLATION_ERROR_CODE: &str = "misalignment_policy_violation";
+const MODEL_NOT_FOUND_ERROR_CODE: &str = "model_not_found";
 const MISALIGNMENT_POLICY_VIOLATION_FALLBACK_MESSAGE: &str =
     "This request was blocked due to a misalignment policy violation.";
 const CLOUDFLARE_BLOCKED_MESSAGE: &str =

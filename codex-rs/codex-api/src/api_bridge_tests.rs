@@ -34,6 +34,10 @@ fn map_api_error_tags_authoritative_account_rejections() {
             AccountRejectionKind::UsageNotIncluded,
         ),
         (
+            ApiError::ModelAccessDenied,
+            AccountRejectionKind::ModelAccessDenied,
+        ),
+        (
             ApiError::Api {
                 status: http::StatusCode::PAYMENT_REQUIRED,
                 message: "payment required".to_string(),
@@ -66,6 +70,15 @@ fn map_api_error_tags_authoritative_account_rejections() {
                 body: Some(r#"{"error":{"type":"usage_not_included"}}"#.to_string()),
             }),
             AccountRejectionKind::UsageNotIncluded,
+        ),
+        (
+            ApiError::Transport(TransportError::Http {
+                status: http::StatusCode::NOT_FOUND,
+                url: Some("http://example.com/v1/responses".to_string()),
+                headers: None,
+                body: Some(r#"{"error":{"code":"model_not_found"}}"#.to_string()),
+            }),
+            AccountRejectionKind::ModelAccessDenied,
         ),
     ];
 
