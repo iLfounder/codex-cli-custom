@@ -80,10 +80,10 @@ pub(crate) struct Session {
     pub(super) next_internal_sub_id: AtomicU64,
 }
 
-struct PreparedExecutionAccountRuntime {
-    runtime: Arc<crate::execution_account::ExecutionAccountRuntime>,
-    hooks: Hooks,
-    async_hook_results: async_channel::Receiver<HookCompletedEvent>,
+pub(super) struct PreparedExecutionAccountRuntime {
+    pub(super) runtime: Arc<crate::execution_account::ExecutionAccountRuntime>,
+    pub(super) hooks: Arc<Hooks>,
+    pub(super) async_hook_results: async_channel::Receiver<HookCompletedEvent>,
 }
 
 pub(crate) struct PreparedExecutionAccountReplacement {
@@ -853,7 +853,7 @@ impl Session {
             .clone()
     }
 
-    async fn prepare_execution_account_runtime(
+    pub(super) async fn prepare_execution_account_runtime(
         self: &Arc<Self>,
         execution_account: Arc<crate::execution_account::ExecutionAccountContext>,
         services: crate::execution_account::ExecutionAccountServices,
@@ -1015,7 +1015,7 @@ impl Session {
                 extension_runtimes,
                 guardian_review_session: Arc::new(GuardianReviewSessionManager::default()),
             }),
-            hooks,
+            hooks: Arc::new(hooks),
             async_hook_results,
         })
     }
@@ -1073,81 +1073,83 @@ impl Session {
     ) {
         let session = Arc::clone(&replacement.session);
         let target = Arc::clone(&replacement.target);
-        let Some(PreparedExecutionAccountRuntime {
-            runtime: prepared,
-            hooks: prepared_hooks,
-            async_hook_results: prepared_async_hook_results,
-        }) = replacement.prepared.take()
-        else {
+        let Some(prepared) = replacement.prepared.take() else {
             tracing::error!(
                 "execution account replacement was published without a prepared runtime"
             );
             return;
         };
-        let previous = session.execution_account_runtime();
-        let startup_prewarm = session.take_session_startup_prewarm().await;
+        session
+            .publish_prepared_execution_account_runtime(target, prepared)
+            .await;
+    }
+
+    pub(super) async fn publish_prepared_execution_account_runtime(
+        self: &Arc<Self>,
+        target: Arc<crate::execution_account::ExecutionAccountContext>,
+        prepared: PreparedExecutionAccountRuntime,
+    ) {
+        let PreparedExecutionAccountRuntime {
+            runtime: prepared,
+            hooks: prepared_hooks,
+            async_hook_results: prepared_async_hook_results,
+        } = prepared;
+        let previous = self.execution_account_runtime();
+        let startup_prewarm = self.take_session_startup_prewarm().await;
         if let Some(startup_prewarm) = startup_prewarm {
             startup_prewarm.abort().await;
         }
-        session.stop_mcp_prewarm_worker().await;
+        self.stop_mcp_prewarm_worker().await;
         previous.guardian_review_session.shutdown().await;
         previous.mcp_runtime.shutdown().await;
         let target_auth_changes = target.auth_manager.auth_change_receiver();
-        session.hooks().shutdown().await;
-        let previous_async_hook_results = session.async_hook_results.load_full();
+        self.hooks().shutdown().await;
+        let previous_async_hook_results = self.async_hook_results.load_full();
         previous_async_hook_results.close();
         while previous_async_hook_results.try_recv().is_ok() {}
-        session
-            .async_hook_results
+        self.async_hook_results
             .store(Arc::new(prepared_async_hook_results));
-        session.services.hooks.store(Arc::new(prepared_hooks));
+        self.services.hooks.store(prepared_hooks);
         previous.mcp_runtime.adopt_prepared(&prepared.mcp_runtime);
-        session
-            .services
+        self.services
             .mcp_runtime
             .adopt_prepared(&prepared.mcp_runtime);
         prepared
             .services
             .plugins_manager
             .set_analytics_events_client(prepared.analytics_events_client.clone());
-        session
-            .services
+        self.services
             .session_extension_data
             .insert(target.as_ref().clone());
-        session
-            .services
+        self.services
             .session_extension_data
             .insert(Arc::clone(&target.auth_manager));
-        session
-            .services
+        self.services
             .thread_extension_data
             .insert(target.as_ref().clone());
-        session
-            .services
+        self.services
             .thread_extension_data
             .insert(Arc::clone(&target.auth_manager));
-        session
-            .services
+        self.services
             .hook_mcp_runtime
             .store(Arc::clone(&prepared.mcp_runtime));
-        session
-            .services
+        self.services
             .turn_environments
             .replace_shell_snapshot(prepared.shell_snapshot.clone());
-        if let Some(network_proxy) = session.services.network_proxy.load_full() {
+        if let Some(network_proxy) = self.services.network_proxy.load_full() {
             network_proxy
                 .proxy()
                 .replace_audit_metadata(prepared.network_proxy_audit_metadata.clone());
         }
         for extension_runtime in &prepared.extension_runtimes {
             extension_runtime.publish(
-                &session.services.session_extension_data,
-                &session.services.thread_extension_data,
+                &self.services.session_extension_data,
+                &self.services.thread_extension_data,
             );
         }
-        session.execution_account_runtime.store(prepared);
-        session.start_mcp_prewarm_worker(target_auth_changes);
-        session.schedule_mcp_prewarm();
+        self.execution_account_runtime.store(prepared);
+        self.start_mcp_prewarm_worker(target_auth_changes);
+        self.schedule_mcp_prewarm();
     }
 
     pub(crate) async fn switch_execution_account(
@@ -1368,7 +1370,7 @@ impl Session {
             while previous_async_hook_results.try_recv().is_ok() {}
             self.async_hook_results
                 .store(Arc::new(prepared_async_hook_results));
-            self.services.hooks.store(Arc::new(prepared_hooks));
+            self.services.hooks.store(prepared_hooks);
 
             previous.mcp_runtime.adopt_prepared(&prepared.mcp_runtime);
             self.services

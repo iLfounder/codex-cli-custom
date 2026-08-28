@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -63,6 +64,36 @@ pub enum TurnExecutionAccountDecision {
 pub type TurnExecutionAccountSelectorFuture<'a> =
     Pin<Box<dyn Future<Output = CodexResult<TurnExecutionAccountDecision>> + Send + 'a>>;
 
+/// Inputs used to choose another account after a provider rejected an attempt before producing
+/// any semantic output or side effect.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TurnExecutionAccountFailoverSelection {
+    pub selection: TurnExecutionAccountSelection,
+    pub rejected_slot_id: String,
+    pub rejection_kind: codex_protocol::error::AccountRejectionKind,
+    pub excluded_account_slot_ids: BTreeSet<String>,
+}
+
+/// Whether a successful attempt keeps the durable binding generation or advances it once.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SuccessfulAccountBindingTransition {
+    Keep,
+    AdvanceGeneration,
+}
+
+/// Atomic success commit requested after the provider has created the response.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TurnExecutionAccountSuccessCommit {
+    pub thread_id: ThreadId,
+    pub expected_binding: ExecutionAccountBinding,
+    pub target_slot_id: String,
+    pub policy_revision: u64,
+    pub binding_transition: SuccessfulAccountBindingTransition,
+}
+
+pub type TurnExecutionAccountSuccessCommitFuture<'a> =
+    Pin<Box<dyn Future<Output = CodexResult<ExecutionAccountBinding>> + Send + 'a>>;
+
 /// Selects the execution account for an actual new user turn.
 ///
 /// Implementations only choose a slot. Core remains responsible for resolving that slot,
@@ -72,6 +103,35 @@ pub trait TurnExecutionAccountSelector: Send + Sync {
         &self,
         selection: TurnExecutionAccountSelection,
     ) -> TurnExecutionAccountSelectorFuture<'_>;
+
+    /// Returns whether this selector supports same-root-turn, pre-semantic failover.
+    fn pre_semantic_failover_enabled(&self) -> bool {
+        false
+    }
+
+    /// Chooses another candidate while excluding every account already tried by this root turn.
+    fn select_failover(
+        &self,
+        _selection: TurnExecutionAccountFailoverSelection,
+    ) -> TurnExecutionAccountSelectorFuture<'_> {
+        Box::pin(async {
+            Err(CodexErr::InvalidRequest(
+                "pre-semantic account failover is unavailable".to_string(),
+            ))
+        })
+    }
+
+    /// Atomically commits the successful binding and rotation cursor.
+    fn commit_successful_selection(
+        &self,
+        _commit: TurnExecutionAccountSuccessCommit,
+    ) -> TurnExecutionAccountSuccessCommitFuture<'_> {
+        Box::pin(async {
+            Err(CodexErr::InvalidRequest(
+                "pre-semantic account failover commit is unavailable".to_string(),
+            ))
+        })
+    }
 }
 
 pub(crate) struct PreparedTurnExecutionAccountTransition {

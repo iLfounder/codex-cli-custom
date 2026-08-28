@@ -518,7 +518,11 @@ impl TurnContext {
         let cwd = self.cwd.clone();
         TurnContextItem {
             turn_id: Some(self.sub_id.clone()),
-            execution_account: Some(self.execution_account.binding.clone()),
+            execution_account: self
+                .extension_data
+                .get::<super::account_failover::PreSemanticAccountFailover>()
+                .is_none_or(|attempt| !attempt.is_provisional())
+                .then(|| self.execution_account.binding.clone()),
             cwd,
             workspace_roots: (!workspace_roots.is_empty()).then_some(workspace_roots),
             current_date: self.current_date.clone(),
@@ -771,6 +775,28 @@ impl Session {
         sub_id: String,
         updates: SessionSettingsUpdate,
     ) -> CodexResult<Arc<TurnContext>> {
+        self.new_turn_with_sub_id_and_account_runtime(
+            sub_id, updates, /*account_runtime*/ None,
+        )
+        .await
+    }
+
+    pub(super) async fn new_turn_with_sub_id_for_account_runtime(
+        &self,
+        sub_id: String,
+        updates: SessionSettingsUpdate,
+        account_runtime: Arc<crate::execution_account::ExecutionAccountRuntime>,
+    ) -> CodexResult<Arc<TurnContext>> {
+        self.new_turn_with_sub_id_and_account_runtime(sub_id, updates, Some(account_runtime))
+            .await
+    }
+
+    async fn new_turn_with_sub_id_and_account_runtime(
+        &self,
+        sub_id: String,
+        updates: SessionSettingsUpdate,
+        account_runtime: Option<Arc<crate::execution_account::ExecutionAccountRuntime>>,
+    ) -> CodexResult<Arc<TurnContext>> {
         let notify_config_contributors = !self.services.extensions.config_contributors().is_empty();
         let update_result: CodexResult<_> = {
             let mut state = self.state.lock().await;
@@ -845,13 +871,27 @@ impl Session {
             self.refresh_managed_network_proxy_for_current_permission_profile()
                 .await;
         }
-        Ok(self
-            .new_turn_from_configuration(
-                sub_id,
-                session_configuration,
-                updates.final_output_json_schema,
-            )
-            .await)
+        Ok(match account_runtime {
+            Some(account_runtime) => {
+                self.new_turn_context_from_configuration(
+                    sub_id,
+                    session_configuration,
+                    account_runtime,
+                    updates.final_output_json_schema,
+                    TurnMultiAgentRuntime::ResolveAndStore,
+                    self.git_enrichment_policy,
+                )
+                .await
+            }
+            None => {
+                self.new_turn_from_configuration(
+                    sub_id,
+                    session_configuration,
+                    updates.final_output_json_schema,
+                )
+                .await
+            }
+        })
     }
 
     async fn new_turn_from_configuration(
@@ -870,6 +910,43 @@ impl Session {
             self.git_enrichment_policy,
         )
         .await
+    }
+
+    pub(super) async fn new_turn_context_for_account_attempt(
+        &self,
+        previous: &Arc<TurnContext>,
+        account_runtime: Arc<crate::execution_account::ExecutionAccountRuntime>,
+    ) -> Arc<TurnContext> {
+        let session_configuration = self.state.lock().await.session_configuration.clone();
+        let next = self
+            .new_turn_context_from_configuration(
+                previous.sub_id.clone(),
+                session_configuration,
+                account_runtime,
+                Some(previous.final_output_json_schema.clone()),
+                TurnMultiAgentRuntime::Preview,
+                GitEnrichmentPolicy::Skip,
+            )
+            .await;
+        let mut next = Arc::try_unwrap(next)
+            .unwrap_or_else(|_| unreachable!("new account attempt context is uniquely owned"));
+        next.trace_id.clone_from(&previous.trace_id);
+        next.realtime_active = previous.realtime_active;
+        next.code_mode_available = previous.code_mode_available;
+        next.turn_metadata_state = Arc::clone(&previous.turn_metadata_state);
+        next.turn_timing_state = Arc::clone(&previous.turn_timing_state);
+        next.terminal_error = Arc::clone(&previous.terminal_error);
+        next.server_model_warning_emitted.store(
+            previous
+                .server_model_warning_emitted
+                .load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        next.model_verification_emitted.store(
+            previous.model_verification_emitted.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        Arc::new(next)
     }
 
     async fn new_startup_prewarm_turn_from_configuration(

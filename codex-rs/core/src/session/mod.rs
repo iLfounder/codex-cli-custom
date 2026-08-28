@@ -204,6 +204,7 @@ use codex_protocol::error::Result as CodexResult;
 #[cfg(test)]
 use codex_protocol::exec_output::StreamOutput;
 
+pub(crate) mod account_failover;
 mod code_mode_warning;
 pub(crate) mod context_window;
 mod environment;
@@ -3936,6 +3937,23 @@ impl Session {
         let mut state = self.state.lock().await;
         state.set_reference_context_item(Some(turn_context_item));
         Ok(world_state)
+    }
+
+    pub(super) async fn persist_accepted_execution_account_context(
+        &self,
+        turn_context: &TurnContext,
+    ) {
+        let turn_context_item = turn_context.to_turn_context_item();
+        if turn_context_item.execution_account.is_none() {
+            tracing::error!("accepted account context remained provisional after commit");
+            return;
+        }
+        self.persist_rollout_items(&[RolloutItem::TurnContext(turn_context_item.clone())])
+            .await;
+        self.state
+            .lock()
+            .await
+            .set_reference_context_item(Some(turn_context_item));
     }
 
     pub(crate) async fn update_token_usage_info(
