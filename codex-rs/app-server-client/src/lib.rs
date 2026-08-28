@@ -33,6 +33,7 @@ pub use codex_app_server::in_process::InProcessServerEvent;
 use codex_app_server::in_process::InProcessStartArgs;
 use codex_app_server::in_process::LogDbLayer;
 pub use codex_app_server::in_process::StateDbHandle;
+use codex_app_server_protocol::AccountFailoverMode;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientNotification;
 use codex_app_server_protocol::ClientRequest;
@@ -325,9 +326,33 @@ impl InProcessAppServerClient {
     /// The returned client is ready for requests and ordered event consumption.
     /// Request queues remain bounded without blocking on unread notifications.
     pub async fn start(args: InProcessClientStartArgs) -> IoResult<Self> {
+        Self::start_with_account_failover(args, AccountFailoverMode::Disabled).await
+    }
+
+    /// Starts the in-process runtime with the exec-only account failover opt-in.
+    pub async fn start_for_exec(
+        args: InProcessClientStartArgs,
+        account_failover_mode: AccountFailoverMode,
+    ) -> IoResult<Self> {
+        if args.client_name != "codex_exec" {
+            return Err(IoError::new(
+                ErrorKind::InvalidInput,
+                "account failover is restricted to the in-process exec client",
+            ));
+        }
+        Self::start_with_account_failover(args, account_failover_mode).await
+    }
+
+    async fn start_with_account_failover(
+        args: InProcessClientStartArgs,
+        account_failover_mode: AccountFailoverMode,
+    ) -> IoResult<Self> {
         let channel_capacity = args.channel_capacity.max(1);
-        let mut handle =
-            codex_app_server::in_process::start(args.into_runtime_start_args()).await?;
+        let mut handle = codex_app_server::in_process::start_with_account_failover(
+            args.into_runtime_start_args(),
+            account_failover_mode,
+        )
+        .await?;
         let request_sender = handle.sender();
         let (command_tx, mut command_rx) = mpsc::channel::<ClientCommand>(channel_capacity);
         // e9996ec62a preserved transcript events by awaiting a bounded queue, but that can

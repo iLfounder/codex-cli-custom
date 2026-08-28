@@ -2,12 +2,16 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use codex_app_server_protocol::AccountFailoverMode;
 use codex_app_server_protocol::RateLimitSnapshot;
 use codex_app_server_protocol::ThreadAccountRotationMode;
 use codex_core::TurnExecutionAccountDecision;
+use codex_core::TurnExecutionAccountFailoverSelection;
 use codex_core::TurnExecutionAccountSelection;
 use codex_core::TurnExecutionAccountSelector;
 use codex_core::TurnExecutionAccountSelectorFuture;
+use codex_core::TurnExecutionAccountSuccessCommit;
+use codex_core::TurnExecutionAccountSuccessCommitFuture;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_thread_store::ThreadAccountRotationMode as StoreRotationMode;
@@ -62,13 +66,19 @@ pub(crate) struct ExhaustionHintKey {
 pub(crate) struct AccountRotationService {
     registry: Arc<AccountRegistry>,
     thread_store: Arc<dyn ThreadStore>,
+    account_failover_mode: AccountFailoverMode,
 }
 
 impl AccountRotationService {
-    pub(crate) fn new(registry: Arc<AccountRegistry>, thread_store: Arc<dyn ThreadStore>) -> Self {
+    pub(crate) fn new(
+        registry: Arc<AccountRegistry>,
+        thread_store: Arc<dyn ThreadStore>,
+        account_failover_mode: AccountFailoverMode,
+    ) -> Self {
         Self {
             registry,
             thread_store,
+            account_failover_mode,
         }
     }
 
@@ -173,6 +183,74 @@ impl TurnExecutionAccountSelector for AccountRotationService {
         selection: TurnExecutionAccountSelection,
     ) -> TurnExecutionAccountSelectorFuture<'_> {
         Box::pin(self.select_with_exclusions(selection, &[]))
+    }
+
+    fn pre_semantic_failover_enabled(&self) -> bool {
+        self.account_failover_mode.is_pre_semantic()
+    }
+
+    fn select_failover(
+        &self,
+        selection: TurnExecutionAccountFailoverSelection,
+    ) -> TurnExecutionAccountSelectorFuture<'_> {
+        Box::pin(async move {
+            if !self.account_failover_mode.is_pre_semantic() {
+                return Err(CodexErr::InvalidRequest(
+                    "pre-semantic account failover is unavailable".to_string(),
+                ));
+            }
+            if !selection
+                .excluded_account_slot_ids
+                .contains(&selection.rejected_slot_id)
+            {
+                return Err(CodexErr::InvalidRequest(
+                    "account failover rejection is missing from the tried set".to_string(),
+                ));
+            }
+            let excluded_account_slot_ids = selection
+                .excluded_account_slot_ids
+                .into_iter()
+                .collect::<Vec<_>>();
+            self.select_with_exclusions(selection.selection, &excluded_account_slot_ids)
+                .await
+        })
+    }
+
+    fn commit_successful_selection(
+        &self,
+        commit: TurnExecutionAccountSuccessCommit,
+    ) -> TurnExecutionAccountSuccessCommitFuture<'_> {
+        Box::pin(async move {
+            let transition = match commit.binding_transition {
+                codex_core::SuccessfulAccountBindingTransition::Keep => {
+                    codex_thread_store::SuccessfulAccountBindingTransition::Keep
+                }
+                codex_core::SuccessfulAccountBindingTransition::AdvanceGeneration => {
+                    codex_thread_store::SuccessfulAccountBindingTransition::AdvanceGeneration
+                }
+            };
+            let Some(committed) = self
+                .thread_store
+                .compare_and_swap_successful_account_rotation(
+                    commit.thread_id,
+                    commit.expected_binding,
+                    commit.policy_revision,
+                    commit.target_slot_id,
+                    transition,
+                )
+                .await
+                .map_err(|error| {
+                    CodexErr::Fatal(format!(
+                        "successful account rotation commit failed: {error}"
+                    ))
+                })?
+            else {
+                return Err(CodexErr::InvalidRequest(
+                    "successful account rotation commit became stale".to_string(),
+                ));
+            };
+            Ok(committed.binding)
+        })
     }
 }
 
