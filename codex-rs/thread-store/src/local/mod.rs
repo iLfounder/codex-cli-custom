@@ -819,6 +819,37 @@ impl ThreadStore for LocalThreadStore {
         })
     }
 
+    fn compare_and_swap_successful_account_rotation(
+        &self,
+        thread_id: ThreadId,
+        expected_binding: ExecutionAccountBinding,
+        expected_policy_revision: u64,
+        accepted_account_slot_id: String,
+        binding_transition: crate::SuccessfulAccountBindingTransition,
+    ) -> ThreadStoreFuture<'_, Option<crate::SuccessfulAccountRotationCommit>> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "compare_and_swap_successful_account_rotation",
+                });
+            };
+            state_db
+                .compare_and_swap_successful_account_rotation(
+                    thread_id,
+                    &expected_binding,
+                    expected_policy_revision,
+                    accepted_account_slot_id.as_str(),
+                    binding_transition,
+                )
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!(
+                        "failed to commit successful account rotation atomically: {err}"
+                    ),
+                })
+        })
+    }
+
     fn remove_account_slot_from_automatic_rotation_policies(
         &self,
         account_slot_id: String,

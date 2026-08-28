@@ -47,6 +47,8 @@ use crate::RuntimeWriterOwnership;
 use crate::StoredModelContext;
 use crate::StoredThread;
 use crate::StoredThreadHistory;
+use crate::SuccessfulAccountBindingTransition;
+use crate::SuccessfulAccountRotationCommit;
 use crate::ThreadAccountRotationMode;
 use crate::ThreadAccountRotationPolicy;
 use crate::ThreadAccountRotationPolicyUpdate;
@@ -1324,6 +1326,59 @@ impl ThreadStore for InMemoryThreadStore {
             }
             policy.last_committed_account_slot_id = Some(accepted_account_slot_id);
             Ok(Some(policy.clone()))
+        })
+    }
+
+    fn compare_and_swap_successful_account_rotation(
+        &self,
+        thread_id: ThreadId,
+        expected_binding: ExecutionAccountBinding,
+        expected_policy_revision: u64,
+        accepted_account_slot_id: String,
+        binding_transition: SuccessfulAccountBindingTransition,
+    ) -> ThreadStoreFuture<'_, Option<SuccessfulAccountRotationCommit>> {
+        Box::pin(async move {
+            if accepted_account_slot_id.is_empty() {
+                return Err(ThreadStoreError::InvalidRequest {
+                    message: "accepted account slot must not be empty".to_string(),
+                });
+            }
+            if binding_transition == SuccessfulAccountBindingTransition::Keep
+                && accepted_account_slot_id != expected_binding.slot_id
+            {
+                return Err(ThreadStoreError::InvalidRequest {
+                    message: "kept execution account binding must match the accepted account slot"
+                        .to_string(),
+                });
+            }
+            let next_generation = match binding_transition {
+                SuccessfulAccountBindingTransition::Keep => expected_binding.generation,
+                SuccessfulAccountBindingTransition::AdvanceGeneration => expected_binding
+                    .generation
+                    .checked_add(1)
+                    .ok_or_else(|| ThreadStoreError::Internal {
+                        message: "execution account generation overflow".to_string(),
+                    })?,
+            };
+            let mut state = self.state.lock().await;
+            if state.execution_accounts.get(&thread_id) != Some(&expected_binding) {
+                return Ok(None);
+            }
+            let Some(policy) = state.account_rotation_policies.get(&thread_id) else {
+                return Ok(None);
+            };
+            if policy.revision != expected_policy_revision {
+                return Ok(None);
+            }
+            let binding = ExecutionAccountBinding {
+                slot_id: accepted_account_slot_id.clone(),
+                generation: next_generation,
+            };
+            let mut policy = policy.clone();
+            policy.last_committed_account_slot_id = Some(accepted_account_slot_id);
+            state.execution_accounts.insert(thread_id, binding.clone());
+            state.account_rotation_policies.insert(thread_id, policy.clone());
+            Ok(Some(SuccessfulAccountRotationCommit { binding, policy }))
         })
     }
 

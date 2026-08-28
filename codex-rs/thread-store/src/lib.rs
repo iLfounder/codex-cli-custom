@@ -22,6 +22,8 @@ pub use codex_state::CommittedThreadTransitions;
 pub use codex_state::MAX_QUEUE_ITEMS;
 pub use codex_state::MarkThreadTransitionPrepared;
 pub use codex_state::QueuedUserSubmissionRecord;
+pub use codex_state::SuccessfulAccountBindingTransition;
+pub use codex_state::SuccessfulAccountRotationCommit;
 pub use codex_state::ThreadAccountRotationMode;
 pub use codex_state::ThreadAccountRotationPolicy;
 pub use codex_state::ThreadAccountRotationPolicyUpdate;

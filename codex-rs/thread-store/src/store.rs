@@ -50,6 +50,8 @@ use crate::StoredThread;
 use crate::StoredThreadHistory;
 use crate::StoredThreadSection;
 use crate::StoredThreadSectionsPage;
+use crate::SuccessfulAccountBindingTransition;
+use crate::SuccessfulAccountRotationCommit;
 use crate::ThreadAccountRotationPolicy;
 use crate::ThreadAccountRotationPolicyUpdate;
 use crate::ThreadMetadataPatch;
@@ -263,6 +265,21 @@ pub trait ThreadStore: Any + Send + Sync {
         Box::pin(async {
             Err(ThreadStoreError::Unsupported {
                 operation: "compare_and_swap_thread_account_rotation_cursor",
+            })
+        })
+    }
+
+    fn compare_and_swap_successful_account_rotation(
+        &self,
+        _thread_id: ThreadId,
+        _expected_binding: ExecutionAccountBinding,
+        _expected_policy_revision: u64,
+        _accepted_account_slot_id: String,
+        _binding_transition: SuccessfulAccountBindingTransition,
+    ) -> ThreadStoreFuture<'_, Option<SuccessfulAccountRotationCommit>> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "compare_and_swap_successful_account_rotation",
             })
         })
     }
