@@ -177,7 +177,7 @@ jobs:
         shell: bash
         run: >-
           TMPDIR=/tmp just test --release -p codex-cli -E
-          'test(/app_server_proxy_routes_canonical_and_unmanaged_defaults|app_server_proxy_preserves_explicit_socket/)'
+          'test(/app_server_proxy_routes_canonical_and_unmanaged_defaults|app_server_proxy_sock_path_parses/)'
 
       - name: Smoke packaged supervisor in an isolated owner home
         shell: bash
