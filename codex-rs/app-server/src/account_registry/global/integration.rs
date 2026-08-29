@@ -153,7 +153,7 @@ impl AccountRegistry {
         });
     }
 
-    async fn refresh_global_catalog(
+    pub(super) async fn refresh_global_catalog(
         &self,
         client: &global::TokenManagerClient,
     ) -> Result<global::ApplyOutcome, global::CatalogError> {
@@ -207,11 +207,24 @@ impl AccountRegistry {
         auth_config.codex_home = auth_home.clone();
         auth_config.auth_credentials_store_mode =
             codex_config::types::AuthCredentialsStoreMode::File;
-        let auth_manager = AuthManager::shared_from_read_only_auth_config(auth_config)
-            .await
+        let refresh = self
+            .token_manager_client
+            .as_ref()
+            .ok_or_else(|| {
+                CodexErr::InvalidRequest(format!("execution account `{account_id}` is unavailable"))
+            })?
+            .read_only_auth_refresh(account_id)
             .map_err(|_| {
                 CodexErr::InvalidRequest(format!("execution account `{account_id}` is unavailable"))
             })?;
+        let auth_manager =
+            AuthManager::shared_from_read_only_auth_config_with_refresh(auth_config, refresh)
+                .await
+                .map_err(|_| {
+                    CodexErr::InvalidRequest(format!(
+                        "execution account `{account_id}` is unavailable"
+                    ))
+                })?;
         let auth = auth_manager.auth_cached().ok_or_else(|| {
             CodexErr::InvalidRequest(format!("execution account `{account_id}` is not logged in"))
         })?;
@@ -298,43 +311,11 @@ impl AccountRegistry {
                     stale_at,
                 }
             });
-        let local_default = if is_default {
-            let (slot, manifest_error, revision) = self
-                .state
-                .read()
-                .ok()
-                .and_then(|state| {
-                    state
-                        .slots
-                        .iter()
-                        .find(|slot| slot.manifest.is_default)
-                        .cloned()
-                        .map(|slot| (slot, state.manifest_error, state.revision))
-                })
-                .map_or((None, None, 0), |(slot, error, revision)| {
-                    (Some(slot), error, revision)
-                });
-            match slot {
-                Some(slot) => {
-                    let capability = self.capability(manifest_error);
-                    let config = self.load_latest_config().await;
-                    Some(self.snapshot(&slot, revision, &capability, &config).await)
-                }
-                None => None,
-            }
+        let status = if runtime.is_some() {
+            AccountSlotStatus::Ready
         } else {
-            None
+            AccountSlotStatus::LoginRequired
         };
-        let status = local_default.as_ref().map_or_else(
-            || {
-                if runtime.is_some() {
-                    AccountSlotStatus::Ready
-                } else {
-                    AccountSlotStatus::LoginRequired
-                }
-            },
-            |slot| slot.status,
-        );
         let health = projection.as_ref().map_or_else(
             || {
                 if status == AccountSlotStatus::Ready {
@@ -349,6 +330,24 @@ impl AccountRegistry {
                 global::CatalogProjectionHealth::Unavailable => AccountSlotHealth::Unavailable,
             },
         );
+        let active_login_operation_id = self
+            .global_active_logins
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&account_id)
+            .cloned();
+        let capability = codex_app_server_protocol::AccountSlotCapability {
+            available: true,
+            deny_reason: None,
+        };
+        let actions = crate::account_registry::live_registration::available_actions(
+            status,
+            &capability,
+            /*is_default*/ false,
+            active_login_operation_id.is_some(),
+            /*active_logout*/ false,
+            /*default_policy*/ None,
+        );
         AccountSlotSnapshot {
             account_slot_id: account_id.to_string(),
             account_number: account_id.number(),
@@ -361,24 +360,63 @@ impl AccountRegistry {
                 .as_ref()
                 .and_then(|runtime| runtime.auth_manager.auth_mode())
                 .map(auth_mode_to_api),
-            attempt_generation: local_default
-                .as_ref()
-                .map_or(0, |slot| slot.attempt_generation),
+            attempt_generation: 0,
             registry_revision,
-            active_login_operation_id: local_default
+            active_login_operation_id,
+            error_code: None,
+            actions,
+            updated_at: projection
                 .as_ref()
-                .and_then(|slot| slot.active_login_operation_id.clone()),
-            error_code: local_default
-                .as_ref()
-                .and_then(|slot| slot.error_code.clone()),
-            actions: local_default
-                .as_ref()
-                .map_or_else(Vec::new, |slot| slot.actions.clone()),
-            updated_at: projection.as_ref().map_or_else(
-                || local_default.as_ref().map_or(0, |slot| slot.updated_at),
-                |projection| projection.fetched_at,
-            ),
+                .map_or(0, |projection| projection.fetched_at),
         }
+    }
+
+    pub(crate) async fn global_slot_snapshot(
+        &self,
+        account_slot_id: &str,
+    ) -> Result<AccountSlotSnapshot, JSONRPCErrorError> {
+        let account_id = global::AccountId::parse(account_slot_id)
+            .ok_or_else(|| invalid_request("managed account is invalid"))?;
+        let directory = self.refresh_global_directory();
+        if !directory.homes.contains_key(&account_id) {
+            return Err(invalid_request("managed account is not registered"));
+        }
+        let (snapshots, _) = self
+            .global_inventory_snapshot(&directory, chrono::Utc::now().timestamp())
+            .await;
+        snapshots
+            .into_iter()
+            .find(|snapshot| snapshot.account_slot_id == account_slot_id)
+            .ok_or_else(|| invalid_request("managed account is unavailable"))
+    }
+
+    pub(crate) fn set_global_active_login(
+        &self,
+        account_slot_id: &str,
+        operation_id: &str,
+    ) -> bool {
+        let Some(account_id) = global::AccountId::parse(account_slot_id) else {
+            return false;
+        };
+        let mut active = self
+            .global_active_logins
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if active.contains_key(&account_id) {
+            return false;
+        }
+        active.insert(account_id, operation_id.to_string());
+        true
+    }
+
+    pub(crate) fn clear_global_active_login(&self, account_slot_id: &str, operation_id: &str) {
+        let Some(account_id) = global::AccountId::parse(account_slot_id) else {
+            return;
+        };
+        self.global_active_logins
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|active_id, active| *active_id != account_id || active != operation_id);
     }
 
     pub(crate) async fn global_rate_limits(

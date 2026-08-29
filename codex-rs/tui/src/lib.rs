@@ -32,6 +32,8 @@ use codex_app_server_client::InProcessClientStartArgs;
 use codex_app_server_client::RemoteAppServerClient;
 use codex_app_server_client::RemoteAppServerConnectArgs;
 pub use codex_app_server_client::RemoteAppServerEndpoint;
+use codex_app_server_client::SupervisedAppServerClient;
+use codex_app_server_client::SupervisedAppServerConnectArgs;
 use codex_app_server_protocol::Account as AppServerAccount;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ConfigWarningNotification;
@@ -70,6 +72,12 @@ use codex_utils_oss::ensure_oss_provider_ready;
 use codex_utils_oss::get_default_model_for_oss_provider;
 use color_eyre::eyre::WrapErr;
 use cwd_prompt::CwdPromptAction;
+pub use launch_overrides::InvocationOverrides as LaunchInvocationOverrides;
+pub use launch_overrides::LaunchDisposition;
+pub use launch_overrides::LaunchOperation;
+pub use launch_overrides::RequestedLaunchMode;
+pub use launch_overrides::classify_current_launch;
+pub use launch_overrides::managed_account_hint_is_present;
 pub use session_archive_commands::DeleteConfirmation;
 pub use session_archive_commands::SessionArchiveAction;
 pub use session_archive_commands::SessionArchiveCommandOptions;
@@ -106,6 +114,7 @@ mod approval_events;
 mod ascii_animation;
 mod bottom_pane;
 mod branch_summary;
+mod canonical_launch_projection;
 mod chatwidget;
 mod cli;
 mod clipboard_copy;
@@ -140,6 +149,7 @@ pub use insert_history::insert_history_lines;
 mod key_hint;
 mod keymap;
 mod keymap_setup;
+mod launch_overrides;
 mod line_truncation;
 pub(crate) mod live_wrap;
 pub use live_wrap::RowBuilder;
@@ -271,8 +281,13 @@ async fn start_embedded_app_server(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum AppServerTarget {
     Embedded,
-    LocalDaemon { endpoint: RemoteAppServerEndpoint },
-    Remote { endpoint: RemoteAppServerEndpoint },
+    LocalDaemon {
+        endpoint: RemoteAppServerEndpoint,
+        canonical_projection: Option<canonical_launch_projection::CanonicalLaunchProjection>,
+    },
+    Remote {
+        endpoint: RemoteAppServerEndpoint,
+    },
 }
 
 impl AppServerTarget {
@@ -292,10 +307,29 @@ impl AppServerTarget {
     }
 
     fn thread_params_mode(&self) -> ThreadParamsMode {
-        if self.uses_remote_workspace() {
-            ThreadParamsMode::Remote
-        } else {
-            ThreadParamsMode::Embedded
+        match self {
+            Self::LocalDaemon {
+                canonical_projection: Some(projection),
+                ..
+            } => ThreadParamsMode::Canonical(*projection),
+            Self::Remote { .. } => ThreadParamsMode::Remote,
+            Self::Embedded
+            | Self::LocalDaemon {
+                canonical_projection: None,
+                ..
+            } => ThreadParamsMode::Embedded,
+        }
+    }
+
+    fn canonical_projection(
+        &self,
+    ) -> Option<canonical_launch_projection::CanonicalLaunchProjection> {
+        match self {
+            Self::LocalDaemon {
+                canonical_projection,
+                ..
+            } => *canonical_projection,
+            Self::Embedded | Self::Remote { .. } => None,
         }
     }
 }
@@ -430,9 +464,36 @@ async fn connect_remote_app_server(
     Ok(AppServerClient::Remote(app_server))
 }
 
+async fn connect_supervised_app_server() -> color_eyre::Result<AppServerClient> {
+    let client = SupervisedAppServerClient::start(SupervisedAppServerConnectArgs {
+        client_name: "codex-tui".to_string(),
+        client_version: env!("CARGO_PKG_VERSION").to_string(),
+        experimental_api: true,
+        mcp_server_openai_form_elicitation: false,
+        opt_out_notification_methods: Vec::new(),
+        channel_capacity: DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
+    })
+    .wrap_err("failed to start supervised app-server client")?;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while client.connected_identity().is_none() {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .map_err(|_| color_eyre::eyre::eyre!("timed out waiting for canonical app-server readiness"))?;
+    Ok(AppServerClient::Supervised(client))
+}
+
 #[cfg(unix)]
 fn default_daemon_socket_if_present(codex_home: &Path) -> std::io::Result<Option<AbsolutePathBuf>> {
     let socket_path = codex_app_server_client::app_server_control_socket_path(codex_home)?;
+    daemon_socket_if_present(socket_path)
+}
+
+#[cfg(unix)]
+fn daemon_socket_if_present(
+    socket_path: AbsolutePathBuf,
+) -> std::io::Result<Option<AbsolutePathBuf>> {
     match std::fs::symlink_metadata(socket_path.as_path()) {
         Ok(_) => Ok(Some(socket_path)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -482,13 +543,21 @@ async fn start_app_server(
         )
         .await
         .map(AppServerClient::InProcess),
-        AppServerTarget::LocalDaemon { endpoint } => {
+        AppServerTarget::LocalDaemon {
+            endpoint,
+            canonical_projection,
+        } => {
             let socket_path = match endpoint {
                 RemoteAppServerEndpoint::UnixSocket { socket_path } => socket_path,
                 RemoteAppServerEndpoint::WebSocket { .. } => {
                     return connect_remote_app_server(endpoint.clone()).await;
                 }
             };
+            if canonical_projection.is_some() {
+                return connect_supervised_app_server().await.wrap_err(
+                    "failed to connect to or initialize canonical app-server; check its operating status and restart it through its dedicated app-server supervisor if needed",
+                );
+            }
             connect_remote_app_server(endpoint.clone())
                 .await
                 .wrap_err_with(|| {
@@ -856,7 +925,29 @@ fn app_server_target_for_launch(
     default_daemon_socket: Option<AbsolutePathBuf>,
     can_reuse_implicit_local_daemon: bool,
     workload_identity_selected: bool,
+    launch_disposition: launch_overrides::LaunchDisposition,
+    canonical_projection: canonical_launch_projection::CanonicalLaunchProjection,
 ) -> std::io::Result<AppServerTarget> {
+    match launch_disposition {
+        launch_overrides::LaunchDisposition::CanonicalLocal => {
+            let socket_path = default_daemon_socket.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "canonical app-server socket path is unavailable",
+                )
+            })?;
+            return Ok(AppServerTarget::LocalDaemon {
+                endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
+                canonical_projection: Some(canonical_projection),
+            });
+        }
+        launch_overrides::LaunchDisposition::ExplicitEmbedded => {
+            return Ok(AppServerTarget::Embedded);
+        }
+        launch_overrides::LaunchDisposition::UnmanagedUpstream
+        | launch_overrides::LaunchDisposition::ExplicitRemote
+        | launch_overrides::LaunchDisposition::WorkloadIdentity => {}
+    }
     if workload_identity_selected {
         if explicit_remote_endpoint.is_some() {
             return Err(std::io::Error::new(
@@ -872,6 +963,7 @@ fn app_server_target_for_launch(
             default_daemon_socket.map_or(AppServerTarget::Embedded, |socket_path| {
                 AppServerTarget::LocalDaemon {
                     endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
+                    canonical_projection: None,
                 }
             })
         }
@@ -892,24 +984,6 @@ async fn cloud_config_bundle_for_app_server_target(
     .await
 }
 
-fn loader_overrides_are_default(loader_overrides: &LoaderOverrides) -> bool {
-    let loader_overrides_are_default = loader_overrides.user_config_path.is_none()
-        && loader_overrides.user_config_profile.is_none()
-        && loader_overrides.managed_config_path.is_none()
-        && loader_overrides.system_config_path.is_none()
-        && loader_overrides.system_requirements_path.is_none()
-        && !loader_overrides.ignore_managed_requirements
-        && !loader_overrides.ignore_user_config
-        && !loader_overrides.ignore_user_and_project_exec_policy_rules
-        && loader_overrides
-            .macos_managed_config_requirements_base64
-            .is_none();
-    #[cfg(target_os = "macos")]
-    let loader_overrides_are_default =
-        loader_overrides_are_default && loader_overrides.managed_preferences_base64.is_none();
-    loader_overrides_are_default
-}
-
 fn can_reuse_implicit_local_daemon(
     cli_kv_overrides: &[(String, toml::Value)],
     loader_overrides: &LoaderOverrides,
@@ -918,7 +992,7 @@ fn can_reuse_implicit_local_daemon(
 ) -> bool {
     // A reused daemon cannot adopt this invocation's full launch config state.
     cli_kv_overrides.is_empty()
-        && loader_overrides_are_default(loader_overrides)
+        && loader_overrides.is_default_for_canonical_launch()
         && !strict_config
         && !has_non_replayable_launch_overrides
 }
@@ -2432,12 +2506,17 @@ mod tests {
     #[test]
     fn default_daemon_socket_absence_selects_embedded() -> color_eyre::Result<()> {
         let codex_home = TempDir::new()?;
-        assert_eq!(default_daemon_socket_if_present(codex_home.path())?, None);
+        let socket_path =
+            AbsolutePathBuf::from_absolute_path(codex_home.path().join("codex.sock"))?;
+        assert_eq!(daemon_socket_if_present(socket_path)?, None);
         assert_eq!(
             app_server_target_for_launch(
-                /*explicit_remote_endpoint*/ None, /*default_daemon_socket*/ None,
+                /*explicit_remote_endpoint*/ None,
+                /*default_daemon_socket*/ None,
                 /*can_reuse_implicit_local_daemon*/ true,
                 /*workload_identity_selected*/ false,
+                launch_overrides::LaunchDisposition::UnmanagedUpstream,
+                canonical_launch_projection::CanonicalLaunchProjection::default(),
             )?,
             AppServerTarget::Embedded
         );
@@ -2450,9 +2529,9 @@ mod tests {
         let temp_dir = TempDir::new()?;
         let codex_home = temp_dir.path().join("occupied-codex-home");
         std::fs::write(&codex_home, "occupied")?;
-        let socket_path = codex_app_server_client::app_server_control_socket_path(&codex_home)?;
+        let socket_path = AbsolutePathBuf::from_absolute_path(codex_home.join("codex.sock"))?;
 
-        let error = default_daemon_socket_if_present(&codex_home)
+        let error = daemon_socket_if_present(socket_path.clone())
             .expect_err("non-directory CODEX_HOME must fail presence classification");
 
         assert!(
@@ -2473,13 +2552,13 @@ mod tests {
     fn default_daemon_socket_presence_does_not_connect() -> color_eyre::Result<()> {
         let codex_home = TempDir::new()?;
         let socket_path =
-            codex_app_server_client::app_server_control_socket_path(codex_home.path())?;
+            AbsolutePathBuf::from_absolute_path(codex_home.path().join("codex.sock"))?;
         std::fs::create_dir_all(socket_path.as_path().parent().expect("socket parent"))?;
         let listener = std::os::unix::net::UnixListener::bind(socket_path.as_path())?;
         listener.set_nonblocking(true)?;
 
         assert_eq!(
-            default_daemon_socket_if_present(codex_home.path())?,
+            daemon_socket_if_present(socket_path.clone())?,
             Some(socket_path)
         );
         assert_eq!(
@@ -2498,16 +2577,18 @@ mod tests {
     {
         let codex_home = TempDir::new()?;
         let socket_path =
-            codex_app_server_client::app_server_control_socket_path(codex_home.path())?;
+            AbsolutePathBuf::from_absolute_path(codex_home.path().join("codex.sock"))?;
         std::fs::create_dir_all(socket_path.as_path().parent().expect("socket parent"))?;
         let listener = std::os::unix::net::UnixListener::bind(socket_path.as_path())?;
         drop(listener);
 
         let target = app_server_target_for_launch(
             /*explicit_remote_endpoint*/ None,
-            default_daemon_socket_if_present(codex_home.path())?,
+            daemon_socket_if_present(socket_path.clone())?,
             /*can_reuse_implicit_local_daemon*/ true,
             /*workload_identity_selected*/ false,
+            launch_overrides::LaunchDisposition::UnmanagedUpstream,
+            canonical_launch_projection::CanonicalLaunchProjection::default(),
         )?;
         let config = build_config(&codex_home).await?;
         let result = start_app_server(
@@ -2549,16 +2630,43 @@ mod tests {
             Some(socket_path.clone()),
             /*can_reuse_implicit_local_daemon*/ true,
             /*workload_identity_selected*/ false,
+            launch_overrides::LaunchDisposition::UnmanagedUpstream,
+            canonical_launch_projection::CanonicalLaunchProjection::default(),
         )?;
 
         assert_eq!(
             target,
             AppServerTarget::LocalDaemon {
                 endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
+                canonical_projection: None,
             }
         );
         assert!(!target.uses_remote_workspace());
         assert_eq!(target.thread_params_mode(), ThreadParamsMode::Embedded);
+        Ok(())
+    }
+
+    #[test]
+    fn managed_canonical_target_does_not_require_socket_presence() -> color_eyre::Result<()> {
+        let socket_path = AbsolutePathBuf::relative_to_current_dir("missing-codex.sock")?;
+        let target = app_server_target_for_launch(
+            /*explicit_remote_endpoint*/ None,
+            Some(socket_path.clone()),
+            /*can_reuse_implicit_local_daemon*/ false,
+            /*workload_identity_selected*/ false,
+            launch_overrides::LaunchDisposition::CanonicalLocal,
+            canonical_launch_projection::CanonicalLaunchProjection::default(),
+        )?;
+
+        assert_eq!(
+            target,
+            AppServerTarget::LocalDaemon {
+                endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
+                canonical_projection: Some(
+                    canonical_launch_projection::CanonicalLaunchProjection::default(),
+                ),
+            }
+        );
         Ok(())
     }
 
@@ -2572,6 +2680,8 @@ mod tests {
             Some(AbsolutePathBuf::relative_to_current_dir("default.sock")?),
             /*can_reuse_implicit_local_daemon*/ false,
             /*workload_identity_selected*/ false,
+            launch_overrides::LaunchDisposition::ExplicitRemote,
+            canonical_launch_projection::CanonicalLaunchProjection::default(),
         )?;
 
         assert_eq!(
@@ -2594,6 +2704,8 @@ mod tests {
             Some(socket_path),
             /*can_reuse_implicit_local_daemon*/ false,
             /*workload_identity_selected*/ false,
+            launch_overrides::LaunchDisposition::UnmanagedUpstream,
+            canonical_launch_projection::CanonicalLaunchProjection::default(),
         )?;
 
         assert_eq!(target, AppServerTarget::Embedded);
@@ -2609,6 +2721,8 @@ mod tests {
                 Some(default_socket),
                 /*can_reuse_implicit_local_daemon*/ true,
                 /*workload_identity_selected*/ true,
+                launch_overrides::LaunchDisposition::WorkloadIdentity,
+                canonical_launch_projection::CanonicalLaunchProjection::default(),
             )?,
             AppServerTarget::Embedded
         );
@@ -2621,6 +2735,8 @@ mod tests {
             /*default_daemon_socket*/ None,
             /*can_reuse_implicit_local_daemon*/ false,
             /*workload_identity_selected*/ true,
+            launch_overrides::LaunchDisposition::WorkloadIdentity,
+            canonical_launch_projection::CanonicalLaunchProjection::default(),
         )
         .expect_err("remote hosts must own workload identity");
         assert_eq!(
@@ -2675,6 +2791,7 @@ mod tests {
             endpoint: RemoteAppServerEndpoint::UnixSocket {
                 socket_path: AbsolutePathBuf::relative_to_current_dir("codex.sock")?,
             },
+            canonical_projection: None,
         };
 
         assert!(should_load_configured_environments(
@@ -2730,6 +2847,7 @@ mod tests {
             endpoint: RemoteAppServerEndpoint::UnixSocket {
                 socket_path: AbsolutePathBuf::relative_to_current_dir("codex.sock")?,
             },
+            canonical_projection: None,
         };
 
         let params = latest_session_lookup_params(
@@ -3018,6 +3136,7 @@ mod tests {
             endpoint: RemoteAppServerEndpoint::UnixSocket {
                 socket_path: AbsolutePathBuf::relative_to_current_dir("codex.sock")?,
             },
+            canonical_projection: None,
         };
         let environment_manager = EnvironmentManager::default_for_tests();
 

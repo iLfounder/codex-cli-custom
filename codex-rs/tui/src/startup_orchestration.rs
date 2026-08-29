@@ -66,13 +66,59 @@ pub(super) async fn run_main_inner(
         launch_loader_overrides.user_config_profile = Some(profile_v2.clone());
     }
     let workload_identity_selected = is_workload_identity_selected();
+    let launch_operation = if cli.fork_picker
+        || cli.fork_last
+        || cli.fork_session_id.is_some()
+        || cli.resume_picker
+        || cli.resume_last
+        || cli.resume_session_id.is_some()
+        || cli.agents_overview
+    {
+        launch_overrides::LaunchOperation::ExistingThread
+    } else {
+        launch_overrides::LaunchOperation::NewThread
+    };
+    let requested_launch_mode = if explicit_remote_endpoint.is_some() {
+        launch_overrides::RequestedLaunchMode::ExplicitRemote
+    } else if workload_identity_selected {
+        launch_overrides::RequestedLaunchMode::WorkloadIdentity
+    } else if cli.embedded {
+        launch_overrides::RequestedLaunchMode::ExplicitEmbedded
+    } else {
+        launch_overrides::RequestedLaunchMode::StandardLocal
+    };
+    let invocation_overrides =
+        launch_overrides::invocation_overrides(&cli, &cli_kv_overrides, &launch_loader_overrides);
+    let canonical_projection =
+        launch_overrides::canonical_projection(&cli, &cli_kv_overrides, &launch_loader_overrides)
+            .ok();
+    let launch_disposition = launch_overrides::classify_current_launch(
+        &codex_home,
+        launch_operation,
+        requested_launch_mode,
+        invocation_overrides,
+    )?;
+    if cli.embedded && (explicit_remote_endpoint.is_some() || workload_identity_selected) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "--embedded cannot be combined with remote or workload-identity mode",
+        ));
+    }
+    let canonical_daemon =
+        if launch_disposition == launch_overrides::LaunchDisposition::CanonicalLocal {
+            Some(codex_app_server_client::canonical_app_server_control_socket_path()?)
+        } else {
+            None
+        };
 
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         let validation_target = app_server_target_for_launch(
             explicit_remote_endpoint.clone(),
-            /*default_daemon_socket*/ None,
+            canonical_daemon.clone(),
             /*can_reuse_implicit_local_daemon*/ false,
             workload_identity_selected,
+            launch_disposition,
+            canonical_projection.unwrap_or_default(),
         )?;
         let validation_environment_manager =
             if should_load_configured_environments(&loader_overrides, &validation_target) {
@@ -145,12 +191,13 @@ pub(super) async fn run_main_inner(
     let search_only_config_override = !workload_identity_selected
         && cli.web_search
         && startup_preflight::has_only_search_config_override(&cli_kv_overrides)
-        && loader_overrides_are_default(&launch_loader_overrides)
+        && launch_loader_overrides.is_default_for_canonical_launch()
         && !strict_config
         && !cli.bypass_hook_trust;
     let initial_screen = if cli.resume_picker || cli.fork_picker || cli.agents_overview {
         startup_draft::StartupDraftInitialScreen::SessionPicker
-    } else if !cli.oss
+    } else if launch_disposition == launch_overrides::LaunchDisposition::UnmanagedUpstream
+        && !cli.oss
         && explicit_remote_endpoint.is_none()
         && (reuse_implicit_local_daemon || search_only_config_override)
         && launch_loader_overrides.packaged_defaults_path.is_none()
@@ -174,7 +221,9 @@ pub(super) async fn run_main_inner(
     };
     let mut startup_draft = startup_draft::StartupDraft::new(initial_screen, session_action)?;
 
-    let default_daemon = if explicit_remote_endpoint.is_none() && reuse_implicit_local_daemon {
+    let default_daemon = if canonical_daemon.is_some() {
+        canonical_daemon
+    } else if explicit_remote_endpoint.is_none() && reuse_implicit_local_daemon {
         default_daemon_socket_if_present(&codex_home)?
     } else {
         None
@@ -184,6 +233,8 @@ pub(super) async fn run_main_inner(
         default_daemon,
         reuse_implicit_local_daemon,
         workload_identity_selected,
+        launch_disposition,
+        canonical_projection.unwrap_or_default(),
     )?;
     let remote_cwd_override = cli
         .cwd
@@ -343,6 +394,9 @@ pub(super) async fn run_main_inner(
             strict_config,
         ))
         .await?;
+    if let Some(projection) = app_server_target.canonical_projection() {
+        projection.validate_config(&config)?;
+    }
     startup_draft.apply_config(&config);
 
     let cloud_config_bundle = if workload_identity_selected {

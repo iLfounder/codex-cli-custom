@@ -51,6 +51,7 @@ mod cloud_config;
 mod desktop_app;
 mod doctor;
 mod exec_server_telemetry;
+mod managed_account_lifecycle;
 mod marketplace_cmd;
 mod mcp_cmd;
 mod migrate_rollouts;
@@ -388,6 +389,10 @@ struct SessionArchiveConfigOverrides {
     #[arg(long = "strict-config", default_value_t = false)]
     strict_config: bool,
 
+    /// Reject attempts to move an existing managed thread into an embedded server.
+    #[arg(long = "embedded", default_value_t = false)]
+    embedded: bool,
+
     #[clap(flatten)]
     config_overrides: CliConfigOverrides,
 }
@@ -723,6 +728,10 @@ enum AppServerDaemonSubcommand {
     /// [internal] Run the detached pid-backed standalone updater loop.
     #[clap(hide = true)]
     PidUpdateLoop,
+
+    /// [internal] Run the canonical app-server supervisor in the foreground.
+    #[clap(hide = true)]
+    Supervisor,
 }
 
 #[derive(Debug, Args)]
@@ -1056,6 +1065,17 @@ async fn cli_main(
         mut interactive,
         subcommand,
     } = MultitoolCli::parse();
+    if managed_account_lifecycle::run_if_managed(
+        &root_config_overrides,
+        &feature_toggles,
+        &remote,
+        &interactive,
+        &subcommand,
+    )
+    .await?
+    {
+        return Ok(());
+    }
     // Fold --enable/--disable into config overrides so they flow to all subcommands.
     let toggle_overrides = feature_toggles.to_overrides()?;
     root_config_overrides.raw_overrides.extend(toggle_overrides);
@@ -1340,8 +1360,26 @@ async fn cli_main(
                         let http_client_factory = updater_http_client_factory(config);
                         codex_app_server_daemon::run_pid_update_loop(http_client_factory).await?;
                     }
+                    AppServerDaemonSubcommand::Supervisor => {
+                        codex_app_server_daemon::run_supervisor().await?;
+                    }
                 },
                 Some(AppServerSubcommand::Proxy(proxy_cli)) => {
+                    if codex_tui::managed_account_hint_is_present()? {
+                        let codex_home = find_codex_home()?;
+                        codex_tui::classify_current_launch(
+                            codex_home.as_path(),
+                            codex_tui::LaunchOperation::PassiveLocal,
+                            codex_tui::RequestedLaunchMode::StandardLocal,
+                            if proxy_cli.socket_path.is_some()
+                                || !root_config_overrides.raw_overrides.is_empty()
+                            {
+                                codex_tui::LaunchInvocationOverrides::EmbeddedOnly
+                            } else {
+                                codex_tui::LaunchInvocationOverrides::None
+                            },
+                        )?;
+                    }
                     let socket_path = match proxy_cli.socket_path {
                         Some(socket_path) => socket_path,
                         None => {
@@ -2493,6 +2531,7 @@ fn app_server_subcommand_name(subcommand: Option<&AppServerSubcommand>) -> &'sta
             AppServerDaemonSubcommand::Stop => "app-server daemon stop",
             AppServerDaemonSubcommand::Version => "app-server daemon version",
             AppServerDaemonSubcommand::PidUpdateLoop => "app-server daemon pid-update-loop",
+            AppServerDaemonSubcommand::Supervisor => "app-server daemon supervisor",
         },
         Some(AppServerSubcommand::Proxy(_)) => "app-server proxy",
         Some(AppServerSubcommand::GenerateTs(_)) => "app-server generate-ts",
@@ -2581,7 +2620,10 @@ async fn run_interactive_tui(
     }
 
     #[cfg(unix)]
-    if interactive.agents_overview && remote.is_none() {
+    if interactive.agents_overview
+        && remote.is_none()
+        && !codex_tui::managed_account_hint_is_present()?
+    {
         if !std::io::stdin().is_terminal() {
             return Ok(AppExitInfo::fatal("stdin is not a terminal"));
         }
@@ -2772,11 +2814,15 @@ fn finalize_session_archive_interactive(
     let SessionArchiveConfigOverrides {
         shared,
         strict_config,
+        embedded,
         config_overrides,
     } = archive_cli;
     interactive.shared.apply_subcommand_overrides(shared);
     if strict_config {
         interactive.strict_config = true;
+    }
+    if embedded {
+        interactive.embedded = true;
     }
     interactive
         .config_overrides
@@ -2793,6 +2839,7 @@ fn merge_interactive_cli_flags(interactive: &mut TuiCli, subcommand_cli: TuiCli)
     let TuiCli {
         shared,
         strict_config,
+        embedded,
         approval_policy,
         web_search,
         no_alt_screen,
@@ -2818,6 +2865,9 @@ fn merge_interactive_cli_flags(interactive: &mut TuiCli, subcommand_cli: TuiCli)
     interactive.no_alt_screen |= no_alt_screen;
     if strict_config {
         interactive.strict_config = true;
+    }
+    if embedded {
+        interactive.embedded = true;
     }
     if let Some(prompt) = prompt {
         // Normalize CRLF/CR to LF so CLI-provided text can't leak `\r` into TUI state.
@@ -3505,6 +3555,7 @@ mod tests {
                 "--remote",
                 "unix://archive.sock",
                 "--strict-config",
+                "--embedded",
                 "--dangerously-bypass-hook-trust",
                 "-m",
                 "gpt-5.1-test",
@@ -3526,6 +3577,7 @@ mod tests {
             Some(std::path::Path::new("/archive"))
         );
         assert!(interactive.strict_config);
+        assert!(interactive.embedded);
         assert!(interactive.bypass_hook_trust);
     }
 
@@ -3884,6 +3936,7 @@ mod tests {
                 "-C",
                 "/tmp",
                 "--strict-config",
+                "--embedded",
                 "-i",
                 "/tmp/a.png,/tmp/b.png",
             ]
@@ -3907,6 +3960,7 @@ mod tests {
         );
         assert!(interactive.web_search);
         assert!(interactive.strict_config);
+        assert!(interactive.embedded);
         let has_a = interactive
             .images
             .iter()
@@ -4579,6 +4633,13 @@ mod tests {
             app_server_from_args(["codex", "app-server", "daemon", "version"].as_ref()).subcommand,
             Some(AppServerSubcommand::Daemon(AppServerDaemonCommand {
                 subcommand: AppServerDaemonSubcommand::Version
+            }))
+        ));
+        assert!(matches!(
+            app_server_from_args(["codex", "app-server", "daemon", "supervisor"].as_ref())
+                .subcommand,
+            Some(AppServerSubcommand::Daemon(AppServerDaemonCommand {
+                subcommand: AppServerDaemonSubcommand::Supervisor
             }))
         ));
     }

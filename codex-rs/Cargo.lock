@@ -2086,6 +2086,7 @@ version = "0.149.0"
 dependencies = [
  "codex-app-server",
  "codex-app-server-protocol",
+ "codex-app-server-transport",
  "codex-arg0",
  "codex-config",
  "codex-core",
@@ -2126,6 +2127,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite",
+ "uuid",
 ]
 
 [[package]]
@@ -2206,6 +2208,7 @@ dependencies = [
  "codex-state",
  "codex-uds",
  "codex-utils-absolute-path",
+ "codex-utils-home-dir",
  "codex-utils-rustls-provider",
  "constant_time_eq",
  "futures",
@@ -2378,6 +2381,7 @@ dependencies = [
  "clap_complete",
  "codex-api",
  "codex-app-server",
+ "codex-app-server-client",
  "codex-app-server-daemon",
  "codex-app-server-protocol",
  "codex-app-server-test-client",
@@ -2421,6 +2425,7 @@ dependencies = [
  "codex-utils-absolute-path",
  "codex-utils-cargo-bin",
  "codex-utils-cli",
+ "codex-utils-home-dir",
  "codex-utils-path",
  "codex-windows-sandbox",
  "crossterm",
@@ -2433,6 +2438,7 @@ dependencies = [
  "predicates",
  "pretty_assertions",
  "regex-lite",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sqlx",

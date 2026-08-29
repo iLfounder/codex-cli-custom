@@ -1738,6 +1738,11 @@ impl ChatWidget {
     }
 
     #[cfg(test)]
+    pub(crate) fn composer_input_enabled(&self) -> bool {
+        self.bottom_pane.composer_input_enabled()
+    }
+
+    #[cfg(test)]
     pub(crate) fn is_task_running_for_test(&self) -> bool {
         self.bottom_pane.is_task_running()
     }

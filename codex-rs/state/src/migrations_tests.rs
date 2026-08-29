@@ -11,6 +11,7 @@ use super::CUSTOM_SCHEMA_V2;
 use super::CUSTOM_SCHEMA_V3;
 use super::CUSTOM_SCHEMA_V4;
 use super::CUSTOM_SCHEMA_V5;
+use super::CUSTOM_SCHEMA_V6;
 use super::LegacyMigrationCutover;
 use super::STATE_MIGRATOR;
 use super::THREAD_HISTORY_MIGRATOR;
@@ -126,6 +127,11 @@ async fn custom_schema_bootstrap_with_account_slot_runtime_versions_serializes_c
                 "thread_account_rotation_policies".to_string(),
                 CUSTOM_SCHEMA_V5.definition.to_string(),
             ),
+            (
+                6,
+                "global_account_rotation_profiles".to_string(),
+                CUSTOM_SCHEMA_V6.definition.to_string(),
+            ),
         ]
     );
     let custom_tables = sqlx::query_scalar::<_, String>(
@@ -133,7 +139,8 @@ async fn custom_schema_bootstrap_with_account_slot_runtime_versions_serializes_c
          AND name IN ('writer_authority_store', 'thread_writer_generations', \
          'thread_execution_account_bindings', 'thread_turn_execution_accounts', \
          'account_slot_runtime_versions', 'thread_transitions', \
-         'thread_account_rotation_policies') ORDER BY name",
+         'thread_account_rotation_policies', 'account_rotation_global_profile', \
+         'thread_account_rotation_overrides', 'thread_account_rotation_cursors') ORDER BY name",
     )
     .fetch_all(&pool)
     .await
@@ -141,7 +148,10 @@ async fn custom_schema_bootstrap_with_account_slot_runtime_versions_serializes_c
     assert_eq!(
         custom_tables,
         vec![
+            "account_rotation_global_profile".to_string(),
             "account_slot_runtime_versions".to_string(),
+            "thread_account_rotation_cursors".to_string(),
+            "thread_account_rotation_overrides".to_string(),
             "thread_account_rotation_policies".to_string(),
             "thread_execution_account_bindings".to_string(),
             "thread_transitions".to_string(),
@@ -151,6 +161,115 @@ async fn custom_schema_bootstrap_with_account_slot_runtime_versions_serializes_c
         ]
     );
 
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn v6_backfills_v5_overrides_and_cursors_without_activating_global_profile() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let pool = sqlite
+        .open_read_write_pool(&sqlite.state_db_path())
+        .await
+        .expect("database should open");
+    sqlx::query(
+        "CREATE TABLE codex_custom_schema_migrations (\
+         version INTEGER PRIMARY KEY, name TEXT NOT NULL, definition TEXT NOT NULL, \
+         applied_at INTEGER NOT NULL DEFAULT (unixepoch()))",
+    )
+    .execute(&pool)
+    .await
+    .expect("custom migration registry should apply");
+    for migration in [
+        &CUSTOM_SCHEMA_V1,
+        &CUSTOM_SCHEMA_V2,
+        &CUSTOM_SCHEMA_V3,
+        &CUSTOM_SCHEMA_V4,
+        &CUSTOM_SCHEMA_V5,
+    ] {
+        sqlx::raw_sql(migration.definition)
+            .execute(&pool)
+            .await
+            .expect("pre-v6 custom migration should apply");
+        sqlx::query(
+            "INSERT INTO codex_custom_schema_migrations (version, name, definition) \
+             VALUES (?, ?, ?)",
+        )
+        .bind(migration.version)
+        .bind(migration.name)
+        .bind(migration.definition)
+        .execute(&pool)
+        .await
+        .expect("pre-v6 migration record should insert");
+    }
+    sqlx::query(
+        "INSERT INTO thread_account_rotation_policies \
+         (thread_id, revision, mode, fixed_slot_id, automatic_slot_ids_json, \
+          last_committed_slot_id, updated_at) VALUES (?, 7, 'roundRobin', ?, ?, ?, 42)",
+    )
+    .bind("00000000-0000-0000-0000-000000000006")
+    .bind("C1")
+    .bind("[\"C1\",\"C2\"]")
+    .bind("C2")
+    .execute(&pool)
+    .await
+    .expect("v5 policy should insert");
+
+    apply_custom_schema_migrations(&pool)
+        .await
+        .expect("v6 migration should apply");
+
+    assert_eq!(
+        sqlx::query_as::<_, (String, i64, String, Option<String>, String, i64)>(
+            "SELECT thread_id, revision, mode, fixed_slot_id, automatic_slot_ids_json, updated_at \
+             FROM thread_account_rotation_overrides",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("backfilled override should load"),
+        vec![(
+            "00000000-0000-0000-0000-000000000006".to_string(),
+            7,
+            "roundRobin".to_string(),
+            Some("C1".to_string()),
+            "[\"C1\",\"C2\"]".to_string(),
+            42,
+        )]
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, String, i64)>(
+            "SELECT thread_id, last_committed_slot_id, updated_at \
+             FROM thread_account_rotation_cursors",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("backfilled cursor should load"),
+        vec![(
+            "00000000-0000-0000-0000-000000000006".to_string(),
+            "C2".to_string(),
+            42,
+        )]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM account_rotation_global_profile")
+            .fetch_one(&pool)
+            .await
+            .expect("global profile count should load"),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM thread_account_rotation_policies")
+            .fetch_one(&pool)
+            .await
+            .expect("legacy policy count should load"),
+        1
+    );
     pool.close().await;
 }
 

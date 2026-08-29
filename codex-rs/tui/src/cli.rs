@@ -16,6 +16,12 @@ pub struct Cli {
     #[arg(long = "strict-config", default_value_t = false)]
     pub strict_config: bool,
 
+    /// Start a new thread with an invocation-local embedded app server.
+    ///
+    /// Existing managed threads always remain owned by the canonical app server.
+    #[arg(long = "embedded", default_value_t = false)]
+    pub embedded: bool,
+
     // Internal controls set by the top-level `codex resume` subcommand.
     // These are not exposed as user flags on the base `codex` command.
     #[clap(skip)]

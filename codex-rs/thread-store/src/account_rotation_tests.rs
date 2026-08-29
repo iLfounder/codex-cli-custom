@@ -3,132 +3,162 @@ use codex_protocol::protocol::ExecutionAccountBinding;
 use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
 
-use crate::AccountBindingCommitIntent;
+use crate::AccountRotationProfileUpdate;
 use crate::InMemoryThreadStore;
 use crate::LocalThreadStore;
 use crate::LocalThreadStoreConfig;
 use crate::SuccessfulAccountBindingTransition;
 use crate::ThreadAccountRotationMode;
 use crate::ThreadAccountRotationPolicy;
-use crate::ThreadAccountRotationPolicyUpdate;
+use crate::ThreadAccountRotationPolicyRevision;
 use crate::ThreadStore;
 
-fn automatic_update() -> ThreadAccountRotationPolicyUpdate {
-    ThreadAccountRotationPolicyUpdate {
+fn automatic_update(slot_ids: &[&str]) -> AccountRotationProfileUpdate {
+    AccountRotationProfileUpdate {
         mode: ThreadAccountRotationMode::RoundRobin,
-        fixed_account_slot_id: Some("default".to_string()),
-        automatic_account_slot_ids: vec!["default".to_string(), "secondary".to_string()],
+        fixed_account_slot_id: None,
+        automatic_account_slot_ids: slot_ids.iter().map(ToString::to_string).collect(),
+    }
+}
+
+fn initial_binding() -> ExecutionAccountBinding {
+    ExecutionAccountBinding {
+        slot_id: "default".to_string(),
+        generation: 1,
     }
 }
 
 #[tokio::test]
-async fn in_memory_rotation_matches_revision_cursor_and_binding_intent_contract() {
+async fn in_memory_effective_policy_distinguishes_inherit_and_override() {
     let store = InMemoryThreadStore::default();
-    let thread_id = ThreadId::default();
-    let initial = ExecutionAccountBinding {
-        slot_id: "default".to_string(),
-        generation: 1,
-    };
+    let inherited_thread = ThreadId::new();
+    let overridden_thread = ThreadId::new();
+    let binding = initial_binding();
+    for thread_id in [inherited_thread, overridden_thread] {
+        store
+            .initialize_execution_account_binding(thread_id, binding.clone())
+            .await
+            .expect("initialize binding");
+    }
+
+    assert_eq!(
+        store
+            .thread_account_rotation_policy(inherited_thread)
+            .await
+            .expect("read pre-activation policy"),
+        ThreadAccountRotationPolicy::virtual_fixed(&binding)
+    );
     store
-        .initialize_execution_account_binding(thread_id, initial.clone())
-        .await
-        .expect("initialize binding");
-    assert_eq!(
-        store
-            .thread_account_rotation_policy(thread_id)
-            .await
-            .expect("read virtual policy"),
-        ThreadAccountRotationPolicy::virtual_fixed(&initial)
-    );
-
-    let policy = store
-        .compare_and_swap_thread_account_rotation_policy(thread_id, 0, automatic_update())
-        .await
-        .expect("create policy")
-        .expect("matching revision");
-    assert_eq!(policy.revision, 1);
-    assert_eq!(
-        store
-            .compare_and_swap_thread_account_rotation_cursor(thread_id, 1, "secondary".to_string(),)
-            .await
-            .expect("commit cursor")
-            .expect("matching policy revision")
-            .last_committed_account_slot_id,
-        Some("secondary".to_string())
-    );
-
-    let automatic_binding = store
-        .compare_and_swap_execution_account_binding_with_intent(
-            thread_id,
-            initial,
-            "secondary".to_string(),
-            AccountBindingCommitIntent::PreserveRotation,
+        .compare_and_swap_account_rotation_global_profile(
+            /*expected_revision*/ 0,
+            automatic_update(&["default", "secondary"]),
         )
         .await
-        .expect("automatic binding commit")
-        .expect("matching binding");
+        .expect("activate global profile")
+        .expect("global revision matches");
+    store
+        .compare_and_swap_thread_account_rotation_override(
+            overridden_thread,
+            /*expected_revision*/ 0,
+            AccountRotationProfileUpdate {
+                mode: ThreadAccountRotationMode::Fixed,
+                fixed_account_slot_id: Some("override".to_string()),
+                automatic_account_slot_ids: Vec::new(),
+            },
+        )
+        .await
+        .expect("create override")
+        .expect("override revision matches");
+
+    let inherited = store
+        .thread_account_rotation_policy(inherited_thread)
+        .await
+        .expect("read inherited policy");
+    let overridden = store
+        .thread_account_rotation_policy(overridden_thread)
+        .await
+        .expect("read overridden policy");
     assert_eq!(
-        store
-            .thread_account_rotation_policy(thread_id)
-            .await
-            .expect("read preserved policy")
-            .mode,
-        ThreadAccountRotationMode::RoundRobin
+        (inherited.revision, overridden.revision),
+        (
+            ThreadAccountRotationPolicyRevision::Inherit(1),
+            ThreadAccountRotationPolicyRevision::Override(1),
+        )
     );
 
     store
-        .compare_and_swap_execution_account_binding(
-            thread_id,
-            automatic_binding,
-            "default".to_string(),
+        .compare_and_swap_account_rotation_global_profile(
+            /*expected_revision*/ 1,
+            automatic_update(&["secondary", "third"]),
         )
         .await
-        .expect("legacy manual binding commit")
-        .expect("matching binding");
+        .expect("update global profile")
+        .expect("global revision matches");
     assert_eq!(
         store
-            .thread_account_rotation_policy(thread_id)
+            .thread_account_rotation_policy(overridden_thread)
             .await
-            .expect("read pinned policy"),
-        ThreadAccountRotationPolicy {
-            mode: ThreadAccountRotationMode::Fixed,
-            fixed_account_slot_id: Some("default".to_string()),
-            automatic_account_slot_ids: policy.automatic_account_slot_ids,
-            revision: 2,
-            last_committed_account_slot_id: Some("default".to_string()),
-        }
+            .expect("override survives global update"),
+        overridden
+    );
+    assert!(
+        !store
+            .reset_thread_account_rotation_override(overridden_thread, /*expected_revision*/ 2)
+            .await
+            .expect("stale reset")
+    );
+    assert!(
+        store
+            .reset_thread_account_rotation_override(overridden_thread, /*expected_revision*/ 1)
+            .await
+            .expect("exact reset")
+    );
+    assert_eq!(
+        store
+            .thread_account_rotation_policy(overridden_thread)
+            .await
+            .expect("read inherited policy after reset")
+            .revision,
+        ThreadAccountRotationPolicyRevision::Inherit(2)
     );
 }
 
 #[tokio::test]
-async fn successful_rotation_commits_binding_and_cursor_atomically() {
+async fn in_memory_cursor_and_success_commit_are_fenced_only_by_exact_binding() {
     let store = InMemoryThreadStore::default();
-    let thread_id = ThreadId::default();
-    let initial = ExecutionAccountBinding {
-        slot_id: "default".to_string(),
-        generation: 1,
-    };
+    let thread_id = ThreadId::new();
+    let initial = initial_binding();
     store
         .initialize_execution_account_binding(thread_id, initial.clone())
         .await
         .expect("initialize binding");
     store
-        .compare_and_swap_thread_account_rotation_policy(thread_id, 0, automatic_update())
+        .compare_and_swap_account_rotation_global_profile(
+            /*expected_revision*/ 0,
+            automatic_update(&["default", "secondary"]),
+        )
         .await
-        .expect("create policy")
-        .expect("matching revision");
+        .expect("activate global profile")
+        .expect("global revision matches");
 
+    store
+        .compare_and_swap_account_rotation_global_profile(
+            /*expected_revision*/ 1,
+            automatic_update(&["secondary", "default"]),
+        )
+        .await
+        .expect("update global after turn snapshot")
+        .expect("global revision matches");
     let committed = store
         .compare_and_swap_successful_account_rotation(
             thread_id,
             initial.clone(),
-            1,
             "secondary".to_string(),
             SuccessfulAccountBindingTransition::AdvanceGeneration,
         )
         .await
-        .expect("commit successful rotation")
-        .expect("matching binding and policy");
+        .expect("commit successful selection")
+        .expect("exact binding matches");
     assert_eq!(
         committed.binding,
         ExecutionAccountBinding {
@@ -137,27 +167,33 @@ async fn successful_rotation_commits_binding_and_cursor_atomically() {
         }
     );
     assert_eq!(
-        committed.policy.last_committed_account_slot_id,
-        Some("secondary".to_string())
+        store
+            .thread_account_rotation_policy(thread_id)
+            .await
+            .expect("read cursor after commit"),
+        ThreadAccountRotationPolicy {
+            mode: ThreadAccountRotationMode::RoundRobin,
+            fixed_account_slot_id: None,
+            automatic_account_slot_ids: vec!["secondary".to_string(), "default".to_string()],
+            revision: ThreadAccountRotationPolicyRevision::Inherit(2),
+            last_committed_account_slot_id: Some("secondary".to_string()),
+        }
     );
-
     assert_eq!(
         store
-            .compare_and_swap_successful_account_rotation(
+            .compare_and_swap_thread_account_rotation_cursor_for_binding(
                 thread_id,
                 initial,
-                1,
                 "default".to_string(),
-                SuccessfulAccountBindingTransition::Keep,
             )
             .await
-            .expect("stale commit is not an error"),
+            .expect("stale cursor commit is not an error"),
         None
     );
 }
 
 #[tokio::test]
-async fn local_legacy_binding_commit_atomically_pins_policy() {
+async fn local_store_matches_effective_profile_and_binding_cursor_contract() {
     let home = tempfile::TempDir::new().expect("temp dir");
     let sqlite = codex_state::SqliteConfig::new_for_testing(home.path().abs());
     let runtime = codex_state::StateRuntime::init(sqlite.clone(), "test-provider".to_string())
@@ -171,155 +207,45 @@ async fn local_legacy_binding_commit_atomically_pins_policy() {
         },
         Some(runtime.clone()),
     );
-    let thread_id = ThreadId::default();
-    let initial = ExecutionAccountBinding {
-        slot_id: "default".to_string(),
-        generation: 1,
-    };
+    let thread_id = ThreadId::new();
+    let binding = initial_binding();
     store
-        .initialize_execution_account_binding(thread_id, initial.clone())
+        .initialize_execution_account_binding(thread_id, binding.clone())
         .await
         .expect("initialize binding");
     store
-        .compare_and_swap_thread_account_rotation_policy(thread_id, 0, automatic_update())
+        .compare_and_swap_account_rotation_global_profile(
+            /*expected_revision*/ 0,
+            automatic_update(&["default", "secondary"]),
+        )
         .await
-        .expect("create policy")
-        .expect("matching revision");
+        .expect("activate global profile")
+        .expect("global revision matches");
 
-    assert_eq!(
-        store
-            .compare_and_swap_execution_account_binding(
-                thread_id,
-                initial,
-                "secondary".to_string(),
-            )
-            .await
-            .expect("legacy binding commit"),
-        Some(ExecutionAccountBinding {
-            slot_id: "secondary".to_string(),
-            generation: 2,
-        })
-    );
     assert_eq!(
         store
             .thread_account_rotation_policy(thread_id)
             .await
-            .expect("read pinned policy"),
-        ThreadAccountRotationPolicy {
-            mode: ThreadAccountRotationMode::Fixed,
-            fixed_account_slot_id: Some("secondary".to_string()),
-            automatic_account_slot_ids: vec!["default".to_string(), "secondary".to_string()],
-            revision: 2,
-            last_committed_account_slot_id: Some("secondary".to_string()),
-        }
+            .expect("read inherited local policy")
+            .revision,
+        ThreadAccountRotationPolicyRevision::Inherit(1)
     );
+    store
+        .compare_and_swap_thread_account_rotation_cursor_for_binding(
+            thread_id,
+            binding.clone(),
+            binding.slot_id.clone(),
+        )
+        .await
+        .expect("commit local cursor")
+        .expect("exact binding matches");
     assert_eq!(
         store
-            .remove_account_slot_from_automatic_rotation_policies("secondary".to_string())
+            .thread_account_rotation_policy(thread_id)
             .await
-            .expect("remove automatic membership"),
-        vec![(
-            thread_id,
-            ThreadAccountRotationPolicy {
-                mode: ThreadAccountRotationMode::Fixed,
-                fixed_account_slot_id: Some("secondary".to_string()),
-                automatic_account_slot_ids: vec!["default".to_string()],
-                revision: 3,
-                last_committed_account_slot_id: Some("secondary".to_string()),
-            },
-        )]
+            .expect("read committed local cursor")
+            .last_committed_account_slot_id,
+        Some(binding.slot_id)
     );
     runtime.close().await;
-}
-
-#[tokio::test]
-async fn in_memory_credential_invalidation_matches_all_policy_semantics() {
-    let store = InMemoryThreadStore::default();
-    let target = "replacement";
-    let fixed_thread = ThreadId::new();
-    let emptied_thread = ThreadId::new();
-    let unaffected_thread = ThreadId::new();
-    let updates = [
-        (
-            fixed_thread,
-            ThreadAccountRotationPolicyUpdate {
-                mode: ThreadAccountRotationMode::Fixed,
-                fixed_account_slot_id: Some(target.to_string()),
-                automatic_account_slot_ids: vec![target.to_string(), "other".to_string()],
-            },
-        ),
-        (
-            emptied_thread,
-            ThreadAccountRotationPolicyUpdate {
-                mode: ThreadAccountRotationMode::QuotaAware,
-                fixed_account_slot_id: Some("other".to_string()),
-                automatic_account_slot_ids: vec![target.to_string()],
-            },
-        ),
-        (
-            unaffected_thread,
-            ThreadAccountRotationPolicyUpdate {
-                mode: ThreadAccountRotationMode::RoundRobin,
-                fixed_account_slot_id: Some(target.to_string()),
-                automatic_account_slot_ids: vec!["other".to_string()],
-            },
-        ),
-    ];
-    for (thread_id, update) in updates {
-        store
-            .initialize_execution_account_binding(
-                thread_id,
-                ExecutionAccountBinding {
-                    slot_id: target.to_string(),
-                    generation: 7,
-                },
-            )
-            .await
-            .expect("initialize binding");
-        store
-            .compare_and_swap_thread_account_rotation_policy(thread_id, 0, update)
-            .await
-            .expect("create policy")
-            .expect("policy commit");
-    }
-
-    let affected = store
-        .remove_account_slot_from_automatic_rotation_policies(target.to_string())
-        .await
-        .expect("remove automatic memberships");
-    assert_eq!(affected.len(), 2);
-    assert_eq!(
-        store
-            .thread_account_rotation_policy(fixed_thread)
-            .await
-            .expect("read fixed policy"),
-        ThreadAccountRotationPolicy {
-            mode: ThreadAccountRotationMode::Fixed,
-            fixed_account_slot_id: Some(target.to_string()),
-            automatic_account_slot_ids: vec!["other".to_string()],
-            revision: 2,
-            last_committed_account_slot_id: Some(target.to_string()),
-        }
-    );
-    assert_eq!(
-        store
-            .thread_account_rotation_policy(emptied_thread)
-            .await
-            .expect("read emptied policy"),
-        ThreadAccountRotationPolicy {
-            mode: ThreadAccountRotationMode::QuotaAware,
-            fixed_account_slot_id: Some("other".to_string()),
-            automatic_account_slot_ids: Vec::new(),
-            revision: 2,
-            last_committed_account_slot_id: Some(target.to_string()),
-        }
-    );
-    assert_eq!(
-        store
-            .thread_account_rotation_policy(unaffected_thread)
-            .await
-            .expect("read unaffected policy")
-            .revision,
-        1
-    );
 }

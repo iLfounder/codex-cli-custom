@@ -6,6 +6,7 @@ fn prepare_local_daemon_thread(app: &mut App) -> Result<ThreadId> {
         endpoint: crate::RemoteAppServerEndpoint::UnixSocket {
             socket_path: AbsolutePathBuf::relative_to_current_dir("codex.sock")?,
         },
+        canonical_projection: None,
     };
     let thread_id = ThreadId::new();
     app.active_thread_id = Some(thread_id);

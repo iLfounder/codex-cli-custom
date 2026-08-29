@@ -475,6 +475,7 @@ See the Codex keymap documentation for supported actions and examples."
             feedback_audience,
             environment_manager,
             app_server_target,
+            reconnect_state: Default::default(),
             pending_update_action: None,
             pending_shutdown: None,
             shutdown_lookup_in_flight: false,
@@ -749,6 +750,17 @@ See the Codex keymap documentation for supported actions and examples."
                     }
                     app_server_event = app_server.next_event(), if listen_for_app_server_events => {
                         match app_server_event {
+                            Some(codex_app_server_client::AppServerEvent::Connected { identity })
+                                if app.uses_supervised_app_server() =>
+                            {
+                                app.handle_supervised_connected(tui, &mut app_server, identity)
+                                    .await;
+                            }
+                            Some(codex_app_server_client::AppServerEvent::Disconnected { message })
+                                if app.uses_supervised_app_server() =>
+                            {
+                                app.handle_supervised_disconnect(message);
+                            }
                             Some(event) => app.handle_app_server_event(&app_server, event).await,
                             None => {
                                 listen_for_app_server_events = false;

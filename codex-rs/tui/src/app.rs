@@ -239,6 +239,10 @@ mod pets;
 mod platform_actions;
 mod plugin_commands;
 mod plugin_mentions;
+mod reconnect;
+#[cfg(test)]
+#[path = "app/reconnect_tests.rs"]
+mod reconnect_tests;
 mod replay_filter;
 mod resize_reflow;
 pub(crate) mod runtime_controls;
@@ -592,6 +596,7 @@ pub(crate) struct App {
     feedback_audience: FeedbackAudience,
     environment_manager: Arc<EnvironmentManager>,
     app_server_target: AppServerTarget,
+    reconnect_state: reconnect::ReconnectState,
     /// Set when the user confirms an update; propagated on exit.
     pub(crate) pending_update_action: Option<UpdateAction>,
 

@@ -15,6 +15,7 @@ use codex_skills::system_cache_root_dir;
 
 use crate::image_url::REMOTE_IMAGE_URL_ERROR;
 use crate::image_url::is_remote_image_url;
+use crate::legacy_admission::LegacyAdmissionPermit;
 
 pub(super) const DIRECT_INPUT_TO_MULTI_AGENT_V2_SUBAGENT_ERROR: &str =
     "direct app-server input is not allowed for multi-agent v2 sub-agents";
@@ -199,6 +200,7 @@ impl TurnRequestProcessor {
         params: TurnStartParams,
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
+        legacy_admission_permit: LegacyAdmissionPermit,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
         validate_user_input_image_urls(&params.input)?;
         self.turn_start_inner(
@@ -206,6 +208,7 @@ impl TurnRequestProcessor {
             params,
             app_server_client_name,
             app_server_client_version,
+            legacy_admission_permit,
         )
         .await
         .map(|response| Some(response.into()))
@@ -318,8 +321,9 @@ impl TurnRequestProcessor {
         &self,
         request_id: &ConnectionRequestId,
         params: ReviewStartParams,
+        legacy_admission_permit: LegacyAdmissionPermit,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        self.review_start_inner(request_id, params)
+        self.review_start_inner(request_id, params, legacy_admission_permit)
             .await
             .map(|()| None)
     }
@@ -498,6 +502,7 @@ impl TurnRequestProcessor {
         params: TurnStartParams,
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
+        legacy_admission_permit: LegacyAdmissionPermit,
     ) -> Result<TurnStartResponse, JSONRPCErrorError> {
         let (thread_id, thread) =
             self.load_thread(&params.thread_id)
@@ -642,7 +647,7 @@ impl TurnRequestProcessor {
             thread_state
                 .lock()
                 .await
-                .register_admitted_turn(turn_id.clone());
+                .register_admitted_turn(turn_id.clone(), Some(legacy_admission_permit));
         }
 
         if turn_has_input && started {
@@ -1359,6 +1364,7 @@ impl TurnRequestProcessor {
         review_request: ReviewRequest,
         display_text: &str,
         parent_thread_id: String,
+        legacy_admission_permit: LegacyAdmissionPermit,
     ) -> std::result::Result<(), JSONRPCErrorError> {
         let turn_id = self
             .submit_core_op(
@@ -1376,7 +1382,7 @@ impl TurnRequestProcessor {
         thread_state
             .lock()
             .await
-            .register_admitted_turn(turn_id.clone());
+            .register_admitted_turn(turn_id.clone(), Some(legacy_admission_permit));
         let turn = Self::build_review_turn(turn_id, display_text);
         self.emit_review_started(request_id, turn, parent_thread_id)
             .await;
@@ -1388,6 +1394,7 @@ impl TurnRequestProcessor {
         request_id: &ConnectionRequestId,
         parent_thread: Arc<CodexThread>,
         prompt: &str,
+        legacy_admission_permit: LegacyAdmissionPermit,
     ) -> std::result::Result<(), JSONRPCErrorError> {
         // AgentRunner::start still delegates to spawn_subagent, which forks from the parent's
         // full history. Paginated threads only allow bounded model-context reads, so keep this
@@ -1472,7 +1479,7 @@ impl TurnRequestProcessor {
         thread_state
             .lock()
             .await
-            .register_admitted_turn(turn_id.clone());
+            .register_admitted_turn(turn_id.clone(), Some(legacy_admission_permit));
 
         let turn = Self::build_review_turn(turn_id, prompt);
         let review_thread_id = thread_id.to_string();
@@ -1486,6 +1493,7 @@ impl TurnRequestProcessor {
         &self,
         request_id: &ConnectionRequestId,
         params: ReviewStartParams,
+        legacy_admission_permit: LegacyAdmissionPermit,
     ) -> Result<(), JSONRPCErrorError> {
         let ReviewStartParams {
             thread_id,
@@ -1504,6 +1512,7 @@ impl TurnRequestProcessor {
                     review_request,
                     &display_text,
                     thread_id,
+                    legacy_admission_permit,
                 )
                 .await?;
             }
@@ -1519,8 +1528,13 @@ impl TurnRequestProcessor {
                 if actual_chars > MAX_USER_INPUT_TEXT_CHARS {
                     return Err(Self::input_too_large_error(actual_chars));
                 }
-                self.start_detached_review(request_id, parent_thread, &prompt)
-                    .await?;
+                self.start_detached_review(
+                    request_id,
+                    parent_thread,
+                    &prompt,
+                    legacy_admission_permit,
+                )
+                .await?;
             }
         }
         Ok(())

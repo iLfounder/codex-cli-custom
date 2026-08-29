@@ -17,6 +17,7 @@ use codex_app_server_protocol::SessionRuntimeSnapshot;
 use codex_app_server_protocol::SessionRuntimeWriter;
 use codex_app_server_protocol::SessionRuntimeWriterState;
 use codex_app_server_protocol::ThreadAccountRotationSnapshot;
+use codex_app_server_protocol::ThreadAccountRotationSource;
 use insta::assert_snapshot;
 use pretty_assertions::assert_eq;
 
@@ -154,6 +155,8 @@ async fn rotation_editor_keeps_fixed_target_and_automatic_membership_independent
             automatic_account_slot_ids: vec!["C1".to_string(), "C2".to_string()],
             revision: 4,
             last_committed_account_slot_id: Some("C1".to_string()),
+            source: ThreadAccountRotationSource::Override,
+            global_profile_revision: Some(3),
         }),
     ));
 

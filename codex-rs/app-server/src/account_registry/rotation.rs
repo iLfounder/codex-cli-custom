@@ -16,7 +16,6 @@ use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_thread_store::ThreadAccountRotationMode as StoreRotationMode;
 use codex_thread_store::ThreadStore;
-use codex_thread_store::ThreadStoreError;
 
 use super::AccountRegistry;
 use super::ManifestSlotStatus;
@@ -87,21 +86,7 @@ impl AccountRotationService {
         selection: TurnExecutionAccountSelection,
         excluded_account_slot_ids: &[String],
     ) -> Result<TurnExecutionAccountDecision, CodexErr> {
-        let policy = match self
-            .thread_store
-            .thread_account_rotation_policy(selection.thread_id)
-            .await
-        {
-            Ok(policy) => policy,
-            Err(ThreadStoreError::Unsupported { .. }) => {
-                return Ok(TurnExecutionAccountDecision::Keep);
-            }
-            Err(error) => {
-                return Err(CodexErr::Fatal(format!(
-                    "account rotation store failed: {error}"
-                )));
-            }
-        };
+        let policy = selection.account_rotation_policy.clone();
         let mode = api_mode(policy.mode);
         if global_policy(&policy) {
             let selected = self
@@ -124,15 +109,12 @@ impl AccountRotationService {
             if target_slot_id == selection.current_binding.slot_id
                 && runtime.credential_revision != selection.credential_revision
             {
-                return Ok(TurnExecutionAccountDecision::ReprepareCurrent {
-                    policy_revision: policy.revision,
-                });
+                return Ok(TurnExecutionAccountDecision::ReprepareCurrent);
             }
             return Ok(selection_decision(
                 mode,
                 target_slot_id,
                 &selection.current_binding.slot_id,
-                policy.revision,
             ));
         }
         if mode == ThreadAccountRotationMode::Fixed
@@ -172,7 +154,6 @@ impl AccountRotationService {
             mode,
             target_slot_id,
             &selection.current_binding.slot_id,
-            policy.revision,
         ))
     }
 }
@@ -234,7 +215,6 @@ impl TurnExecutionAccountSelector for AccountRotationService {
                 .compare_and_swap_successful_account_rotation(
                     commit.thread_id,
                     commit.expected_binding,
-                    commit.policy_revision,
                     commit.target_slot_id,
                     transition,
                 )
@@ -273,15 +253,11 @@ fn selection_decision(
     mode: ThreadAccountRotationMode,
     target_slot_id: String,
     current_slot_id: &str,
-    policy_revision: u64,
 ) -> TurnExecutionAccountDecision {
     if mode == ThreadAccountRotationMode::Fixed && target_slot_id == current_slot_id {
         TurnExecutionAccountDecision::Keep
     } else {
-        TurnExecutionAccountDecision::Select {
-            target_slot_id,
-            policy_revision,
-        }
+        TurnExecutionAccountDecision::Select { target_slot_id }
     }
 }
 

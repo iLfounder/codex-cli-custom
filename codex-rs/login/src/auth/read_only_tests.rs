@@ -5,6 +5,7 @@ use crate::auth::manager::CodexAuth;
 use crate::auth::manager::ExternalAuth;
 use crate::auth::manager::ExternalAuthFuture;
 use crate::auth::manager::ExternalAuthRefreshContext;
+use crate::auth::manager::ReadOnlyAuthRefresh;
 use crate::auth::storage::AuthKeyringBackendKind;
 use crate::auth::storage::AuthStorageBackend;
 use crate::auth::storage::FileAuthStorage;
@@ -17,7 +18,10 @@ use codex_protocol::protocol::SessionSource;
 use serde::Serialize;
 use serde_json::json;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use tempfile::tempdir;
 
 fn read_only_test_auth_config(codex_home: &Path) -> AuthConfig {
@@ -92,6 +96,31 @@ impl ExternalAuth for StaticExternalAuth {
     }
 }
 
+struct ReplacingReadOnlyRefresh {
+    auth_home: PathBuf,
+    account_id: &'static str,
+    access_token: &'static str,
+    calls: AtomicUsize,
+}
+
+struct NoopReadOnlyRefresh(AtomicUsize);
+
+impl ReadOnlyAuthRefresh for NoopReadOnlyRefresh {
+    fn force_refresh(&self) -> ExternalAuthFuture<'_, ()> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Ok(()) })
+    }
+}
+
+impl ReadOnlyAuthRefresh for ReplacingReadOnlyRefresh {
+    fn force_refresh(&self) -> ExternalAuthFuture<'_, ()> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let result =
+            write_private_chatgpt_auth(&self.auth_home, self.account_id, self.access_token);
+        Box::pin(async move { result })
+    }
+}
+
 #[tokio::test]
 async fn sibling_auth_rejects_every_write_path() {
     let auth_home = tempdir().expect("temp auth home");
@@ -163,6 +192,90 @@ async fn unauthorized_recovery_accepts_same_account_file_replacement() {
             .and_then(|auth| auth.get_token().ok())
             .as_deref(),
         Some("access-b")
+    );
+}
+
+#[tokio::test]
+async fn unauthorized_recovery_delegates_unchanged_snapshot_and_reloads_replacement() {
+    let auth_home = tempdir().expect("temp auth home");
+    write_private_chatgpt_auth(auth_home.path(), "account-a", "access-a")
+        .expect("write private auth");
+    let refresh = Arc::new(ReplacingReadOnlyRefresh {
+        auth_home: auth_home.path().to_path_buf(),
+        account_id: "account-a",
+        access_token: "access-b",
+        calls: AtomicUsize::new(0),
+    });
+    let manager = AuthManager::shared_from_read_only_auth_config_with_refresh(
+        read_only_test_auth_config(auth_home.path()),
+        refresh.clone(),
+    )
+    .await
+    .expect("create read-only manager");
+    let initial_revision = manager.credential_revision();
+
+    let mut recovery = manager.unauthorized_recovery();
+    let result = recovery.next().await.expect("refresh replacement auth");
+
+    assert_eq!(result.auth_state_changed(), Some(true));
+    assert!(!recovery.has_next());
+    assert_eq!(refresh.calls.load(Ordering::SeqCst), 1);
+    assert_ne!(manager.credential_revision(), initial_revision);
+    assert_eq!(
+        manager
+            .auth_cached()
+            .and_then(|auth| auth.get_token().ok())
+            .as_deref(),
+        Some("access-b")
+    );
+}
+
+#[tokio::test]
+async fn unauthorized_recovery_rejects_unchanged_snapshot_after_authority_returns() {
+    let auth_home = tempdir().expect("temp auth home");
+    write_private_chatgpt_auth(auth_home.path(), "account-a", "access-a")
+        .expect("write private auth");
+    let refresh = Arc::new(NoopReadOnlyRefresh(AtomicUsize::new(0)));
+    let manager = AuthManager::shared_from_read_only_auth_config_with_refresh(
+        read_only_test_auth_config(auth_home.path()),
+        refresh.clone(),
+    )
+    .await
+    .expect("create read-only manager");
+
+    let mut recovery = manager.unauthorized_recovery();
+    assert!(recovery.next().await.is_err());
+
+    assert!(!recovery.has_next());
+    assert_eq!(refresh.0.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn unauthorized_recovery_rejects_identity_change_written_by_authority() {
+    let auth_home = tempdir().expect("temp auth home");
+    write_private_chatgpt_auth(auth_home.path(), "account-a", "access-a")
+        .expect("write private auth");
+    let refresh = Arc::new(ReplacingReadOnlyRefresh {
+        auth_home: auth_home.path().to_path_buf(),
+        account_id: "account-b",
+        access_token: "access-b",
+        calls: AtomicUsize::new(0),
+    });
+    let manager = AuthManager::shared_from_read_only_auth_config_with_refresh(
+        read_only_test_auth_config(auth_home.path()),
+        refresh.clone(),
+    )
+    .await
+    .expect("create read-only manager");
+
+    let mut recovery = manager.unauthorized_recovery();
+    assert!(recovery.next().await.is_err());
+
+    assert!(!recovery.has_next());
+    assert_eq!(refresh.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        manager.auth_cached().and_then(|auth| auth.get_account_id()),
+        Some("account-a".to_string())
     );
 }
 

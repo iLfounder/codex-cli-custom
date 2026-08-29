@@ -517,25 +517,7 @@ impl RemoteAppServerClient {
     }
 
     pub async fn notify(&self, notification: ClientNotification) -> IoResult<()> {
-        let (response_tx, response_rx) = oneshot::channel();
-        self.command_tx
-            .send(RemoteClientCommand::Notify {
-                notification,
-                response_tx,
-            })
-            .await
-            .map_err(|_| {
-                IoError::new(
-                    ErrorKind::BrokenPipe,
-                    "remote app-server worker channel is closed",
-                )
-            })?;
-        response_rx.await.map_err(|_| {
-            IoError::new(
-                ErrorKind::BrokenPipe,
-                "remote app-server notify channel is closed",
-            )
-        })?
+        self.request_handle().notify(notification).await
     }
 
     pub async fn resolve_server_request(
@@ -543,26 +525,9 @@ impl RemoteAppServerClient {
         request_id: RequestId,
         result: JsonRpcResult,
     ) -> IoResult<()> {
-        let (response_tx, response_rx) = oneshot::channel();
-        self.command_tx
-            .send(RemoteClientCommand::ResolveServerRequest {
-                request_id,
-                result,
-                response_tx,
-            })
+        self.request_handle()
+            .resolve_server_request(request_id, result)
             .await
-            .map_err(|_| {
-                IoError::new(
-                    ErrorKind::BrokenPipe,
-                    "remote app-server worker channel is closed",
-                )
-            })?;
-        response_rx.await.map_err(|_| {
-            IoError::new(
-                ErrorKind::BrokenPipe,
-                "remote app-server resolve channel is closed",
-            )
-        })?
     }
 
     pub async fn reject_server_request(
@@ -570,26 +535,9 @@ impl RemoteAppServerClient {
         request_id: RequestId,
         error: JSONRPCErrorError,
     ) -> IoResult<()> {
-        let (response_tx, response_rx) = oneshot::channel();
-        self.command_tx
-            .send(RemoteClientCommand::RejectServerRequest {
-                request_id,
-                error,
-                response_tx,
-            })
+        self.request_handle()
+            .reject_server_request(request_id, error)
             .await
-            .map_err(|_| {
-                IoError::new(
-                    ErrorKind::BrokenPipe,
-                    "remote app-server worker channel is closed",
-                )
-            })?;
-        response_rx.await.map_err(|_| {
-            IoError::new(
-                ErrorKind::BrokenPipe,
-                "remote app-server reject channel is closed",
-            )
-        })?
     }
 
     pub async fn next_event(&mut self) -> Option<AppServerEvent> {
@@ -677,6 +625,74 @@ impl RemoteAppServerRequestHandle {
             source,
         })
     }
+
+    pub async fn notify(&self, notification: ClientNotification) -> IoResult<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(RemoteClientCommand::Notify {
+                notification,
+                response_tx,
+            })
+            .await
+            .map_err(|_| worker_closed())?;
+        response_rx.await.map_err(|_| {
+            IoError::new(
+                ErrorKind::BrokenPipe,
+                "remote app-server notify channel is closed",
+            )
+        })?
+    }
+
+    pub async fn resolve_server_request(
+        &self,
+        request_id: RequestId,
+        result: JsonRpcResult,
+    ) -> IoResult<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(RemoteClientCommand::ResolveServerRequest {
+                request_id,
+                result,
+                response_tx,
+            })
+            .await
+            .map_err(|_| worker_closed())?;
+        response_rx.await.map_err(|_| {
+            IoError::new(
+                ErrorKind::BrokenPipe,
+                "remote app-server resolve channel is closed",
+            )
+        })?
+    }
+
+    pub async fn reject_server_request(
+        &self,
+        request_id: RequestId,
+        error: JSONRPCErrorError,
+    ) -> IoResult<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(RemoteClientCommand::RejectServerRequest {
+                request_id,
+                error,
+                response_tx,
+            })
+            .await
+            .map_err(|_| worker_closed())?;
+        response_rx.await.map_err(|_| {
+            IoError::new(
+                ErrorKind::BrokenPipe,
+                "remote app-server reject channel is closed",
+            )
+        })?
+    }
+}
+
+fn worker_closed() -> IoError {
+    IoError::new(
+        ErrorKind::BrokenPipe,
+        "remote app-server worker channel is closed",
+    )
 }
 
 async fn connect_websocket_endpoint(
@@ -1016,6 +1032,50 @@ fn websocket_close_error_is_already_closed(err: &TungsteniteError) -> bool {
 mod tests {
     use super::*;
 
+    async fn observe_unit_command(
+        command_rx: &mut mpsc::Receiver<RemoteClientCommand>,
+    ) -> serde_json::Value {
+        match command_rx.recv().await.expect("command should arrive") {
+            RemoteClientCommand::Notify {
+                notification,
+                response_tx,
+            } => {
+                let value = serde_json::to_value(notification).expect("notification should encode");
+                response_tx.send(Ok(())).expect("response should send");
+                serde_json::json!({"kind": "notify", "value": value})
+            }
+            RemoteClientCommand::ResolveServerRequest {
+                request_id,
+                result,
+                response_tx,
+            } => {
+                response_tx.send(Ok(())).expect("response should send");
+                serde_json::json!({
+                    "kind": "resolve",
+                    "requestId": request_id,
+                    "result": result,
+                })
+            }
+            RemoteClientCommand::RejectServerRequest {
+                request_id,
+                error,
+                response_tx,
+            } => {
+                response_tx.send(Ok(())).expect("response should send");
+                serde_json::json!({
+                    "kind": "reject",
+                    "requestId": request_id,
+                    "code": error.code,
+                    "message": error.message,
+                    "data": error.data,
+                })
+            }
+            RemoteClientCommand::Request { .. } | RemoteClientCommand::Shutdown { .. } => {
+                panic!("unexpected command")
+            }
+        }
+    }
+
     #[tokio::test]
     async fn shutdown_tolerates_worker_exit_after_command_is_queued() {
         let (command_tx, mut command_rx) = mpsc::channel(1);
@@ -1036,5 +1096,66 @@ mod tests {
             .shutdown()
             .await
             .expect("shutdown should complete when worker exits first");
+    }
+
+    #[tokio::test]
+    async fn request_handle_unit_commands_match_client_delegates() {
+        let (command_tx, mut command_rx) = mpsc::channel(8);
+        let (_event_tx, event_rx) = mpsc::unbounded_channel::<AppServerEvent>();
+        let worker_handle = tokio::spawn(std::future::pending());
+        let client = RemoteAppServerClient {
+            command_tx,
+            event_rx,
+            pending_events: VecDeque::new(),
+            server_version: None,
+            codex_home: None,
+            worker_handle,
+        };
+        let handle = client.request_handle();
+
+        let (direct_notify, observed_direct_notify) = tokio::join!(
+            client.notify(ClientNotification::Initialized),
+            observe_unit_command(&mut command_rx),
+        );
+        direct_notify.expect("client notify should succeed");
+        let (handle_notify, observed_handle_notify) = tokio::join!(
+            handle.notify(ClientNotification::Initialized),
+            observe_unit_command(&mut command_rx),
+        );
+        handle_notify.expect("handle notify should succeed");
+        assert_eq!(observed_direct_notify, observed_handle_notify);
+
+        let request_id = RequestId::String("server-1".to_string());
+        let result = serde_json::json!({"answer": 42});
+        let (direct_resolve, observed_direct_resolve) = tokio::join!(
+            client.resolve_server_request(request_id.clone(), result.clone()),
+            observe_unit_command(&mut command_rx),
+        );
+        direct_resolve.expect("client resolve should succeed");
+        let (handle_resolve, observed_handle_resolve) = tokio::join!(
+            handle.resolve_server_request(request_id.clone(), result),
+            observe_unit_command(&mut command_rx),
+        );
+        handle_resolve.expect("handle resolve should succeed");
+        assert_eq!(observed_direct_resolve, observed_handle_resolve);
+
+        let error = JSONRPCErrorError {
+            code: -32000,
+            message: "rejected".to_string(),
+            data: Some(serde_json::json!({"retry": false})),
+        };
+        let (direct_reject, observed_direct_reject) = tokio::join!(
+            client.reject_server_request(request_id.clone(), error.clone()),
+            observe_unit_command(&mut command_rx),
+        );
+        direct_reject.expect("client reject should succeed");
+        let (handle_reject, observed_handle_reject) = tokio::join!(
+            handle.reject_server_request(request_id, error),
+            observe_unit_command(&mut command_rx),
+        );
+        handle_reject.expect("handle reject should succeed");
+        assert_eq!(observed_direct_reject, observed_handle_reject);
+
+        client.worker_handle.abort();
     }
 }

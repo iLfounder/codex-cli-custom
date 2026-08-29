@@ -172,7 +172,7 @@ pub(crate) enum ExecutionAccountTransitionIdle {
 
 enum ExecutionAccountBindingCommit {
     PinFixed,
-    PreserveRotation { policy_revision: u64 },
+    PreserveRotation,
 }
 
 impl Drop for ExecutionAccountSwitchCancellation {
@@ -1225,7 +1225,6 @@ impl Session {
         target: Arc<crate::execution_account::ExecutionAccountContext>,
         services: crate::execution_account::ExecutionAccountServices,
         reservation: IdleExecutionAccountReservation,
-        policy_revision: u64,
     ) -> Result<
         codex_protocol::protocol::ExecutionAccountBinding,
         crate::execution_account::ExecutionAccountSwitchError,
@@ -1238,7 +1237,7 @@ impl Session {
                 services,
                 ExecutionAccountTransitionIdle::ExactReservation(reservation),
                 cancellation,
-                ExecutionAccountBindingCommit::PreserveRotation { policy_revision },
+                ExecutionAccountBindingCommit::PreserveRotation,
             )
             .await
     }
@@ -1318,20 +1317,7 @@ impl Session {
                 ExecutionAccountBindingCommit::PinFixed => {
                     codex_thread_store::AccountBindingCommitIntent::PinFixed
                 }
-                ExecutionAccountBindingCommit::PreserveRotation { policy_revision } => {
-                    let policy = self
-                        .services
-                        .thread_store
-                        .thread_account_rotation_policy(self.thread_id)
-                        .await
-                        .map_err(|_| {
-                            crate::execution_account::ExecutionAccountSwitchError::PersistenceFailed
-                        })?;
-                    if policy.revision != policy_revision {
-                        return Err(
-                            crate::execution_account::ExecutionAccountSwitchError::StaleGeneration,
-                        );
-                    }
+                ExecutionAccountBindingCommit::PreserveRotation => {
                     codex_thread_store::AccountBindingCommitIntent::PreserveRotation
                 }
             };

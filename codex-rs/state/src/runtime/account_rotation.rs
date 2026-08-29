@@ -1,46 +1,23 @@
-use std::collections::HashSet;
-
 use anyhow::Context;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::ExecutionAccountBinding;
 use serde::Deserialize;
 use serde::Serialize;
-use sqlx::Row;
-use sqlx::sqlite::SqliteRow;
 
 use super::StateRuntime;
+use super::account_rotation_cursor::ThreadAccountRotationCursor;
+use super::account_rotation_cursor::read_cursor;
+use super::account_rotation_cursor::write_cursor;
+use super::account_rotation_profile::AccountRotationProfile;
+use super::account_rotation_profile::AccountRotationProfileUpdate;
+use super::account_rotation_profile::ThreadAccountRotationMode;
+use super::account_rotation_profile::read_global_profile;
+use super::account_rotation_profile::read_thread_override;
+use super::account_rotation_profile::write_thread_override;
 
 const DEFAULT_ACCOUNT_SLOT_ID: &str = "default";
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum ThreadAccountRotationMode {
-    Fixed,
-    QuotaAware,
-    RoundRobin,
-    ExhaustThenNext,
-}
-
-impl ThreadAccountRotationMode {
-    fn as_db_str(self) -> &'static str {
-        match self {
-            Self::Fixed => "fixed",
-            Self::QuotaAware => "quotaAware",
-            Self::RoundRobin => "roundRobin",
-            Self::ExhaustThenNext => "exhaustThenNext",
-        }
-    }
-
-    fn from_db_str(value: &str) -> anyhow::Result<Self> {
-        match value {
-            "fixed" => Ok(Self::Fixed),
-            "quotaAware" => Ok(Self::QuotaAware),
-            "roundRobin" => Ok(Self::RoundRobin),
-            "exhaustThenNext" => Ok(Self::ExhaustThenNext),
-            _ => anyhow::bail!("invalid thread account rotation mode {value}"),
-        }
-    }
-}
+pub type ThreadAccountRotationPolicyUpdate = AccountRotationProfileUpdate;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,42 +38,6 @@ impl ThreadAccountRotationPolicy {
             revision: 0,
             last_committed_account_slot_id: Some(binding.slot_id.clone()),
         }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ThreadAccountRotationPolicyUpdate {
-    pub mode: ThreadAccountRotationMode,
-    pub fixed_account_slot_id: Option<String>,
-    pub automatic_account_slot_ids: Vec<String>,
-}
-
-impl ThreadAccountRotationPolicyUpdate {
-    pub fn validate(&self) -> anyhow::Result<()> {
-        if self.mode != ThreadAccountRotationMode::Fixed
-            && self.automatic_account_slot_ids.is_empty()
-        {
-            anyhow::bail!("automatic account rotation requires at least one account slot");
-        }
-        self.validate_persisted()
-    }
-
-    fn validate_persisted(&self) -> anyhow::Result<()> {
-        if self.mode == ThreadAccountRotationMode::Fixed && self.fixed_account_slot_id.is_none() {
-            anyhow::bail!("fixed account rotation requires a fixed account slot");
-        }
-        let mut unique = HashSet::with_capacity(self.automatic_account_slot_ids.len());
-        if self
-            .automatic_account_slot_ids
-            .iter()
-            .any(|slot_id| slot_id.is_empty() || !unique.insert(slot_id))
-        {
-            anyhow::bail!("automatic account rotation slots must be non-empty and distinct");
-        }
-        if self.fixed_account_slot_id.as_deref() == Some("") {
-            anyhow::bail!("fixed account rotation slot must not be empty");
-        }
-        Ok(())
     }
 }
 
@@ -123,119 +64,71 @@ impl StateRuntime {
         &self,
         thread_id: ThreadId,
     ) -> anyhow::Result<ThreadAccountRotationPolicy> {
-        if let Some(policy) = read_policy(self.pool.as_ref(), thread_id).await? {
-            return Ok(policy);
-        }
         let binding = self
             .execution_account_binding(thread_id)
             .await?
             .unwrap_or_else(default_execution_account_binding);
-        Ok(ThreadAccountRotationPolicy::virtual_fixed(&binding))
+        let profile = read_thread_override(self.pool.as_ref(), thread_id)
+            .await?
+            .or(read_global_profile(self.pool.as_ref()).await?);
+        let cursor = read_cursor(self.pool.as_ref(), thread_id).await?;
+        Ok(effective_policy(profile, &binding, cursor))
     }
 
+    /// Compatibility entrypoint: a thread-scoped update always creates or updates an override.
     pub async fn compare_and_swap_thread_account_rotation_policy(
         &self,
         thread_id: ThreadId,
         expected_revision: u64,
         update: &ThreadAccountRotationPolicyUpdate,
     ) -> anyhow::Result<Option<ThreadAccountRotationPolicy>> {
-        update.validate()?;
-        let next_revision = expected_revision
-            .checked_add(1)
-            .context("thread account rotation revision overflow")?;
-        let automatic_slot_ids_json = serde_json::to_string(&update.automatic_account_slot_ids)?;
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let current = read_policy(&mut *transaction, thread_id).await?;
-        let current_revision = current.as_ref().map_or(0, |policy| policy.revision);
-        if current_revision != expected_revision {
-            transaction.rollback().await?;
+        let Some(profile) = self
+            .compare_and_swap_thread_account_rotation_override(thread_id, expected_revision, update)
+            .await?
+        else {
             return Ok(None);
-        }
-
-        let rows_affected = if current.is_none() {
-            let last_committed_slot_id = sqlx::query_scalar::<_, String>(
-                "SELECT slot_id FROM thread_execution_account_bindings WHERE thread_id = ?",
-            )
-            .bind(thread_id.to_string())
-            .fetch_optional(&mut *transaction)
-            .await?
-            .unwrap_or_else(|| DEFAULT_ACCOUNT_SLOT_ID.to_string());
-            sqlx::query(
-                "INSERT INTO thread_account_rotation_policies \
-                 (thread_id, revision, mode, fixed_slot_id, automatic_slot_ids_json, \
-                  last_committed_slot_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, unixepoch())",
-            )
-            .bind(thread_id.to_string())
-            .bind(i64::try_from(next_revision)?)
-            .bind(update.mode.as_db_str())
-            .bind(&update.fixed_account_slot_id)
-            .bind(&automatic_slot_ids_json)
-            .bind(last_committed_slot_id)
-            .execute(&mut *transaction)
-            .await?
-            .rows_affected()
-        } else {
-            sqlx::query(
-                "UPDATE thread_account_rotation_policies SET revision = ?, mode = ?, \
-                 fixed_slot_id = ?, automatic_slot_ids_json = ?, updated_at = unixepoch() \
-                 WHERE thread_id = ? AND revision = ?",
-            )
-            .bind(i64::try_from(next_revision)?)
-            .bind(update.mode.as_db_str())
-            .bind(&update.fixed_account_slot_id)
-            .bind(&automatic_slot_ids_json)
-            .bind(thread_id.to_string())
-            .bind(i64::try_from(expected_revision)?)
-            .execute(&mut *transaction)
-            .await?
-            .rows_affected()
         };
-        if rows_affected != 1 {
-            transaction.rollback().await?;
-            return Ok(None);
-        }
-        let committed = read_policy(&mut *transaction, thread_id)
+        let binding = self
+            .execution_account_binding(thread_id)
             .await?
-            .context("thread account rotation policy disappeared after commit")?;
-        transaction.commit().await?;
-        Ok(Some(committed))
+            .unwrap_or_else(default_execution_account_binding);
+        let cursor = read_cursor(self.pool.as_ref(), thread_id).await?;
+        Ok(Some(effective_policy(Some(profile), &binding, cursor)))
     }
 
-    pub async fn compare_and_swap_thread_account_rotation_cursor(
+    pub async fn compare_and_swap_thread_account_rotation_cursor_for_binding(
         &self,
         thread_id: ThreadId,
-        expected_revision: u64,
+        expected_binding: &ExecutionAccountBinding,
         accepted_account_slot_id: &str,
     ) -> anyhow::Result<Option<ThreadAccountRotationPolicy>> {
         if accepted_account_slot_id.is_empty() {
             anyhow::bail!("accepted account slot must not be empty");
         }
+        if accepted_account_slot_id != expected_binding.slot_id {
+            anyhow::bail!("cursor account slot must match the expected execution account binding");
+        }
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let updated = sqlx::query(
-            "UPDATE thread_account_rotation_policies SET last_committed_slot_id = ?, \
-             updated_at = unixepoch() WHERE thread_id = ? AND revision = ?",
-        )
-        .bind(accepted_account_slot_id)
-        .bind(thread_id.to_string())
-        .bind(i64::try_from(expected_revision)?)
-        .execute(&mut *transaction)
-        .await?;
-        if updated.rows_affected() != 1 {
+        if !binding_matches(&mut transaction, thread_id, expected_binding).await? {
             transaction.rollback().await?;
             return Ok(None);
         }
-        let committed = read_policy(&mut *transaction, thread_id)
-            .await?
-            .context("thread account rotation policy disappeared after cursor commit")?;
+        let cursor = write_cursor(&mut transaction, thread_id, accepted_account_slot_id).await?;
+        let policy = effective_policy_in_transaction(
+            &mut transaction,
+            thread_id,
+            expected_binding,
+            Some(cursor),
+        )
+        .await?;
         transaction.commit().await?;
-        Ok(Some(committed))
+        Ok(Some(policy))
     }
 
     pub async fn compare_and_swap_successful_account_rotation(
         &self,
         thread_id: ThreadId,
         expected_binding: &ExecutionAccountBinding,
-        expected_policy_revision: u64,
         accepted_account_slot_id: &str,
         binding_transition: SuccessfulAccountBindingTransition,
     ) -> anyhow::Result<Option<SuccessfulAccountRotationCommit>> {
@@ -255,24 +148,10 @@ impl StateRuntime {
                 .context("execution account generation overflow")?,
         };
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let current_binding = sqlx::query_as::<_, (String, i64)>(
-            "SELECT slot_id, generation FROM thread_execution_account_bindings \
-             WHERE thread_id = ?",
-        )
-        .bind(thread_id.to_string())
-        .fetch_optional(&mut *transaction)
-        .await?;
-        if current_binding
-            .as_ref()
-            .is_none_or(|(slot_id, generation)| {
-                slot_id != &expected_binding.slot_id
-                    || u64::try_from(*generation).ok() != Some(expected_binding.generation)
-            })
-        {
+        if !binding_matches(&mut transaction, thread_id, expected_binding).await? {
             transaction.rollback().await?;
             return Ok(None);
         }
-
         if binding_transition == SuccessfulAccountBindingTransition::AdvanceGeneration {
             let updated = sqlx::query(
                 "UPDATE thread_execution_account_bindings SET slot_id = ?, generation = ? \
@@ -290,98 +169,16 @@ impl StateRuntime {
                 return Ok(None);
             }
         }
-
-        let cursor_updated = sqlx::query(
-            "UPDATE thread_account_rotation_policies SET last_committed_slot_id = ?, \
-             updated_at = unixepoch() WHERE thread_id = ? AND revision = ?",
-        )
-        .bind(accepted_account_slot_id)
-        .bind(thread_id.to_string())
-        .bind(i64::try_from(expected_policy_revision)?)
-        .execute(&mut *transaction)
-        .await?;
-        if cursor_updated.rows_affected() != 1 {
-            transaction.rollback().await?;
-            return Ok(None);
-        }
-        let policy = read_policy(&mut *transaction, thread_id)
-            .await?
-            .context("thread account rotation policy disappeared after successful commit")?;
         let binding = ExecutionAccountBinding {
             slot_id: accepted_account_slot_id.to_string(),
             generation: next_generation,
         };
+        let cursor = write_cursor(&mut transaction, thread_id, accepted_account_slot_id).await?;
+        let policy =
+            effective_policy_in_transaction(&mut transaction, thread_id, &binding, Some(cursor))
+                .await?;
         transaction.commit().await?;
         Ok(Some(SuccessfulAccountRotationCommit { binding, policy }))
-    }
-
-    pub async fn remove_account_slot_from_automatic_rotation_policies(
-        &self,
-        account_slot_id: &str,
-    ) -> anyhow::Result<Vec<(ThreadId, ThreadAccountRotationPolicy)>> {
-        if account_slot_id.is_empty() {
-            anyhow::bail!("account slot must not be empty");
-        }
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let rows = sqlx::query(
-            "SELECT thread_id, revision, mode, fixed_slot_id, automatic_slot_ids_json, \
-             last_committed_slot_id FROM thread_account_rotation_policies ORDER BY thread_id",
-        )
-        .fetch_all(&mut *transaction)
-        .await?;
-        let mut affected = Vec::new();
-        for row in rows {
-            let thread_id = ThreadId::from_string(row.try_get::<String, _>("thread_id")?.as_str())?;
-            let mut policy = policy_from_row(&row)?;
-            if !policy
-                .automatic_account_slot_ids
-                .iter()
-                .any(|slot_id| slot_id == account_slot_id)
-            {
-                continue;
-            }
-            policy
-                .automatic_account_slot_ids
-                .retain(|slot_id| slot_id != account_slot_id);
-            let previous_revision = i64::try_from(policy.revision)?;
-            policy.revision = policy
-                .revision
-                .checked_add(1)
-                .context("thread account rotation revision overflow")?;
-            let revision = i64::try_from(policy.revision)?;
-            let automatic_slot_ids_json =
-                serde_json::to_string(&policy.automatic_account_slot_ids)?;
-            affected.push((
-                thread_id,
-                previous_revision,
-                revision,
-                automatic_slot_ids_json,
-                policy,
-            ));
-        }
-
-        for (thread_id, previous_revision, revision, automatic_slot_ids_json, _) in &affected {
-            let updated = sqlx::query(
-                "UPDATE thread_account_rotation_policies SET revision = ?, \
-                 automatic_slot_ids_json = ?, updated_at = unixepoch() \
-                 WHERE thread_id = ? AND revision = ?",
-            )
-            .bind(revision)
-            .bind(automatic_slot_ids_json)
-            .bind(thread_id.to_string())
-            .bind(previous_revision)
-            .execute(&mut *transaction)
-            .await?;
-            if updated.rows_affected() != 1 {
-                transaction.rollback().await?;
-                anyhow::bail!("thread account rotation changed during credential invalidation");
-            }
-        }
-        transaction.commit().await?;
-        Ok(affected
-            .into_iter()
-            .map(|(thread_id, _, _, _, policy)| (thread_id, policy))
-            .collect())
     }
 
     pub async fn compare_and_swap_execution_account_binding_with_intent(
@@ -414,9 +211,9 @@ impl StateRuntime {
             transaction.rollback().await?;
             return Ok(None);
         }
-
         if intent == AccountBindingCommitIntent::PinFixed {
-            pin_fixed_policy(&mut transaction, thread_id, next_slot_id).await?;
+            pin_fixed_override(&mut transaction, thread_id, next_slot_id).await?;
+            write_cursor(&mut transaction, thread_id, next_slot_id).await?;
         }
         transaction.commit().await?;
         Ok(Some(ExecutionAccountBinding {
@@ -433,86 +230,72 @@ fn default_execution_account_binding() -> ExecutionAccountBinding {
     }
 }
 
-async fn pin_fixed_policy(
+async fn pin_fixed_override(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     thread_id: ThreadId,
     next_slot_id: &str,
 ) -> anyhow::Result<()> {
-    let current = read_policy(&mut **transaction, thread_id).await?;
-    match current {
-        Some(current) => {
-            let next_revision = current
-                .revision
-                .checked_add(1)
-                .context("thread account rotation revision overflow")?;
-            let updated = sqlx::query(
-                "UPDATE thread_account_rotation_policies SET revision = ?, mode = 'fixed', \
-                 fixed_slot_id = ?, last_committed_slot_id = ?, updated_at = unixepoch() \
-                 WHERE thread_id = ? AND revision = ?",
-            )
-            .bind(i64::try_from(next_revision)?)
-            .bind(next_slot_id)
-            .bind(next_slot_id)
-            .bind(thread_id.to_string())
-            .bind(i64::try_from(current.revision)?)
-            .execute(&mut **transaction)
-            .await?;
-            if updated.rows_affected() != 1 {
-                anyhow::bail!("thread account rotation changed during binding commit");
-            }
-        }
-        None => {
-            sqlx::query(
-                "INSERT INTO thread_account_rotation_policies \
-                 (thread_id, revision, mode, fixed_slot_id, automatic_slot_ids_json, \
-                  last_committed_slot_id, updated_at) \
-                 VALUES (?, 1, 'fixed', ?, '[]', ?, unixepoch())",
-            )
-            .bind(thread_id.to_string())
-            .bind(next_slot_id)
-            .bind(next_slot_id)
-            .execute(&mut **transaction)
-            .await?;
-        }
-    }
+    let current = read_thread_override(&mut **transaction, thread_id).await?;
+    let update = AccountRotationProfileUpdate {
+        mode: ThreadAccountRotationMode::Fixed,
+        fixed_account_slot_id: Some(next_slot_id.to_string()),
+        automatic_account_slot_ids: current.as_ref().map_or_else(Vec::new, |profile| {
+            profile.automatic_account_slot_ids.clone()
+        }),
+    };
+    write_thread_override(
+        transaction,
+        thread_id,
+        current.as_ref().map_or(0, |profile| profile.revision),
+        &update,
+    )
+    .await?;
     Ok(())
 }
 
-async fn read_policy<'e, E>(
-    executor: E,
+async fn binding_matches(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     thread_id: ThreadId,
-) -> anyhow::Result<Option<ThreadAccountRotationPolicy>>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
-{
-    let row = sqlx::query(
-        "SELECT revision, mode, fixed_slot_id, automatic_slot_ids_json, \
-         last_committed_slot_id FROM thread_account_rotation_policies WHERE thread_id = ?",
+    expected: &ExecutionAccountBinding,
+) -> anyhow::Result<bool> {
+    let current = sqlx::query_as::<_, (String, i64)>(
+        "SELECT slot_id, generation FROM thread_execution_account_bindings WHERE thread_id = ?",
     )
     .bind(thread_id.to_string())
-    .fetch_optional(executor)
+    .fetch_optional(&mut **transaction)
     .await?;
-    row.map(|row| policy_from_row(&row)).transpose()
+    Ok(current.is_some_and(|(slot_id, generation)| {
+        slot_id == expected.slot_id && u64::try_from(generation).ok() == Some(expected.generation)
+    }))
 }
 
-fn policy_from_row(row: &SqliteRow) -> anyhow::Result<ThreadAccountRotationPolicy> {
-    let automatic_slot_ids_json = row.try_get::<String, _>("automatic_slot_ids_json")?;
-    let policy = ThreadAccountRotationPolicy {
-        mode: ThreadAccountRotationMode::from_db_str(row.try_get("mode")?)?,
-        fixed_account_slot_id: row.try_get("fixed_slot_id")?,
-        automatic_account_slot_ids: serde_json::from_str(&automatic_slot_ids_json)
-            .context("invalid automatic account slot ids")?,
-        revision: u64::try_from(row.try_get::<i64, _>("revision")?)?,
-        last_committed_account_slot_id: row.try_get("last_committed_slot_id")?,
+async fn effective_policy_in_transaction(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    thread_id: ThreadId,
+    binding: &ExecutionAccountBinding,
+    cursor: Option<ThreadAccountRotationCursor>,
+) -> anyhow::Result<ThreadAccountRotationPolicy> {
+    let profile = read_thread_override(&mut **transaction, thread_id)
+        .await?
+        .or(read_global_profile(&mut **transaction).await?);
+    Ok(effective_policy(profile, binding, cursor))
+}
+
+fn effective_policy(
+    profile: Option<AccountRotationProfile>,
+    binding: &ExecutionAccountBinding,
+    cursor: Option<ThreadAccountRotationCursor>,
+) -> ThreadAccountRotationPolicy {
+    let Some(profile) = profile else {
+        return ThreadAccountRotationPolicy::virtual_fixed(binding);
     };
-    ThreadAccountRotationPolicyUpdate {
-        mode: policy.mode,
-        fixed_account_slot_id: policy.fixed_account_slot_id.clone(),
-        automatic_account_slot_ids: policy.automatic_account_slot_ids.clone(),
+    ThreadAccountRotationPolicy {
+        mode: profile.mode,
+        fixed_account_slot_id: profile.fixed_account_slot_id,
+        automatic_account_slot_ids: profile.automatic_account_slot_ids,
+        revision: profile.revision,
+        last_committed_account_slot_id: cursor.map(|cursor| cursor.last_committed_account_slot_id),
     }
-    .validate_persisted()
-    .context("invalid stored thread account rotation policy")?;
-    Ok(policy)
 }
 
 #[cfg(test)]

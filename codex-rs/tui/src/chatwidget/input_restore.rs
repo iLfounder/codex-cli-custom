@@ -575,4 +575,41 @@ impl ChatWidget {
     pub(crate) fn set_queue_autosend_suppressed(&mut self, suppressed: bool) {
         self.input_queue.suppress_queue_autosend = suppressed;
     }
+
+    pub(crate) fn suspend_for_app_server_reconnect(
+        &mut self,
+        message: String,
+    ) -> Option<ThreadInputState> {
+        let mut input_state = self.capture_thread_input_state();
+        if let Some(input_state) = input_state.as_mut() {
+            input_state.safety_buffering_prompt = None;
+            input_state.pending_steers.clear();
+            input_state.pending_steer_history_records.clear();
+            input_state.pending_steer_compare_keys.clear();
+            input_state.rejected_steers_queue.clear();
+            input_state.rejected_steer_history_records.clear();
+            input_state.queued_user_messages.clear();
+            input_state.queued_user_message_history_records.clear();
+            input_state.user_turn_pending_start = false;
+            input_state.submit_pending_steers_after_interrupt = false;
+            input_state.task_running = false;
+            input_state.agent_turn_running = false;
+        }
+        self.input_queue.clear();
+        self.input_queue.suppress_queue_autosend = true;
+        self.finalize_turn();
+        self.bottom_pane.set_composer_input_enabled(
+            /*enabled*/ false,
+            Some("Reconnecting to app server…".to_string()),
+        );
+        self.add_error_message(message);
+        input_state
+    }
+
+    pub(crate) fn finish_app_server_reconnect_without_thread(&mut self) {
+        self.input_queue.suppress_queue_autosend = false;
+        self.bottom_pane
+            .set_composer_input_enabled(/*enabled*/ true, /*placeholder*/ None);
+        self.request_redraw();
+    }
 }

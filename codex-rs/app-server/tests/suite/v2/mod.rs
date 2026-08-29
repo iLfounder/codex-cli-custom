@@ -35,11 +35,15 @@ mod external_agent_import_sync;
 mod feedback;
 mod fs;
 mod git_attribution;
+#[cfg(unix)]
+mod global_account_lifecycle;
 mod guardian_v2;
 mod hooks_list;
 mod host_skills;
 mod imagegen_extension;
 mod initialize;
+#[cfg(unix)]
+mod legacy_admission;
 mod marketplace_add;
 mod marketplace_remove;
 mod marketplace_upgrade;
@@ -89,6 +93,8 @@ mod server_diagnostics;
 mod session_end;
 mod skills_list;
 mod sleep;
+#[cfg(unix)]
+mod thread_account_rotation;
 mod thread_account_switch;
 mod thread_archive;
 mod thread_delete;

@@ -5,6 +5,7 @@ use super::thread_fork_goal::inherit_thread_goal_snapshot;
 use super::turn_processor::can_accept_direct_input;
 use super::*;
 use crate::error_code::method_not_found;
+use crate::legacy_admission::LegacyAdmissionPermit;
 use codex_app_server_protocol::SelectedCapabilityRoot;
 use codex_app_server_protocol::ThreadRevertParams;
 use codex_app_server_protocol::ThreadRevertResponse;
@@ -1098,8 +1099,9 @@ impl ThreadRequestProcessor {
         &self,
         request_id: &ConnectionRequestId,
         params: ThreadCompactStartParams,
+        legacy_admission_permit: LegacyAdmissionPermit,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        self.thread_compact_start_inner(request_id, params)
+        self.thread_compact_start_inner(request_id, params, legacy_admission_permit)
             .await
             .map(|response| Some(response.into()))
     }
@@ -1226,8 +1228,9 @@ impl ThreadRequestProcessor {
         &self,
         request_id: &ConnectionRequestId,
         params: ThreadShellCommandParams,
+        legacy_admission_permit: LegacyAdmissionPermit,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        self.thread_shell_command_inner(request_id, params)
+        self.thread_shell_command_inner(request_id, params, legacy_admission_permit)
             .await
             .map(|response| Some(response.into()))
     }
@@ -3153,13 +3156,21 @@ impl ThreadRequestProcessor {
         &self,
         request_id: &ConnectionRequestId,
         params: ThreadCompactStartParams,
+        legacy_admission_permit: LegacyAdmissionPermit,
     ) -> Result<ThreadCompactStartResponse, JSONRPCErrorError> {
         let ThreadCompactStartParams { thread_id } = params;
 
-        let (_, thread) = self.load_thread(&thread_id).await?;
-        self.submit_core_op(request_id, thread.as_ref(), Op::Compact)
+        let (thread_id, thread) = self.load_thread(&thread_id).await?;
+        let turn_id = self
+            .submit_core_op(request_id, thread.as_ref(), Op::Compact)
             .await
             .map_err(|err| internal_error(format!("failed to start compaction: {err}")))?;
+        self.thread_state_manager
+            .thread_state(thread_id)
+            .await
+            .lock()
+            .await
+            .register_admitted_turn(turn_id, Some(legacy_admission_permit));
         Ok(ThreadCompactStartResponse {})
     }
 
@@ -3231,6 +3242,7 @@ impl ThreadRequestProcessor {
         &self,
         request_id: &ConnectionRequestId,
         params: ThreadShellCommandParams,
+        legacy_admission_permit: LegacyAdmissionPermit,
     ) -> Result<ThreadShellCommandResponse, JSONRPCErrorError> {
         let ThreadShellCommandParams { thread_id, command } = params;
         let command = command.trim().to_string();
@@ -3248,14 +3260,21 @@ impl ThreadRequestProcessor {
             return Err(internal_error("local environment is not configured"));
         }
 
-        let (_, thread) = self.load_thread(&thread_id).await?;
-        self.submit_core_op(
-            request_id,
-            thread.as_ref(),
-            Op::RunUserShellCommand { command },
-        )
-        .await
-        .map_err(|err| internal_error(format!("failed to start shell command: {err}")))?;
+        let (thread_id, thread) = self.load_thread(&thread_id).await?;
+        let turn_id = self
+            .submit_core_op(
+                request_id,
+                thread.as_ref(),
+                Op::RunUserShellCommand { command },
+            )
+            .await
+            .map_err(|err| internal_error(format!("failed to start shell command: {err}")))?;
+        self.thread_state_manager
+            .thread_state(thread_id)
+            .await
+            .lock()
+            .await
+            .register_admitted_turn(turn_id, Some(legacy_admission_permit));
         Ok(ThreadShellCommandResponse {})
     }
 

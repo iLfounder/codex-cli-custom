@@ -62,6 +62,52 @@ pub struct LoaderOverrides {
 }
 
 impl LoaderOverrides {
+    /// Returns whether this invocation can rely exclusively on daemon-owned
+    /// configuration inputs.
+    ///
+    /// Keep the destructuring exhaustive so adding another loader escape hatch
+    /// requires an explicit launch-routing decision.
+    pub fn is_default_for_canonical_launch(&self) -> bool {
+        let Self {
+            packaged_defaults_path,
+            user_config_path,
+            user_config_profile,
+            managed_config_path,
+            system_config_path,
+            system_requirements_path,
+            ignore_managed_requirements,
+            ignore_login_requirements,
+            ignore_user_config,
+            ignore_project_config,
+            ignore_user_and_project_exec_policy_rules,
+            #[cfg(target_os = "macos")]
+            managed_preferences_base64,
+            macos_managed_config_requirements_base64,
+        } = self;
+        packaged_defaults_path.is_none()
+            && user_config_path.is_none()
+            && user_config_profile.is_none()
+            && managed_config_path.is_none()
+            && system_config_path.is_none()
+            && system_requirements_path.is_none()
+            && !ignore_managed_requirements
+            && !ignore_login_requirements
+            && !ignore_user_config
+            && !ignore_project_config
+            && !ignore_user_and_project_exec_policy_rules
+            && macos_managed_config_requirements_base64.is_none()
+            && {
+                #[cfg(target_os = "macos")]
+                {
+                    managed_preferences_base64.is_none()
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    true
+                }
+            }
+    }
+
     /// Returns overrides that ignore host-managed configuration.
     ///
     /// This is intended for tests that should load only repo-controlled config fixtures.

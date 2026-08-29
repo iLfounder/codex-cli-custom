@@ -13,6 +13,7 @@ pub(crate) use history::HistoryHydrationScope;
 pub(crate) use history::thread_items_page_params;
 
 use crate::bottom_pane::FeedbackAudience;
+use crate::canonical_launch_projection::CanonicalLaunchProjection;
 use crate::legacy_core::config::Config;
 use crate::service_tier_resolution;
 use crate::session_state::MessageHistoryMetadata;
@@ -368,6 +369,7 @@ struct PendingThreadTransition {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ThreadParamsMode {
     Embedded,
+    Canonical(CanonicalLaunchProjection),
     Remote,
 }
 
@@ -386,6 +388,7 @@ impl ThreadParamsMode {
     fn model_provider_from_config(self, config: &Config) -> Option<String> {
         match self {
             Self::Embedded => Some(config.model_provider_id.clone()),
+            Self::Canonical(_) => Some(config.model_provider_id.clone()),
             Self::Remote => None,
         }
     }
@@ -475,10 +478,10 @@ impl AppServerSession {
     }
 
     pub(crate) fn server_version(&self) -> Option<&str> {
-        let AppServerClient::Remote(client) = &self.client else {
-            return None;
-        };
-        client.server_version()
+        match &self.client {
+            AppServerClient::Remote(client) => client.server_version(),
+            AppServerClient::InProcess(_) | AppServerClient::Supervised(_) => None,
+        }
     }
 
     pub(crate) async fn bootstrap(&mut self, config: &Config) -> Result<AppServerBootstrap> {
@@ -2271,7 +2274,7 @@ fn thread_start_params_from_config(
             )
         })
         .flatten();
-    ThreadStartParams {
+    let mut params = ThreadStartParams {
         model: config.model.clone(),
         model_provider: thread_params_mode.model_provider_from_config(config),
         service_tier: service_tier_override_from_config(config),
@@ -2291,7 +2294,11 @@ fn thread_start_params_from_config(
         ),
         dynamic_tools: Some(thread_control_dynamic_tools()),
         ..ThreadStartParams::default()
+    };
+    if let ThreadParamsMode::Canonical(projection) = thread_params_mode {
+        projection.restrict_start(&mut params);
     }
+    params
 }
 
 fn thread_resume_params_from_config(
@@ -2336,7 +2343,7 @@ fn thread_resume_params_from_config(
             (None, None)
         }
     };
-    ThreadResumeParams {
+    let mut params = ThreadResumeParams {
         thread_id: thread_id.to_string(),
         model,
         model_provider,
@@ -2353,7 +2360,11 @@ fn thread_resume_params_from_config(
         ),
         dynamic_tools: Some(thread_control_dynamic_tools()),
         ..ThreadResumeParams::default()
+    };
+    if let ThreadParamsMode::Canonical(projection) = thread_params_mode {
+        projection.restrict_resume(&mut params);
     }
+    params
 }
 
 fn thread_fork_params_from_config(
@@ -2372,7 +2383,7 @@ fn thread_fork_params_from_config(
             )
         })
         .flatten();
-    ThreadForkParams {
+    let mut params = ThreadForkParams {
         thread_id: thread_id.to_string(),
         model: config.model.clone(),
         model_provider: thread_params_mode.model_provider_from_config(&config),
@@ -2397,7 +2408,11 @@ fn thread_fork_params_from_config(
         ephemeral: config.ephemeral,
         thread_source: Some(ThreadSource::User),
         ..ThreadForkParams::default()
+    };
+    if let ThreadParamsMode::Canonical(projection) = thread_params_mode {
+        projection.restrict_fork(&mut params);
     }
+    params
 }
 
 fn thread_cwd_from_config(
@@ -2406,7 +2421,9 @@ fn thread_cwd_from_config(
     remote_cwd_override: Option<&std::path::Path>,
 ) -> Option<String> {
     match thread_params_mode {
-        ThreadParamsMode::Embedded => Some(config.cwd.to_string_lossy().to_string()),
+        ThreadParamsMode::Embedded | ThreadParamsMode::Canonical(_) => {
+            Some(config.cwd.to_string_lossy().to_string())
+        }
         ThreadParamsMode::Remote => {
             remote_cwd_override.map(|cwd| cwd.to_string_lossy().to_string())
         }
@@ -2588,7 +2605,7 @@ fn display_permission_profile_from_thread_response(
             PermissionProfile::from_legacy_sandbox_policy_for_cwd(&sandbox.to_core(), cwd)
         }
         ThreadParamsMode::Embedded => config.permissions.effective_permission_profile(),
-        ThreadParamsMode::Remote => {
+        ThreadParamsMode::Canonical(_) | ThreadParamsMode::Remote => {
             PermissionProfile::from_legacy_sandbox_policy_for_cwd(&sandbox.to_core(), cwd)
         }
     }

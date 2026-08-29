@@ -29,6 +29,48 @@ use wiremock::matchers::path;
 const SECOND_SLOT_ID: &str = "11111111111141118111111111111111";
 const THIRD_SLOT_ID: &str = "22222222222242228222222222222222";
 
+#[cfg(debug_assertions)]
+#[test]
+fn token_manager_base_url_uses_fixed_default_without_test_override() {
+    assert_eq!(
+        resolve_token_manager_base_url(/*test_override*/ None),
+        url::Url::parse(TOKEN_MANAGER_URL).ok()
+    );
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn token_manager_base_url_accepts_isolated_test_override() {
+    for test_override in ["http://127.0.0.1:43101/", "http://[::1]:43101/"] {
+        assert_eq!(
+            resolve_token_manager_base_url(Some(test_override)),
+            url::Url::parse(test_override).ok()
+        );
+    }
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn token_manager_base_url_rejects_invalid_or_unsafe_test_override() {
+    for test_override in [
+        "not a URL",
+        "http://192.0.2.1:43101/",
+        "https://127.0.0.1:43101/",
+        "file:///tmp/tokenmanager.sock",
+        "http://user@127.0.0.1:43101/",
+        "http://127.0.0.1:43101/snapshots",
+        "http://127.0.0.1:43101/?mode=test",
+        "http://127.0.0.1:43101/#test",
+        "http://localhost:43101/",
+    ] {
+        assert_eq!(
+            resolve_token_manager_base_url(Some(test_override)),
+            None,
+            "override should be rejected: {test_override}"
+        );
+    }
+}
+
 fn write_global_registry(user_home: &Path, entries: &[(u32, &Path)]) {
     let config = user_home.join(".config");
     std::fs::create_dir_all(&config).unwrap();
@@ -482,6 +524,17 @@ async fn matching_token_manager_source_overlays_health_and_quota() {
     let process_home = tempdir().unwrap();
     let mut registry = registry_for_home(process_home.path()).await;
     persist_chatgpt_auth(process_home.path(), "owner-one");
+    {
+        let mut state = registry.state.write().unwrap();
+        let legacy_default = state
+            .slots
+            .iter_mut()
+            .find(|slot| slot.manifest.is_default)
+            .unwrap();
+        legacy_default.manifest.status = ManifestSlotStatus::Failed;
+        legacy_default.manifest.attempt_generation = 9;
+        legacy_default.manifest.error_code = Some("staleLegacyFailure".to_string());
+    }
     registry.global_directory_user_home = Some(user_home.path().to_path_buf());
     write_global_registry(user_home.path(), &[(1, process_home.path())]);
     let account_id = global::AccountId::parse("C1").unwrap();
@@ -518,6 +571,18 @@ async fn matching_token_manager_source_overlays_health_and_quota() {
     assert_eq!(response.registry_revision, baseline_revision + 1);
     assert_eq!(slot.status, AccountSlotStatus::Ready);
     assert_eq!(slot.health, AccountSlotHealth::Degraded);
+    assert_eq!(slot.attempt_generation, 0);
+    assert_eq!(slot.error_code, None);
+    assert_eq!(
+        slot.actions
+            .iter()
+            .find(|action| action.action == AccountSlotAction::Logout),
+        Some(&AccountSlotActionAvailability {
+            action: AccountSlotAction::Logout,
+            allowed: true,
+            deny_reason: None,
+        })
+    );
     assert_eq!(
         slot.quota
             .as_ref()

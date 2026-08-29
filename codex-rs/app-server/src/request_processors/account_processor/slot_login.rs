@@ -45,10 +45,12 @@ use crate::external_auth::ExternalAuthBridge;
 
 const SLOT_RETRY_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
 
+mod global;
 mod transport;
 
 pub(super) struct SlotLoginCoordinator {
     active: Mutex<HashMap<String, ActiveSlotLogin>>,
+    global_active: Mutex<HashMap<String, ActiveGlobalLogin>>,
     external_owners: Mutex<HashMap<String, ExternalSlotOwner>>,
     start_lock: Semaphore,
 }
@@ -57,6 +59,7 @@ impl Default for SlotLoginCoordinator {
     fn default() -> Self {
         Self {
             active: Mutex::new(HashMap::new()),
+            global_active: Mutex::new(HashMap::new()),
             external_owners: Mutex::new(HashMap::new()),
             start_lock: Semaphore::new(/*permits*/ 1),
         }
@@ -76,6 +79,42 @@ struct ActiveSlotLogin {
     owner_connection: ConnectionId,
     cancel: SlotLoginCancel,
     completion: Arc<SlotLoginCompletion>,
+}
+
+#[derive(Clone)]
+struct ActiveGlobalLogin {
+    account_slot_id: String,
+    owner_connection: ConnectionId,
+    cancel: SlotLoginCancel,
+    completion: Arc<SlotLoginCompletion>,
+    terminal: Arc<GlobalLoginTerminal>,
+}
+
+impl ActiveGlobalLogin {
+    fn request_cancel(&self) -> bool {
+        let claimed = self.terminal.request_cancel();
+        if claimed {
+            self.cancel.cancel();
+        }
+        claimed
+    }
+}
+
+#[derive(Default)]
+struct GlobalLoginTerminal(AtomicBool);
+
+impl GlobalLoginTerminal {
+    fn try_begin_commit(&self) -> bool {
+        self.0
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    fn request_cancel(&self) -> bool {
+        self.0
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
 }
 
 #[derive(Clone)]
@@ -136,6 +175,11 @@ impl AccountRequestProcessor {
             .acquire()
             .await
             .map_err(|_| internal_error("account slot login coordinator is unavailable"))?;
+        if self.account_registry.global_managed_mode()? {
+            return self
+                .login_global_account_slot_response(owner_connection, params)
+                .await;
+        }
         let (requested_slot, kind) = slot_request_identity(&params);
         let binding_transition = if let Some(slot_id) = requested_slot.as_deref() {
             self.await_previous_slot_login(slot_id).await?;
@@ -169,21 +213,6 @@ impl AccountRequestProcessor {
             .prepare_slot_login(requested_slot, operation_id, candidate_runtime_version)
             .await?;
         drop(binding_transition);
-        let rotation_affected = match self
-            .account_registry
-            .reset_automatic_rotation_memberships(&prepared.account_slot_id)
-            .await
-        {
-            Ok(thread_ids) => thread_ids,
-            Err(error) => {
-                self.finish_slot_failure(&prepared, ERROR_LOGIN_FAILED)
-                    .await;
-                return Err(error);
-            }
-        };
-        for thread_id in rotation_affected {
-            self.session_runtime.publish_thread(thread_id).await;
-        }
         if let Err(error) = self
             .session_runtime
             .begin_operation(operation(
@@ -615,7 +644,20 @@ impl AccountRequestProcessor {
     ) -> Result<bool, JSONRPCErrorError> {
         let active = self.slot_logins.active.lock().await.get(login_id).cloned();
         let Some(active) = active else {
-            return Ok(false);
+            let active = self
+                .slot_logins
+                .global_active
+                .lock()
+                .await
+                .get(login_id)
+                .cloned();
+            let Some(active) = active else {
+                return Ok(false);
+            };
+            if !active.request_cancel() {
+                return Ok(false);
+            }
+            return Ok(true);
         };
         if !active.prepared.try_claim_failure() {
             return Ok(false);
@@ -637,6 +679,17 @@ impl AccountRequestProcessor {
             .collect::<Vec<_>>();
         for login in active {
             login.cancel.cancel();
+        }
+        let global_active = self
+            .slot_logins
+            .global_active
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for login in global_active {
+            login.request_cancel();
         }
         let external_owners = self
             .slot_logins
@@ -666,6 +719,18 @@ impl AccountRequestProcessor {
             login.cancel.cancel();
             self.finish_slot_failure(&login.prepared, ERROR_REFRESH_UNAVAILABLE)
                 .await;
+        }
+        let global_active = self
+            .slot_logins
+            .global_active
+            .lock()
+            .await
+            .values()
+            .filter(|active| active.owner_connection == connection_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        for login in global_active {
+            login.request_cancel();
         }
         let external_owners = {
             let mut owners = self.slot_logins.external_owners.lock().await;

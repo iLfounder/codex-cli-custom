@@ -338,6 +338,30 @@ pub(super) async fn start_app_server_for_session_command(
     }
 
     let workload_identity_selected = codex_login::is_workload_identity_selected();
+    let requested_launch_mode = if explicit_remote_endpoint.is_some() {
+        crate::launch_overrides::RequestedLaunchMode::ExplicitRemote
+    } else if workload_identity_selected {
+        crate::launch_overrides::RequestedLaunchMode::WorkloadIdentity
+    } else if cli.embedded {
+        crate::launch_overrides::RequestedLaunchMode::ExplicitEmbedded
+    } else {
+        crate::launch_overrides::RequestedLaunchMode::StandardLocal
+    };
+    let launch_disposition = crate::launch_overrides::classify_current_launch(
+        &codex_home,
+        crate::launch_overrides::LaunchOperation::ExistingThread,
+        requested_launch_mode,
+        crate::launch_overrides::invocation_overrides(
+            &cli,
+            &cli_kv_overrides,
+            &launch_loader_overrides,
+        ),
+    )?;
+    if cli.embedded && (explicit_remote_endpoint.is_some() || workload_identity_selected) {
+        return Err(eyre!(
+            "--embedded cannot be combined with remote or workload-identity mode"
+        ));
+    }
     let reuse_implicit_local_daemon = !workload_identity_selected
         && super::can_reuse_implicit_local_daemon(
             &cli_kv_overrides,
@@ -345,16 +369,21 @@ pub(super) async fn start_app_server_for_session_command(
             strict_config,
             cli.bypass_hook_trust,
         );
-    let default_daemon = if explicit_remote_endpoint.is_none() && reuse_implicit_local_daemon {
-        super::default_daemon_socket_if_present(codex_home.as_path())?
-    } else {
-        None
-    };
+    let default_daemon =
+        if launch_disposition == crate::launch_overrides::LaunchDisposition::CanonicalLocal {
+            Some(codex_app_server_client::canonical_app_server_control_socket_path()?)
+        } else if explicit_remote_endpoint.is_none() && reuse_implicit_local_daemon {
+            super::default_daemon_socket_if_present(codex_home.as_path())?
+        } else {
+            None
+        };
     let app_server_target = super::app_server_target_for_launch(
         explicit_remote_endpoint,
         default_daemon,
         reuse_implicit_local_daemon,
         workload_identity_selected,
+        launch_disposition,
+        crate::canonical_launch_projection::CanonicalLaunchProjection::default(),
     )?;
     let remote_cwd_override = cli
         .cwd

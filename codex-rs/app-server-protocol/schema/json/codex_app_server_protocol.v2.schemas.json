@@ -139,6 +139,114 @@
       "title": "AccountRateLimitsUpdatedNotification",
       "type": "object"
     },
+    "AccountRotationChangedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "rotation": {
+          "$ref": "#/definitions/AccountRotationSnapshot"
+        }
+      },
+      "required": [
+        "rotation"
+      ],
+      "title": "AccountRotationChangedNotification",
+      "type": "object"
+    },
+    "AccountRotationReadResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "rotation": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AccountRotationSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`null` means the global profile has not been activated yet."
+        }
+      },
+      "title": "AccountRotationReadResponse",
+      "type": "object"
+    },
+    "AccountRotationSnapshot": {
+      "description": "The global rotation profile shared by inheriting threads.",
+      "properties": {
+        "automaticAccountSlotIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "fixedAccountSlotId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/definitions/ThreadAccountRotationMode"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "automaticAccountSlotIds",
+        "mode",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "AccountRotationUpdateParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "automaticAccountSlotIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "expectedRotationRevision": {
+          "description": "Use revision zero to create the first global profile.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "fixedAccountSlotId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/definitions/ThreadAccountRotationMode"
+        }
+      },
+      "required": [
+        "automaticAccountSlotIds",
+        "expectedRotationRevision",
+        "mode"
+      ],
+      "title": "AccountRotationUpdateParams",
+      "type": "object"
+    },
+    "AccountRotationUpdateResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "rotation": {
+          "$ref": "#/definitions/AccountRotationSnapshot"
+        }
+      },
+      "required": [
+        "rotation"
+      ],
+      "title": "AccountRotationUpdateResponse",
+      "type": "object"
+    },
     "AccountSlotAction": {
       "enum": [
         "login",
@@ -2320,6 +2428,30 @@
             },
             "method": {
               "enum": [
+                "thread/account/rotation/reset"
+              ],
+              "title": "Thread/account/rotation/resetRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ThreadAccountRotationResetParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/account/rotation/resetRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
                 "thread/relinquish"
               ],
               "title": "Thread/relinquishRequestMethod",
@@ -4086,6 +4218,53 @@
             "params"
           ],
           "title": "AccountSlot/logoutRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "accountRotation/read"
+              ],
+              "title": "AccountRotation/readRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "id",
+            "method"
+          ],
+          "title": "AccountRotation/readRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "accountRotation/update"
+              ],
+              "title": "AccountRotation/updateRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/AccountRotationUpdateParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "AccountRotation/updateRequest",
           "type": "object"
         },
         {
@@ -9855,6 +10034,41 @@
       ],
       "title": "ItemStartedNotification",
       "type": "object"
+    },
+    "LegacyAdmissionSnapshot": {
+      "description": "Sanitized state for a cutover-only legacy admission seal.",
+      "properties": {
+        "appServerInstanceGeneration": {
+          "type": "string"
+        },
+        "cutoverEpoch": {
+          "type": "string"
+        },
+        "inFlightMutationCount": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/definitions/LegacyAdmissionState"
+        }
+      },
+      "required": [
+        "appServerInstanceGeneration",
+        "cutoverEpoch",
+        "inFlightMutationCount",
+        "state"
+      ],
+      "type": "object"
+    },
+    "LegacyAdmissionState": {
+      "description": "Transition state for one Relay-managed legacy app-server admission seal.",
+      "enum": [
+        "sealing",
+        "drained",
+        "aborted"
+      ],
+      "type": "string"
     },
     "LegacyAppPathString": {
       "type": "string"
@@ -16958,6 +17172,26 @@
           "properties": {
             "method": {
               "enum": [
+                "accountRotation/changed"
+              ],
+              "title": "AccountRotation/changedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/AccountRotationChangedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "AccountRotation/changedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
                 "sessionRuntime/changed"
               ],
               "title": "SessionRuntime/changedNotificationMethod",
@@ -19296,6 +19530,39 @@
       "title": "ThreadAccountRotationReadResponse",
       "type": "object"
     },
+    "ThreadAccountRotationResetParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "expectedRotationRevision": {
+          "description": "The exact thread-local override revision to remove.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expectedRotationRevision",
+        "threadId"
+      ],
+      "title": "ThreadAccountRotationResetParams",
+      "type": "object"
+    },
+    "ThreadAccountRotationResetResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "rotation": {
+          "$ref": "#/definitions/ThreadAccountRotationSnapshot"
+        }
+      },
+      "required": [
+        "rotation"
+      ],
+      "title": "ThreadAccountRotationResetResponse",
+      "type": "object"
+    },
     "ThreadAccountRotationSnapshot": {
       "properties": {
         "automaticAccountSlotIds": {
@@ -19307,6 +19574,15 @@
         "fixedAccountSlotId": {
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "globalProfileRevision": {
+          "description": "The current global profile revision, or `null` before global activation.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
             "null"
           ]
         },
@@ -19323,6 +19599,14 @@
           "format": "uint64",
           "minimum": 0.0,
           "type": "integer"
+        },
+        "source": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThreadAccountRotationSource"
+            }
+          ],
+          "default": "legacyFixed"
         }
       },
       "required": [
@@ -19331,6 +19615,14 @@
         "revision"
       ],
       "type": "object"
+    },
+    "ThreadAccountRotationSource": {
+      "enum": [
+        "legacyFixed",
+        "global",
+        "override"
+      ],
+      "type": "string"
     },
     "ThreadAccountRotationUpdateParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",

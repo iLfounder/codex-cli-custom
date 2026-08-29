@@ -566,6 +566,11 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ThreadAccountRotationUpdateResponse,
     },
+    ThreadAccountRotationReset => "thread/account/rotation/reset" {
+        params: v2::ThreadAccountRotationResetParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadAccountRotationResetResponse,
+    },
     ThreadRelinquish => "thread/relinquish" {
         params: v2::ThreadRelinquishParams,
         serialization: thread_id(params.thread_id),
@@ -1257,6 +1262,39 @@ client_request_definitions! {
         params: v2::AccountSlotLogoutParams,
         serialization: global("account-slots"),
         response: v2::AccountSlotLogoutResponse,
+    },
+
+    AccountRotationRead => "accountRotation/read" {
+        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        serialization: global_shared_read("account-rotation"),
+        response: v2::AccountRotationReadResponse,
+    },
+
+    AccountRotationUpdate => "accountRotation/update" {
+        params: v2::AccountRotationUpdateParams,
+        serialization: global("account-rotation"),
+        response: v2::AccountRotationUpdateResponse,
+    },
+
+    #[experimental("legacyAdmission/seal")]
+    LegacyAdmissionSeal => "legacyAdmission/seal" {
+        params: v2::LegacyAdmissionSealParams,
+        serialization: global("legacy-admission"),
+        response: v2::LegacyAdmissionSealResponse,
+    },
+
+    #[experimental("legacyAdmission/status")]
+    LegacyAdmissionStatus => "legacyAdmission/status" {
+        params: v2::LegacyAdmissionStatusParams,
+        serialization: global("legacy-admission"),
+        response: v2::LegacyAdmissionStatusResponse,
+    },
+
+    #[experimental("legacyAdmission/abort")]
+    LegacyAdmissionAbort => "legacyAdmission/abort" {
+        params: v2::LegacyAdmissionAbortParams,
+        serialization: global("legacy-admission"),
+        response: v2::LegacyAdmissionAbortResponse,
     },
 
     LoginAccount => "account/login/start" {
@@ -1970,6 +2008,7 @@ server_notification_definitions! {
     AccountRateLimitsUpdated => "account/rateLimits/updated" (v2::AccountRateLimitsUpdatedNotification),
     AccountSlotChanged => "accountSlot/changed" (v2::AccountSlotChangedNotification),
     AccountSlotInventoryChanged => "accountSlot/inventoryChanged" (v2::AccountSlotInventoryChangedNotification),
+    AccountRotationChanged => "accountRotation/changed" (v2::AccountRotationChangedNotification),
     SessionRuntimeChanged => "sessionRuntime/changed" (v2::SessionRuntimeChangedNotification),
     SessionRuntimeOperationUpdated => "sessionRuntime/operation/updated" (v2::SessionRuntimeOperationUpdatedNotification),
     ThreadPresentationAppended => "thread/presentation/appended" (v2::ThreadPresentationAppendedNotification),

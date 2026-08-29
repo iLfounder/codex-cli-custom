@@ -24,6 +24,15 @@
             "null"
           ]
         },
+        "globalProfileRevision": {
+          "description": "The current global profile revision, or `null` before global activation.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "lastCommittedAccountSlotId": {
           "type": [
             "string",
@@ -37,6 +46,14 @@
           "format": "uint64",
           "minimum": 0.0,
           "type": "integer"
+        },
+        "source": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThreadAccountRotationSource"
+            }
+          ],
+          "default": "legacyFixed"
         }
       },
       "required": [
@@ -45,6 +62,14 @@
         "revision"
       ],
       "type": "object"
+    },
+    "ThreadAccountRotationSource": {
+      "enum": [
+        "legacyFixed",
+        "global",
+        "override"
+      ],
+      "type": "string"
     }
   },
   "properties": {

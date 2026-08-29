@@ -1,6 +1,7 @@
 mod directory;
 mod identity;
 mod integration;
+mod lifecycle;
 mod runtime;
 mod selection;
 mod token_manager;

@@ -2,6 +2,15 @@ use super::*;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
+#[test]
+fn canonical_launch_requires_default_loader_overrides() {
+    let mut overrides = LoaderOverrides::default();
+    assert!(overrides.is_default_for_canonical_launch());
+
+    overrides.ignore_project_config = true;
+    assert!(!overrides.is_default_for_canonical_launch());
+}
+
 fn test_user_config_path(temp_dir: &TempDir, file_name: &str) -> AbsolutePathBuf {
     AbsolutePathBuf::from_absolute_path(temp_dir.path().join(file_name))
         .expect("test user config path should be absolute")

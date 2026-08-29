@@ -18,6 +18,7 @@
 
 mod path;
 mod remote;
+mod supervised;
 
 use std::error::Error;
 use std::fmt;
@@ -45,6 +46,7 @@ use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::Result as JsonRpcResult;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
+pub use codex_app_server_transport::canonical_app_server_control_socket_path;
 use codex_arg0::Arg0DispatchPaths;
 use codex_config::CloudConfigBundleLoader;
 use codex_config::LoaderOverrides;
@@ -67,6 +69,13 @@ pub use crate::path::AppServerPath;
 pub use crate::remote::RemoteAppServerClient;
 pub use crate::remote::RemoteAppServerConnectArgs;
 pub use crate::remote::RemoteAppServerEndpoint;
+pub use crate::supervised::SupervisedAppServerClient;
+pub use crate::supervised::SupervisedAppServerConnectArgs;
+pub use crate::supervised::SupervisedAppServerEvent;
+pub use crate::supervised::SupervisedAppServerRequestHandle;
+pub use crate::supervised::SupervisorSnapshotFuture;
+pub use crate::supervised::SupervisorSnapshotSource;
+pub use codex_app_server_transport::AppServerInstanceIdentity;
 
 /// Transitional access to core-only embedded app-server types.
 ///
@@ -96,6 +105,7 @@ pub type RequestResult = std::result::Result<JsonRpcResult, JSONRPCErrorError>;
 
 #[derive(Debug, Clone)]
 pub enum AppServerEvent {
+    Connected { identity: AppServerInstanceIdentity },
     Lagged { skipped: usize },
     ServerNotification(Box<ServerNotification>),
     ServerRequest(Box<ServerRequest>),
@@ -313,11 +323,13 @@ pub struct InProcessAppServerRequestHandle {
 pub enum AppServerRequestHandle {
     InProcess(InProcessAppServerRequestHandle),
     Remote(crate::remote::RemoteAppServerRequestHandle),
+    Supervised(SupervisedAppServerRequestHandle),
 }
 
 pub enum AppServerClient {
     InProcess(InProcessAppServerClient),
     Remote(RemoteAppServerClient),
+    Supervised(SupervisedAppServerClient),
 }
 
 impl InProcessAppServerClient {
@@ -687,6 +699,7 @@ impl AppServerRequestHandle {
         match self {
             Self::InProcess(handle) => handle.request(request).await,
             Self::Remote(handle) => handle.request(request).await,
+            Self::Supervised(handle) => handle.request(request).await,
         }
     }
 
@@ -697,6 +710,7 @@ impl AppServerRequestHandle {
         match self {
             Self::InProcess(handle) => handle.request_typed(request).await,
             Self::Remote(handle) => handle.request_typed(request).await,
+            Self::Supervised(handle) => handle.request_typed(request).await,
         }
     }
 }
@@ -708,6 +722,7 @@ impl AppServerClient {
                 local_codex_home.display().to_string(),
             )),
             Self::Remote(client) => client.codex_home().map(AppServerPath::from_app_server),
+            Self::Supervised(_) => None,
         }
     }
 
@@ -715,6 +730,7 @@ impl AppServerClient {
         match self {
             Self::InProcess(client) => client.request(request).await,
             Self::Remote(client) => client.request(request).await,
+            Self::Supervised(client) => client.request(request).await,
         }
     }
 
@@ -725,6 +741,7 @@ impl AppServerClient {
         match self {
             Self::InProcess(client) => client.request_typed(request).await,
             Self::Remote(client) => client.request_typed(request).await,
+            Self::Supervised(client) => client.request_typed(request).await,
         }
     }
 
@@ -732,6 +749,7 @@ impl AppServerClient {
         match self {
             Self::InProcess(client) => client.notify(notification).await,
             Self::Remote(client) => client.notify(notification).await,
+            Self::Supervised(client) => client.notify(notification).await,
         }
     }
 
@@ -743,6 +761,7 @@ impl AppServerClient {
         match self {
             Self::InProcess(client) => client.resolve_server_request(request_id, result).await,
             Self::Remote(client) => client.resolve_server_request(request_id, result).await,
+            Self::Supervised(client) => client.resolve_server_request(request_id, result).await,
         }
     }
 
@@ -754,6 +773,7 @@ impl AppServerClient {
         match self {
             Self::InProcess(client) => client.reject_server_request(request_id, error).await,
             Self::Remote(client) => client.reject_server_request(request_id, error).await,
+            Self::Supervised(client) => client.reject_server_request(request_id, error).await,
         }
     }
 
@@ -761,6 +781,7 @@ impl AppServerClient {
         match self {
             Self::InProcess(client) => client.next_event().await.map(Into::into),
             Self::Remote(client) => client.next_event().await,
+            Self::Supervised(client) => client.next_event().await.map(Into::into),
         }
     }
 
@@ -768,6 +789,10 @@ impl AppServerClient {
         match self {
             Self::InProcess(client) => client.shutdown().await,
             Self::Remote(client) => client.shutdown().await,
+            Self::Supervised(client) => {
+                client.shutdown().await;
+                Ok(())
+            }
         }
     }
 
@@ -775,6 +800,16 @@ impl AppServerClient {
         match self {
             Self::InProcess(client) => AppServerRequestHandle::InProcess(client.request_handle()),
             Self::Remote(client) => AppServerRequestHandle::Remote(client.request_handle()),
+            Self::Supervised(client) => AppServerRequestHandle::Supervised(client.request_handle()),
+        }
+    }
+}
+
+impl From<SupervisedAppServerEvent> for AppServerEvent {
+    fn from(value: SupervisedAppServerEvent) -> Self {
+        match value {
+            SupervisedAppServerEvent::Connected { identity } => Self::Connected { identity },
+            SupervisedAppServerEvent::AppServer(event) => event,
         }
     }
 }

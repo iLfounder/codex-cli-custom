@@ -25,6 +25,36 @@ const UPDATE_PID_FILE_NAME: &str = "app-server-updater.pid";
 /// be treated as failures. A stale socket is a warning because it can explain
 /// client connection problems without proving the daemon itself is broken.
 pub(super) async fn background_server_check(config: &Config) -> DoctorCheck {
+    if let Err(err) = codex_tui::classify_current_launch(
+        config.codex_home.as_path(),
+        codex_tui::LaunchOperation::PassiveLocal,
+        codex_tui::RequestedLaunchMode::StandardLocal,
+        codex_tui::LaunchInvocationOverrides::None,
+    ) {
+        return DoctorCheck::new(
+            "app_server.status",
+            "app-server",
+            CheckStatus::Warning,
+            "managed app-server launch context is invalid",
+        )
+        .detail(err.to_string());
+    }
+    let socket_path = match codex_app_server::app_server_control_socket_path(&config.codex_home) {
+        Ok(socket_path) => socket_path,
+        Err(err) => {
+            return DoctorCheck::new(
+                "app_server.status",
+                "app-server",
+                CheckStatus::Warning,
+                "background server socket path could not be resolved",
+            )
+            .detail(err.to_string());
+        }
+    };
+    background_server_check_at_socket(config, socket_path.as_path()).await
+}
+
+async fn background_server_check_at_socket(config: &Config, socket_path: &Path) -> DoctorCheck {
     let mut details = Vec::new();
     let state_dir = config.codex_home.join(STATE_DIR_NAME);
     details.push(format!("daemon state dir: {}", state_dir.display()));
@@ -40,22 +70,8 @@ pub(super) async fn background_server_check(config: &Config) -> DoctorCheck {
         &state_dir.join(UPDATE_PID_FILE_NAME),
     );
 
-    let socket_path = match codex_app_server::app_server_control_socket_path(&config.codex_home) {
-        Ok(socket_path) => socket_path,
-        Err(err) => {
-            return DoctorCheck::new(
-                "app_server.status",
-                "app-server",
-                CheckStatus::Warning,
-                "background server socket path could not be resolved",
-            )
-            .details(details)
-            .detail(err.to_string());
-        }
-    };
-
     details.push(format!("control socket: {}", socket_path.display()));
-    let status = socket_status(socket_path.as_path()).await;
+    let status = socket_status(socket_path).await;
     details.push(format!("status: {}", status.detail_label()));
     if let Some(version_detail) = status.app_server_version_detail() {
         details.push(version_detail);
@@ -192,9 +208,7 @@ mod tests {
             .expect("config")
     }
 
-    fn create_socket_placeholder(config: &Config) {
-        let socket_path = codex_app_server::app_server_control_socket_path(&config.codex_home)
-            .expect("socket path");
+    fn create_socket_placeholder(socket_path: &Path) {
         std::fs::create_dir_all(socket_path.parent().expect("socket parent"))
             .expect("create socket dir");
         std::fs::write(socket_path, "").expect("create socket placeholder");
@@ -204,8 +218,9 @@ mod tests {
     async fn not_running_background_server_stays_ok_without_version() {
         let temp = tempfile::tempdir().expect("tempdir");
         let config = test_config(temp.path().to_path_buf()).await;
+        let socket_path = temp.path().join("control.sock");
 
-        let check = background_server_check(&config).await;
+        let check = background_server_check_at_socket(&config, &socket_path).await;
 
         assert_eq!(check.status, CheckStatus::Ok);
         assert_eq!(check.summary, "background server is not running");
@@ -235,9 +250,10 @@ mod tests {
     async fn failed_version_probe_reports_unavailable() {
         let temp = tempfile::tempdir().expect("tempdir");
         let config = test_config(temp.path().to_path_buf()).await;
-        create_socket_placeholder(&config);
+        let socket_path = temp.path().join("control.sock");
+        create_socket_placeholder(&socket_path);
 
-        let check = background_server_check(&config).await;
+        let check = background_server_check_at_socket(&config, &socket_path).await;
 
         assert_eq!(check.status, CheckStatus::Warning);
         assert_eq!(

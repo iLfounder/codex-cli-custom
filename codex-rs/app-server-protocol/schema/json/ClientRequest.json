@@ -5,6 +5,37 @@
       "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
       "type": "string"
     },
+    "AccountRotationUpdateParams": {
+      "properties": {
+        "automaticAccountSlotIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "expectedRotationRevision": {
+          "description": "Use revision zero to create the first global profile.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "fixedAccountSlotId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/definitions/ThreadAccountRotationMode"
+        }
+      },
+      "required": [
+        "automaticAccountSlotIds",
+        "expectedRotationRevision",
+        "mode"
+      ],
+      "type": "object"
+    },
     "AccountSlotListParams": {
       "description": "Parameters for reading a revision-consistent page of sanitized global accounts.",
       "properties": {
@@ -4278,6 +4309,24 @@
       ],
       "type": "object"
     },
+    "ThreadAccountRotationResetParams": {
+      "properties": {
+        "expectedRotationRevision": {
+          "description": "The exact thread-local override revision to remove.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expectedRotationRevision",
+        "threadId"
+      ],
+      "type": "object"
+    },
     "ThreadAccountRotationUpdateParams": {
       "properties": {
         "automaticAccountSlotIds": {
@@ -6325,6 +6374,30 @@
         },
         "method": {
           "enum": [
+            "thread/account/rotation/reset"
+          ],
+          "title": "Thread/account/rotation/resetRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadAccountRotationResetParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Thread/account/rotation/resetRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
             "thread/relinquish"
           ],
           "title": "Thread/relinquishRequestMethod",
@@ -8091,6 +8164,53 @@
         "params"
       ],
       "title": "AccountSlot/logoutRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "accountRotation/read"
+          ],
+          "title": "AccountRotation/readRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "type": "null"
+        }
+      },
+      "required": [
+        "id",
+        "method"
+      ],
+      "title": "AccountRotation/readRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "accountRotation/update"
+          ],
+          "title": "AccountRotation/updateRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AccountRotationUpdateParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "AccountRotation/updateRequest",
       "type": "object"
     },
     {

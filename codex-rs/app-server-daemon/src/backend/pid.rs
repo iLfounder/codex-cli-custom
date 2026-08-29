@@ -42,6 +42,18 @@ struct PidRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProcessStartIdentity {
+    pid: u32,
+    exact_start_time: String,
+}
+
+impl ProcessStartIdentity {
+    pub(crate) fn pid(&self) -> u32 {
+        self.pid
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PidLogTail {
     pub(crate) path: PathBuf,
     pub(crate) contents: String,
@@ -586,6 +598,28 @@ async fn process_matches_record(record: &PidRecord) -> Result<bool> {
     }
 }
 
+#[cfg(unix)]
+pub(crate) async fn process_start_identity(pid: u32) -> Result<ProcessStartIdentity> {
+    Ok(ProcessStartIdentity {
+        pid,
+        exact_start_time: read_exact_process_start_time(pid).await?,
+    })
+}
+
+#[cfg(unix)]
+pub(crate) async fn process_start_identity_is_active(
+    identity: &ProcessStartIdentity,
+) -> Result<bool> {
+    if !process_exists(identity.pid) {
+        return Ok(false);
+    }
+    match read_exact_process_start_time(identity.pid).await {
+        Ok(start_time) => Ok(start_time == identity.exact_start_time),
+        Err(_err) if !process_exists(identity.pid) => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
 #[cfg(not(unix))]
 async fn process_matches_record(_record: &PidRecord) -> Result<bool> {
     Ok(false)
@@ -715,6 +749,54 @@ async fn read_process_start_time(pid: u32) -> Result<String> {
         bail!("pid-managed app server {pid} has no recorded start time");
     }
     Ok(start_time.to_string())
+}
+
+#[cfg(target_os = "macos")]
+async fn read_exact_process_start_time(pid: u32) -> Result<String> {
+    let pid = libc::pid_t::try_from(pid)?;
+    // SAFETY: proc_pidinfo initializes the fixed-size proc_bsdinfo output buffer.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let expected = std::mem::size_of::<libc::proc_bsdinfo>();
+    // SAFETY: the pointer and byte length describe the live stack buffer above.
+    let bytes = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            /*arg*/ 0,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            libc::c_int::try_from(expected)?,
+        )
+    };
+    if usize::try_from(bytes).ok() != Some(expected) {
+        bail!("failed to read exact process start identity for pid {pid}");
+    }
+    Ok(format!(
+        "{}:{}",
+        info.pbi_start_tvsec, info.pbi_start_tvusec
+    ))
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+async fn read_exact_process_start_time(pid: u32) -> Result<String> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))
+        .await
+        .with_context(|| format!("failed to read exact process start identity for pid {pid}"))?;
+    let (_, fields) = stat
+        .rsplit_once(") ")
+        .ok_or_else(|| anyhow::anyhow!("malformed process stat for pid {pid}"))?;
+    fields
+        .split_whitespace()
+        .nth(19)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("process stat lacks start identity for pid {pid}"))
+}
+
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "linux", target_os = "android"))
+))]
+async fn read_exact_process_start_time(pid: u32) -> Result<String> {
+    bail!("exact process start identity is unsupported for pid {pid} on this platform")
 }
 
 #[cfg(all(test, unix))]

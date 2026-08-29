@@ -7,6 +7,8 @@ use std::pin::Pin;
 
 use crate::AbortThreadTransition;
 use crate::AccountBindingCommitIntent;
+use crate::AccountRotationProfile;
+use crate::AccountRotationProfileUpdate;
 use crate::AppendThreadItemsParams;
 use crate::ArchiveThreadParams;
 use crate::ArchiveThreadsParams;
@@ -51,9 +53,6 @@ use crate::StoredThreadHistory;
 use crate::StoredThreadSection;
 use crate::StoredThreadSectionsPage;
 use crate::SuccessfulAccountBindingTransition;
-use crate::SuccessfulAccountRotationCommit;
-use crate::ThreadAccountRotationPolicy;
-use crate::ThreadAccountRotationPolicyUpdate;
 use crate::ThreadMetadataPatch;
 use crate::ThreadOccurrenceSearchPage;
 use crate::ThreadPage;
@@ -78,6 +77,57 @@ pub type ThreadStoreFuture<'a, T> = Pin<Box<dyn Future<Output = ThreadStoreResul
 
 /// A slot runtime version and its complete durable binding set.
 pub type ExecutionAccountSlotRuntimeState = (u64, Vec<(ThreadId, ExecutionAccountBinding)>);
+
+pub type ThreadAccountRotationPolicyUpdate = AccountRotationProfileUpdate;
+
+/// Durable configuration revision captured for one root turn.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ThreadAccountRotationPolicyRevision {
+    Inherit(u64),
+    Override(u64),
+}
+
+/// Effective account rotation configuration and cursor captured for one thread.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ThreadAccountRotationPolicy {
+    pub mode: crate::ThreadAccountRotationMode,
+    pub fixed_account_slot_id: Option<String>,
+    pub automatic_account_slot_ids: Vec<String>,
+    pub revision: ThreadAccountRotationPolicyRevision,
+    pub last_committed_account_slot_id: Option<String>,
+}
+
+impl ThreadAccountRotationPolicy {
+    pub fn virtual_fixed(binding: &ExecutionAccountBinding) -> Self {
+        Self {
+            mode: crate::ThreadAccountRotationMode::Fixed,
+            fixed_account_slot_id: Some(binding.slot_id.clone()),
+            automatic_account_slot_ids: Vec::new(),
+            revision: ThreadAccountRotationPolicyRevision::Inherit(0),
+            last_committed_account_slot_id: Some(binding.slot_id.clone()),
+        }
+    }
+
+    pub(crate) fn from_profile(
+        profile: AccountRotationProfile,
+        revision: ThreadAccountRotationPolicyRevision,
+        last_committed_account_slot_id: Option<String>,
+    ) -> Self {
+        Self {
+            mode: profile.mode,
+            fixed_account_slot_id: profile.fixed_account_slot_id,
+            automatic_account_slot_ids: profile.automatic_account_slot_ids,
+            revision,
+            last_committed_account_slot_id,
+        }
+    }
+}
+
+/// Binding committed after one selected account produced a response.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SuccessfulAccountRotationCommit {
+    pub binding: ExecutionAccountBinding,
+}
 
 /// Why thread persistence is being requested.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -243,28 +293,73 @@ pub trait ThreadStore: Any + Send + Sync {
         })
     }
 
-    fn compare_and_swap_thread_account_rotation_policy(
+    fn account_rotation_global_profile(
         &self,
-        _thread_id: ThreadId,
-        _expected_revision: u64,
-        _update: ThreadAccountRotationPolicyUpdate,
-    ) -> ThreadStoreFuture<'_, Option<ThreadAccountRotationPolicy>> {
+    ) -> ThreadStoreFuture<'_, Option<AccountRotationProfile>> {
         Box::pin(async {
             Err(ThreadStoreError::Unsupported {
-                operation: "compare_and_swap_thread_account_rotation_policy",
+                operation: "account_rotation_global_profile",
             })
         })
     }
 
-    fn compare_and_swap_thread_account_rotation_cursor(
+    fn compare_and_swap_account_rotation_global_profile(
+        &self,
+        _expected_revision: u64,
+        _update: AccountRotationProfileUpdate,
+    ) -> ThreadStoreFuture<'_, Option<AccountRotationProfile>> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "compare_and_swap_account_rotation_global_profile",
+            })
+        })
+    }
+
+    fn thread_account_rotation_override(
+        &self,
+        _thread_id: ThreadId,
+    ) -> ThreadStoreFuture<'_, Option<AccountRotationProfile>> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "thread_account_rotation_override",
+            })
+        })
+    }
+
+    fn compare_and_swap_thread_account_rotation_override(
         &self,
         _thread_id: ThreadId,
         _expected_revision: u64,
-        _accepted_account_slot_id: String,
-    ) -> ThreadStoreFuture<'_, Option<ThreadAccountRotationPolicy>> {
+        _update: AccountRotationProfileUpdate,
+    ) -> ThreadStoreFuture<'_, Option<AccountRotationProfile>> {
         Box::pin(async {
             Err(ThreadStoreError::Unsupported {
-                operation: "compare_and_swap_thread_account_rotation_cursor",
+                operation: "compare_and_swap_thread_account_rotation_override",
+            })
+        })
+    }
+
+    fn reset_thread_account_rotation_override(
+        &self,
+        _thread_id: ThreadId,
+        _expected_revision: u64,
+    ) -> ThreadStoreFuture<'_, bool> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "reset_thread_account_rotation_override",
+            })
+        })
+    }
+
+    fn compare_and_swap_thread_account_rotation_cursor_for_binding(
+        &self,
+        _thread_id: ThreadId,
+        _expected_binding: ExecutionAccountBinding,
+        _accepted_account_slot_id: String,
+    ) -> ThreadStoreFuture<'_, Option<()>> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "compare_and_swap_thread_account_rotation_cursor_for_binding",
             })
         })
     }
@@ -273,24 +368,12 @@ pub trait ThreadStore: Any + Send + Sync {
         &self,
         _thread_id: ThreadId,
         _expected_binding: ExecutionAccountBinding,
-        _expected_policy_revision: u64,
         _accepted_account_slot_id: String,
         _binding_transition: SuccessfulAccountBindingTransition,
     ) -> ThreadStoreFuture<'_, Option<SuccessfulAccountRotationCommit>> {
         Box::pin(async {
             Err(ThreadStoreError::Unsupported {
                 operation: "compare_and_swap_successful_account_rotation",
-            })
-        })
-    }
-
-    fn remove_account_slot_from_automatic_rotation_policies(
-        &self,
-        _account_slot_id: String,
-    ) -> ThreadStoreFuture<'_, Vec<(ThreadId, ThreadAccountRotationPolicy)>> {
-        Box::pin(async {
-            Err(ThreadStoreError::Unsupported {
-                operation: "remove_account_slot_from_automatic_rotation_policies",
             })
         })
     }

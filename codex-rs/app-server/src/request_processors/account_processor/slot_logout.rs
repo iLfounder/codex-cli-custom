@@ -1,4 +1,5 @@
 use codex_app_server_protocol::AccountSlotLogoutParams;
+use codex_app_server_protocol::AccountSlotLogoutResponse;
 use codex_app_server_protocol::ClientResponsePayload;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::ServerNotification;
@@ -13,6 +14,18 @@ impl AccountRequestProcessor {
         &self,
         params: AccountSlotLogoutParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        if self.account_registry.global_managed_mode()? {
+            let account_slot_id = params.account_slot_id.clone();
+            self.account_registry.logout_global_account(&params).await?;
+            self.account_registry
+                .notify_global_inventory_if_changed(&self.outgoing)
+                .await;
+            let slot = self
+                .account_registry
+                .global_slot_snapshot(&account_slot_id)
+                .await?;
+            return Ok(Some(AccountSlotLogoutResponse { slot }.into()));
+        }
         if params.account_slot_id == "default" {
             return Err(crate::error_code::invalid_request(
                 "default account logout must use account/logout",

@@ -30,7 +30,7 @@ pub(crate) enum AttemptEffect {
 
 struct AccountAttemptCandidate {
     binding: ExecutionAccountBinding,
-    policy_revision: Option<u64>,
+    selected_by_policy: bool,
     binding_transition: SuccessfulAccountBindingTransition,
     resolved: Option<PreparedTurnExecutionAccountTransition>,
     prepared: Option<PreparedExecutionAccountRuntime>,
@@ -47,7 +47,7 @@ impl AccountAttemptCandidate {
 
 struct AccountFailoverInner {
     initial_binding: ExecutionAccountBinding,
-    credential_revision: Option<codex_login::CredentialRevision>,
+    selection: TurnExecutionAccountSelection,
     candidate: Mutex<AccountAttemptCandidate>,
     tried_slot_ids: Mutex<BTreeSet<String>>,
     effect: AtomicU8,
@@ -155,12 +155,12 @@ impl PreSemanticAccountFailover {
             .clone()
     }
 
-    pub(super) fn policy_revision(&self) -> Option<u64> {
+    pub(super) fn selected_by_policy(&self) -> bool {
         self.inner
             .candidate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .policy_revision
+            .selected_by_policy
     }
 
     #[expect(
@@ -182,7 +182,7 @@ impl PreSemanticAccountFailover {
                 "execution account binding changed before successful attempt commit".to_string(),
             ));
         }
-        let (binding, policy_revision, binding_transition) = {
+        let (binding, selected_by_policy, binding_transition) = {
             let candidate = self
                 .inner
                 .candidate
@@ -190,18 +190,17 @@ impl PreSemanticAccountFailover {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             (
                 candidate.binding.clone(),
-                candidate.policy_revision,
+                candidate.selected_by_policy,
                 candidate.binding_transition,
             )
         };
-        let accepted = if let Some(policy_revision) = policy_revision {
+        let accepted = if selected_by_policy {
             session
                 .turn_execution_account_selector()
                 .commit_successful_selection(TurnExecutionAccountSuccessCommit {
                     thread_id: session.thread_id(),
                     expected_binding: self.inner.initial_binding.clone(),
                     target_slot_id: binding.slot_id.clone(),
-                    policy_revision,
                     binding_transition,
                 })
                 .await?
@@ -271,11 +270,7 @@ impl PreSemanticAccountFailover {
         let decision = session
             .turn_execution_account_selector()
             .select_failover(TurnExecutionAccountFailoverSelection {
-                selection: TurnExecutionAccountSelection {
-                    thread_id: session.thread_id(),
-                    current_binding: self.inner.initial_binding.clone(),
-                    credential_revision: self.inner.credential_revision.clone(),
-                },
+                selection: self.inner.selection.clone(),
                 rejected_slot_id,
                 rejection_kind,
                 excluded_account_slot_ids: excluded_account_slot_ids.clone(),
@@ -331,18 +326,16 @@ impl PreSemanticAccountFailover {
 
 pub(super) async fn prepare_initial(
     session: &Arc<Session>,
-    initial_binding: ExecutionAccountBinding,
+    selection: TurnExecutionAccountSelection,
     decision: TurnExecutionAccountDecision,
 ) -> CodexResult<PreSemanticAccountFailover> {
+    let initial_binding = selection.current_binding.clone();
     let candidate = prepare_candidate(session, &initial_binding, decision).await?;
     let tried_slot_ids = BTreeSet::from([candidate.binding.slot_id.clone()]);
     Ok(PreSemanticAccountFailover {
         inner: Arc::new(AccountFailoverInner {
-            credential_revision: session
-                .execution_account()
-                .auth_manager
-                .credential_revision(),
             initial_binding,
+            selection,
             candidate: Mutex::new(candidate),
             tried_slot_ids: Mutex::new(tried_slot_ids),
             effect: AtomicU8::new(0),
@@ -356,39 +349,33 @@ async fn prepare_candidate(
     initial_binding: &ExecutionAccountBinding,
     decision: TurnExecutionAccountDecision,
 ) -> CodexResult<AccountAttemptCandidate> {
-    let (target_slot_id, policy_revision, binding_transition) = match decision {
+    let (target_slot_id, binding_transition) = match decision {
         TurnExecutionAccountDecision::Keep => {
             return Ok(AccountAttemptCandidate {
                 binding: initial_binding.clone(),
-                policy_revision: None,
+                selected_by_policy: false,
                 binding_transition: SuccessfulAccountBindingTransition::Keep,
                 resolved: None,
                 prepared: None,
             });
         }
-        TurnExecutionAccountDecision::Select {
-            target_slot_id,
-            policy_revision,
-        } if target_slot_id == initial_binding.slot_id => {
+        TurnExecutionAccountDecision::Select { target_slot_id }
+            if target_slot_id == initial_binding.slot_id =>
+        {
             return Ok(AccountAttemptCandidate {
                 binding: initial_binding.clone(),
-                policy_revision: Some(policy_revision),
+                selected_by_policy: true,
                 binding_transition: SuccessfulAccountBindingTransition::Keep,
                 resolved: None,
                 prepared: None,
             });
         }
-        TurnExecutionAccountDecision::Select {
+        TurnExecutionAccountDecision::Select { target_slot_id } => (
             target_slot_id,
-            policy_revision,
-        } => (
-            target_slot_id,
-            policy_revision,
             SuccessfulAccountBindingTransition::AdvanceGeneration,
         ),
-        TurnExecutionAccountDecision::ReprepareCurrent { policy_revision } => (
+        TurnExecutionAccountDecision::ReprepareCurrent => (
             initial_binding.slot_id.clone(),
-            policy_revision,
             SuccessfulAccountBindingTransition::AdvanceGeneration,
         ),
     };
@@ -421,7 +408,7 @@ async fn prepare_candidate(
         .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?;
     Ok(AccountAttemptCandidate {
         binding: expected_binding,
-        policy_revision: Some(policy_revision),
+        selected_by_policy: true,
         binding_transition,
         resolved: Some(resolved),
         prepared: Some(prepared),

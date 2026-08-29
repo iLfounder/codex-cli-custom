@@ -68,6 +68,48 @@
       ],
       "type": "object"
     },
+    "AccountRotationChangedNotification": {
+      "properties": {
+        "rotation": {
+          "$ref": "#/definitions/AccountRotationSnapshot"
+        }
+      },
+      "required": [
+        "rotation"
+      ],
+      "type": "object"
+    },
+    "AccountRotationSnapshot": {
+      "description": "The global rotation profile shared by inheriting threads.",
+      "properties": {
+        "automaticAccountSlotIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "fixedAccountSlotId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/definitions/ThreadAccountRotationMode"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "automaticAccountSlotIds",
+        "mode",
+        "revision"
+      ],
+      "type": "object"
+    },
     "AccountSlotAction": {
       "enum": [
         "login",
@@ -4942,6 +4984,15 @@
             "null"
           ]
         },
+        "globalProfileRevision": {
+          "description": "The current global profile revision, or `null` before global activation.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "lastCommittedAccountSlotId": {
           "type": [
             "string",
@@ -4955,6 +5006,14 @@
           "format": "uint64",
           "minimum": 0.0,
           "type": "integer"
+        },
+        "source": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThreadAccountRotationSource"
+            }
+          ],
+          "default": "legacyFixed"
         }
       },
       "required": [
@@ -4963,6 +5022,14 @@
         "revision"
       ],
       "type": "object"
+    },
+    "ThreadAccountRotationSource": {
+      "enum": [
+        "legacyFixed",
+        "global",
+        "override"
+      ],
+      "type": "string"
     },
     "ThreadActiveFlag": {
       "enum": [
@@ -8347,6 +8414,26 @@
         "params"
       ],
       "title": "AccountSlot/inventoryChangedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "accountRotation/changed"
+          ],
+          "title": "AccountRotation/changedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AccountRotationChangedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "AccountRotation/changedNotification",
       "type": "object"
     },
     {

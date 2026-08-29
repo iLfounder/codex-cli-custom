@@ -104,6 +104,27 @@ const THREAD_ACCOUNT_ROTATION_POLICIES_DEFINITION: &str = r#"CREATE TABLE thread
     last_committed_slot_id TEXT,
     updated_at INTEGER NOT NULL
 )"#;
+const ACCOUNT_ROTATION_GLOBAL_PROFILE_DEFINITION: &str = r#"CREATE TABLE account_rotation_global_profile (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    mode TEXT NOT NULL CHECK (mode IN ('fixed','quotaAware','roundRobin','exhaustThenNext')),
+    fixed_slot_id TEXT,
+    automatic_slot_ids_json TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+)"#;
+const THREAD_ACCOUNT_ROTATION_OVERRIDES_DEFINITION: &str = r#"CREATE TABLE thread_account_rotation_overrides (
+    thread_id TEXT PRIMARY KEY NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    mode TEXT NOT NULL CHECK (mode IN ('fixed','quotaAware','roundRobin','exhaustThenNext')),
+    fixed_slot_id TEXT,
+    automatic_slot_ids_json TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+)"#;
+const THREAD_ACCOUNT_ROTATION_CURSORS_DEFINITION: &str = r#"CREATE TABLE thread_account_rotation_cursors (
+    thread_id TEXT PRIMARY KEY NOT NULL,
+    last_committed_slot_id TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+)"#;
 
 const CUSTOM_SCHEMA_V1: CustomSchemaMigration = CustomSchemaMigration {
     version: 1,
@@ -248,6 +269,65 @@ CREATE TABLE thread_account_rotation_policies (
         definition: THREAD_ACCOUNT_ROTATION_POLICIES_DEFINITION,
     }],
 };
+const CUSTOM_SCHEMA_V6: CustomSchemaMigration = CustomSchemaMigration {
+    version: 6,
+    name: "global_account_rotation_profiles",
+    definition: r#"
+CREATE TABLE account_rotation_global_profile (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    mode TEXT NOT NULL CHECK (mode IN ('fixed','quotaAware','roundRobin','exhaustThenNext')),
+    fixed_slot_id TEXT,
+    automatic_slot_ids_json TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE thread_account_rotation_overrides (
+    thread_id TEXT PRIMARY KEY NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    mode TEXT NOT NULL CHECK (mode IN ('fixed','quotaAware','roundRobin','exhaustThenNext')),
+    fixed_slot_id TEXT,
+    automatic_slot_ids_json TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE thread_account_rotation_cursors (
+    thread_id TEXT PRIMARY KEY NOT NULL,
+    last_committed_slot_id TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+INSERT INTO thread_account_rotation_overrides (
+    thread_id, revision, mode, fixed_slot_id, automatic_slot_ids_json, updated_at
+)
+SELECT thread_id, revision, mode, fixed_slot_id, automatic_slot_ids_json, updated_at
+FROM thread_account_rotation_policies;
+
+INSERT INTO thread_account_rotation_cursors (
+    thread_id, last_committed_slot_id, updated_at
+)
+SELECT thread_id, last_committed_slot_id, updated_at
+FROM thread_account_rotation_policies
+WHERE last_committed_slot_id IS NOT NULL;
+"#,
+    legacy_upstream_version: 0,
+    legacy_description: "",
+    legacy_checksum: "",
+    required_tables: &[
+        RequiredCustomTable {
+            name: "account_rotation_global_profile",
+            definition: ACCOUNT_ROTATION_GLOBAL_PROFILE_DEFINITION,
+        },
+        RequiredCustomTable {
+            name: "thread_account_rotation_overrides",
+            definition: THREAD_ACCOUNT_ROTATION_OVERRIDES_DEFINITION,
+        },
+        RequiredCustomTable {
+            name: "thread_account_rotation_cursors",
+            definition: THREAD_ACCOUNT_ROTATION_CURSORS_DEFINITION,
+        },
+    ],
+};
 
 const ACTIVE_CUSTOM_SCHEMA_MIGRATIONS: &[&CustomSchemaMigration] = &[
     &CUSTOM_SCHEMA_V1,
@@ -255,6 +335,7 @@ const ACTIVE_CUSTOM_SCHEMA_MIGRATIONS: &[&CustomSchemaMigration] = &[
     &CUSTOM_SCHEMA_V3,
     &CUSTOM_SCHEMA_V4,
     &CUSTOM_SCHEMA_V5,
+    &CUSTOM_SCHEMA_V6,
 ];
 const LEGACY_CUSTOM_SCHEMA_MIGRATIONS: &[&CustomSchemaMigration] =
     &[&CUSTOM_SCHEMA_V1, &CUSTOM_SCHEMA_V2];
