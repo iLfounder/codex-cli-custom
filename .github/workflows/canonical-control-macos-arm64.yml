@@ -1,0 +1,108 @@
+name: Canonical control macOS arm64 build and test
+
+on:
+  push:
+    branches:
+      - ci/canonical-control-macos-arm64
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: canonical-control-macos-arm64-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-test:
+    name: release build and full test / macOS arm64
+    runs-on: macos-15
+    timeout-minutes: 330
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"
+      CARGO_PROFILE_RELEASE_INCREMENTAL: "false"
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_TERM_COLOR: always
+      SCCACHE_GHA_ENABLED: "on"
+      SCCACHE_IDLE_TIMEOUT: "0"
+      SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-ci
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+
+      - name: Install compiler cache
+        id: install_sccache
+        continue-on-error: true
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.17.0"
+          disable_annotations: true
+
+      - name: Configure compiler cache
+        if: steps.install_sccache.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${SCCACHE_PATH:-}"
+          test -x "$SCCACHE_PATH"
+          "$SCCACHE_PATH" --start-server
+          echo "RUSTC_WRAPPER=$SCCACHE_PATH" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_RUSTC_WRAPPER=$SCCACHE_PATH" >> "$GITHUB_ENV"
+
+      - name: Configure checksum-verified rusty_v8 artifacts
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: aarch64-apple-darwin
+
+      - name: Build release binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release -p codex-cli --bin codex
+          cargo build --release -p codex-app-server --bin codex-app-server
+
+      - name: Run complete Rust test suite
+        shell: bash
+        run: just test
+
+      - name: Package binaries and provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist="$RUNNER_TEMP/canonical-control-dist"
+          mkdir -p "$dist"
+          cp "$CARGO_TARGET_DIR/release/codex" "$dist/codex"
+          cp "$CARGO_TARGET_DIR/release/codex-app-server" "$dist/codex-app-server"
+          strip -x "$dist/codex" "$dist/codex-app-server"
+          chmod 0755 "$dist/codex" "$dist/codex-app-server"
+          shasum -a 256 "$dist/codex" "$dist/codex-app-server" > "$dist/SHA256SUMS"
+          {
+            printf 'source_commit=%s\n' "$GITHUB_SHA"
+            printf 'source_tree=%s\n' "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD^{tree})"
+            printf 'runner_arch=%s\n' "$(uname -m)"
+            rustc --version
+            cargo --version
+            sw_vers
+          } > "$dist/BUILD-METADATA.txt"
+          file "$dist/codex" "$dist/codex-app-server"
+
+      - name: Upload verified candidate binaries
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: canonical-control-macos-arm64-${{ github.sha }}
+          path: ${{ runner.temp }}/canonical-control-dist/
+          if-no-files-found: error
+          retention-days: 14
