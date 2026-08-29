@@ -1,4 +1,4 @@
-name: Canonical control macOS arm64 build and smoke candidate
+name: Canonical control macOS arm64 package and isolated smoke
 
 on:
   push:
@@ -40,6 +40,11 @@ jobs:
 
       - uses: ./.github/actions/setup-ci
 
+      - name: Set up package-builder Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
 
@@ -77,46 +82,305 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --release -p codex-cli --bin codex
-          cargo build --release -p codex-app-server --bin codex-app-server
+          cargo build --locked --release \
+            -p codex-cli --bin codex \
+            -p codex-app-server --bin codex-app-server \
+            -p codex-code-mode-host --bin codex-code-mode-host \
+            -p codex-responses-api-proxy --bin codex-responses-api-proxy
 
-      - name: Package binaries and provenance
+      - name: Assemble canonical packages and provenance
         shell: bash
         run: |
           set -euo pipefail
           dist="$RUNNER_TEMP/canonical-control-dist"
           mkdir -p "$dist"
-          cp "$CARGO_TARGET_DIR/release/codex" "$dist/codex"
-          cp "$CARGO_TARGET_DIR/release/codex-app-server" "$dist/codex-app-server"
-          strip -x "$dist/codex" "$dist/codex-app-server"
-          chmod 0755 "$dist/codex" "$dist/codex-app-server"
-          shasum -a 256 "$dist/codex" "$dist/codex-app-server" > "$dist/SHA256SUMS"
+          strip -x \
+            "$CARGO_TARGET_DIR/release/codex" \
+            "$CARGO_TARGET_DIR/release/codex-app-server" \
+            "$CARGO_TARGET_DIR/release/codex-code-mode-host" \
+            "$CARGO_TARGET_DIR/release/codex-responses-api-proxy"
+
+          export CODEX_REPO_ROOT="$GITHUB_WORKSPACE"
+          python3 "$GITHUB_WORKSPACE/scripts/build_codex_package.py" \
+            --target aarch64-apple-darwin \
+            --variant codex \
+            --package-version 0.149.0 \
+            --package-dir "$RUNNER_TEMP/codex-package-aarch64-apple-darwin" \
+            --archive-output "$dist/codex-package-aarch64-apple-darwin.tar.gz" \
+            --entrypoint-bin "$CARGO_TARGET_DIR/release/codex" \
+            --code-mode-host-bin "$CARGO_TARGET_DIR/release/codex-code-mode-host"
+          python3 "$GITHUB_WORKSPACE/scripts/build_codex_package.py" \
+            --target aarch64-apple-darwin \
+            --variant codex-app-server \
+            --package-version 0.149.0 \
+            --package-dir "$RUNNER_TEMP/codex-app-server-package-aarch64-apple-darwin" \
+            --archive-output "$dist/codex-app-server-package-aarch64-apple-darwin.tar.gz" \
+            --entrypoint-bin "$CARGO_TARGET_DIR/release/codex-app-server" \
+            --code-mode-host-bin "$CARGO_TARGET_DIR/release/codex-code-mode-host"
+
+          cp "$CARGO_TARGET_DIR/release/codex-responses-api-proxy" "$dist/"
+          cp "$GITHUB_WORKSPACE/LICENSE" "$GITHUB_WORKSPACE/NOTICE" "$dist/"
+          chmod 0755 "$dist/codex-responses-api-proxy"
           {
             printf 'source_commit=%s\n' "$GITHUB_SHA"
             printf 'source_tree=%s\n' "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD^{tree})"
+            printf 'cargo_lock_sha256=%s\n' "$(shasum -a 256 Cargo.lock | awk '{print $1}')"
+            printf 'package_builder_sha256=%s\n' "$(shasum -a 256 "$GITHUB_WORKSPACE/scripts/build_codex_package.py" | awk '{print $1}')"
+            printf 'workflow_sha256=%s\n' "$(shasum -a 256 "$GITHUB_WORKSPACE/.github/workflows/canonical-control-macos-arm64.yml" | awk '{print $1}')"
+            printf 'profile=release\n'
+            printf 'incremental=false\n'
+            printf 'lto=false\n'
+            printf 'codegen_units=8\n'
+            printf 'cargo_targets=codex,codex-app-server,codex-code-mode-host,codex-responses-api-proxy\n'
             printf 'runner_arch=%s\n' "$(uname -m)"
             rustc --version
             cargo --version
+            python3 -VV 2>&1
             sw_vers
           } > "$dist/BUILD-METADATA.txt"
-          file "$dist/codex" "$dist/codex-app-server"
 
-      - name: Upload release candidate binaries
+          primary="$RUNNER_TEMP/verify-primary"
+          app_server="$RUNNER_TEMP/verify-app-server"
+          mkdir -p "$primary" "$app_server"
+          tar -xzf "$dist/codex-package-aarch64-apple-darwin.tar.gz" -C "$primary"
+          tar -xzf "$dist/codex-app-server-package-aarch64-apple-darwin.tar.gz" -C "$app_server"
+          test -x "$primary/bin/codex"
+          test -x "$primary/bin/codex-code-mode-host"
+          test -x "$primary/codex-path/rg"
+          test -x "$primary/codex-resources/zsh/bin/zsh"
+          test -x "$app_server/bin/codex-app-server"
+          test -x "$app_server/bin/codex-code-mode-host"
+          test -x "$app_server/codex-path/rg"
+          test -x "$app_server/codex-resources/zsh/bin/zsh"
+          cmp "$primary/bin/codex-code-mode-host" "$app_server/bin/codex-code-mode-host"
+          test "$("$primary/bin/codex" --version)" = "codex-cli 0.149.0"
+          test "$("$app_server/bin/codex-app-server" --version)" = "codex-app-server 0.149.0"
+          file \
+            "$primary/bin/codex" \
+            "$primary/bin/codex-code-mode-host" \
+            "$app_server/bin/codex-app-server" \
+            "$dist/codex-responses-api-proxy"
+
+      - name: Run corrected reconnect regressions
+        shell: bash
+        run: >-
+          TMPDIR=/tmp just test --release -p codex-app-server-client -E
+          'test(/transient_disconnect_reconnects_the_exact_same_ready_identity_without_replay/)'
+
+      - name: Run TUI same-identity resync regressions
+        shell: bash
+        run: >-
+          TMPDIR=/tmp just test --release -p codex-tui -E
+          'test(/reconnect_state_accepts_exact_identity_only_while_disconnected|same_identity_reconnect_replaces_unmaterialized_thread_without_sending_draft/)'
+
+      - name: Run managed proxy routing regressions
+        shell: bash
+        run: >-
+          TMPDIR=/tmp just test --release -p codex-cli -E
+          'test(/app_server_proxy_routes_canonical_and_unmanaged_defaults|app_server_proxy_preserves_explicit_socket/)'
+
+      - name: Smoke packaged supervisor in an isolated owner home
+        shell: bash
+        env:
+          DIST: ${{ runner.temp }}/canonical-control-dist
+        run: |
+          set -euo pipefail
+          umask 077
+          smoke_root=$(mktemp -d "$RUNNER_TEMP/canonical-supervisor-smoke.XXXXXX")
+          owner_home="$smoke_root/owner"
+          codex_home="$smoke_root/codex-home"
+          sqlite_home="$smoke_root/sqlite"
+          managed_bin="$codex_home/packages/standalone/current/codex"
+          mkdir -p \
+            "$(dirname "$managed_bin")" \
+            "$owner_home" \
+            "$sqlite_home" \
+            "$smoke_root/tmp" \
+            "$smoke_root/primary"
+          tar -xzf "$DIST/codex-package-aarch64-apple-darwin.tar.gz" -C "$smoke_root/primary"
+          cp "$smoke_root/primary/bin/codex" "$managed_bin"
+          chmod 0755 "$managed_bin"
+
+          supervisor_log="$smoke_root/supervisor.log"
+          env -i \
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+            HOME="$owner_home" \
+            CODEX_HOME="$codex_home" \
+            CODEX_SQLITE_HOME="$sqlite_home" \
+            TMPDIR="$smoke_root/tmp" \
+            RUST_LOG=trace \
+            "$managed_bin" app-server daemon supervisor >"$supervisor_log" 2>&1 &
+          supervisor_pid=$!
+          cleanup() {
+            if kill -0 "$supervisor_pid" 2>/dev/null; then
+              kill -TERM "$supervisor_pid" 2>/dev/null || true
+              wait "$supervisor_pid" || true
+            fi
+          }
+          trap cleanup EXIT
+
+          supervisor_socket="$owner_home/.codex/app-server-control/supervisor.sock"
+          snapshot_file="$owner_home/.codex/app-server-control/supervisor-snapshot.json"
+          for _ in $(seq 1 200); do
+            if [[ -S "$supervisor_socket" ]] \
+              && [[ -f "$snapshot_file" ]] \
+              && jq -e '.appServer.status == "ready"' "$snapshot_file" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.1
+          done
+          test -S "$supervisor_socket"
+          jq -e '.appServer.status == "ready"' "$snapshot_file" >/dev/null
+          test "$(stat -f %Lp "$supervisor_socket")" = 600
+          test "$(stat -f %Lp "$snapshot_file")" = 600
+
+          SUPERVISOR_SOCKET="$supervisor_socket" \
+          SOURCE_COMMIT="$GITHUB_SHA" \
+          SMOKE_RESULT="$DIST/SMOKE-RESULT.json" \
+          python3 - <<'PY'
+          import json
+          import os
+          import socket
+
+          client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+          client.connect(os.environ["SUPERVISOR_SOCKET"])
+          stream = client.makefile("rwb", buffering=0)
+
+          def request(payload, request_id):
+              stream.write(json.dumps(payload, separators=(",", ":")).encode() + b"\n")
+              while True:
+                  message = json.loads(stream.readline())
+                  if message.get("id") == request_id:
+                      return message
+
+          first = request({"id": 1, "method": "snapshot/read"}, 1)["snapshot"]
+          identity = first["appServer"]["instance"]
+          restarted = request(
+              {"id": 2, "method": "appServer/restart", "expectedInstance": identity},
+              2,
+          )["snapshot"]
+          stale = request(
+              {"id": 3, "method": "appServer/restart", "expectedInstance": identity},
+              3,
+          )
+          assert restarted["appServer"]["status"] == "ready"
+          assert restarted["snapshotRevision"] > first["snapshotRevision"]
+          assert restarted["appServer"]["processGeneration"] > first["appServer"]["processGeneration"]
+          assert restarted["appServer"]["instance"]["generation"] > identity["generation"]
+          assert stale["error"]["code"] == "staleInstance"
+          encoded = json.dumps(restarted).lower()
+          for forbidden in ("credential", "token", "socketpath", "pid"):
+              assert forbidden not in encoded
+          with open(os.environ["SMOKE_RESULT"], "w", encoding="utf-8") as result:
+              json.dump(
+                  {
+                      "sourceCommit": os.environ["SOURCE_COMMIT"],
+                      "supervisorReady": True,
+                      "exactRestart": True,
+                      "staleRestartRejected": True,
+                      "sharedRuntimeTouched": False,
+                      "providerCalled": False,
+                  },
+                  result,
+                  indent=2,
+              )
+              result.write("\n")
+          client.close()
+          PY
+
+          kill -TERM "$supervisor_pid"
+          wait "$supervisor_pid"
+          trap - EXIT
+          test ! -S "$supervisor_socket"
+          test ! -S "$owner_home/.codex/app-server-control/app-server-control.sock"
+
+      - name: Smoke managed proxy routing against isolated sockets
+        shell: bash
+        env:
+          DIST: ${{ runner.temp }}/canonical-control-dist
+        run: |
+          set -euo pipefail
+          umask 077
+          smoke_root=$(mktemp -d "$RUNNER_TEMP/canonical-proxy-smoke.XXXXXX")
+          owner_home="$smoke_root/owner"
+          codex_home="$smoke_root/account1"
+          canonical_socket="$owner_home/.codex/app-server-control/app-server-control.sock"
+          account_socket="$codex_home/app-server-control/app-server-control.sock"
+          mkdir -p "$owner_home/.config" "$codex_home" "$smoke_root/primary"
+          printf '1\t%s\n' "$codex_home" > "$owner_home/.config/codex-accounts.tsv"
+          chmod 0600 "$owner_home/.config/codex-accounts.tsv"
+          tar -xzf "$DIST/codex-package-aarch64-apple-darwin.tar.gz" -C "$smoke_root/primary"
+
+          CANONICAL_SOCKET="$canonical_socket" \
+          ACCOUNT_SOCKET="$account_socket" \
+          ACCEPTED_PATH="$smoke_root/accepted-path" \
+          python3 - <<'PY' &
+          import os
+          import selectors
+          import socket
+
+          selector = selectors.DefaultSelector()
+          listeners = []
+          for name, path in (
+              ("canonical", os.environ["CANONICAL_SOCKET"]),
+              ("account", os.environ["ACCOUNT_SOCKET"]),
+          ):
+              os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+              listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+              listener.bind(path)
+              listener.listen(1)
+              selector.register(listener, selectors.EVENT_READ, name)
+              listeners.append(listener)
+          events = selector.select(timeout=10)
+          assert events, "proxy did not connect"
+          key, _ = events[0]
+          connection, _ = key.fileobj.accept()
+          with open(os.environ["ACCEPTED_PATH"], "w", encoding="utf-8") as result:
+              result.write(key.data + "\n")
+          connection.close()
+          for listener in listeners:
+              path = listener.getsockname()
+              listener.close()
+              os.unlink(path)
+          PY
+          listener_pid=$!
+          for _ in $(seq 1 100); do
+            [[ -S "$canonical_socket" && -S "$account_socket" ]] && break
+            sleep 0.05
+          done
+          test -S "$canonical_socket"
+          test -S "$account_socket"
+
+          env -i \
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+            HOME="$owner_home" \
+            CODEX_HOME="$codex_home" \
+            CODEX_MANAGED_ACCOUNT_ID=C1 \
+            "$smoke_root/primary/bin/codex" app-server proxy </dev/null
+          wait "$listener_pid"
+          test "$(cat "$smoke_root/accepted-path")" = canonical
+          jq '.managedProxyCanonical = true' "$DIST/SMOKE-RESULT.json" > "$smoke_root/result.json"
+          mv "$smoke_root/result.json" "$DIST/SMOKE-RESULT.json"
+
+      - name: Finalize and verify artifact checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist="$RUNNER_TEMP/canonical-control-dist"
+          (
+            cd "$dist"
+            shasum -a 256 \
+              codex-package-aarch64-apple-darwin.tar.gz \
+              codex-app-server-package-aarch64-apple-darwin.tar.gz \
+              codex-responses-api-proxy \
+              BUILD-METADATA.txt LICENSE NOTICE SMOKE-RESULT.json > SHA256SUMS
+            shasum -a 256 -c SHA256SUMS
+          )
+
+      - name: Upload installation-ready release candidate
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: canonical-control-macos-arm64-${{ github.sha }}
           path: ${{ runner.temp }}/canonical-control-dist/
           if-no-files-found: error
           retention-days: 14
-
-      - name: Run canonical account lifecycle regressions
-        shell: bash
-        run: >-
-          TMPDIR=/tmp just test -p codex-app-server -E
-          'test(/identity_mismatch_aborts_and_preserves_existing_credential|logout_commit_response_loss_preserves_deletion|logged_out_registered_account_commits_first_identity_and_snapshot|logout_uses_snapshot_cas_and_observes_absent_identity|post_commit_logout_readiness_failure_preserves_deletion|fresh_process_cn_binding_single_flights_initial_catalog_fetch|exact_c_login_reauth_and_logout_commit_matching_snapshots/)'
-
-      - name: Run canonical state lifetime regressions
-        shell: bash
-        run: >-
-          just test -p codex-core -E
-          'test(/context_window_error_sets_total_tokens_to_model_window|queued_inter_agent_mail_does_not_restart_after_final_answer/)'

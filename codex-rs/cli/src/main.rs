@@ -40,6 +40,7 @@ use owo_colors::OwoColorize;
 use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::io::Write;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use supports_color::Stream;
@@ -1365,28 +1366,24 @@ async fn cli_main(
                     }
                 },
                 Some(AppServerSubcommand::Proxy(proxy_cli)) => {
-                    if codex_tui::managed_account_hint_is_present()? {
-                        let codex_home = find_codex_home()?;
-                        codex_tui::classify_current_launch(
-                            codex_home.as_path(),
-                            codex_tui::LaunchOperation::PassiveLocal,
-                            codex_tui::RequestedLaunchMode::StandardLocal,
-                            if proxy_cli.socket_path.is_some()
-                                || !root_config_overrides.raw_overrides.is_empty()
-                            {
-                                codex_tui::LaunchInvocationOverrides::EmbeddedOnly
-                            } else {
-                                codex_tui::LaunchInvocationOverrides::None
-                            },
-                        )?;
-                    }
-                    let socket_path = match proxy_cli.socket_path {
-                        Some(socket_path) => socket_path,
-                        None => {
-                            let codex_home = find_codex_home()?;
-                            codex_app_server::app_server_control_socket_path(&codex_home)?
-                        }
-                    };
+                    let codex_home = find_codex_home()?;
+                    let launch_disposition = codex_tui::classify_current_launch(
+                        codex_home.as_path(),
+                        codex_tui::LaunchOperation::PassiveLocal,
+                        codex_tui::RequestedLaunchMode::StandardLocal,
+                        if proxy_cli.socket_path.is_some()
+                            || !root_config_overrides.raw_overrides.is_empty()
+                        {
+                            codex_tui::LaunchInvocationOverrides::EmbeddedOnly
+                        } else {
+                            codex_tui::LaunchInvocationOverrides::None
+                        },
+                    )?;
+                    let socket_path = resolve_app_server_proxy_socket_path(
+                        proxy_cli.socket_path,
+                        launch_disposition,
+                        codex_home.as_path(),
+                    )?;
                     codex_stdio_to_uds::run(socket_path.as_path()).await?;
                 }
                 Some(AppServerSubcommand::GenerateTs(gen_cli)) => {
@@ -1857,6 +1854,21 @@ async fn cli_main(
     }
 
     Ok(())
+}
+
+fn resolve_app_server_proxy_socket_path(
+    explicit_socket_path: Option<AbsolutePathBuf>,
+    launch_disposition: codex_tui::LaunchDisposition,
+    codex_home: &Path,
+) -> anyhow::Result<AbsolutePathBuf> {
+    if let Some(socket_path) = explicit_socket_path {
+        return Ok(socket_path);
+    }
+    if launch_disposition == codex_tui::LaunchDisposition::CanonicalLocal {
+        return codex_app_server_client::canonical_app_server_control_socket_path()
+            .map_err(anyhow::Error::from);
+    }
+    codex_app_server::app_server_control_socket_path(codex_home).map_err(anyhow::Error::from)
 }
 
 fn profile_v2_for_subcommand<'a>(
@@ -4658,6 +4670,47 @@ mod tests {
                     .expect("relative path should resolve")
             )
         );
+    }
+
+    #[test]
+    fn app_server_proxy_routes_canonical_and_unmanaged_defaults() -> anyhow::Result<()> {
+        let codex_home = AbsolutePathBuf::from_absolute_path("/tmp/proxy-account-home")?;
+        let actual = vec![
+            resolve_app_server_proxy_socket_path(
+                /*explicit_socket_path*/ None,
+                codex_tui::LaunchDisposition::CanonicalLocal,
+                codex_home.as_path(),
+            )?,
+            resolve_app_server_proxy_socket_path(
+                /*explicit_socket_path*/ None,
+                codex_tui::LaunchDisposition::UnmanagedUpstream,
+                codex_home.as_path(),
+            )?,
+        ];
+        let expected = vec![
+            codex_app_server_client::canonical_app_server_control_socket_path()?,
+            codex_app_server::app_server_control_socket_path(&codex_home)?,
+        ];
+
+        assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn app_server_proxy_preserves_explicit_socket() -> anyhow::Result<()> {
+        let codex_home = AbsolutePathBuf::from_absolute_path("/tmp/proxy-account-home")?;
+        let explicit_socket_path =
+            AbsolutePathBuf::from_absolute_path("/tmp/explicit-app-server.sock")?;
+
+        assert_eq!(
+            resolve_app_server_proxy_socket_path(
+                Some(explicit_socket_path.clone()),
+                codex_tui::LaunchDisposition::CanonicalLocal,
+                codex_home.as_path(),
+            )?,
+            explicit_socket_path
+        );
+        Ok(())
     }
 
     #[test]

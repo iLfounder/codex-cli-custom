@@ -24,7 +24,7 @@ pub(super) enum ConnectedDisposition {
 
 #[derive(Default)]
 pub(super) struct ReconnectState {
-    highest_generation: Option<u64>,
+    highest_identity: Option<AppServerInstanceIdentity>,
     pending: Option<PendingReconnect>,
 }
 
@@ -50,13 +50,20 @@ impl ReconnectState {
         &mut self,
         identity: AppServerInstanceIdentity,
     ) -> ConnectedDisposition {
-        if self
-            .highest_generation
-            .is_some_and(|generation| identity.generation <= generation)
-        {
-            return ConnectedDisposition::Stale;
+        if let Some(highest_identity) = self.highest_identity {
+            if identity == highest_identity {
+                return self
+                    .pending
+                    .take()
+                    .map_or(ConnectedDisposition::Stale, |pending| {
+                        ConnectedDisposition::Resync(Box::new(pending))
+                    });
+            }
+            if identity.generation <= highest_identity.generation {
+                return ConnectedDisposition::Stale;
+            }
         }
-        self.highest_generation = Some(identity.generation);
+        self.highest_identity = Some(identity);
         self.pending
             .take()
             .map_or(ConnectedDisposition::Baseline, |pending| {

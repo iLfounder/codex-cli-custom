@@ -21,11 +21,16 @@ fn identity(discriminator: u128, generation: u64) -> AppServerInstanceIdentity {
 }
 
 #[test]
-fn reconnect_state_requires_disconnect_and_strictly_higher_generation() {
+fn reconnect_state_accepts_exact_identity_only_while_disconnected() {
     let mut state = ReconnectState::default();
+    let baseline = identity(1, 4);
     assert!(matches!(
-        state.observe_connected(identity(1, 4)),
+        state.observe_connected(baseline),
         ConnectedDisposition::Baseline
+    ));
+    assert!(matches!(
+        state.observe_connected(baseline),
+        ConnectedDisposition::Stale
     ));
     state.begin_disconnect(Some(ThreadId::new()), /*input_state*/ None);
     assert!(matches!(
@@ -37,12 +42,17 @@ fn reconnect_state_requires_disconnect_and_strictly_higher_generation() {
         ConnectedDisposition::Stale
     ));
     assert!(matches!(
-        state.observe_connected(identity(4, 5)),
+        state.observe_connected(baseline),
         ConnectedDisposition::Resync(_)
     ));
     assert!(matches!(
-        state.observe_connected(identity(4, 5)),
+        state.observe_connected(baseline),
         ConnectedDisposition::Stale
+    ));
+    state.begin_disconnect(Some(ThreadId::new()), /*input_state*/ None);
+    assert!(matches!(
+        state.observe_connected(identity(4, 5)),
+        ConnectedDisposition::Resync(_)
     ));
 }
 
@@ -82,7 +92,7 @@ async fn supervised_disconnect_preserves_draft_and_reports_once() {
 }
 
 #[tokio::test]
-async fn fresh_reconnect_replaces_unmaterialized_thread_without_sending_draft()
+async fn same_identity_reconnect_replaces_unmaterialized_thread_without_sending_draft()
 -> color_eyre::Result<()> {
     let (mut app, mut event_rx, mut op_rx) = make_test_app_with_channels().await;
     let mut app_server =
@@ -111,7 +121,7 @@ async fn fresh_reconnect_replaces_unmaterialized_thread_without_sending_draft()
     app.chat_widget.insert_str("do not autosend this draft");
     app.handle_supervised_disconnect("connection interrupted".to_string());
 
-    app.handle_supervised_connected(&mut tui, &mut app_server, identity(2, 2))
+    app.handle_supervised_connected(&mut tui, &mut app_server, identity(1, 1))
         .await;
 
     assert!(app.current_displayed_thread_id().is_some());
