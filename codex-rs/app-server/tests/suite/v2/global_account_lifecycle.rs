@@ -421,6 +421,9 @@ fn managed_snapshot(label: &str, source_ref: &str) -> serde_json::Value {
 }
 
 fn subscription_source_ref(account_id: &str, account_home: &std::path::Path) -> String {
+    let account_home = account_home
+        .canonicalize()
+        .expect("canonical managed account home");
     let mut digest = Sha256::new();
     digest.update(b"llm-bridge.subscription-source-ref/v1\0codex-cli\0");
     digest.update(account_id.as_bytes());

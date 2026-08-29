@@ -292,9 +292,13 @@ async fn registry_for_home_and_store(
 #[tokio::test]
 async fn fresh_process_cn_binding_single_flights_initial_catalog_fetch() {
     let process_home = tempdir().unwrap();
+    let c1_home = tempdir().unwrap();
     let user_home = tempdir().unwrap();
     let mut registry = registry_for_home(process_home.path()).await;
-    write_global_registry(user_home.path(), &[(2, process_home.path())]);
+    write_global_registry(
+        user_home.path(),
+        &[(1, c1_home.path()), (2, process_home.path())],
+    );
     registry.global_directory_user_home = Some(user_home.path().to_path_buf());
 
     let server = MockServer::start().await;

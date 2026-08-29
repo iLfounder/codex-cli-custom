@@ -37,7 +37,7 @@ use crate::account_registry::global::AccountId;
 use crate::account_registry::global::CatalogError;
 use crate::account_registry::global::RawSnapshot;
 use crate::account_registry::global::TokenManagerClient;
-use crate::account_registry::global::directory::subscription_source_ref;
+use crate::account_registry::global::directory::subscription_source_ref as canonical_subscription_source_ref;
 use crate::config_manager::ConfigManager;
 
 #[derive(Default)]
@@ -184,6 +184,10 @@ fn raw_snapshot(label: &str, source_ref: Option<String>) -> RawSnapshot {
         ok: true,
         rate_limit: None,
     }
+}
+
+fn subscription_source_ref(account_id: &str, home: &Path) -> Option<String> {
+    canonical_subscription_source_ref(account_id, &home.canonicalize().ok()?)
 }
 
 async fn registry_fixture(

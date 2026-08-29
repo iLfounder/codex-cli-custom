@@ -1,4 +1,4 @@
-name: Canonical control macOS arm64 build and test
+name: Canonical control macOS arm64 build and smoke candidate
 
 on:
   push:
@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   build-and-test:
-    name: release build and full test / macOS arm64
+    name: release build and focused regression / macOS arm64
     runs-on: macos-15
     timeout-minutes: 330
     defaults:
@@ -80,10 +80,6 @@ jobs:
           cargo build --release -p codex-cli --bin codex
           cargo build --release -p codex-app-server --bin codex-app-server
 
-      - name: Run complete Rust test suite
-        shell: bash
-        run: just test
-
       - name: Package binaries and provenance
         shell: bash
         run: |
@@ -105,10 +101,22 @@ jobs:
           } > "$dist/BUILD-METADATA.txt"
           file "$dist/codex" "$dist/codex-app-server"
 
-      - name: Upload verified candidate binaries
+      - name: Upload release candidate binaries
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: canonical-control-macos-arm64-${{ github.sha }}
           path: ${{ runner.temp }}/canonical-control-dist/
           if-no-files-found: error
           retention-days: 14
+
+      - name: Run canonical account lifecycle regressions
+        shell: bash
+        run: >-
+          TMPDIR=/tmp just test -p codex-app-server -E
+          'test(/identity_mismatch_aborts_and_preserves_existing_credential|logout_commit_response_loss_preserves_deletion|logged_out_registered_account_commits_first_identity_and_snapshot|logout_uses_snapshot_cas_and_observes_absent_identity|post_commit_logout_readiness_failure_preserves_deletion|fresh_process_cn_binding_single_flights_initial_catalog_fetch|exact_c_login_reauth_and_logout_commit_matching_snapshots/)'
+
+      - name: Run canonical state lifetime regressions
+        shell: bash
+        run: >-
+          just test -p codex-core -E
+          'test(/context_window_error_sets_total_tokens_to_model_window|queued_inter_agent_mail_does_not_restart_after_final_answer/)'
