@@ -161,6 +161,14 @@ jobs:
             "$app_server/bin/codex-app-server" \
             "$dist/codex-responses-api-proxy"
 
+      - name: Preserve exact build outputs before regression and smoke
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: canonical-control-macos-arm64-build-${{ github.sha }}
+          path: ${{ runner.temp }}/canonical-control-dist/
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Run corrected reconnect regressions
         shell: bash
         run: >-
@@ -186,7 +194,7 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-          smoke_root=$(mktemp -d "$RUNNER_TEMP/canonical-supervisor-smoke.XXXXXX")
+          smoke_root=$(mktemp -d /tmp/cs.XXXXXX)
           owner_home="$smoke_root/owner"
           codex_home="$smoke_root/codex-home"
           sqlite_home="$smoke_root/sqlite"
@@ -229,8 +237,11 @@ jobs:
             fi
             sleep 0.1
           done
-          test -S "$supervisor_socket"
-          jq -e '.appServer.status == "ready"' "$snapshot_file" >/dev/null
+          if [[ ! -S "$supervisor_socket" ]] \
+            || ! jq -e '.appServer.status == "ready"' "$snapshot_file" >/dev/null 2>&1; then
+            cat "$supervisor_log"
+            exit 1
+          fi
           test "$(stat -f %Lp "$supervisor_socket")" = 600
           test "$(stat -f %Lp "$snapshot_file")" = 600
 
@@ -301,7 +312,7 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-          smoke_root=$(mktemp -d "$RUNNER_TEMP/canonical-proxy-smoke.XXXXXX")
+          smoke_root=$(mktemp -d /tmp/cp.XXXXXX)
           owner_home="$smoke_root/owner"
           codex_home="$smoke_root/account1"
           canonical_socket="$owner_home/.codex/app-server-control/app-server-control.sock"
