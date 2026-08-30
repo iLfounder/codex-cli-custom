@@ -1,0 +1,189 @@
+{
+  "schema": "codex-a.runtime-artifact/v1",
+  "releaseIdentity": "codex-a/0.149.0/p024/darwin-arm64",
+  "sourceRevision": "d2c19347ca12c9bdba0ac4e5816884a75dc5e22c",
+  "provenance": {
+    "repository": "ilfounder/Codex-Cli-Custom",
+    "buildRevision": "1c3aa6e31485ad6d558929ee30b1a337dea363b7",
+    "buildWorkflow": ".github/workflows/build-custom-macos-arm64.yml",
+    "buildRunId": 33295539074,
+    "buildArtifact": {
+      "id": 9728206200,
+      "name": "codex-custom-rust-v0.149.0-macos-arm64-ba401ca060b1128c6fb99280f08ab42846a7e95613cf0de290d51a48c8b43da7",
+      "digest": "sha256:d77a695a1d132673ec3735f864a63ad38f8d8586284272004dbccded035fa0ae"
+    },
+    "smokeWorkflow": ".github/workflows/canonical-control-macos-arm64-artifact-smoke.yml",
+    "smokeRunId": 33299202294
+  },
+  "artifact": {
+    "id": 9728371465,
+    "name": "canonical-control-p024-8b334b2b723f599a7db9139a7d5693c4472d44c2-smoke-33299202294",
+    "digest": "sha256:5b7d4c581ef256cfd96a756fd4a1de8b97b4f3635688003d0ba25b19c60f9c63",
+    "payloadChecksum": {
+      "path": "SHA256SUMS",
+      "digest": "sha256:f4237b3f883f2cc8b727cfbf18ab2bd312e3f237cda6c28cb0053ae13be3d5cd"
+    },
+    "exactFileSet": [
+      "BUILD-METADATA.txt",
+      "INVOCATION-READY.json",
+      "LICENSE",
+      "NOTICE",
+      "SHA256SUMS",
+      "SMOKE-RESULT.json",
+      "codex-app-server-package-aarch64-apple-darwin.tar.gz",
+      "codex-package-aarch64-apple-darwin.tar.gz",
+      "codex-responses-api-proxy"
+    ]
+  },
+  "product": {
+    "version": "0.149.0",
+    "upstreamCommit": "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0",
+    "patchedTree": {
+      "grammar": "git-tree-sha1",
+      "digest": "8b334b2b723f599a7db9139a7d5693c4472d44c2"
+    },
+    "compiledTree": {
+      "grammar": "git-tree-sha1",
+      "digest": "8b334b2b723f599a7db9139a7d5693c4472d44c2"
+    }
+  },
+  "platform": {
+    "os": "darwin",
+    "arch": "arm64",
+    "target": "aarch64-apple-darwin"
+  },
+  "packages": [
+    {
+      "archivePath": "codex-package-aarch64-apple-darwin.tar.gz",
+      "layoutVersion": 1,
+      "variant": "codex",
+      "entrypoint": "bin/codex",
+      "requiredExecutables": [
+        {"path": "bin/codex", "mode": "0755"},
+        {"path": "bin/codex-code-mode-host", "mode": "0755"},
+        {"path": "codex-path/rg", "mode": "0755"},
+        {"path": "codex-resources/zsh/bin/zsh", "mode": "0755"}
+      ]
+    },
+    {
+      "archivePath": "codex-app-server-package-aarch64-apple-darwin.tar.gz",
+      "layoutVersion": 1,
+      "variant": "codex-app-server",
+      "entrypoint": "bin/codex-app-server",
+      "requiredExecutables": [
+        {"path": "bin/codex-app-server", "mode": "0755"},
+        {"path": "bin/codex-code-mode-host", "mode": "0755"},
+        {"path": "codex-path/rg", "mode": "0755"},
+        {"path": "codex-resources/zsh/bin/zsh", "mode": "0755"}
+      ]
+    }
+  ],
+  "entrypoints": {
+    "cli": {
+      "archivePath": "codex-package-aarch64-apple-darwin.tar.gz",
+      "executablePath": "bin/codex",
+      "mode": "0755",
+      "argv": []
+    },
+    "appServer": {
+      "archivePath": "codex-app-server-package-aarch64-apple-darwin.tar.gz",
+      "executablePath": "bin/codex-app-server",
+      "mode": "0755",
+      "argv": []
+    },
+    "supervisor": {
+      "archivePath": "codex-package-aarch64-apple-darwin.tar.gz",
+      "executablePath": "bin/codex",
+      "mode": "0755",
+      "argv": ["app-server", "daemon", "supervisor"]
+    },
+    "responsesApiProxy": {
+      "archivePath": null,
+      "executablePath": "codex-responses-api-proxy",
+      "mode": "0755",
+      "argv": []
+    }
+  },
+  "invocationReady": {
+    "protocolVersion": 1,
+    "commandScopes": ["exec", "resume"],
+    "optInFlag": "--invocation-ready-id",
+    "idGrammar": "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}",
+    "requiresJson": true,
+    "requiresForcedStdinPrompt": true,
+    "requiresAccountFailover": "pre_semantic",
+    "firstJsonlRecord": true,
+    "exactlyOnce": true,
+    "flushBeforePromptRead": true,
+    "event": {
+      "type": "invocation.ready",
+      "provenance": "codex_exec",
+      "processScope": "in_process",
+      "capabilities": [
+        "ananke_account_rotation_v1",
+        "ananke_account_failover_v1"
+      ],
+      "accountFailover": "pre_semantic",
+      "supportedAccountRotation": [
+        "quota_aware",
+        "round_robin",
+        "exhaust_then_next"
+      ],
+      "requestedAccountRotation": "echo_invocation_option_or_null"
+    }
+  },
+  "externalState": {
+    "contractIdentity": "codex-a.external-state/v1",
+    "releasePayloadContainsPersistentState": false,
+    "preserveOutsideRelease": [
+      {"owner": "codex", "selector": "${HOME}/.config/codex-accounts.tsv", "class": "account_catalog"},
+      {"owner": "codex", "selector": "${CODEX_HOME}/auth.json", "class": "authentication"},
+      {"owner": "codex", "selector": "${CODEX_HOME}/config.toml", "class": "configuration"},
+      {"owner": "codex", "selector": "${CODEX_HOME}/sessions", "class": "rollouts"},
+      {"owner": "codex", "selector": "${CODEX_SQLITE_HOME}", "class": "database"},
+      {"owner": "token_manager", "selector": "provider-owned credential snapshots", "class": "authentication"},
+      {"owner": "llc_relay", "selector": "external daemon and state", "class": "external_runtime"}
+    ],
+    "forbiddenReleaseEffects": [
+      "auth_write",
+      "provider_call",
+      "token_manager_mutation",
+      "database_mutation",
+      "pm2_mutation",
+      "launchd_mutation",
+      "manual_symlink_activation"
+    ]
+  },
+  "rollback": {
+    "compatibilityIdentity": "codex-a/0.149/p024/external-state-v1",
+    "previousReleaseFence": {
+      "allowInitialActivationWithoutPrevious": true,
+      "requireCoordinatorSelectedImmutablePrevious": true,
+      "requiredSchema": "codex-a.runtime-artifact/v1",
+      "requiredPlatform": "darwin-arm64",
+      "requiredExternalStateContract": "codex-a.external-state/v1",
+      "requiredCapabilities": [
+        "ananke_account_rotation_v1",
+        "ananke_account_failover_v1",
+        "canonical_app_server_supervisor_v1"
+      ]
+    }
+  },
+  "providerFreeCanary": {
+    "providerCallsAllowed": false,
+    "contracts": [
+      "C1",
+      "C2",
+      "C3",
+      "C4",
+      "C5",
+      "C6",
+      "C7",
+      "C8",
+      "C9",
+      "C10",
+      "multiple-TUI",
+      "Relay-zero-child"
+    ]
+  }
+}
