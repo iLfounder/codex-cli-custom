@@ -1,0 +1,242 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ilfounder/Codex-Cli-Custom/release-manifests/codex-a/runtime-artifact-v1.schema.json",
+  "title": "codex-a.runtime-artifact/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "releaseIdentity",
+    "sourceRevision",
+    "provenance",
+    "artifact",
+    "product",
+    "platform",
+    "packages",
+    "entrypoints",
+    "invocationReady",
+    "externalState",
+    "rollback",
+    "providerFreeCanary"
+  ],
+  "properties": {
+    "schema": {"const": "codex-a.runtime-artifact/v1"},
+    "releaseIdentity": {"type": "string", "minLength": 1},
+    "sourceRevision": {"$ref": "#/$defs/gitSha"},
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "buildRevision", "buildWorkflow", "buildRunId", "buildArtifact", "smokeWorkflow", "smokeRunId"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "buildRevision": {"$ref": "#/$defs/gitSha"},
+        "buildWorkflow": {"$ref": "#/$defs/relativePath"},
+        "buildRunId": {"type": "integer", "minimum": 1},
+        "buildArtifact": {"$ref": "#/$defs/githubArtifact"},
+        "smokeWorkflow": {"$ref": "#/$defs/relativePath"},
+        "smokeRunId": {"type": "integer", "minimum": 1}
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "digest", "payloadChecksum", "exactFileSet"],
+      "properties": {
+        "id": {"type": "integer", "minimum": 1},
+        "name": {"type": "string", "minLength": 1},
+        "digest": {"$ref": "#/$defs/sha256"},
+        "payloadChecksum": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "digest"],
+          "properties": {
+            "path": {"$ref": "#/$defs/relativePath"},
+            "digest": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "exactFileSet": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/relativePath"}
+        }
+      }
+    },
+    "product": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "upstreamCommit", "patchedTree", "compiledTree"],
+      "properties": {
+        "version": {"type": "string", "minLength": 1},
+        "upstreamCommit": {"$ref": "#/$defs/gitSha"},
+        "patchedTree": {"$ref": "#/$defs/gitTree"},
+        "compiledTree": {"$ref": "#/$defs/gitTree"}
+      }
+    },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["os", "arch", "target"],
+      "properties": {
+        "os": {"const": "darwin"},
+        "arch": {"const": "arm64"},
+        "target": {"const": "aarch64-apple-darwin"}
+      }
+    },
+    "packages": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/package"}
+    },
+    "entrypoints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cli", "appServer", "supervisor", "responsesApiProxy"],
+      "properties": {
+        "cli": {"$ref": "#/$defs/entrypoint"},
+        "appServer": {"$ref": "#/$defs/entrypoint"},
+        "supervisor": {"$ref": "#/$defs/entrypoint"},
+        "responsesApiProxy": {"$ref": "#/$defs/entrypoint"}
+      }
+    },
+    "invocationReady": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocolVersion", "commandScopes", "optInFlag", "idGrammar", "requiresJson", "requiresForcedStdinPrompt", "requiresAccountFailover", "firstJsonlRecord", "exactlyOnce", "flushBeforePromptRead", "event"],
+      "properties": {
+        "protocolVersion": {"const": 1},
+        "commandScopes": {"type": "array", "uniqueItems": true, "items": {"enum": ["exec", "resume"]}},
+        "optInFlag": {"const": "--invocation-ready-id"},
+        "idGrammar": {"type": "string", "minLength": 1},
+        "requiresJson": {"const": true},
+        "requiresForcedStdinPrompt": {"const": true},
+        "requiresAccountFailover": {"const": "pre_semantic"},
+        "firstJsonlRecord": {"const": true},
+        "exactlyOnce": {"const": true},
+        "flushBeforePromptRead": {"const": true},
+        "event": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "provenance", "processScope", "capabilities", "accountFailover", "supportedAccountRotation", "requestedAccountRotation"],
+          "properties": {
+            "type": {"const": "invocation.ready"},
+            "provenance": {"const": "codex_exec"},
+            "processScope": {"const": "in_process"},
+            "capabilities": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+            "accountFailover": {"const": "pre_semantic"},
+            "supportedAccountRotation": {"type": "array", "uniqueItems": true, "items": {"enum": ["quota_aware", "round_robin", "exhaust_then_next"]}},
+            "requestedAccountRotation": {"const": "echo_invocation_option_or_null"}
+          }
+        }
+      }
+    },
+    "externalState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contractIdentity", "releasePayloadContainsPersistentState", "preserveOutsideRelease", "forbiddenReleaseEffects"],
+      "properties": {
+        "contractIdentity": {"type": "string", "minLength": 1},
+        "releasePayloadContainsPersistentState": {"const": false},
+        "preserveOutsideRelease": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/externalState"}},
+        "forbiddenReleaseEffects": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "rollback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["compatibilityIdentity", "previousReleaseFence"],
+      "properties": {
+        "compatibilityIdentity": {"type": "string", "minLength": 1},
+        "previousReleaseFence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["allowInitialActivationWithoutPrevious", "requireCoordinatorSelectedImmutablePrevious", "requiredSchema", "requiredPlatform", "requiredExternalStateContract", "requiredCapabilities"],
+          "properties": {
+            "allowInitialActivationWithoutPrevious": {"type": "boolean"},
+            "requireCoordinatorSelectedImmutablePrevious": {"const": true},
+            "requiredSchema": {"const": "codex-a.runtime-artifact/v1"},
+            "requiredPlatform": {"const": "darwin-arm64"},
+            "requiredExternalStateContract": {"type": "string", "minLength": 1},
+            "requiredCapabilities": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+          }
+        }
+      }
+    },
+    "providerFreeCanary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["providerCallsAllowed", "contracts"],
+      "properties": {
+        "providerCallsAllowed": {"const": false},
+        "contracts": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      }
+    }
+  },
+  "$defs": {
+    "gitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "relativePath": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"},
+    "githubArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "digest"],
+      "properties": {
+        "id": {"type": "integer", "minimum": 1},
+        "name": {"type": "string", "minLength": 1},
+        "digest": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "gitTree": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["grammar", "digest"],
+      "properties": {
+        "grammar": {"const": "git-tree-sha1"},
+        "digest": {"$ref": "#/$defs/gitSha"}
+      }
+    },
+    "executable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "mode"],
+      "properties": {
+        "path": {"$ref": "#/$defs/relativePath"},
+        "mode": {"const": "0755"}
+      }
+    },
+    "package": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["archivePath", "layoutVersion", "variant", "entrypoint", "requiredExecutables"],
+      "properties": {
+        "archivePath": {"$ref": "#/$defs/relativePath"},
+        "layoutVersion": {"const": 1},
+        "variant": {"enum": ["codex", "codex-app-server"]},
+        "entrypoint": {"$ref": "#/$defs/relativePath"},
+        "requiredExecutables": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/executable"}}
+      }
+    },
+    "entrypoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["archivePath", "executablePath", "mode", "argv"],
+      "properties": {
+        "archivePath": {"oneOf": [{"$ref": "#/$defs/relativePath"}, {"type": "null"}]},
+        "executablePath": {"$ref": "#/$defs/relativePath"},
+        "mode": {"const": "0755"},
+        "argv": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "externalState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["owner", "selector", "class"],
+      "properties": {
+        "owner": {"type": "string", "minLength": 1},
+        "selector": {"type": "string", "minLength": 1},
+        "class": {"enum": ["account_catalog", "authentication", "configuration", "rollouts", "database", "external_runtime"]}
+      }
+    }
+  }
+}
