@@ -12,6 +12,10 @@ use std::process::Stdio;
 use std::string::ToString;
 use std::time::Duration;
 use tempfile::TempDir;
+use tokio::io::AsyncBufReadExt;
+use tokio::io::BufReader;
+use tokio::process::Command;
+use tokio::time::timeout;
 use uuid::Uuid;
 use walkdir::WalkDir;
 use wiremock::MockServer;
@@ -678,6 +682,101 @@ async fn exec_resume_includes_output_schema_in_request() -> anyhow::Result<()> {
         })
     );
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invocation_ready_is_flushed_before_resume_prompt_read() -> anyhow::Result<()> {
+    let test = test_codex_exec();
+    let server = MockServer::start().await;
+    let response_mock = responses::mount_sse_once(
+        &server,
+        responses::sse(vec![
+            responses::ev_response_created("resp-ready-seed"),
+            responses::ev_assistant_message("msg-ready-seed", "seed response"),
+            responses::ev_completed("resp-ready-seed"),
+        ]),
+    )
+    .await;
+
+    let seed = test
+        .cmd_with_server(&server)
+        .arg("--skip-git-repo-check")
+        .arg("-C")
+        .arg(test.cwd_path())
+        .arg("--json")
+        .arg("seed invocation readiness")
+        .output()?;
+    assert!(seed.status.success(), "seed exec failed: {seed:?}");
+    let seed_events = String::from_utf8(seed.stdout)?
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let thread_id = seed_events
+        .first()
+        .and_then(|event| event["thread_id"].as_str())
+        .expect("seed should emit thread.started")
+        .to_string();
+
+    for (ready_id, rotation) in [
+        ("resume-ready-null", None),
+        ("resume-ready-quota", Some("quota-aware")),
+    ] {
+        let mut command = test.cmd_with_server(&server);
+        command
+            .arg("--skip-git-repo-check")
+            .arg("-C")
+            .arg(test.cwd_path())
+            .arg("--json")
+            .arg("--account-failover=pre-semantic")
+            .arg("--invocation-ready-id")
+            .arg(ready_id);
+        if let Some(rotation) = rotation {
+            command.arg("--account-rotation").arg(rotation);
+        }
+        command.arg("resume").arg(&thread_id).arg("-");
+        let mut child_command = Command::new(command.get_program());
+        child_command
+            .args(command.get_args())
+            .envs(
+                command
+                    .get_envs()
+                    .filter_map(|(key, value)| value.map(|value| (key, value))),
+            )
+            .current_dir(test.cwd_path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = child_command.spawn()?;
+        let stdin = child.stdin.take().expect("stdin should be piped");
+        let stdout = child.stdout.take().expect("stdout should be piped");
+        let mut stdout = BufReader::new(stdout);
+        let mut line = String::new();
+        timeout(Duration::from_secs(30), stdout.read_line(&mut line)).await??;
+        let ready: Value = serde_json::from_str(&line)?;
+        assert_eq!(ready["type"], "invocation.ready");
+        assert_eq!(ready["invocation_id"], ready_id);
+        assert_eq!(ready["account_failover"], "pre_semantic");
+        assert_eq!(
+            ready["account_rotation"]["requested"],
+            rotation.map_or(Value::Null, |_| Value::String("quota_aware".to_string()))
+        );
+
+        let mut later_line = String::new();
+        assert!(
+            timeout(
+                Duration::from_millis(200),
+                stdout.read_line(&mut later_line)
+            )
+            .await
+            .is_err()
+        );
+
+        child.kill().await?;
+        child.wait().await?;
+        drop(stdin);
+    }
+    assert_eq!(response_mock.requests().len(), 1);
     Ok(())
 }
 

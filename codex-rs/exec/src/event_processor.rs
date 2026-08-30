@@ -4,6 +4,8 @@ use codex_app_server_protocol::ServerNotification;
 use codex_core::config::Config;
 use codex_protocol::protocol::SessionConfiguredEvent;
 
+use crate::exec_events::InvocationReadyEvent;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodexStatus {
     Running,
@@ -11,6 +13,11 @@ pub enum CodexStatus {
 }
 
 pub(crate) trait EventProcessor {
+    /// Emit the invocation capability handshake before the first prompt is read.
+    fn print_invocation_ready(&mut self, _event: InvocationReadyEvent) -> std::io::Result<()> {
+        Ok(())
+    }
+
     /// Print summary of effective configuration and user prompt.
     fn print_config_summary(
         &mut self,
