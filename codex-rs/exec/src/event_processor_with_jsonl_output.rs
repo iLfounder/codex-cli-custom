@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -33,6 +34,7 @@ use crate::exec_events::CommandExecutionStatus as ExecCommandExecutionStatus;
 use crate::exec_events::ErrorItem;
 use crate::exec_events::FileChangeItem;
 use crate::exec_events::FileUpdateChange;
+use crate::exec_events::InvocationReadyEvent;
 use crate::exec_events::ItemCompletedEvent;
 use crate::exec_events::ItemStartedEvent;
 use crate::exec_events::ItemUpdatedEvent;
@@ -119,6 +121,12 @@ impl EventProcessorWithJsonOutput {
                 .to_string()
             })
         );
+    }
+
+    #[allow(clippy::print_stdout)]
+    fn emit_and_flush(&self, event: ThreadEvent) -> std::io::Result<()> {
+        self.emit(event);
+        std::io::stdout().flush()
     }
 
     fn usage_from_last_total(&self) -> Usage {
@@ -641,6 +649,10 @@ impl EventProcessorWithJsonOutput {
 }
 
 impl EventProcessor for EventProcessorWithJsonOutput {
+    fn print_invocation_ready(&mut self, event: InvocationReadyEvent) -> std::io::Result<()> {
+        self.emit_and_flush(ThreadEvent::InvocationReady(event))
+    }
+
     fn print_config_summary(
         &mut self,
         _: &Config,

@@ -486,6 +486,40 @@ async fn exec_account_failover_bootstrap_precedes_first_turn_and_fails_closed() 
 }
 
 #[test]
+fn invocation_ready_event_is_account_abstract_and_has_stable_wire_shape() {
+    let event = invocation_ready_event("turn-01", Some(cli::AccountRotation::QuotaAware));
+    let value = serde_json::to_value(ThreadEvent::InvocationReady(event)).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "type": "invocation.ready",
+            "protocol_version": 1,
+            "invocation_id": "turn-01",
+            "provenance": "codex_exec",
+            "process_scope": "in_process",
+            "capabilities": [
+                "ananke_account_rotation_v1",
+                "ananke_account_failover_v1"
+            ],
+            "account_failover": "pre_semantic",
+            "account_rotation": {
+                "supported": ["quota_aware", "round_robin", "exhaust_then_next"],
+                "requested": "quota_aware"
+            }
+        })
+    );
+
+    let resume = invocation_ready_event("resume-01", Some(cli::AccountRotation::RoundRobin));
+    assert_eq!(
+        resume.account_rotation.requested,
+        Some(InvocationReadyRotationMode::RoundRobin)
+    );
+
+    let normal_resume = invocation_ready_event("resume-02", None);
+    assert_eq!(normal_resume.account_rotation.requested, None);
+}
+
+#[test]
 fn runtime_warnings_are_filtered_to_the_primary_thread() {
     let primary_thread_id = "thread-1";
     let turn_id = "turn-1";

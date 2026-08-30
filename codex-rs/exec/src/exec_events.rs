@@ -9,6 +9,9 @@ use ts_rs::TS;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 #[serde(tag = "type")]
 pub enum ThreadEvent {
+    /// Emitted once, before a forced stdin prompt is read, when invocation readiness is opted in.
+    #[serde(rename = "invocation.ready")]
+    InvocationReady(InvocationReadyEvent),
     /// Emitted when a new thread is started as the first event.
     #[serde(rename = "thread.started")]
     ThreadStarted(ThreadStartedEvent),
@@ -34,6 +37,31 @@ pub enum ThreadEvent {
     /// Represents an unrecoverable error emitted directly by the event stream.
     #[serde(rename = "error")]
     Error(ThreadErrorEvent),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+pub struct InvocationReadyEvent {
+    pub protocol_version: u8,
+    pub invocation_id: String,
+    pub provenance: String,
+    pub process_scope: String,
+    pub capabilities: Vec<String>,
+    pub account_failover: String,
+    pub account_rotation: InvocationReadyAccountRotation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+pub struct InvocationReadyAccountRotation {
+    pub supported: Vec<InvocationReadyRotationMode>,
+    pub requested: Option<InvocationReadyRotationMode>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum InvocationReadyRotationMode {
+    QuotaAware,
+    RoundRobin,
+    ExhaustThenNext,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
