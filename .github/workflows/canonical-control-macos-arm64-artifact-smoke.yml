@@ -299,9 +299,12 @@ jobs:
           SMOKE_HARNESS_SHA="$GITHUB_SHA" \
           SMOKE_RESULT="$DIST/SMOKE-RESULT.json" \
           python3 - <<'PY'
+          import base64
+          import hashlib
           import json
           import os
           import socket
+          import struct
 
           client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
           client.connect(os.environ["SUPERVISOR_SOCKET"])
@@ -335,16 +338,94 @@ jobs:
           for forbidden in ("credential", "token", "socketpath", "pid"):
               assert forbidden not in encoded
 
+          class WebSocket:
+              def __init__(self, client, buffered=b""):
+                  self.client = client
+                  self.buffered = buffered
+
+              def read_exact(self, length):
+                  chunks = []
+                  if self.buffered:
+                      take = self.buffered[:length]
+                      chunks.append(take)
+                      self.buffered = self.buffered[len(take):]
+                      length -= len(take)
+                  while length:
+                      chunk = self.client.recv(length)
+                      assert chunk, "app-server closed before websocket frame"
+                      chunks.append(chunk)
+                      length -= len(chunk)
+                  return b"".join(chunks)
+
+              def send_frame(self, opcode, payload):
+                  mask = os.urandom(4)
+                  length = len(payload)
+                  if length < 126:
+                      header = bytes((0x80 | opcode, 0x80 | length))
+                  elif length < 65536:
+                      header = bytes((0x80 | opcode, 0x80 | 126)) + struct.pack("!H", length)
+                  else:
+                      header = bytes((0x80 | opcode, 0x80 | 127)) + struct.pack("!Q", length)
+                  masked = bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
+                  self.client.sendall(header + mask + masked)
+
+              def send_json(self, payload):
+                  encoded = json.dumps(payload, separators=(",", ":")).encode()
+                  self.send_frame(0x1, encoded)
+
+              def read_json(self):
+                  while True:
+                      first, second = self.read_exact(2)
+                      opcode = first & 0x0F
+                      length = second & 0x7F
+                      assert second & 0x80 == 0, "server websocket frame must not be masked"
+                      if length == 126:
+                          length = struct.unpack("!H", self.read_exact(2))[0]
+                      elif length == 127:
+                          length = struct.unpack("!Q", self.read_exact(8))[0]
+                      payload = self.read_exact(length)
+                      if opcode == 0x9:
+                          self.send_frame(0xA, payload)
+                          continue
+                      assert opcode == 0x1, f"unexpected websocket opcode {opcode}"
+                      return json.loads(payload)
+
           app_client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
           app_client.connect(os.environ["APP_SERVER_SOCKET"])
-          app_stream = app_client.makefile("rwb", buffering=0)
+          websocket_key = base64.b64encode(os.urandom(16)).decode()
+          upgrade = (
+              "GET / HTTP/1.1\r\n"
+              "Host: localhost\r\n"
+              "Upgrade: websocket\r\n"
+              "Connection: Upgrade\r\n"
+              f"Sec-WebSocket-Key: {websocket_key}\r\n"
+              "Sec-WebSocket-Version: 13\r\n\r\n"
+          ).encode()
+          app_client.sendall(upgrade)
+          response = b""
+          while b"\r\n\r\n" not in response:
+              chunk = app_client.recv(4096)
+              assert chunk, "app-server closed during websocket upgrade"
+              response += chunk
+          headers, buffered = response.split(b"\r\n\r\n", 1)
+          lines = headers.decode("ascii").split("\r\n")
+          assert lines[0].startswith("HTTP/1.1 101 ")
+          response_headers = {
+              key.lower(): value.strip()
+              for key, value in (line.split(":", 1) for line in lines[1:])
+          }
+          expected_accept = base64.b64encode(
+              hashlib.sha1(
+                  (websocket_key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()
+              ).digest()
+          ).decode()
+          assert response_headers["sec-websocket-accept"] == expected_accept
+          app_stream = WebSocket(app_client, buffered)
 
           def app_request(payload, request_id):
-              app_stream.write(json.dumps(payload, separators=(",", ":")).encode() + b"\n")
+              app_stream.send_json(payload)
               while True:
-                  line = app_stream.readline()
-                  assert line, "app-server closed before response"
-                  message = json.loads(line)
+                  message = app_stream.read_json()
                   if message.get("id") == request_id:
                       return message
 
@@ -359,7 +440,7 @@ jobs:
               10,
           )
           assert "result" in initialized
-          app_stream.write(b'{"method":"initialized"}\n')
+          app_stream.send_json({"method": "initialized"})
           rotation = app_request({"id": 11, "method": "accountRotation/read"}, 11)
           assert rotation.get("result") == {"rotation": None}
 
