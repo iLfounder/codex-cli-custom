@@ -37,6 +37,7 @@
 | P021 | Goal edit 중 accounting-only revision drift는 authoritative refresh로 회복하고, 충돌하는 semantic change는 거부한다. |
 | P022 | 0.149를 최종 수렴한다. Writer 반환과 종료 재시도, 등록 계정 전체 목록과 실시간 quota overlay, MCP startup의 terminal 결과, compact된 content를 노출하지 않는 context-compaction JSONL telemetry를 제공한다. |
 | P023 | Codex 내부가 quota-aware 계정 순환과 pre-semantic same-root failover를 소유하고, JSON forced-stdin `exec`·`resume`에 invocation 범위 readiness handshake를 제공한다. |
+| P024 | 검수된 canonical control plane을 통합한다. 하나의 supervised app-server, account-neutral local UDS, 전역 rotation과 managed account lifecycle API, reconnect-safe TUI·CLI, bounded OAuth callback 호환성을 제공한다. |
 
 App-server는 opaque account reference와 sanitize된 session state만 노출한다. 외부 workflow role, group ID, 사용자 handle은 저장하지 않는다.
 
@@ -59,14 +60,14 @@ Patch에는 생성된 Rust, JSON Schema, TypeScript 정의가 `codex-rs/app-serv
 
 ## 적용과 build
 
-정확한 upstream commit에만 스물세 개 patch를 적용한다.
+정확한 upstream commit에만 스물네 개 patch를 적용한다.
 
 ```sh
 git checkout 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
 /path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD"
 ```
 
-Applier는 clean tree를 요구하고 각 patch digest를 검증한 뒤 P001–P023을 순서대로 적용하고 최종 Git tree를 확인한다. POSIX shell, Git, `sed`, `awk`, `shasum` 또는 `sha256sum`이 필요하다.
+Applier는 clean tree를 요구하고 각 patch digest를 검증한 뒤 P001–P024를 순서대로 적용하고 최종 Git tree를 확인한다. POSIX shell, Git, `sed`, `awk`, `shasum` 또는 `sha256sum`이 필요하다.
 
 `codex-rs`에서 로컬 build:
 

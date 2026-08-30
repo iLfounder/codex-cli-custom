@@ -37,6 +37,7 @@ The fork makes account selection, thread ownership, session handoff, and externa
 | P021 | Goal edits recover from accounting-only revision drift through an authoritative refresh, while conflicting semantic changes are rejected. |
 | P022 | Final 0.149 convergence: reliable writer release and exit retry, complete registered-account inventory with live quota overlays, terminal MCP startup reporting, and context-compaction JSONL telemetry without exposing compacted content. |
 | P023 | Codex-owned quota-aware account rotation and pre-semantic same-root failover, plus an invocation-scoped readiness handshake for JSON forced-stdin `exec` and `resume`. |
+| P024 | The reviewed canonical control plane: one supervised app-server, account-neutral local UDS, global rotation and managed account lifecycle APIs, reconnect-safe TUI/CLI clients, and bounded OAuth callback compatibility. |
 
 The app-server exposes opaque account references and sanitized session state. It never stores external workflow roles, group IDs, or user handles.
 
@@ -59,14 +60,14 @@ Generated Rust, JSON Schema, and TypeScript definitions are included by the patc
 
 ## Apply and build
 
-Apply the twenty-three patches only to the exact upstream commit:
+Apply the twenty-four patches only to the exact upstream commit:
 
 ```sh
 git checkout 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
 /path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD"
 ```
 
-The applier requires a clean tree, verifies every patch digest, applies P001–P023 in order, and verifies the final Git tree. It needs a POSIX shell, Git, `sed`, `awk`, and either `shasum` or `sha256sum`.
+The applier requires a clean tree, verifies every patch digest, applies P001–P024 in order, and verifies the final Git tree. It needs a POSIX shell, Git, `sed`, `awk`, and either `shasum` or `sha256sum`.
 
 Build locally from `codex-rs`:
 
