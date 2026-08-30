@@ -168,11 +168,20 @@ jobs:
               stderr=subprocess.PIPE,
               env=env,
           )
+          stdin = process.stdin
+          assert stdin is not None and not stdin.closed
           selector = selectors.DefaultSelector()
           selector.register(process.stdout, selectors.EVENT_READ)
           events = selector.select(timeout=20)
           assert events, "invocation readiness was not flushed while stdin remained open"
           line = process.stdout.readline()
+          if not line:
+              process.wait(timeout=5)
+              stderr = process.stderr.read().decode("utf-8", errors="replace")
+              raise AssertionError(
+                  f"codex exited before invocation readiness: "
+                  f"status={process.returncode}, stderr={stderr!r}"
+              )
           message = json.loads(line)
           assert message == {
               "type": "invocation.ready",
