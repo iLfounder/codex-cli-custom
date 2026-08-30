@@ -42,6 +42,7 @@ const MAX_ACCOUNT_PAGES: usize = 4;
 const ACCOUNT_PAGE_LIMIT: u32 = 100;
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+const LIFE_SCIENCES_STATE_SUFFIX: &str = ".onboarding_entrypoint=life_sciences";
 
 #[derive(Clone, Copy)]
 enum LifecycleAction<'a> {
@@ -359,6 +360,13 @@ fn validate_auth_url(auth_url: &str) -> anyhow::Result<(Url, String)> {
     Ok((redirect, states[0].1.to_string()))
 }
 
+fn valid_callback_state(actual: &str, expected: &str) -> bool {
+    actual == expected
+        || actual
+            .strip_suffix(LIFE_SCIENCES_STATE_SUFFIX)
+            .is_some_and(|base| base == expected)
+}
+
 async fn deliver_callback(auth_url: &str, callback_url: &str) -> anyhow::Result<()> {
     let (redirect, expected_state) = validate_auth_url(auth_url)?;
     let callback =
@@ -386,7 +394,7 @@ async fn deliver_callback(auth_url: &str, callback_url: &str) -> anyhow::Result<
         .filter(|(key, _)| key == "error")
         .collect::<Vec<_>>();
     if states.len() != 1
-        || states[0].1 != expected_state
+        || !valid_callback_state(states[0].1.as_ref(), &expected_state)
         || (codes.len() == 1) == (errors.len() == 1)
         || codes.len() > 1
         || errors.len() > 1

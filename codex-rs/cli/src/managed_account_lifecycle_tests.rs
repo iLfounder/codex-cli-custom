@@ -80,6 +80,39 @@ async fn callback_delivery_accepts_exact_terminal_response() {
 }
 
 #[tokio::test]
+async fn callback_delivery_accepts_known_state_suffix() {
+    let (address, server) = serve_once("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+    let redirect = format!("http://{address}/auth/callback");
+    let auth = auth_url(&redirect, "state-life");
+    let callback =
+        format!("{redirect}?error=access_denied&state=state-life{LIFE_SCIENCES_STATE_SUFFIX}");
+    deliver_callback(&auth, &callback)
+        .await
+        .expect("known state suffix should be accepted");
+    server.await.expect("server task");
+}
+
+#[test]
+fn callback_state_compatibility_is_bounded() {
+    for (actual, expected_valid) in [
+        ("expected", true),
+        ("expected.onboarding_entrypoint=life_sciences", true),
+        ("wrong.onboarding_entrypoint=life_sciences", false),
+        ("expected.onboarding_entrypoint=unknown", false),
+        (
+            "expected.onboarding_entrypoint=life_sciences.onboarding_entrypoint=life_sciences",
+            false,
+        ),
+    ] {
+        assert_eq!(
+            valid_callback_state(actual, "expected"),
+            expected_valid,
+            "actual state: {actual}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn callback_delivery_rejects_mismatch_and_cross_origin_success() {
     let (address, server) = serve_once(
         "HTTP/1.1 302 Found\r\nLocation: http://example.com/success?secret=hidden\r\nContent-Length: 0\r\n\r\n",
