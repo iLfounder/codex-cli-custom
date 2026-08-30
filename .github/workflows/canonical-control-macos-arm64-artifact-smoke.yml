@@ -154,6 +154,7 @@ jobs:
               [
                   os.environ["CODEX_BIN"],
                   "exec",
+                  "--skip-git-repo-check",
                   "--json",
                   "--account-failover",
                   "pre-semantic",
