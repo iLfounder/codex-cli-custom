@@ -80,11 +80,16 @@ Before finalizing a large change to `codex-rs`, run `just fix -p <project>` (in 
   script, package builder, toolchain, target, or release-profile setting. A smoke script, workflow
   wiring, evidence format, documentation, or `AGENTS.md`-only change must reuse the existing exact
   artifact.
-- Run smoke in an artifact-only job or workflow. It must download a named artifact by build run ID
-  and artifact ID, verify its source SHA and digest, and run from short isolated `/tmp` paths. It
-  must not install Rust, check out source, invoke Cargo/nextest, or build/link anything. A failed
-  smoke reruns only this consumer and emits a small evidence artifact containing both the build
-  identity and smoke-harness commit.
+- Run packaged-binary CI smoke in an artifact-only job or workflow. It must download a named
+  artifact by build run ID and artifact ID, verify its source SHA and digest, and run from short
+  isolated `/tmp` paths. It must not install Rust, check out source, invoke Cargo/nextest, or
+  build/link anything. A failed CI smoke reruns only this consumer and emits a small evidence
+  artifact containing both the build identity and smoke-harness commit.
+- Do not treat CI artifact smoke as final acceptance for local control-plane work. Multi-account
+  catalog and TokenManager behavior, a PM2-owned supervisor, multiple local TUI clients, canonical
+  owner UDS routing, and Relay externalization must be exercised on the target Mac with the same
+  preserved artifact. Keep that local E2E separate from compilation and preserve the installed
+  release and running legacy processes until their exact activation boundary is approved.
 - Keep focused Rust validation independent of packaging and parallel to it when both are needed.
   Use the repository `ci-test` profile, not `--release`, unless the behavior specifically depends on
   release optimization. Select exact compile targets such as `--lib` or `--bin codex`; a nextest

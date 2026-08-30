@@ -94,6 +94,7 @@ jobs:
           SOURCE_SHA: ${{ steps.artifact.outputs.source_sha }}
         run: |
           set -euo pipefail
+          test "$(uname -m)" = arm64
           test "$(sed -n 's/^source_commit=//p' "$DIST/BUILD-METADATA.txt")" = \
             "$SOURCE_SHA"
           test -f "$DIST/codex-package-aarch64-apple-darwin.tar.gz"
