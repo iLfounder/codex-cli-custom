@@ -162,6 +162,15 @@ fn catalog_rejects_leading_zero_and_final_home_symlink() {
         ManagedAccountCatalog::load_from_owner_home(owner_home.path()),
         Err(ManagedAccountCatalogError::InvalidEntry)
     );
+
+    write_registry(
+        &config,
+        &format!("1\t{}\n", c1.join("..").join("account1").display()),
+    );
+    assert_eq!(
+        ManagedAccountCatalog::load_from_owner_home(owner_home.path()),
+        Err(ManagedAccountCatalogError::InvalidEntry)
+    );
 }
 
 #[cfg(unix)]
@@ -208,5 +217,19 @@ fn catalog_symlink_is_rejected() {
     assert_eq!(
         ManagedAccountCatalog::load_from_owner_home(owner_home.path()),
         Err(ManagedAccountCatalogError::Unavailable)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn match_hint_rejects_noncanonical_codex_home() {
+    let (owner_home, config, c1, _) = fixture();
+    write_registry(&config, &format!("1\t{}\n", c1.display()));
+    let catalog = ManagedAccountCatalog::load_from_owner_home(owner_home.path())
+        .expect("valid private catalog");
+
+    assert_eq!(
+        catalog.match_hint("C1", &c1.join("..").join("account1")),
+        Err(ManagedAccountHintError::UnresolvableCodexHome)
     );
 }

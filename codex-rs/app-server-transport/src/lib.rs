@@ -26,6 +26,7 @@ pub use supervisor::SupervisorControlMessage;
 pub use supervisor::SupervisorControlRequest;
 pub use supervisor::SupervisorControlResponse;
 pub use supervisor::SupervisorSnapshot;
+pub use supervisor::app_server_socket_is_owner_private;
 pub use supervisor::canonical_app_server_control_socket_path;
 pub use supervisor::canonical_app_server_startup_lock_path;
 pub use supervisor::canonical_control_paths;

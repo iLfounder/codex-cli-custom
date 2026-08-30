@@ -20,6 +20,7 @@ use super::backoff_delay;
 use super::process_start_identity;
 use super::read_supervisor_seed;
 use super::stop_exact;
+use super::validate_supervisor_codex_home;
 
 fn identity(id: &str, generation: u64) -> AppServerInstanceIdentity {
     AppServerInstanceIdentity {
@@ -191,4 +192,51 @@ fn non_private_or_counterless_snapshot_is_rejected_instead_of_regressing() {
         })
         .is_err()
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn supervisor_requires_registered_c1_codex_home() {
+    let owner = tempfile::tempdir().expect("owner home");
+    let config = owner.path().join(".config");
+    let c1 = owner.path().join(".codex/account1");
+    let c2 = owner.path().join(".codex/account2");
+    std::fs::create_dir_all(&config).expect("create config");
+    std::fs::create_dir_all(&c1).expect("create C1");
+    std::fs::create_dir_all(&c2).expect("create C2");
+    std::fs::write(
+        config.join("codex-accounts.tsv"),
+        format!("1\t{}\n2\t{}\n", c1.display(), c2.display()),
+    )
+    .expect("write catalog");
+    std::fs::set_permissions(
+        config.join("codex-accounts.tsv"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .expect("protect catalog");
+
+    validate_supervisor_codex_home(&c1, owner.path()).expect("C1 should be accepted");
+    assert!(validate_supervisor_codex_home(&c2, owner.path()).is_err());
+    assert!(validate_supervisor_codex_home(&owner.path().join(".codex"), owner.path()).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn supervisor_rejects_invalid_catalog_instead_of_falling_back() {
+    let owner = tempfile::tempdir().expect("owner home");
+    let c1 = owner.path().join(".codex/account1");
+    std::fs::create_dir_all(owner.path().join(".config")).expect("create config");
+    std::fs::create_dir_all(&c1).expect("create C1");
+    std::fs::write(
+        owner.path().join(".config/codex-accounts.tsv"),
+        format!("1\t{}\n", c1.display()),
+    )
+    .expect("write catalog");
+    std::fs::set_permissions(
+        owner.path().join(".config/codex-accounts.tsv"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .expect("make catalog unsafe");
+
+    assert!(validate_supervisor_codex_home(&c1, owner.path()).is_err());
 }

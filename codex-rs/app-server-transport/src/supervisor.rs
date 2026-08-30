@@ -1,6 +1,13 @@
 use std::io;
 use std::path::Path;
 
+#[cfg(unix)]
+use std::os::unix::fs::FileTypeExt;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_home_dir::find_owner_home;
 use serde::Deserialize;
@@ -113,6 +120,34 @@ pub async fn supervised_app_server_ready_proof_matches(
         expected,
     )
     .await
+}
+
+/// Returns whether the canonical app-server rendezvous is an owner-private
+/// Unix socket. This is a path/peer ownership fence for readiness: a ready
+/// proof alone is not sufficient if a stale regular file or another owner's
+/// socket is present at the canonical path.
+pub async fn app_server_socket_is_owner_private(path: &Path) -> io::Result<bool> {
+    #[cfg(unix)]
+    {
+        let metadata = match tokio::fs::symlink_metadata(path).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let Some(parent) = path.parent() else {
+            return Ok(false);
+        };
+        let parent_metadata = tokio::fs::symlink_metadata(parent).await?;
+        return Ok(metadata.file_type().is_socket()
+            && metadata.uid() == parent_metadata.uid()
+            && metadata.permissions().mode() & 0o777 == 0o600);
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(true)
+    }
 }
 
 /// Stable identity for an initialized app-server instance. This identity is

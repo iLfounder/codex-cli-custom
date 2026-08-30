@@ -13,6 +13,8 @@ use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
 use codex_app_server_transport::AppServerInstanceIdentity;
+use codex_app_server_transport::ManagedAccountCatalog;
+use codex_app_server_transport::ManagedAccountId;
 use codex_app_server_transport::REMOTE_CONTROL_DISABLED_ENV_VAR;
 use codex_app_server_transport::SUPERVISED_APP_SERVER_IDENTITY_ENV_VAR;
 use codex_app_server_transport::SupervisedAppServerSnapshot;
@@ -63,6 +65,9 @@ struct SupervisorConfig {
 impl SupervisorConfig {
     async fn from_environment() -> Result<Self> {
         let codex_home = find_codex_home().context("failed to resolve CODEX_HOME")?;
+        let owner_home = codex_app_server_transport::find_owner_home()
+            .context("failed to resolve owner home")?;
+        validate_supervisor_codex_home(codex_home.as_path(), owner_home.as_path())?;
         let codex_bin = managed_codex_bin(codex_home.as_path());
         if !codex_bin.is_file() {
             bail!("managed Codex binary is unavailable");
@@ -83,6 +88,33 @@ impl SupervisorConfig {
             remote_control_enabled: settings.remote_control_enabled,
         })
     }
+}
+
+/// A canonical supervisor is owner-scoped, while each child app-server keeps
+/// its own numbered-home startup lock. Refuse the owner `.codex` home up
+/// front: otherwise the supervisor and a child can accidentally share the
+/// same lock namespace and failures are hidden behind guardian backoff.
+fn validate_supervisor_codex_home(codex_home: &Path, owner_home: &Path) -> Result<()> {
+    let catalog = ManagedAccountCatalog::load_from_owner_home(owner_home)
+        .context("managed account catalog is invalid or unavailable")?;
+    let c1 = ManagedAccountId::from_number(1).expect("account one is non-zero");
+    let expected_c1 = catalog
+        .home(c1)
+        .ok_or_else(|| anyhow!("managed account catalog does not register C1"))?;
+    let codex_home = std::fs::canonicalize(codex_home)
+        .context("CODEX_HOME cannot be canonicalized for supervisor ownership")?;
+    let owner_codex_home = std::fs::canonicalize(owner_home.join(".codex"))
+        .context("owner .codex home cannot be canonicalized for supervisor ownership")?;
+    if codex_home == owner_codex_home {
+        bail!("canonical supervisor cannot run with the owner .codex CODEX_HOME");
+    }
+    if codex_home != expected_c1 {
+        bail!(
+            "canonical supervisor requires CODEX_HOME to match registered C1 ({})",
+            expected_c1.display()
+        );
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -328,6 +360,10 @@ impl Guardian {
                 bail!("supervised app-server start identity is no longer active");
             }
             if supervised_app_server_ready_proof_matches(expected).await?
+                && codex_app_server_transport::app_server_socket_is_owner_private(
+                    &self.config.app_socket,
+                )
+                .await?
                 && client::probe(&self.config.app_socket).await.is_ok()
             {
                 return Ok(());

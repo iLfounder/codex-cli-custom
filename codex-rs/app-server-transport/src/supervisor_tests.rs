@@ -16,6 +16,7 @@ use super::SupervisorControlMessage;
 use super::SupervisorControlRequest;
 use super::SupervisorControlResponse;
 use super::SupervisorSnapshot;
+use super::app_server_socket_is_owner_private;
 use super::ready_proof_matches_at;
 use super::remove_ready_proof;
 use super::write_supervised_ready_identity;
@@ -50,6 +51,45 @@ fn owner_control_paths_are_fixed_outside_numbered_codex_homes() {
         owner_home
             .path()
             .join(".codex/app-server-control/supervisor-snapshot.json")
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn canonical_socket_readiness_requires_owner_private_socket() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let socket = temp.path().join("app.sock");
+    let _listener = UnixListener::bind(&socket).expect("bind socket");
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
+        .expect("protect socket");
+    assert!(
+        app_server_socket_is_owner_private(&socket)
+            .await
+            .expect("inspect socket")
+    );
+
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o644))
+        .expect("weaken socket");
+    assert!(
+        !app_server_socket_is_owner_private(&socket)
+            .await
+            .expect("inspect weakened socket")
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn canonical_socket_readiness_rejects_regular_file() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join("app.sock");
+    std::fs::write(&path, b"stale").expect("write stale file");
+    assert!(
+        !app_server_socket_is_owner_private(&path)
+            .await
+            .expect("inspect stale path")
     );
 }
 

@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::fs::OpenOptions;
 use std::io::Read;
+use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -186,6 +187,9 @@ impl ManagedAccountCatalog {
     }
 
     pub fn account_for_home(&self, codex_home: &Path) -> Option<ManagedAccountId> {
+        if !is_clean_absolute_path(codex_home) {
+            return None;
+        }
         let codex_home = std::fs::canonicalize(codex_home).ok()?;
         self.homes
             .iter()
@@ -205,6 +209,9 @@ impl ManagedAccountCatalog {
         let expected_home = self
             .home(account_id)
             .ok_or(ManagedAccountHintError::UnknownAccount)?;
+        if !is_clean_absolute_path(codex_home) {
+            return Err(ManagedAccountHintError::UnresolvableCodexHome);
+        }
         let codex_home = std::fs::canonicalize(codex_home)
             .map_err(|_| ManagedAccountHintError::UnresolvableCodexHome)?;
         if codex_home != expected_home {
@@ -227,7 +234,7 @@ fn parse_catalog_account_id(value: &str) -> Result<ManagedAccountId, ManagedAcco
 
 fn catalog_home(value: &str) -> Result<PathBuf, ManagedAccountCatalogError> {
     let home = PathBuf::from(value);
-    if !home.is_absolute() {
+    if !is_clean_absolute_path(&home) {
         return Err(ManagedAccountCatalogError::InvalidEntry);
     }
     let metadata =
@@ -236,6 +243,28 @@ fn catalog_home(value: &str) -> Result<PathBuf, ManagedAccountCatalogError> {
         return Err(ManagedAccountCatalogError::InvalidEntry);
     }
     std::fs::canonicalize(home).map_err(|_| ManagedAccountCatalogError::InvalidEntry)
+}
+
+/// Returns whether a path is absolute and already in lexical-clean form.
+///
+/// Canonicalization intentionally remains separate: symlinked ancestors are
+/// accepted, while `~`, `.`/`..`, duplicate separators, and trailing separators
+/// are rejected before filesystem resolution so callers share one acceptance
+/// contract with the TokenManager catalog loader.
+fn is_clean_absolute_path(path: &Path) -> bool {
+    if !path.is_absolute() {
+        return false;
+    }
+
+    let mut rebuilt = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir | Component::ParentDir => return false,
+            Component::Prefix(prefix) => rebuilt.push(prefix.as_os_str()),
+            Component::RootDir | Component::Normal(_) => rebuilt.push(component.as_os_str()),
+        }
+    }
+    rebuilt == path
 }
 
 fn read_account_registry(path: &Path) -> Result<String, ManagedAccountCatalogError> {
