@@ -1,7 +1,7 @@
 schema_version = 1
 applies_to = "rust-v0.149.0"
 base_commit = "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0"
-final_tree = "f0b1f3679cd8bb383c1457b71d9f559fecd16393"
+final_tree = "c2632d3ad5902e74ff456bc2d2f92f8fd52ac6ec"
 
 [[patches]]
 number = "P001"
@@ -112,3 +112,8 @@ sha256 = "3700bdfa62403cba0f06e5cb7e420c1229805ff573ac4e49b2ca6bf8a5b80970"
 number = "P022"
 file = "0022-P022-finalize-0.149-session-stability-and-compaction-observability.patch"
 sha256 = "4fcce3fcf211e6b86fef09536efe3a1434f1f43889c42b78d93a1fa56baf5152"
+
+[[patches]]
+number = "P023"
+file = "0023-P023-codex-owned-same-turn-failover-and-invocation-ready.patch"
+sha256 = "91af85d1bfc876eadb24529060aa3a37a4086a5bdb39d2e470de0f39f7520dd5"
