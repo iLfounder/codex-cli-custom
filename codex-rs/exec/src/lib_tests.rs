@@ -20,12 +20,16 @@ use tempfile::tempdir;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 struct ScriptedExecRequestClient {
-    responses: Mutex<VecDeque<Value>>,
+    responses: Mutex<VecDeque<Result<Value, TypedRequestError>>>,
     requests: Mutex<Vec<ClientRequest>>,
 }
 
 impl ScriptedExecRequestClient {
     fn new(responses: impl IntoIterator<Item = Value>) -> Self {
+        Self::with_results(responses.into_iter().map(Ok))
+    }
+
+    fn with_results(responses: impl IntoIterator<Item = Result<Value, TypedRequestError>>) -> Self {
         Self {
             responses: Mutex::new(responses.into_iter().collect()),
             requests: Mutex::new(Vec::new()),
@@ -54,7 +58,7 @@ impl ExecRequestClient for ScriptedExecRequestClient {
             .pop_front()
             .unwrap_or_else(|| panic!("missing scripted response for {method}"));
         async move {
-            serde_json::from_value(response)
+            serde_json::from_value(response?)
                 .map_err(|source| TypedRequestError::Deserialize { method, source })
         }
     }
@@ -473,7 +477,7 @@ async fn exec_account_failover_bootstrap_precedes_first_turn_and_fails_closed() 
     .expect_err("registry revision drift should stop before turn/start");
 
     assert_eq!(
-        error,
+        error.into_pre_ready_message(),
         "account rotation inventory changed during bootstrap".to_string()
     );
     assert_eq!(
@@ -484,6 +488,166 @@ async fn exec_account_failover_bootstrap_precedes_first_turn_and_fails_closed() 
             .collect::<Vec<_>>(),
         ["accountSlot/list", "accountSlot/list"]
     );
+}
+
+#[tokio::test]
+async fn account_rotation_bootstrap_errors_are_bounded_and_never_start_a_turn() {
+    let client = ScriptedExecRequestClient::with_results([Err(TypedRequestError::Server {
+        method: "accountSlot/list".to_string(),
+        source: JSONRPCErrorError {
+            code: -32603,
+            message: "raw slot C7 failure".to_string(),
+            data: Some(serde_json::json!({"accountSlotId": "C7"})),
+        },
+    })]);
+    let error = start_turn_with_account_rotation(
+        &client,
+        &mut RequestIdSequencer::new(),
+        Some(("thread-1", cli::AccountRotation::QuotaAware)),
+        TurnStartParams {
+            thread_id: "thread-1".to_string(),
+            ..TurnStartParams::default()
+        },
+    )
+    .await
+    .expect_err("account inventory failure should stop before turn/start");
+
+    assert_eq!(
+        error.post_ready_message(),
+        ACCOUNT_ROTATION_BOOTSTRAP_FAILED
+    );
+    assert_eq!(
+        client
+            .requests()
+            .iter()
+            .map(ClientRequest::method_name)
+            .collect::<Vec<_>>(),
+        ["accountSlot/list"]
+    );
+
+    let client = ScriptedExecRequestClient::with_results([
+        Ok(account_slot_page(
+            "C1", /*account_number*/ 1, /*registry_revision*/ 41,
+            /*next_cursor*/ None,
+        )),
+        Ok(rotation_response(/*revision*/ 7)),
+        Err(TypedRequestError::Server {
+            method: "thread/account/rotation/update".to_string(),
+            source: JSONRPCErrorError {
+                code: -32603,
+                message: "raw rotation rejection".to_string(),
+                data: None,
+            },
+        }),
+    ]);
+    let error = start_turn_with_account_rotation(
+        &client,
+        &mut RequestIdSequencer::new(),
+        Some(("thread-1", cli::AccountRotation::QuotaAware)),
+        TurnStartParams {
+            thread_id: "thread-1".to_string(),
+            ..TurnStartParams::default()
+        },
+    )
+    .await
+    .expect_err("rotation update failure should stop before turn/start");
+
+    assert_eq!(
+        error.post_ready_message(),
+        ACCOUNT_ROTATION_BOOTSTRAP_FAILED
+    );
+    assert_eq!(
+        client
+            .requests()
+            .iter()
+            .map(ClientRequest::method_name)
+            .collect::<Vec<_>>(),
+        [
+            "accountSlot/list",
+            "thread/account/rotation/read",
+            "thread/account/rotation/update",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn turn_start_typed_errors_map_to_bounded_post_ready_codes() {
+    let errors = [
+        (
+            TypedRequestError::Server {
+                method: "turn/start".to_string(),
+                source: JSONRPCErrorError {
+                    code: -32603,
+                    message: "raw rejected prompt detail".to_string(),
+                    data: Some(serde_json::json!({"accountSlotId": "C9"})),
+                },
+            },
+            TURN_START_REJECTED,
+        ),
+        (
+            TypedRequestError::Transport {
+                method: "turn/start".to_string(),
+                source: io::Error::new(io::ErrorKind::BrokenPipe, "raw transport detail"),
+            },
+            TURN_START_OUTCOME_UNKNOWN,
+        ),
+        (
+            TypedRequestError::Deserialize {
+                method: "turn/start".to_string(),
+                source: serde_json::from_str::<Value>("{")
+                    .expect_err("invalid JSON should create a deserialize error"),
+            },
+            TURN_START_OUTCOME_UNKNOWN,
+        ),
+    ];
+
+    for (error, expected_code) in errors {
+        let client = ScriptedExecRequestClient::with_results([Err(error)]);
+        let error = start_turn_with_account_rotation(
+            &client,
+            &mut RequestIdSequencer::new(),
+            None,
+            TurnStartParams {
+                thread_id: "thread-1".to_string(),
+                ..TurnStartParams::default()
+            },
+        )
+        .await
+        .expect_err("typed turn/start error should be preserved until the ready boundary");
+
+        assert_eq!(error.post_ready_message(), expected_code);
+        assert_eq!(
+            client
+                .requests()
+                .iter()
+                .map(ClientRequest::method_name)
+                .collect::<Vec<_>>(),
+            ["turn/start"]
+        );
+    }
+}
+
+#[test]
+fn post_ready_failure_wire_shape_contains_only_the_bounded_message() {
+    for message in [
+        ACCOUNT_ROTATION_BOOTSTRAP_FAILED,
+        TURN_START_REJECTED,
+        TURN_START_OUTCOME_UNKNOWN,
+    ] {
+        let value = serde_json::to_value(ThreadEvent::TurnFailed(TurnFailedEvent {
+            error: ThreadErrorEvent {
+                message: message.to_string(),
+            },
+        }))
+        .expect("turn.failed should serialize");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "type": "turn.failed",
+                "error": {"message": message}
+            })
+        );
+    }
 }
 
 #[test]

@@ -3,6 +3,7 @@
 use crate::custom_terminal::Terminal;
 use crate::insert_history::HistoryLineWrapPolicy;
 use crate::insert_history::InsertHistoryMode;
+use codex_terminal_detection::Multiplexer;
 use codex_terminal_detection::TerminalInfo;
 use codex_terminal_detection::TerminalName;
 use crossterm::cursor::MoveTo;
@@ -23,10 +24,14 @@ pub(super) enum ScrollbackStrategy {
 
 impl ScrollbackStrategy {
     pub(super) fn detect(terminal: &TerminalInfo) -> Self {
+        Self::detect_for(terminal, std::env::var_os("WT_SESSION").is_some())
+    }
+
+    pub(super) fn detect_for(terminal: &TerminalInfo, wt_session_present: bool) -> Self {
         if terminal.is_zellij() {
             Self::Zellij
-        } else if terminal.name == TerminalName::WindowsTerminal
-            || std::env::var_os("WT_SESSION").is_some()
+        } else if (terminal.name == TerminalName::WindowsTerminal || wt_session_present)
+            && !is_tmux(terminal)
         {
             Self::FullScreen
         } else {
@@ -77,6 +82,13 @@ impl ScrollbackStrategy {
                 .scroll_region_up(0..viewport_top, scroll_by),
         }
     }
+}
+
+fn is_tmux(terminal: &TerminalInfo) -> bool {
+    matches!(
+        terminal.multiplexer.as_ref(),
+        Some(Multiplexer::Tmux { .. })
+    )
 }
 
 #[cfg(test)]

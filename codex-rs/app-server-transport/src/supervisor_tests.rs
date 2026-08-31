@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -5,6 +6,7 @@ use uuid::Uuid;
 
 use super::AppServerInstanceIdentity;
 use super::CanonicalControlPaths;
+use super::SUPERVISOR_CONTRACT_VERSION;
 use super::SupervisedAppServerSnapshot;
 use super::SupervisedAppServerStatus;
 use super::SupervisorControlError;
@@ -16,9 +18,13 @@ use super::SupervisorControlMessage;
 use super::SupervisorControlRequest;
 use super::SupervisorControlResponse;
 use super::SupervisorSnapshot;
+#[cfg(unix)]
 use super::app_server_socket_is_owner_private;
+#[cfg(unix)]
 use super::ready_proof_matches_at;
+#[cfg(unix)]
 use super::remove_ready_proof;
+#[cfg(unix)]
 use super::write_supervised_ready_identity;
 
 #[test]
@@ -105,6 +111,7 @@ fn supervisor_snapshot_keeps_revision_domains_separate() {
         generation: 7,
     };
     let snapshot = SupervisorSnapshot {
+        contract_version: SUPERVISOR_CONTRACT_VERSION,
         snapshot_revision: 19,
         app_server: Some(SupervisedAppServerSnapshot {
             process_generation: 11,
@@ -117,6 +124,7 @@ fn supervisor_snapshot_keeps_revision_domains_separate() {
     assert_eq!(
         serde_json::to_value(&snapshot).expect("serialize snapshot"),
         json!({
+            "contractVersion": 1,
             "snapshotRevision": 19,
             "appServer": {
                 "processGeneration": 11,
@@ -142,6 +150,18 @@ fn supervisor_snapshot_keeps_revision_domains_separate() {
 }
 
 #[test]
+fn supervisor_snapshot_defaults_legacy_contract_version_and_emits_numeric_version() {
+    let legacy: SupervisorSnapshot =
+        serde_json::from_str(r#"{"snapshotRevision":19,"appServer":null}"#)
+            .expect("deserialize legacy snapshot");
+    assert_eq!(legacy.contract_version, SUPERVISOR_CONTRACT_VERSION);
+
+    let encoded = serde_json::to_value(legacy).expect("serialize current snapshot");
+    assert_eq!(encoded["contractVersion"], json!(1));
+    assert!(encoded["contractVersion"].is_number());
+}
+
+#[test]
 fn supervisor_control_wire_is_bounded_to_snapshot_and_exact_restart() {
     let instance = AppServerInstanceIdentity {
         instance_id: Uuid::parse_str("22222222-2222-4222-8222-222222222222")
@@ -149,6 +169,7 @@ fn supervisor_control_wire_is_bounded_to_snapshot_and_exact_restart() {
         generation: 7,
     };
     let snapshot = SupervisorSnapshot {
+        contract_version: SUPERVISOR_CONTRACT_VERSION,
         snapshot_revision: 19,
         app_server: Some(SupervisedAppServerSnapshot {
             process_generation: 11,
@@ -209,10 +230,9 @@ fn supervisor_control_wire_is_bounded_to_snapshot_and_exact_restart() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn ready_proof_is_private_and_removed_with_its_guard() {
-    use std::os::unix::fs::PermissionsExt;
-
     let temp = tempfile::tempdir().expect("temp dir");
     let path = temp.path().join("app-server-ready.json");
     let absolute = AbsolutePathBuf::from_absolute_path(&path).expect("absolute proof path");
@@ -233,6 +253,8 @@ async fn ready_proof_is_private_and_removed_with_its_guard() {
         .expect("deserialize proof"),
         identity
     );
+    use std::os::unix::fs::PermissionsExt;
+
     assert_eq!(
         tokio::fs::metadata(&path)
             .await
@@ -247,6 +269,7 @@ async fn ready_proof_is_private_and_removed_with_its_guard() {
     assert!(!path.exists());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn readiness_rejects_missing_and_stale_proofs() {
     let temp = tempfile::tempdir().expect("temp dir");

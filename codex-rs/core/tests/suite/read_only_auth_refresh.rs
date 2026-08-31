@@ -103,6 +103,7 @@ fn write_auth(auth_home: &Path, access_token: &str) -> std::io::Result<()> {
             agent_identity: None,
             personal_access_token: None,
             bedrock_api_key: None,
+            bedrock_access_keys: None,
         },
         AuthCredentialsStoreMode::File,
         AuthKeyringBackendKind::default(),

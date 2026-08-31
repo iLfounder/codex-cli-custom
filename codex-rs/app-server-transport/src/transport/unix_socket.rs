@@ -3,6 +3,9 @@ use std::io::ErrorKind;
 use std::io::Result as IoResult;
 use std::path::Path;
 
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
+
 use super::TransportEvent;
 use crate::supervisor::publish_supervised_ready_identity_from_env;
 use crate::transport::websocket::run_websocket_connection;
@@ -146,13 +149,26 @@ pub async fn acquire_app_server_startup_lock(
     if let Some(parent) = startup_lock_path.as_path().parent() {
         codex_uds::prepare_private_socket_directory(parent).await?;
     }
+    let startup_lock_path = startup_lock_path.as_path().to_path_buf();
     tokio::task::spawn_blocking(move || {
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(startup_lock_path.as_path())?;
+        let mut options = OpenOptions::new();
+        options.create(true).truncate(false).read(true).write(true);
+        #[cfg(windows)]
+        options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
+        let file = options.open(&startup_lock_path)?;
+        #[cfg(windows)]
+        {
+            let opened_identity = codex_utils_home_dir::file_identity_from_file(&file)?;
+            codex_utils_home_dir::ensure_owner_private(&startup_lock_path)?;
+            if opened_identity != codex_utils_home_dir::file_identity(&startup_lock_path)?
+                || !codex_utils_home_dir::is_owner_private(&startup_lock_path)?
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "app-server startup lock changed while securing its ACL",
+                ));
+            }
+        }
         file.lock()?;
         Ok(AppServerStartupLock { _file: file })
     })
@@ -172,7 +188,17 @@ async fn set_control_socket_permissions(socket_path: &Path) -> IoResult<()> {
 }
 
 #[cfg(not(unix))]
-async fn set_control_socket_permissions(_socket_path: &Path) -> IoResult<()> {
+async fn set_control_socket_permissions(socket_path: &Path) -> IoResult<()> {
+    // Windows AF_UNIX endpoints do not expose Unix mode bits.  Their pathname
+    // is nevertheless resolved through the containing directory, so enforce
+    // an owner-only Windows DACL on any filesystem rendezvous entry (and fail
+    // closed if the endpoint cannot be inspected).
+    #[cfg(windows)]
+    {
+        if socket_path.exists() {
+            codex_utils_home_dir::ensure_owner_private(socket_path)?;
+        }
+    }
     Ok(())
 }
 

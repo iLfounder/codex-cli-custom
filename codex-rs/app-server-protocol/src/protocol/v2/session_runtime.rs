@@ -111,6 +111,7 @@ pub struct SessionRuntimeIdentity {
     pub name: Option<String>,
     /// Stable sanitized source name from the thread metadata.
     pub source: String,
+    /// Opaque workspace marker (`<workspace>`), never a filesystem path.
     pub cwd: String,
     pub git_info: Option<GitInfo>,
     /// Effective next-turn settings when the thread is loaded and they are available.

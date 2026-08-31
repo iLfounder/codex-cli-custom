@@ -82,8 +82,24 @@ impl ExecutionAccountResolver for InitialBindingExecutionAccountResolver {
     }
 }
 
-#[tokio::test]
-async fn resolver_initial_binding_applies_only_to_fresh_threads() {
+#[test]
+fn resolver_initial_binding_applies_only_to_fresh_threads() {
+    const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
+    let handle = std::thread::Builder::new()
+        .name("resolver_initial_binding_applies_only_to_fresh_threads".to_string())
+        .stack_size(TEST_STACK_SIZE_BYTES)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build test runtime");
+            runtime.block_on(resolver_initial_binding_applies_only_to_fresh_threads_inner());
+        })
+        .expect("spawn test thread");
+    handle.join().expect("test thread should not panic");
+}
+
+async fn resolver_initial_binding_applies_only_to_fresh_threads_inner() {
     let temp_dir = tempdir().expect("tempdir");
     let mut config = test_config().await;
     config.codex_home = temp_dir.path().join("codex-home").abs();
@@ -121,6 +137,12 @@ async fn resolver_initial_binding_applies_only_to_fresh_threads() {
     });
     let manager = manager.with_execution_account_resolver(resolver.clone());
 
+    let mut explicit_options = StartThreadOptions::new(config.clone());
+    explicit_options.initial_execution_account_slot_id = Some("C3".to_string());
+    let explicit = manager
+        .start_thread(explicit_options)
+        .await
+        .expect("start explicitly bound thread");
     let fresh = manager
         .start_thread(StartThreadOptions::new(config.clone()))
         .await
@@ -160,12 +182,17 @@ async fn resolver_initial_binding_applies_only_to_fresh_threads() {
 
     assert_eq!(
         (
+            explicit.thread.execution_account().binding.clone(),
             fresh.thread.execution_account().binding.clone(),
             forked.thread.execution_account().binding.clone(),
             resumed.thread.execution_account().binding.clone(),
             resolver.initial_binding_calls.load(Ordering::Relaxed),
         ),
         (
+            ExecutionAccountBinding {
+                slot_id: "C3".to_string(),
+                generation: 1,
+            },
             initial_binding.clone(),
             initial_binding.clone(),
             initial_binding,
@@ -173,6 +200,11 @@ async fn resolver_initial_binding_applies_only_to_fresh_threads() {
         )
     );
 
+    explicit
+        .thread
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown explicitly bound thread");
     forked
         .thread
         .shutdown_and_wait()

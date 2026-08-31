@@ -11,7 +11,11 @@ export type SessionRuntimeIdentity = { sessionId: string, forkedFromId: string |
 /**
  * Stable sanitized source name from the thread metadata.
  */
-source: string, cwd: string, gitInfo: GitInfo | null,
+source: string,
+/**
+ * Opaque workspace marker (`<workspace>`), never a filesystem path.
+ */
+cwd: string, gitInfo: GitInfo | null,
 /**
  * Effective next-turn settings when the thread is loaded and they are available.
  */

@@ -19,6 +19,7 @@ use crate::error_code::invalid_params;
 
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 100;
+const STALE_CURSOR_REASON: &str = "session_runtime_snapshot_stale";
 
 #[derive(Default)]
 pub(super) struct SnapshotCache {
@@ -249,5 +250,7 @@ fn decode_cursor(cursor: &str) -> Result<RuntimeCursor, JSONRPCErrorError> {
 }
 
 pub(super) fn stale_cursor() -> JSONRPCErrorError {
-    invalid_params("sessionRuntime/list cursor is stale; restart pagination")
+    let mut error = invalid_params("sessionRuntime/list cursor is stale; restart pagination");
+    error.data = Some(serde_json::json!({"reason": STALE_CURSOR_REASON}));
+    error
 }

@@ -425,7 +425,9 @@ impl ThreadGoalRequestProcessor {
             return Err(invalid_request("goals feature is disabled"));
         }
         let thread_id = parse_thread_id_for_request(&params.thread_id)?;
-        let state_db = self.state_db_for_materialized_thread(thread_id).await?;
+        let state_db = self
+            .state_db_for_materialized_thread(thread_id, GoalAccess::Mutate)
+            .await?;
         self.reconcile_thread_goal_rollout(thread_id, &state_db)
             .await?;
         let max_goal_token_budget = self.max_goal_token_budget(thread_id).await;
@@ -464,7 +466,9 @@ impl ThreadGoalRequestProcessor {
             return Err(invalid_request("goals feature is disabled"));
         }
         let thread_id = parse_thread_id_for_request(&params.thread_id)?;
-        let state_db = self.state_db_for_materialized_thread(thread_id).await?;
+        let state_db = self
+            .state_db_for_materialized_thread(thread_id, GoalAccess::Mutate)
+            .await?;
         self.reconcile_thread_goal_rollout(thread_id, &state_db)
             .await?;
         let listener_command_tx = self.goal_listener_command_tx(thread_id).await;

@@ -17,12 +17,19 @@ fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
 
 #[test]
 fn source_ref_matches_token_manager_v1_vector() {
+    #[cfg(unix)]
+    let canonical_home = Path::new("/safe/provider-home/codex/account1");
+    #[cfg(windows)]
+    let canonical_home = Path::new(r"C:\safe\provider-home\codex\account1");
+
+    #[cfg(unix)]
+    let expected = "subscription-source-v1:G-fhAxUyHw3v9ePvf2wsKBzaJdC2qS__7m3wjsHrE-A";
+    #[cfg(windows)]
+    let expected = "subscription-source-v1:CB_MaC097_LKpQdUQUUfP6a1ZF6L7WMZxoGjkaxaEbo";
+
     assert_eq!(
-        subscription_source_ref(
-            "synthetic-codex-account",
-            Path::new("/safe/provider-home/codex/account1"),
-        ),
-        Some("subscription-source-v1:G-fhAxUyHw3v9ePvf2wsKBzaJdC2qS__7m3wjsHrE-A".to_string())
+        subscription_source_ref("synthetic-codex-account", canonical_home),
+        Some(expected.to_string())
     );
 }
 

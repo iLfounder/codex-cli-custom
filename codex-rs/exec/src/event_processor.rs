@@ -18,6 +18,11 @@ pub(crate) trait EventProcessor {
         Ok(())
     }
 
+    /// Emit one bounded terminal event after an invocation-ready handshake.
+    fn print_post_ready_failure(&mut self, _message: &'static str) -> std::io::Result<()> {
+        Ok(())
+    }
+
     /// Print summary of effective configuration and user prompt.
     fn print_config_summary(
         &mut self,

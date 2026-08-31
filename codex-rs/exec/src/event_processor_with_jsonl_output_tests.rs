@@ -238,6 +238,7 @@ fn compaction_processor_emits_full_lifecycle_and_retry_error_without_relabeling(
     let retry = processor.collect_thread_events(ServerNotification::Error(
         codex_app_server_protocol::ErrorNotification {
             error: codex_app_server_protocol::TurnError {
+                misalignment: None,
                 message: "retrying summarizer".to_string(),
                 codex_error_info: None,
                 additional_details: None,

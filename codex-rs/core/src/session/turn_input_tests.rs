@@ -1,6 +1,5 @@
 use super::*;
 use crate::config::Constrained;
-use crate::session::step_settings::StepSettingsUpdate;
 use crate::execution_account::ExecutionAccountContext;
 use crate::execution_account::ExecutionAccountServices;
 use crate::execution_account::PreparedTurnExecutionAccountTransition;
@@ -9,6 +8,7 @@ use crate::execution_account::TurnExecutionAccountSelector;
 use crate::execution_account::TurnExecutionAccountSelectorFuture;
 use crate::execution_account::TurnExecutionAccountTransitionResolver;
 use crate::execution_account::TurnExecutionAccountTransitionResolverFuture;
+use crate::session::step_settings::StepSettingsUpdate;
 use crate::session::tests::attach_in_memory_thread_store;
 use crate::session::tests::make_session_and_context;
 use crate::session::tests::make_session_and_context_with_rx;
@@ -33,17 +33,17 @@ use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::turn_input::TurnInput as SubmittedTurnInput;
 use codex_protocol::user_input::UserInput;
-use codex_utils_absolute_path::AbsolutePathBuf;
-use core_test_support::test_codex::local_selections;
-use pretty_assertions::assert_eq;
-use test_case::test_case;
 use codex_thread_store::ThreadAccountRotationMode;
 use codex_thread_store::ThreadAccountRotationPolicyRevision;
 use codex_thread_store::ThreadAccountRotationPolicyUpdate;
 use codex_thread_store::ThreadStore;
+use codex_utils_absolute_path::AbsolutePathBuf;
+use core_test_support::test_codex::local_selections;
+use pretty_assertions::assert_eq;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use test_case::test_case;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
@@ -598,10 +598,11 @@ async fn pre_semantic_target_is_prepared_without_publishing_or_committing_cursor
     let admission = prepare_root_execution_account_admission(&session, binding.clone())
         .await
         .expect("prepare provisional target");
-    let turn_context = session
+    let (turn_context, _settings_snapshot) = session
         .new_turn_with_sub_id(
             "provisional-account-context".to_string(),
             SessionSettingsUpdate::default(),
+            NewTurnContextOptions::default(),
         )
         .await
         .expect("construct provisional turn context");
@@ -789,8 +790,7 @@ async fn turn_and_mailbox_admission_wait_for_execution_control_transition() {
                 "queued while closing".to_string(),
                 /*trigger_turn*/ false,
             ),
-            /*parent_turn_id*/ None,
-            /*root_turn_id*/ None,
+            TurnStartOptions::default(),
         )
         .await;
     });
@@ -1182,6 +1182,7 @@ async fn prepared_user_updates_merge_with_settings_at_turn_start() {
                 &session,
                 "sparse-user-start".to_string(),
                 TurnStartKind::User,
+                None,
             )
             .await
             .expect("apply prepared settings")
@@ -1240,6 +1241,7 @@ async fn automatic_admission_uses_current_candidate_after_plan_preview() {
             &session,
             "automatic-after-plan-preview".to_string(),
             TurnStartKind::Automatic,
+            None,
         )
         .await
         .expect("automatic admission should succeed")
@@ -1358,6 +1360,7 @@ async fn automatic_admission_rechecks_plan_mode_without_committing_sparse_settin
                 &session,
                 submission_id.to_string(),
                 TurnStartKind::Automatic,
+                None,
             )
             .await
             .expect("automatic admission should return a typed rejection");
@@ -1439,7 +1442,7 @@ async fn admission_revalidates_constraints_before_committing(kind: TurnStartKind
     let desired_settings = session.thread_settings_snapshot().await;
     let submission_id = "constraints-after-preview";
     let result = prepared
-        .apply_started(&session, submission_id.to_string(), kind)
+        .apply_started(&session, submission_id.to_string(), kind, None)
         .await;
     let Err(error) = result else {
         panic!("commit-time constraint failure must return InvalidRequest");

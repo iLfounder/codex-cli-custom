@@ -821,7 +821,11 @@ impl Session {
             return false;
         }
         match &configuration.thread_source {
-            Some(ThreadSource::Subagent | ThreadSource::MemoryConsolidation) => false,
+            Some(
+                ThreadSource::Subagent
+                | ThreadSource::GuardianReview
+                | ThreadSource::MemoryConsolidation,
+            ) => false,
             Some(ThreadSource::Feature(feature)) => {
                 !matches!(feature.as_str(), "system" | "title") && !feature.starts_with("ambient")
             }

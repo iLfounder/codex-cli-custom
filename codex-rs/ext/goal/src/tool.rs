@@ -357,7 +357,7 @@ impl GoalToolExecutor {
 
     async fn handle_clear(
         &self,
-        invocation: ToolCall,
+        invocation: ToolCall<'_>,
     ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
         let args: ClearGoalArgs = parse_arguments(invocation.function_arguments()?)?;
         let outcome = self
@@ -395,7 +395,7 @@ impl GoalToolExecutor {
 
     async fn handle_replace(
         &self,
-        invocation: ToolCall,
+        invocation: ToolCall<'_>,
     ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
         let args: ReplaceGoalArgs = parse_arguments(invocation.function_arguments()?)?;
         let outcome = self

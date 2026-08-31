@@ -1567,6 +1567,7 @@ impl App {
             .pending_shutdown
             .as_ref()
             .is_some_and(|pending| pending.thread_id == active_thread_id)
+            || self.pending_shutdown_exit_thread_id == Some(active_thread_id)
         {
             return None;
         }
@@ -1820,6 +1821,12 @@ impl App {
         //
         // This preserves the mental model that user-requested exits do not trigger
         // failover, while true sub-agent deaths still do.
+        let pending_shutdown_exit_completed = matches!(
+            &event,
+            ThreadBufferedEvent::Notification(notification)
+                if matches!(notification.as_ref(), ServerNotification::ThreadClosed(_))
+                    && self.pending_shutdown_exit_thread_id == self.active_thread_id
+        );
         if let ThreadBufferedEvent::Notification(notification) = &event
             && let Some((closed_thread_id, primary_thread_id)) =
                 self.active_non_primary_shutdown_target(notification.as_ref())

@@ -15,6 +15,7 @@ pub use outgoing_message::QueuedOutgoingMessage;
 pub use supervisor::AppServerInstanceIdentity;
 pub use supervisor::CanonicalControlPaths;
 pub use supervisor::SUPERVISED_APP_SERVER_IDENTITY_ENV_VAR;
+pub use supervisor::SUPERVISOR_CONTRACT_VERSION;
 pub use supervisor::SupervisedAppServerSnapshot;
 pub use supervisor::SupervisedAppServerStatus;
 pub use supervisor::SupervisorControlError;

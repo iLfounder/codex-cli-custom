@@ -1,4 +1,5 @@
 use super::backend_banner_fallback_tests::fallback_response;
+use super::rate_limits::bind_rate_limit_response;
 use super::*;
 use crate::chatwidget::UserMessage;
 use pretty_assertions::assert_eq;
@@ -31,6 +32,7 @@ async fn backend_banner_fallback_applies_before_initial_and_queued_startup_promp
     )
     .await?;
     let generation = app.rate_limit_hard_stop_generation;
+    let (subject, response) = bind_rate_limit_response(&mut app, fallback_response());
     app.handle_event(
         &mut tui,
         &mut server,
@@ -39,11 +41,14 @@ async fn backend_banner_fallback_applies_before_initial_and_queued_startup_promp
             origin: RateLimitRefreshOrigin::StartupPrefetch {
                 reset_hint_request_id: 0,
             },
+            subject: Some(subject),
             hard_stop_generation: generation,
-            result: Ok(fallback_response()),
+            result: Ok(response),
         },
     )
     .await?;
+    app.active_thread_id = None;
+    app.account_runtime = None;
     assert!(requests.lock().unwrap().is_empty());
     assert!(
         !render_bottom_popup(&app.chat_widget, /*width*/ 72)

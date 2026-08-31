@@ -14,6 +14,8 @@ use std::io::Write;
 use std::os::unix::fs::MetadataExt;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -202,7 +204,7 @@ fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bo
     left.dev() == right.dev() && left.ino() == right.ino()
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(unix), not(windows)))]
 fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
     left.is_file() && right.is_file() && left.len() == right.len()
 }
@@ -210,16 +212,41 @@ fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bo
 pub(super) fn read_auth_file_snapshot(
     codex_home: &Path,
 ) -> std::io::Result<Option<AuthFileSnapshot>> {
-    let auth_file = get_auth_file(codex_home);
+    read_auth_file_snapshot_at(&get_auth_file(codex_home), codex_home)
+}
+
+fn read_auth_file_snapshot_at(
+    auth_file: &Path,
+    owner_home: &Path,
+) -> std::io::Result<Option<AuthFileSnapshot>> {
     let before = match std::fs::symlink_metadata(&auth_file) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
+    #[cfg(windows)]
+    let before_identity = codex_utils_home_dir::file_identity(auth_file)?;
     #[cfg(unix)]
-    let owner_matches_home = before.uid() == std::fs::metadata(codex_home)?.uid();
-    #[cfg(not(unix))]
+    let owner_matches_home = before.uid() == std::fs::metadata(owner_home)?.uid();
+    #[cfg(windows)]
+    {
+        // Protect the containing CODEX_HOME before opening the credential file;
+        // otherwise another local user could replace auth.json through a
+        // writable directory even when the file ACL itself is private.
+        let owner_metadata = std::fs::symlink_metadata(owner_home)?;
+        if owner_metadata.file_type().is_symlink() || !owner_metadata.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "CODEX_HOME must be a private regular directory",
+            ));
+        }
+        codex_utils_home_dir::ensure_owner_private(owner_home)?;
+        codex_utils_home_dir::ensure_owner_private(auth_file)?;
+    }
+    #[cfg(all(not(unix), not(windows)))]
     let owner_matches_home = true;
+    #[cfg(windows)]
+    let owner_matches_home = codex_utils_home_dir::is_owner_private(auth_file)?;
     if before.file_type().is_symlink()
         || !auth_file_metadata_is_safe(&before)
         || !owner_matches_home
@@ -232,23 +259,63 @@ pub(super) fn read_auth_file_snapshot(
 
     let mut options = OpenOptions::new();
     options.read(true);
+    #[cfg(windows)]
+    options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     options.custom_flags(0x0000_0100);
     #[cfg(any(target_os = "linux", target_os = "android"))]
     options.custom_flags(0x0002_0000);
     let mut file = options.open(&auth_file)?;
     let opened = file.metadata()?;
-    if !auth_file_metadata_is_safe(&opened) || !same_file_identity(&before, &opened) {
+    #[cfg(windows)]
+    let opened_identity = codex_utils_home_dir::file_identity_from_file(&file)?;
+    let identity_changed = {
+        #[cfg(windows)]
+        {
+            opened_identity != before_identity
+        }
+        #[cfg(not(windows))]
+        {
+            !same_file_identity(&before, &opened)
+        }
+    };
+    if !auth_file_metadata_is_safe(&opened) || identity_changed {
         return Err(std::io::Error::other(
             "auth.json identity changed while opening",
         ));
     }
+    #[cfg(windows)]
+    if !codex_utils_home_dir::is_owner_private(auth_file)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "auth.json Windows ACL changed while opening",
+        ));
+    }
 
     let snapshot = snapshot_from_file(&mut file)?;
-    let after = std::fs::symlink_metadata(&auth_file)?;
-    if after.file_type().is_symlink() || !same_file_identity(&opened, &after) {
+    let after = std::fs::symlink_metadata(auth_file)?;
+    #[cfg(windows)]
+    let after_identity = codex_utils_home_dir::file_identity(auth_file)?;
+    let identity_changed = {
+        #[cfg(windows)]
+        {
+            after_identity != opened_identity
+        }
+        #[cfg(not(windows))]
+        {
+            !same_file_identity(&opened, &after)
+        }
+    };
+    if after.file_type().is_symlink() || identity_changed {
         return Err(std::io::Error::other(
             "auth.json identity changed while reading",
+        ));
+    }
+    #[cfg(windows)]
+    if !codex_utils_home_dir::is_owner_private(auth_file)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "auth.json Windows ACL changed while reading",
         ));
     }
     Ok(Some(snapshot))
@@ -282,22 +349,16 @@ impl FileAuthStorage {
     /// Attempt to read and parse the `auth.json` file in the given `CODEX_HOME` directory.
     /// Returns the full AuthDotJson structure.
     pub(super) fn try_read_auth_json(&self, auth_file: &Path) -> std::io::Result<AuthDotJson> {
-        let mut file = File::open(auth_file)?;
-        let mut contents = String::new();
-        file.read_to_string(&mut contents)?;
-        let auth_dot_json: AuthDotJson = serde_json::from_str(&contents)?;
-
-        Ok(auth_dot_json)
+        // Keep the ownership anchor tied to this storage instance.  In
+        // particular, do not let an arbitrary path supplied by a caller cause
+        // ACL changes to an unrelated parent directory.
+        let snapshot = read_auth_file_snapshot_at(auth_file, &self.codex_home)?
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
+        Ok(snapshot.auth)
     }
 
     pub(super) fn load_snapshot(&self) -> std::io::Result<Option<AuthFileSnapshot>> {
-        let auth_file = get_auth_file(&self.codex_home);
-        let mut file = match File::open(auth_file) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        snapshot_from_file(&mut file).map(Some)
+        read_auth_file_snapshot(&self.codex_home)
     }
 }
 
@@ -322,6 +383,17 @@ impl AuthStorageBackend for FileAuthStorage {
         let parent = auth_file
             .parent()
             .ok_or_else(|| std::io::Error::other("auth.json has no parent directory"))?;
+        #[cfg(windows)]
+        {
+            let metadata = std::fs::symlink_metadata(parent)?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "auth.json parent must be a private directory",
+                ));
+            }
+            codex_utils_home_dir::ensure_owner_private(parent)?;
+        }
         let (temp_path, mut file) = loop {
             let temp_path = parent.join(format!(
                 ".auth.json.tmp.{}.{}",
@@ -333,7 +405,15 @@ impl AuthStorageBackend for FileAuthStorage {
             #[cfg(unix)]
             options.mode(0o600);
             match options.open(&temp_path) {
-                Ok(file) => break (temp_path, file),
+                Ok(file) => {
+                    #[cfg(windows)]
+                    if let Err(error) = codex_utils_home_dir::ensure_owner_private(&temp_path) {
+                        drop(file);
+                        let _ = std::fs::remove_file(&temp_path);
+                        return Err(error);
+                    }
+                    break (temp_path, file);
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(error),
             }
@@ -343,6 +423,8 @@ impl AuthStorageBackend for FileAuthStorage {
             file.flush()?;
             file.sync_all()?;
             std::fs::rename(&temp_path, &auth_file)?;
+            #[cfg(windows)]
+            codex_utils_home_dir::ensure_owner_private(&auth_file)?;
             Ok(())
         })();
         if result.is_err() {

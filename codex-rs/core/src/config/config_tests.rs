@@ -65,6 +65,7 @@ use codex_config::types::SkillsConfig;
 use codex_config::types::ToolSuggestDisabledTool;
 use codex_config::types::ToolSuggestDiscoverableType;
 use codex_config::types::Tui;
+use codex_config::types::TuiFooter;
 use codex_config::types::TuiKeymap;
 use codex_config::types::TuiNotificationSettings;
 use codex_config::types::TuiPetAnchor;
@@ -1218,6 +1219,7 @@ fn config_toml_deserializes_model_availability_nux() {
         cfg.tui.expect("tui config should deserialize"),
         Tui {
             notification_settings: TuiNotificationSettings::default(),
+            footer: TuiFooter::default(),
             animations: true,
             show_tooltips: true,
             auto_recap: true,
@@ -4231,6 +4233,7 @@ fn tui_config_missing_notifications_field_defaults_to_enabled() {
         tui,
         Tui {
             notification_settings: TuiNotificationSettings::default(),
+            footer: TuiFooter::default(),
             animations: true,
             show_tooltips: true,
             auto_recap: true,

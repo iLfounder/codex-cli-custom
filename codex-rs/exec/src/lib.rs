@@ -184,6 +184,9 @@ use crate::event_processor::EventProcessor;
 
 const DEFAULT_ANALYTICS_ENABLED: bool = true;
 const EXEC_DEFAULT_LOG_FILTER: &str = "error,opentelemetry_sdk=off,opentelemetry_otlp=off";
+const ACCOUNT_ROTATION_BOOTSTRAP_FAILED: &str = "codex_exec_account_rotation_bootstrap_failed";
+const TURN_START_REJECTED: &str = "codex_exec_turn_start_rejected";
+const TURN_START_OUTCOME_UNKNOWN: &str = "codex_exec_turn_start_outcome_unknown";
 
 enum InitialOperation {
     ForkOnly,
@@ -1018,14 +1021,22 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     if let Some(account_rotation) = account_rotation
         && !matches!(&initial_operation, InitialOperation::UserTurn { .. })
     {
-        bootstrap_account_rotation(
+        if let Err(err) = bootstrap_account_rotation(
             &client,
             &mut request_ids,
             primary_thread_id_for_span.as_str(),
             account_rotation,
         )
         .await
-        .map_err(anyhow::Error::msg)?;
+        {
+            if handshake_enabled {
+                return Err(post_ready_failure(
+                    event_processor.as_mut(),
+                    ACCOUNT_ROTATION_BOOTSTRAP_FAILED,
+                ));
+            }
+            return Err(anyhow::Error::msg(err));
+        }
     }
 
     exec_span.record("thread.id", primary_thread_id_for_span.as_str());
@@ -1066,7 +1077,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
             items,
             output_schema,
         } => {
-            let response = start_turn_with_account_rotation(
+            let response = match start_turn_with_account_rotation(
                 &client,
                 &mut request_ids,
                 account_rotation.map(|mode| (primary_thread_id_for_span.as_str(), mode)),
@@ -1099,7 +1110,16 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 },
             )
             .await
-            .map_err(anyhow::Error::msg)?;
+            {
+                Ok(response) => response,
+                Err(err) if handshake_enabled => {
+                    return Err(post_ready_failure(
+                        event_processor.as_mut(),
+                        err.post_ready_message(),
+                    ));
+                }
+                Err(err) => return Err(anyhow::Error::msg(err.into_pre_ready_message())),
+            };
             let task_id = response.turn.id;
             info!("Sent prompt with event ID: {task_id}");
             task_id
@@ -1328,6 +1348,39 @@ trait ExecRequestClient {
         T: serde::de::DeserializeOwned + Send;
 }
 
+#[derive(Debug)]
+enum StartTurnError {
+    AccountRotationBootstrap(String),
+    TurnStart(TypedRequestError),
+}
+
+impl StartTurnError {
+    fn post_ready_message(&self) -> &'static str {
+        match self {
+            Self::AccountRotationBootstrap(_) => ACCOUNT_ROTATION_BOOTSTRAP_FAILED,
+            Self::TurnStart(TypedRequestError::Server { .. }) => TURN_START_REJECTED,
+            Self::TurnStart(
+                TypedRequestError::Transport { .. } | TypedRequestError::Deserialize { .. },
+            ) => TURN_START_OUTCOME_UNKNOWN,
+        }
+    }
+
+    fn into_pre_ready_message(self) -> String {
+        match self {
+            Self::AccountRotationBootstrap(message) => message,
+            Self::TurnStart(err) => format!("turn/start: {err}"),
+        }
+    }
+}
+
+fn post_ready_failure(
+    event_processor: &mut dyn EventProcessor,
+    message: &'static str,
+) -> anyhow::Error {
+    let _ = event_processor.print_post_ready_failure(message);
+    anyhow::anyhow!(message)
+}
+
 impl ExecRequestClient for InProcessAppServerClient {
     async fn request_typed<T>(&self, request: ClientRequest) -> Result<T, TypedRequestError>
     where
@@ -1360,22 +1413,22 @@ async fn start_turn_with_account_rotation<C>(
     request_ids: &mut RequestIdSequencer,
     account_rotation: Option<(&str, cli::AccountRotation)>,
     params: TurnStartParams,
-) -> Result<TurnStartResponse, String>
+) -> Result<TurnStartResponse, StartTurnError>
 where
     C: ExecRequestClient,
 {
     if let Some((thread_id, mode)) = account_rotation {
-        bootstrap_account_rotation(client, request_ids, thread_id, mode).await?;
+        bootstrap_account_rotation(client, request_ids, thread_id, mode)
+            .await
+            .map_err(StartTurnError::AccountRotationBootstrap)?;
     }
-    send_exec_request_with_response(
-        client,
-        ClientRequest::TurnStart {
+    client
+        .request_typed(ClientRequest::TurnStart {
             request_id: request_ids.next(),
             params,
-        },
-        "turn/start",
-    )
-    .await
+        })
+        .await
+        .map_err(StartTurnError::TurnStart)
 }
 
 async fn bootstrap_account_rotation<C>(

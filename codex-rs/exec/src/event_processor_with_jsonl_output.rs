@@ -658,6 +658,14 @@ impl EventProcessor for EventProcessorWithJsonOutput {
         self.emit_and_flush(ThreadEvent::InvocationReady(event))
     }
 
+    fn print_post_ready_failure(&mut self, message: &'static str) -> std::io::Result<()> {
+        self.emit_and_flush(ThreadEvent::TurnFailed(TurnFailedEvent {
+            error: ThreadErrorEvent {
+                message: message.to_string(),
+            },
+        }))
+    }
+
     fn print_config_summary(
         &mut self,
         _: &Config,

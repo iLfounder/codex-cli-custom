@@ -9,10 +9,20 @@ use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 
+mod windows_security;
+pub use windows_security::ensure_owner_private;
+#[cfg(windows)]
+pub use windows_security::file_identity;
+#[cfg(windows)]
+pub use windows_security::file_identity_from_file;
+pub use windows_security::is_owner_private;
+
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 
 const ACCOUNT_REGISTRY_RELATIVE_PATH: &str = ".config/codex-accounts.tsv";
 const MAX_ACCOUNT_REGISTRY_BYTES: u64 = 64 * 1024;
@@ -268,13 +278,34 @@ fn is_clean_absolute_path(path: &Path) -> bool {
 }
 
 fn read_account_registry(path: &Path) -> Result<String, ManagedAccountCatalogError> {
+    #[cfg(windows)]
+    {
+        // A registry file controls which credential homes are selected.  Do
+        // not trust inherited ACLs: repair only files already owned by this
+        // process' user, and reject links before the repair/query.
+        let metadata =
+            std::fs::symlink_metadata(path).map_err(|_| ManagedAccountCatalogError::Unavailable)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(ManagedAccountCatalogError::UnsafeFile);
+        }
+        let path_identity_before = windows_security::file_identity(path)
+            .map_err(|_| ManagedAccountCatalogError::UnsafeFile)?;
+        ensure_owner_private(path).map_err(|_| ManagedAccountCatalogError::UnsafeFile)?;
+        let protected_identity = windows_security::file_identity(path)
+            .map_err(|_| ManagedAccountCatalogError::UnsafeFile)?;
+        if path_identity_before != protected_identity {
+            return Err(ManagedAccountCatalogError::UnsafeFile);
+        }
+    }
     let mut options = OpenOptions::new();
     options.read(true);
+    #[cfg(windows)]
+    options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     options.custom_flags(0x0000_0100);
     #[cfg(any(target_os = "linux", target_os = "android"))]
     options.custom_flags(0x0002_0000);
-    let file = options
+    let mut file = options
         .open(path)
         .map_err(|_| ManagedAccountCatalogError::Unavailable)?;
     let metadata = file
@@ -282,6 +313,16 @@ fn read_account_registry(path: &Path) -> Result<String, ManagedAccountCatalogErr
         .map_err(|_| ManagedAccountCatalogError::Unavailable)?;
     if !metadata.is_file() {
         return Err(ManagedAccountCatalogError::UnsafeFile);
+    }
+    #[cfg(windows)]
+    {
+        let opened_identity = windows_security::file_identity_from_file(&file)
+            .map_err(|_| ManagedAccountCatalogError::UnsafeFile)?;
+        let path_identity = windows_security::file_identity(path)
+            .map_err(|_| ManagedAccountCatalogError::UnsafeFile)?;
+        if opened_identity != path_identity || !is_owner_private(path).unwrap_or(false) {
+            return Err(ManagedAccountCatalogError::UnsafeFile);
+        }
     }
     #[cfg(unix)]
     if metadata.mode() & 0o777 != 0o600 || metadata.uid() != effective_uid() {
@@ -291,9 +332,22 @@ fn read_account_registry(path: &Path) -> Result<String, ManagedAccountCatalogErr
         return Err(ManagedAccountCatalogError::TooLarge);
     }
     let mut contents = String::new();
-    file.take(MAX_ACCOUNT_REGISTRY_BYTES + 1)
+    (&mut file)
+        .take(MAX_ACCOUNT_REGISTRY_BYTES + 1)
         .read_to_string(&mut contents)
         .map_err(|_| ManagedAccountCatalogError::InvalidEncoding)?;
+    #[cfg(windows)]
+    {
+        let after_identity = windows_security::file_identity(path)
+            .map_err(|_| ManagedAccountCatalogError::UnsafeFile)?;
+        if !is_owner_private(path).unwrap_or(false)
+            || windows_security::file_identity_from_file(&file)
+                .map_err(|_| ManagedAccountCatalogError::UnsafeFile)?
+                != after_identity
+        {
+            return Err(ManagedAccountCatalogError::UnsafeFile);
+        }
+    }
     if contents.len() as u64 > MAX_ACCOUNT_REGISTRY_BYTES {
         return Err(ManagedAccountCatalogError::TooLarge);
     }

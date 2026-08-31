@@ -115,6 +115,7 @@ mod effort_status_line;
 mod experimental_features_view;
 mod file_search_popup;
 mod footer;
+mod footer_box;
 mod list_selection_view;
 mod memories_settings_view;
 mod mentions_v2;
@@ -126,6 +127,8 @@ pub(crate) use footer::CollaborationModeIndicator;
 pub(crate) use footer::GoalStatusIndicator;
 #[cfg(test)]
 pub(crate) use footer::goal_status_indicator_line;
+pub(crate) use footer_box::FooterBoxConfig;
+pub(crate) use footer_box::FooterSnapshot;
 pub(crate) use list_selection_view::ColumnWidthMode;
 pub(crate) use list_selection_view::ListSelectionView;
 pub(crate) use list_selection_view::OnSelectionChangedCallback;
@@ -337,6 +340,36 @@ impl BottomPane {
             context_window_used_tokens: None,
             keymap,
         }
+    }
+
+    /// Construct a pane with the opt-in semantic footer configuration.
+    pub(crate) fn new_with_footer_config(
+        params: BottomPaneParams,
+        footer_config: FooterBoxConfig,
+    ) -> Self {
+        let mut pane = Self::new(params);
+        // Construction happens before the widget is observable; avoid emitting a redraw event
+        // just to install the initial immutable presentation config.
+        pane.composer.set_footer_config(footer_config);
+        pane
+    }
+
+    /// Replace the semantic footer presentation settings and request a redraw.
+    pub(crate) fn set_footer_config(&mut self, config: FooterBoxConfig) {
+        self.composer.set_footer_config(config);
+        self.request_redraw();
+    }
+
+    /// Replace the immutable semantic footer snapshot and request a redraw.
+    pub(crate) fn set_footer_snapshot(&mut self, snapshot: FooterSnapshot) {
+        self.composer.set_footer_snapshot(snapshot);
+        self.request_redraw();
+    }
+
+    /// Update only display-safe account fields in the semantic footer snapshot.
+    pub(crate) fn set_footer_account(&mut self, email: Option<String>, plan: Option<String>) {
+        self.composer.set_footer_account(email, plan);
+        self.request_redraw();
     }
 
     pub fn set_skills(&mut self, skills: Option<Vec<SkillMetadata>>) {

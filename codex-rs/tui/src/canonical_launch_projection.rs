@@ -12,6 +12,7 @@ use crate::legacy_core::config::Config;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct CanonicalLaunchProjection {
+    initial_account_number: Option<u32>,
     model: bool,
     oss: bool,
     service_tier: bool,
@@ -30,6 +31,7 @@ impl CanonicalLaunchProjection {
     pub(crate) fn from_invocation(cli: &Cli, parsed_overrides: &[(String, toml::Value)]) -> Self {
         let has = |key: &str| parsed_overrides.iter().any(|(path, _)| path == key);
         Self {
+            initial_account_number: None,
             model: cli.model.is_some() || cli.oss || has("model"),
             oss: cli.oss,
             service_tier: has("service_tier"),
@@ -49,8 +51,24 @@ impl CanonicalLaunchProjection {
         }
     }
 
+    pub(crate) fn with_managed_account_hint(mut self, hint: &str) -> std::io::Result<Self> {
+        let number = hint
+            .strip_prefix('C')
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|number| *number > 0 && hint == format!("C{number}"))
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "managed account hint is malformed",
+                )
+            })?;
+        self.initial_account_number = Some(number);
+        Ok(self)
+    }
+
     pub(crate) fn has_explicit_overrides(self) -> bool {
         let Self {
+            initial_account_number: _,
             model,
             oss,
             service_tier,
@@ -107,6 +125,9 @@ impl CanonicalLaunchProjection {
     }
 
     pub(crate) fn restrict_start(self, params: &mut ThreadStartParams) {
+        params.initial_account_slot_id = self
+            .initial_account_number
+            .map(|number| format!("C{number}"));
         self.restrict_common(
             &mut params.model,
             &mut params.model_provider,

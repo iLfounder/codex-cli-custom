@@ -246,6 +246,14 @@ impl ChatWidget {
         self.plan_type = plan_type;
         self.has_chatgpt_account = has_chatgpt_account;
         self.has_codex_backend_auth = has_codex_backend_auth;
+        let (account_email, account_plan) = match self.status_account_display.as_ref() {
+            Some(StatusAccountDisplay::ChatGpt { email, plan }) => (email.clone(), plan.clone()),
+            Some(StatusAccountDisplay::ApiKey) | None => (None, None),
+        };
+        let account_plan =
+            account_plan.or_else(|| self.plan_type.map(crate::status::plan_type_display_name));
+        self.bottom_pane
+            .set_footer_account(account_email, account_plan);
         self.bottom_pane
             .set_connectors_enabled(self.connectors_enabled());
         self.refresh_connector_mentions(/*force_refresh*/ false);

@@ -635,11 +635,7 @@ async fn start_or_steer(
                 }
                 session.clear_connector_selection().await;
                 session
-                    .start_task(
-                        turn_context,
-                        task_input,
-                        RegularTask::new(),
-                    )
+                    .start_task(turn_context, task_input, RegularTask::new())
                     .await;
                 session.finish_idle_execution_account_reservation(&admission.reservation);
                 admission.commit_cursor_after_started(session).await;
@@ -677,11 +673,10 @@ async fn start_if_idle(
         SubmittedTurnInput::UserInput { content, .. } if !content.is_empty()
     );
     let can_start_root_turn = start.parent_turn_id.is_none() && start.root_turn_id.is_none();
-    let should_select_execution_account =
-        kind == TurnStartKind::User
-            && has_user_input
-            && can_start_root_turn
-            && session.can_admit_root_user_turn().await;
+    let should_select_execution_account = kind == TurnStartKind::User
+        && has_user_input
+        && can_start_root_turn
+        && session.can_admit_root_user_turn().await;
     if session.input_queue.has_trigger_turn_mailbox_items().await {
         return Ok(TurnInputSubmission::NotSubmitted {
             reason: NotSubmittedReason::PendingTriggerTurn,
@@ -834,21 +829,13 @@ async fn start_if_idle(
             return Err(error);
         }
         session
-            .start_task(
-                turn_context,
-                task_input,
-                RegularTask::new(),
-            )
+            .start_task(turn_context, task_input, RegularTask::new())
             .await;
         session.finish_idle_execution_account_reservation(&admission.reservation);
         admission.commit_cursor_after_started(session).await;
     } else {
         session
-            .start_task(
-                turn_context,
-                task_input,
-                RegularTask::new(),
-            )
+            .start_task(turn_context, task_input, RegularTask::new())
             .await;
     }
     Ok(TurnInputSubmission::Started {

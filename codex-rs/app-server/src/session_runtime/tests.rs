@@ -2,6 +2,9 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::SessionRuntimeAccountBinding;
 use codex_app_server_protocol::SessionRuntimeAccountSwitchState;
 use codex_app_server_protocol::SessionRuntimeIdentity;
@@ -18,6 +21,7 @@ use codex_app_server_protocol::SessionRuntimeWriterState;
 use codex_app_server_protocol::ThreadStatus;
 use codex_protocol::ThreadId;
 use pretty_assertions::assert_eq;
+use serde_json::json;
 
 use super::EngineState;
 use super::RuntimeActivity;
@@ -163,6 +167,24 @@ fn materialize_plan(plan: &super::pagination::PagePlan) -> Vec<SessionRuntimeSna
         .collect()
 }
 
+fn assert_stale_cursor(error: JSONRPCErrorError) {
+    assert_eq!(error.code, -32602);
+    assert_eq!(
+        error.message,
+        "sessionRuntime/list cursor is stale; restart pagination"
+    );
+    assert_eq!(
+        error.data,
+        Some(json!({"reason": "session_runtime_snapshot_stale"}))
+    );
+}
+
+fn assert_invalid_cursor(error: JSONRPCErrorError) {
+    assert_eq!(error.code, -32602);
+    assert_eq!(error.message, "sessionRuntime/list cursor is invalid");
+    assert_eq!(error.data, None);
+}
+
 #[test]
 fn pagination_cursor_is_stable_and_restarts_after_sequence_change() {
     let thread_ids = (0..3).map(|_index| ThreadId::new()).collect::<Vec<_>>();
@@ -192,10 +214,72 @@ fn pagination_cursor_is_stable_and_restarts_after_sequence_change() {
 
     assert_eq!(first.data.len(), 1);
     assert_eq!(second.data.len(), 1);
-    assert!(cache.plan(Some(&cursor), "epoch-a", 8, 11, 1).is_err());
-    assert!(cache.plan(Some(&cursor), "epoch-b", 7, 11, 1).is_err());
+    assert_stale_cursor(
+        cache
+            .plan(Some(&cursor), "epoch-a", 8, 11, 1)
+            .err()
+            .expect("sequence mismatch must be stale"),
+    );
+    assert_stale_cursor(
+        cache
+            .plan(Some(&cursor), "epoch-a", 7, 12, 1)
+            .err()
+            .expect("source generation mismatch must be stale"),
+    );
+    assert_stale_cursor(
+        cache
+            .plan(Some(&cursor), "epoch-b", 7, 11, 1)
+            .err()
+            .expect("instance epoch mismatch must be stale"),
+    );
+    assert_invalid_cursor(
+        cache
+            .plan(Some("not-base64!"), "epoch-a", 7, 11, 1)
+            .err()
+            .expect("malformed base64 cursor must be invalid"),
+    );
+    let malformed_json_cursor = URL_SAFE_NO_PAD.encode(b"{");
+    assert_invalid_cursor(
+        cache
+            .plan(Some(&malformed_json_cursor), "epoch-a", 7, 11, 1)
+            .err()
+            .expect("malformed JSON cursor must be invalid"),
+    );
     cache.replace(7, 11, inventory(&[ThreadId::new()]));
-    assert!(cache.plan(Some(&cursor), "epoch-a", 7, 11, 1).is_err());
+    assert_stale_cursor(
+        cache
+            .plan(Some(&cursor), "epoch-a", 7, 11, 1)
+            .err()
+            .expect("replacement snapshot ID mismatch must be stale"),
+    );
+
+    let mut commit_cache = SnapshotCache::default();
+    commit_cache.replace(7, 11, inventory(&thread_ids));
+    let commit_plan = commit_cache
+        .plan(None, "epoch-a", 7, 11, 1)
+        .expect("plan before runtime source change");
+    let commit_snapshots = materialize_plan(&commit_plan);
+    commit_cache.replace(8, 12, inventory(&thread_ids));
+    assert_stale_cursor(
+        commit_cache
+            .commit(&commit_plan, commit_snapshots)
+            .expect_err("runtime source change during materialization must be stale"),
+    );
+
+    let mut response_cache = SnapshotCache::default();
+    response_cache.replace(7, 11, inventory(&thread_ids));
+    let response_plan = response_cache
+        .plan(None, "epoch-a", 7, 11, 1)
+        .expect("plan before response replacement");
+    response_cache
+        .commit(&response_plan, materialize_plan(&response_plan))
+        .expect("commit before response replacement");
+    response_cache.replace(7, 11, inventory(&thread_ids));
+    assert_stale_cursor(
+        response_cache
+            .response(&response_plan, "epoch-a", 1, Vec::new())
+            .expect_err("replacement before response must be stale"),
+    );
 }
 
 #[test]

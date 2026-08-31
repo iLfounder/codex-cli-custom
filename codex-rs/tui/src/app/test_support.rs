@@ -68,6 +68,7 @@ pub(super) async fn make_test_app_with_channels() -> (
         reconnect: Default::default(),
         reconnect_state: Default::default(),
         pending_update_action: None,
+        pending_shutdown_exit_thread_id: None,
         pending_shutdown: None,
         shutdown_lookup_in_flight: false,
         shutdown_force_exit_armed: false,

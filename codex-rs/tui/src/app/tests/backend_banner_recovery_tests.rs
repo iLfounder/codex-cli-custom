@@ -1,3 +1,4 @@
+use super::rate_limits::bind_rate_limit_response;
 use super::*;
 use crate::app::rate_limit_refresh::RateLimitReadStatus;
 use crate::app::rate_limit_refresh::RateLimitRefreshOutcome;
@@ -146,6 +147,8 @@ async fn backend_banner_limit_error_refreshes_again_after_intervening_rolling_ha
         codex_app_server_client::AppServerEvent::ServerNotification(Box::new(
             ServerNotification::AccountRateLimitsUpdated(
                 codex_app_server_protocol::AccountRateLimitsUpdatedNotification {
+                    thread_id: None,
+                    execution_account: None,
                     rate_limits: rolling.clone(),
                 },
             ),
@@ -175,6 +178,8 @@ async fn backend_banner_limit_error_refreshes_again_after_intervening_rolling_ha
         codex_app_server_client::AppServerEvent::ServerNotification(Box::new(
             ServerNotification::AccountRateLimitsUpdated(
                 codex_app_server_protocol::AccountRateLimitsUpdatedNotification {
+                    thread_id: None,
+                    execution_account: None,
                     rate_limits: rolling,
                 },
             ),
@@ -226,13 +231,16 @@ async fn backend_banner_rolling_only_recovery_holds_new_input() -> Result<()> {
     ));
     set_chatgpt_auth(&mut app.chat_widget);
     app.chat_widget.set_model("test-model-a");
-    let mut rolling = response_with_banner().rate_limits;
+    let (subject, response) = bind_rate_limit_response(&mut app, response_with_banner());
+    let mut rolling = response.rate_limits.clone();
     rolling.spend_control_reached = Some(true);
     app.handle_app_server_event(
         &session,
         codex_app_server_client::AppServerEvent::ServerNotification(Box::new(
             ServerNotification::AccountRateLimitsUpdated(
                 codex_app_server_protocol::AccountRateLimitsUpdatedNotification {
+                    thread_id: Some(subject.thread_id.to_string()),
+                    execution_account: subject.execution_account.clone(),
                     rate_limits: rolling,
                 },
             ),
@@ -255,8 +263,9 @@ async fn backend_banner_rolling_only_recovery_holds_new_input() -> Result<()> {
         AppEvent::RateLimitsLoaded {
             request_id: 1,
             origin: RateLimitRefreshOrigin::Recovery,
+            subject: Some(subject),
             hard_stop_generation: app.rate_limit_hard_stop_generation,
-            result: Ok(response_with_banner()),
+            result: Ok(response),
         },
     )
     .await?;
@@ -274,7 +283,7 @@ async fn backend_banner_account_changes_invalidate_pending_recovery() -> Result<
     let mut session = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
     let mut tui = crate::tui::test_support::make_test_tui()?;
     app.chat_widget.set_model("test-model-a");
-    let current = response_with_banner();
+    let (subject, current) = bind_rate_limit_response(&mut app, response_with_banner());
     app.chat_widget.update_backend_banner(&current);
     assert!(
         render_bottom_popup(&app.chat_widget, /*width*/ 90)
@@ -305,6 +314,7 @@ async fn backend_banner_account_changes_invalidate_pending_recovery() -> Result<
         AppEvent::RateLimitsLoaded {
             request_id: pending.0,
             origin: RateLimitRefreshOrigin::Recovery,
+            subject: Some(subject),
             hard_stop_generation: pending.1,
             result: Ok(current),
         },
@@ -336,7 +346,7 @@ async fn backend_banner_reset_redemption_rejects_pre_reset_content() -> Result<(
         app.config.cwd.to_path_buf(),
     ));
     app.chat_widget.set_model("test-model-a");
-    let banner = response_with_banner();
+    let (subject, banner) = bind_rate_limit_response(&mut app, response_with_banner());
     app.chat_widget.update_backend_banner(&banner);
     assert!(
         render_bottom_popup(&app.chat_widget, /*width*/ 90)
@@ -387,6 +397,7 @@ async fn backend_banner_reset_redemption_rejects_pre_reset_content() -> Result<(
         AppEvent::RateLimitsLoaded {
             request_id: 2,
             origin: RateLimitRefreshOrigin::ResetConsume { request_id },
+            subject: Some(subject.clone()),
             hard_stop_generation: app.rate_limit_hard_stop_generation,
             result: Ok(recovered),
         },
@@ -404,6 +415,7 @@ async fn backend_banner_reset_redemption_rejects_pre_reset_content() -> Result<(
         AppEvent::RateLimitsLoaded {
             request_id: pending.0,
             origin: RateLimitRefreshOrigin::Recovery,
+            subject: Some(subject),
             hard_stop_generation: pending.1,
             result: Ok(banner),
         },

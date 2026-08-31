@@ -168,6 +168,7 @@ fn write_auth(home: &Path, account_id: &str, token: &str) {
             agent_identity: None,
             personal_access_token: None,
             bedrock_api_key: None,
+            bedrock_access_keys: None,
         },
         AuthCredentialsStoreMode::File,
         AuthKeyringBackendKind::default(),

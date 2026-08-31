@@ -3,6 +3,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use codex_app_server_transport::AppServerInstanceIdentity;
+use codex_app_server_transport::SUPERVISOR_CONTRACT_VERSION;
 use codex_app_server_transport::SupervisedAppServerSnapshot;
 use codex_app_server_transport::SupervisedAppServerStatus;
 use codex_app_server_transport::SupervisorSnapshot;
@@ -42,11 +43,13 @@ async fn snapshot_publication_is_private_revisioned_and_sanitized() {
         status: SupervisedAppServerStatus::Starting,
     };
     let (updates, _snapshots) = tokio::sync::watch::channel(SupervisorSnapshot {
+        contract_version: SUPERVISOR_CONTRACT_VERSION,
         snapshot_revision: 0,
         app_server: None,
     });
     let mut publisher = SnapshotPublisher {
         snapshot: SupervisorSnapshot {
+            contract_version: SUPERVISOR_CONTRACT_VERSION,
             snapshot_revision: 0,
             app_server: None,
         },
@@ -65,6 +68,7 @@ async fn snapshot_publication_is_private_revisioned_and_sanitized() {
     assert_eq!(
         actual,
         SupervisorSnapshot {
+            contract_version: SUPERVISOR_CONTRACT_VERSION,
             snapshot_revision: 1,
             app_server: Some(projected),
         }
@@ -139,6 +143,7 @@ fn private_snapshot_resumes_all_monotonic_high_water_marks() {
     let predecessor = identity("11111111-1111-4111-8111-111111111111", 6);
     let current = identity("22222222-2222-4222-8222-222222222222", 7);
     let snapshot = SupervisorSnapshot {
+        contract_version: SUPERVISOR_CONTRACT_VERSION,
         snapshot_revision: 41,
         app_server: Some(SupervisedAppServerSnapshot {
             process_generation: 12,
@@ -168,6 +173,7 @@ fn non_private_or_counterless_snapshot_is_rejected_instead_of_regressing() {
     let temp = tempfile::tempdir().expect("temp dir");
     let path = temp.path().join("snapshot.json");
     let snapshot = SupervisorSnapshot {
+        contract_version: SUPERVISOR_CONTRACT_VERSION,
         snapshot_revision: 41,
         app_server: Some(SupervisedAppServerSnapshot {
             process_generation: 12,
@@ -187,6 +193,7 @@ fn non_private_or_counterless_snapshot_is_rejected_instead_of_regressing() {
 
     assert!(
         SupervisorSeed::from_snapshot(SupervisorSnapshot {
+            contract_version: SUPERVISOR_CONTRACT_VERSION,
             snapshot_revision: 42,
             app_server: None,
         })

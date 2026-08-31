@@ -101,14 +101,22 @@ async fn handle_observes_only_matching_model_provider() {
         ..model_provider
     };
 
-    handle.observe_event(thread_id, &mismatched_config, &event, Arc::clone(&auth_manager), || {
-        panic!("telemetry should not be captured for a mismatched provider")
-    });
+    handle.observe_event(
+        thread_id,
+        &mismatched_config,
+        &event,
+        Arc::clone(&auth_manager),
+        || panic!("telemetry should not be captured for a mismatched provider"),
+    );
     assert!(receiver.try_recv().is_err());
 
-    handle.observe_event(thread_id, config.as_ref(), &event, Arc::clone(&auth_manager), || {
-        test_session_telemetry(thread_id)
-    });
+    handle.observe_event(
+        thread_id,
+        config.as_ref(),
+        &event,
+        Arc::clone(&auth_manager),
+        || test_session_telemetry(thread_id),
+    );
     let observation = receiver.recv().await.expect("matching observation");
     assert_eq!(observation.thread_id, thread_id);
     assert_eq!(observation.turn_id, "turn-1");

@@ -463,6 +463,13 @@ impl LocalThreadStore {
                 failure_reason,
                 bytes_processed: 0,
                 message: (!empty).then(|| error.to_string()),
+                history_mode: None,
+                file_identity: None,
+                first_invalid_ordinal: None,
+                expected_ordinal: None,
+                affected_suffix_records: None,
+                mutation_count: None,
+                backup_path: None,
             }));
         };
         let thread_id = metadata.meta.id;

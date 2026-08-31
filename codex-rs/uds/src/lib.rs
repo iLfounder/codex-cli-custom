@@ -185,7 +185,33 @@ mod platform {
     pub(super) struct Stream(Compat<Async<WindowsUnixStream>>);
 
     pub(super) async fn prepare_private_socket_directory(socket_dir: &Path) -> IoResult<()> {
-        tokio::fs::create_dir_all(socket_dir).await
+        tokio::fs::create_dir_all(socket_dir).await?;
+        let metadata = tokio::fs::symlink_metadata(socket_dir).await?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "socket directory path is not a private directory: {}",
+                    socket_dir.display()
+                ),
+            ));
+        }
+        let identity_before = codex_utils_home_dir::file_identity(socket_dir)?;
+        tokio::task::spawn_blocking({
+            let socket_dir = socket_dir.to_path_buf();
+            move || codex_utils_home_dir::ensure_owner_private(&socket_dir)
+        })
+        .await
+        .map_err(|err| io::Error::other(format!("socket ACL task failed: {err}")))??;
+        if identity_before != codex_utils_home_dir::file_identity(socket_dir)?
+            || !codex_utils_home_dir::is_owner_private(socket_dir)?
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "socket directory changed while securing its ACL",
+            ));
+        }
+        Ok(())
     }
 
     pub(super) struct Listener(Async<WindowsUnixListener>);

@@ -3845,6 +3845,21 @@
           "description": "When true, disables burst-paste detection for typed input entirely. All characters are inserted as they are received, and no buffering or placeholder replacement will occur for fast keypress bursts. Overrides the legacy top-level `disable_paste_burst` setting. Defaults to `false`.",
           "type": "boolean"
         },
+        "footer": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TuiFooter"
+            }
+          ],
+          "default": {
+            "adapter_ids": [],
+            "border": "none",
+            "enabled": false,
+            "layout": "stacked",
+            "max_rows": 1
+          },
+          "description": "Opt-in semantic contextual footer box. Disabled by default to preserve the legacy footer."
+        },
         "keymap": {
           "allOf": [
             {
@@ -4510,6 +4525,104 @@
         }
       },
       "type": "object"
+    },
+    "TuiFooter": {
+      "additionalProperties": false,
+      "description": "Opt-in semantic footer presentation settings.\n\nThe footer is disabled by default. When enabled, the composer can reserve and render up to `max_rows` contextual rows using the configured adapter registry; the existing transient shortcut/status-line waterfall remains responsible for interactive states.",
+      "properties": {
+        "adapter_ids": {
+          "default": [],
+          "description": "Ordered adapter IDs. An empty list selects the built-in adapter order. `adapters` is accepted as an alias for callers that prefer the shorter spelling.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "border": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TuiFooterBorder"
+            }
+          ],
+          "default": "none",
+          "description": "Border style. Defaults to `none`."
+        },
+        "enabled": {
+          "default": false,
+          "description": "Enable the contextual footer box. Defaults to `false`.",
+          "type": "boolean"
+        },
+        "layout": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TuiFooterLayout"
+            }
+          ],
+          "default": "stacked",
+          "description": "Row arrangement. Defaults to `stacked`."
+        },
+        "max_rows": {
+          "default": 1,
+          "description": "Maximum number of semantic rows to reserve. Values below one are treated as one by the renderer; the schema advertises a practical upper bound of 64 rows.",
+          "format": "uint16",
+          "maximum": 64.0,
+          "minimum": 1.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "TuiFooterBorder": {
+      "description": "Border treatment for the opt-in contextual TUI footer box.",
+      "oneOf": [
+        {
+          "description": "Keep the footer row borderless (the default and legacy-compatible mode).",
+          "enum": [
+            "none"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Draw a single-line box border.",
+          "enum": [
+            "plain"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Draw rounded corners.",
+          "enum": [
+            "rounded"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Draw a double-line box border.",
+          "enum": [
+            "double"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "TuiFooterLayout": {
+      "description": "Row arrangement for semantic footer contributions.",
+      "oneOf": [
+        {
+          "description": "Keep contributions in their preferred rows.",
+          "enum": [
+            "stacked"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Collapse all contributions into one deterministic row.",
+          "enum": [
+            "compact"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "TuiGlobalKeymap": {
       "additionalProperties": false,

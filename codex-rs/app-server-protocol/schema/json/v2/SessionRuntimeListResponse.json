@@ -455,6 +455,7 @@
       "description": "Sanitized identity and settings that remain useful outside the Codex process.",
       "properties": {
         "cwd": {
+          "description": "Opaque workspace marker (`<workspace>`), never a filesystem path.",
           "type": "string"
         },
         "forkedFromId": {

@@ -1,5 +1,9 @@
 //! Construction and initial wiring for `ChatWidget`.
 
+use crate::bottom_pane::FooterBoxConfig;
+use crate::bottom_pane::FooterSnapshot;
+use crate::status::plan_type_display_name;
+
 use super::*;
 
 impl ChatWidget {
@@ -35,6 +39,7 @@ impl ChatWidget {
         let model = model.filter(|m| !m.trim().is_empty());
         let mut config = config;
         config.model = model.clone();
+        let footer_config = FooterBoxConfig::from(&config.tui_footer);
         let prevent_idle_sleep = config.features.enabled(Feature::PreventIdleSleep);
         let placeholder = PLACEHOLDER.to_string();
         let side_placeholder = SIDE_PLACEHOLDER.to_string();
@@ -98,16 +103,19 @@ impl ChatWidget {
             app_event_tx: app_event_tx.clone(),
             frame_requester: frame_requester.clone(),
             codex_op_target,
-            bottom_pane: BottomPane::new(BottomPaneParams {
-                frame_requester,
-                app_event_tx,
-                has_input_focus: true,
-                enhanced_keys_supported,
-                placeholder_text: placeholder.clone(),
-                disable_paste_burst: config.disable_paste_burst,
-                animations_enabled: config.animations,
-                skills: None,
-            }),
+            bottom_pane: BottomPane::new_with_footer_config(
+                BottomPaneParams {
+                    frame_requester,
+                    app_event_tx,
+                    has_input_focus: true,
+                    enhanced_keys_supported,
+                    placeholder_text: placeholder.clone(),
+                    disable_paste_burst: config.disable_paste_burst,
+                    animations_enabled: config.animations,
+                    skills: None,
+                },
+                footer_config,
+            ),
             transcript: TranscriptState::new(active_cell),
             raw_output_mode: config.tui_raw_output_mode,
             config,
@@ -261,6 +269,17 @@ impl ChatWidget {
             last_rendered_user_message_display: None,
             last_non_retry_error: None,
         };
+
+        // Keep the semantic footer opt-in and its initial display-safe account projection in
+        // lockstep with the widget's resolved config.  The legacy footer remains the default
+        // because `TuiFooter::default()` is disabled and this snapshot is inert until enabled.
+        let (account_email, account_plan) = match widget.status_account_display.as_ref() {
+            Some(StatusAccountDisplay::ChatGpt { email, plan }) => (email.clone(), plan.clone()),
+            Some(StatusAccountDisplay::ApiKey) | None => (None, None),
+        };
+        let account_plan = account_plan.or_else(|| widget.plan_type.map(plan_type_display_name));
+        let footer_snapshot = FooterSnapshot::new().with_account(account_email, account_plan);
+        widget.bottom_pane.set_footer_snapshot(footer_snapshot);
 
         widget.prefetch_rate_limits();
         if let Some(keymap) = runtime_keymap {

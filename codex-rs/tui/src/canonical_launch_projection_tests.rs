@@ -170,6 +170,19 @@ fn oss_projection_keeps_only_provider_and_raw_reasoning_proof() {
 }
 
 #[test]
+fn managed_account_hint_binds_canonical_thread_start() {
+    let cli = Cli::parse_from(["codex"]);
+    let projection = CanonicalLaunchProjection::from_invocation(&cli, &[])
+        .with_managed_account_hint("C3")
+        .expect("managed account hint");
+    let mut params = ThreadStartParams::default();
+
+    projection.restrict_start(&mut params);
+
+    assert_eq!(params.initial_account_slot_id.as_deref(), Some("C3"));
+}
+
+#[test]
 fn oss_requires_built_in_provider_and_raw_reasoning_visibility() {
     let projection = CanonicalLaunchProjection {
         oss: true,

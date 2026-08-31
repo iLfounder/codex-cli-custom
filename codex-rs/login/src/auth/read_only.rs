@@ -14,7 +14,15 @@ pub(super) struct LoadedAuth {
 }
 
 pub(super) async fn load_auth(auth_config: &AuthConfig) -> std::io::Result<LoadedAuth> {
-    let Some(snapshot) = read_auth_file_snapshot(&auth_config.codex_home)? else {
+    // `read_auth_file_snapshot` performs blocking filesystem I/O and hashes the
+    // complete credential file. Sibling-account probing can run for many
+    // accounts during one turn, so keep that work off the async executor while
+    // retaining the exact revision/hash semantics used for external updates.
+    let codex_home = auth_config.codex_home.clone();
+    let snapshot = tokio::task::spawn_blocking(move || read_auth_file_snapshot(&codex_home))
+        .await
+        .map_err(|error| std::io::Error::other(format!("auth snapshot task failed: {error}")))??;
+    let Some(snapshot) = snapshot else {
         return Ok(LoadedAuth {
             auth: None,
             credential_revision: None,

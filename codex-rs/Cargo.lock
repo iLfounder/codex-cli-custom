@@ -3625,6 +3625,7 @@ dependencies = [
  "codex-protocol",
  "codex-secrets",
  "codex-terminal-detection",
+ "codex-utils-home-dir",
  "codex-utils-template",
  "codex-workload-identity",
  "core_test_support",
@@ -4619,6 +4620,7 @@ name = "codex-uds"
 version = "0.0.0"
 dependencies = [
  "async-io",
+ "codex-utils-home-dir",
  "pretty_assertions",
  "tempfile",
  "tokio",
@@ -4720,6 +4722,7 @@ dependencies = [
  "dirs",
  "pretty_assertions",
  "tempfile",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

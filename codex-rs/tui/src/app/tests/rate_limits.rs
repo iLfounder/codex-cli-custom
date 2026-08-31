@@ -111,6 +111,16 @@ fn install_rate_limit_subject(app: &mut App) -> RateLimitRequestSubject {
     subject
 }
 
+pub(super) fn bind_rate_limit_response(
+    app: &mut App,
+    mut response: GetAccountRateLimitsResponse,
+) -> (RateLimitRequestSubject, GetAccountRateLimitsResponse) {
+    let subject = install_rate_limit_subject(app);
+    response.thread_id = Some(subject.thread_id.to_string());
+    response.execution_account = subject.execution_account.clone();
+    (subject, response)
+}
+
 fn account_rate_limits_response(
     subject: &RateLimitRequestSubject,
     snapshot: RateLimitSnapshot,
@@ -189,10 +199,14 @@ async fn backend_banner_state_survives_widget_replacement() -> Result<()> {
     for dismiss in [false, true] {
         let (mut app, _rx, _op_rx) = make_test_app_with_channels().await;
         set_chatgpt_auth(&mut app.chat_widget);
-        let mut response = account_rate_limits_response(rate_limit_snapshot(
-            /*used_percent*/ 100, /*rate_limit_reached_type*/ None,
-            /*spend_control_reached*/ None,
-        ));
+        let subject = install_rate_limit_subject(&mut app);
+        let mut response = account_rate_limits_response(
+            &subject,
+            rate_limit_snapshot(
+                /*used_percent*/ 100, /*rate_limit_reached_type*/ None,
+                /*spend_control_reached*/ None,
+            ),
+        );
         response.rate_limit_upsell = Some(serde_json::json!({
             "banner_type": "plus_rate_limit_reached", "title": "Usage limit reached",
             "presentation": "dismissible",
@@ -590,11 +604,15 @@ async fn failed_rate_limit_read_preserves_visible_backend_banner() -> Result<()>
         app.chat_widget.config_ref(),
     ))
     .await?;
-    let mut response = account_rate_limits_response(rate_limit_snapshot(
-        /*used_percent*/ 25,
-        /*rate_limit_reached_type*/ None,
-        Some(false),
-    ));
+    let subject = install_rate_limit_subject(&mut app);
+    let mut response = account_rate_limits_response(
+        &subject,
+        rate_limit_snapshot(
+            /*used_percent*/ 25,
+            /*rate_limit_reached_type*/ None,
+            Some(false),
+        ),
+    );
     response.account_id = Some("workspace-a".into());
     response.rate_limit_upsell = Some(serde_json::json!({
         "banner_type": "workspace_recovery", "presentation": "inline",
@@ -614,6 +632,7 @@ async fn failed_rate_limit_read_preserves_visible_backend_banner() -> Result<()>
         AppEvent::RateLimitsLoaded {
             request_id: 0,
             origin: RateLimitRefreshOrigin::StatusCommand { request_id },
+            subject: None,
             hard_stop_generation: generation,
             result: Err("transient test failure".into()),
         },
@@ -630,10 +649,14 @@ async fn backend_banner_reads_ignore_older_completions() -> Result<()> {
     let mut session = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
     let mut tui = crate::tui::test_support::make_test_tui()?;
     app.chat_widget.set_model("test-model-a");
-    let mut current = account_rate_limits_response(rate_limit_snapshot(
-        /*used_percent*/ 100, /*rate_limit_reached_type*/ None,
-        /*spend_control_reached*/ None,
-    ));
+    let subject = install_rate_limit_subject(&mut app);
+    let mut current = account_rate_limits_response(
+        &subject,
+        rate_limit_snapshot(
+            /*used_percent*/ 100, /*rate_limit_reached_type*/ None,
+            /*spend_control_reached*/ None,
+        ),
+    );
     current.rate_limit_upsell = Some(serde_json::json!({
         "banner_type":"selected_model_limit", "model_slug":"test-model-a", "presentation":"inline",
         "title":"Selected model usage exhausted", "description":"Contact your owner.", "ctas":[]
@@ -677,6 +700,7 @@ async fn backend_banner_reads_ignore_older_completions() -> Result<()> {
             AppEvent::RateLimitsLoaded {
                 request_id: id,
                 origin: RateLimitRefreshOrigin::StatusCommand { request_id: id },
+                subject: Some(subject.clone()),
                 hard_stop_generation: generation,
                 result,
             },

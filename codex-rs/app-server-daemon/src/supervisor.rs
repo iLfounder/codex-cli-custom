@@ -17,6 +17,7 @@ use codex_app_server_transport::ManagedAccountCatalog;
 use codex_app_server_transport::ManagedAccountId;
 use codex_app_server_transport::REMOTE_CONTROL_DISABLED_ENV_VAR;
 use codex_app_server_transport::SUPERVISED_APP_SERVER_IDENTITY_ENV_VAR;
+use codex_app_server_transport::SUPERVISOR_CONTRACT_VERSION;
 use codex_app_server_transport::SupervisedAppServerSnapshot;
 use codex_app_server_transport::SupervisedAppServerStatus;
 use codex_app_server_transport::SupervisorSnapshot;
@@ -147,6 +148,7 @@ impl SupervisorSeed {
     fn empty() -> Self {
         Self {
             snapshot: SupervisorSnapshot {
+                contract_version: SUPERVISOR_CONTRACT_VERSION,
                 snapshot_revision: 0,
                 app_server: None,
             },

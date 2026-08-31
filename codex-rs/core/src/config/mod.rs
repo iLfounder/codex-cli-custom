@@ -51,6 +51,7 @@ use codex_config::types::SessionPickerViewMode;
 use codex_config::types::ToolSuggestConfig;
 use codex_config::types::ToolSuggestDisabledTool;
 use codex_config::types::ToolSuggestDiscoverable;
+use codex_config::types::TuiFooter;
 use codex_config::types::TuiKeymap;
 use codex_config::types::TuiNotificationSettings;
 use codex_config::types::TuiPetAnchor;
@@ -736,6 +737,9 @@ pub struct Config {
 
     /// TUI notification settings, including enabled events, delivery method, and focus condition.
     pub tui_notifications: TuiNotificationSettings,
+
+    /// Opt-in semantic contextual footer presentation settings.
+    pub tui_footer: TuiFooter,
 
     /// Enable ASCII animations and shimmer effects in the TUI.
     pub animations: bool,
@@ -4328,6 +4332,11 @@ impl Config {
                 .tui
                 .as_ref()
                 .map(|t| t.notification_settings.clone())
+                .unwrap_or_default(),
+            tui_footer: cfg
+                .tui
+                .as_ref()
+                .map(|t| t.footer.clone())
                 .unwrap_or_default(),
             animations: cfg.tui.as_ref().map(|t| t.animations).unwrap_or(true),
             show_tooltips: cfg.tui.as_ref().map(|t| t.show_tooltips).unwrap_or(true),

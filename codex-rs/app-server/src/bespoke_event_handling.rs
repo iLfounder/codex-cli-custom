@@ -3451,6 +3451,7 @@ mod tests {
                 conversation_id,
                 Arc::clone(&conversation),
                 Arc::clone(&thread_manager),
+                test_thread_store(),
                 outgoing.clone(),
                 Arc::clone(&thread_state),
                 thread_watch_manager.clone(),

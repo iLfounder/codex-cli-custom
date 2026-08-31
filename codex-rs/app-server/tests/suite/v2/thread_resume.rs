@@ -1842,6 +1842,7 @@ async fn unloaded_thread_goal_mutations_respect_parent_ownership() -> Result<()>
                     retained,
                     ThreadGoalGetResponse {
                         goal: Some(original.goal.clone()),
+                        revision: original.goal.revision,
                     },
                 );
             } else if method == "thread/goal/set" {
@@ -1850,7 +1851,7 @@ async fn unloaded_thread_goal_mutations_respect_parent_ownership() -> Result<()>
             } else {
                 let cleared: ThreadGoalClearResponse =
                     timeout(DEFAULT_READ_TIMEOUT, app.read_response(request_id)).await??;
-                assert_eq!(cleared, ThreadGoalClearResponse { cleared: true });
+                assert!(cleared.cleared);
             }
         }
     }

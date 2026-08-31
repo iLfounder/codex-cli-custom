@@ -611,6 +611,12 @@ pub(crate) struct App {
     /// Set when the user confirms an update; propagated on exit.
     pub(crate) pending_update_action: Option<UpdateAction>,
 
+    /// Tracks the thread being explicitly shut down by the interrupt exit path.
+    ///
+    /// This marker is thread-scoped so a shutdown notification from another
+    /// thread can still take the normal failover path.
+    pending_shutdown_exit_thread_id: Option<ThreadId>,
+
     pending_shutdown: Option<runtime_controls::PendingShutdown>,
     shutdown_lookup_in_flight: bool,
     shutdown_force_exit_armed: bool,

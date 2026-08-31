@@ -264,11 +264,16 @@ use super::footer::render_footer_from_props;
 use super::footer::render_footer_hint_items;
 use super::footer::render_footer_line;
 use super::footer::reset_mode_after_activity;
+use super::footer::shows_passive_footer_line;
 use super::footer::side_conversation_context_line;
 use super::footer::single_line_footer_layout;
 use super::footer::status_line_right_indicator_line;
 use super::footer::toggle_shortcut_mode;
 use super::footer::uses_passive_footer_status_layout;
+use super::footer_box::FooterBox;
+use super::footer_box::FooterBoxConfig;
+use super::footer_box::FooterBoxLayout;
+use super::footer_box::FooterSnapshot;
 use super::mentions_v2::MentionV2Popup;
 use super::mentions_v2::MentionV2Selection;
 use super::paste_burst::CharDecision;
@@ -511,6 +516,7 @@ pub(crate) struct ChatComposer {
     history: ChatComposerHistory,
     agents_navigation_enabled: bool,
     footer: FooterState,
+    footer_box: FooterBox,
     has_focus: bool,
     frame_requester: Option<FrameRequester>,
     effort_tier: Option<EffortTier>,
@@ -692,6 +698,7 @@ impl ChatComposer {
                 reasoning_up_key: default_keymap
                     .primary_hint(KeymapContext::Chat, "increase_reasoning_effort"),
             },
+            footer_box: FooterBox::new(FooterBoxConfig::default()),
             has_focus: has_input_focus,
             frame_requester: None,
             effort_tier: None,
@@ -1042,12 +1049,7 @@ impl ChatComposer {
         area: Rect,
         textarea_right_reserve: u16,
     ) -> [Rect; 4] {
-        let footer_props = self.footer_props();
-        let footer_hint_height = self
-            .custom_footer_height()
-            .unwrap_or_else(|| footer_height(&footer_props));
-        let footer_spacing = Self::footer_spacing(footer_hint_height);
-        let footer_total_height = footer_hint_height + footer_spacing;
+        let footer_total_height = self.footer_height_for_width(area.width);
         let popup_constraint = match &self.popups.active {
             ActivePopup::Command(popup) => {
                 Constraint::Max(popup.calculate_required_height(area.width))
@@ -1533,6 +1535,21 @@ impl ChatComposer {
     /// `None` restores the default shortcut footer.
     pub(crate) fn set_footer_hint_override(&mut self, items: Option<Vec<(String, String)>>) {
         self.footer.hint_override = items;
+    }
+
+    /// Replace the opt-in semantic footer presentation settings.
+    pub(crate) fn set_footer_config(&mut self, config: FooterBoxConfig) {
+        self.footer_box.set_config(config);
+    }
+
+    /// Replace the immutable semantic footer snapshot consumed by adapters.
+    pub(crate) fn set_footer_snapshot(&mut self, snapshot: FooterSnapshot) {
+        self.footer_box.set_snapshot(snapshot);
+    }
+
+    /// Update only the display-safe account projection in the footer snapshot.
+    pub(crate) fn set_footer_account(&mut self, email: Option<String>, plan: Option<String>) {
+        self.footer_box.set_account(email, plan);
     }
 
     pub(crate) fn set_remote_image_urls(&mut self, urls: Vec<String>) {
@@ -3994,6 +4011,89 @@ impl ChatComposer {
             .map(|items| if items.is_empty() { 0 } else { 1 })
     }
 
+    /// Whether the semantic footer may replace the legacy footer row for this frame.
+    ///
+    /// The legacy waterfall owns all instructional/transient states.  Keeping this predicate in
+    /// one place is important because desired-height, layout, and render must make the same
+    /// decision or a resize can reserve a row that is never painted (or vice versa).
+    fn footer_box_visible(&self) -> bool {
+        let props = self.footer_props();
+        self.footer_box.is_enabled()
+            && self.footer_box.has_content()
+            && shows_passive_footer_line(&props)
+            && self.custom_footer_height().is_none()
+            && self.shell_mode_footer_line().is_none()
+            && self
+                .effort_status_line_transition
+                .as_ref()
+                .is_none_or(EffortStatusLineTransition::is_finished)
+    }
+
+    /// Return the footer height reserved by the active renderer.
+    ///
+    /// A FooterBox measurement already includes border and padding chrome, while the legacy
+    /// waterfall uses its own hint/spacing calculation.  The two paths intentionally remain
+    /// separate so the default (disabled) path is byte-for-byte compatible with existing TUI
+    /// snapshots.
+    fn footer_height_for_width(&self, width: u16) -> u16 {
+        if self.footer_box_visible() {
+            self.footer_box.measure(width).height
+        } else {
+            let footer_props = self.footer_props();
+            let footer_hint_height = self
+                .custom_footer_height()
+                .unwrap_or_else(|| footer_height(&footer_props));
+            footer_hint_height + Self::footer_spacing(footer_hint_height)
+        }
+    }
+
+    /// Return the legacy right-side context that can safely share a FooterBox row.
+    ///
+    /// FooterBox contributions are rendered directly by the box.  The existing right-context
+    /// helper is retained only for this independent native indicator, and only when the selected
+    /// semantic rows have no right lane (the render path checks that before calling it).
+    fn footer_box_native_context_line(&self, props: &FooterProps) -> Option<Line<'static>> {
+        if let Some(label) = self.footer.side_conversation_context_label.as_ref() {
+            return Some(side_conversation_context_line(label));
+        }
+        if uses_passive_footer_status_layout(props) {
+            let show_cycle_hint =
+                !props.is_task_running && self.footer.collaboration_mode_indicator.is_some();
+            self.mode_indicator_line(show_cycle_hint)
+        } else {
+            Some(self.right_footer_line_with_context())
+        }
+    }
+
+    /// Render the native right indicator in an otherwise-empty semantic lane.
+    ///
+    /// This deliberately calls `render_context_right` only for the native indicator; FooterBox
+    /// rows never pass through that one-line helper.  If the indicator cannot fit beside the
+    /// semantic left lane, it is omitted for this frame rather than overwriting user-visible
+    /// FooterBox text.
+    fn render_footer_box_native_context(
+        &self,
+        layout: &FooterBoxLayout,
+        props: &FooterProps,
+        buf: &mut Buffer,
+    ) {
+        let Some(row) = layout.rows.first() else {
+            return;
+        };
+        if row.right.is_some() {
+            return;
+        }
+        let Some(line) = self.footer_box_native_context_line(props) else {
+            return;
+        };
+        let left_width = row.left.width() as u16;
+        let context_width = line.width() as u16;
+        if context_width == 0 || !can_show_left_with_context(row.area, left_width, context_width) {
+            return;
+        }
+        render_context_right(row.area, buf, &line);
+    }
+
     pub(crate) fn sync_popups(&mut self) {
         self.sync_slash_command_elements();
         if self.history_search.is_some() || self.draft.textarea.vim_query().is_some() {
@@ -4466,8 +4566,10 @@ impl ChatComposer {
 
     pub(crate) fn set_status_line(&mut self, status_line: Option<Line<'static>>) -> bool {
         if self.footer.status_line_value == status_line {
+            self.footer_box.set_status_line(status_line.as_ref());
             return false;
         }
+        self.footer_box.set_status_line(status_line.as_ref());
         self.footer.status_line_value = status_line;
         true
     }
@@ -4655,12 +4757,7 @@ impl ChatComposer {
         width: u16,
         textarea_right_reserve: u16,
     ) -> u16 {
-        let footer_props = self.footer_props();
-        let footer_hint_height = self
-            .custom_footer_height()
-            .unwrap_or_else(|| footer_height(&footer_props));
-        let footer_spacing = Self::footer_spacing(footer_hint_height);
-        let footer_total_height = footer_hint_height + footer_spacing;
+        let footer_total_height = self.footer_height_for_width(width);
         const COLS_WITH_MARGIN: u16 = LIVE_PREFIX_COLS + 1;
         let inner_width =
             width.saturating_sub(COLS_WITH_MARGIN.saturating_add(textarea_right_reserve));
@@ -4715,108 +4812,121 @@ impl ChatComposer {
                 popup.render_ref(popup_rect, buf);
             }
             ActivePopup::None => {
-                let footer_props = self.footer_props();
-                let show_cycle_hint = !footer_props.is_task_running
-                    && self.footer.collaboration_mode_indicator.is_some();
-                let show_shortcuts_hint = match footer_props.mode {
-                    FooterMode::ComposerEmpty => !self.is_in_paste_burst(),
-                    FooterMode::ComposerHasDraft => false,
-                    FooterMode::HistorySearch
-                    | FooterMode::QuitShortcutReminder
-                    | FooterMode::ShortcutOverlay
-                    | FooterMode::EscHint => false,
-                };
-                let show_queue_hint = match footer_props.mode {
-                    FooterMode::ComposerHasDraft => footer_props.is_task_running,
-                    FooterMode::HistorySearch
-                    | FooterMode::QuitShortcutReminder
-                    | FooterMode::ComposerEmpty
-                    | FooterMode::ShortcutOverlay
-                    | FooterMode::EscHint => false,
-                };
-                let custom_height = self.custom_footer_height();
-                let footer_hint_height =
-                    custom_height.unwrap_or_else(|| footer_height(&footer_props));
-                let footer_spacing = Self::footer_spacing(footer_hint_height);
-                let hint_rect = if footer_spacing > 0 && footer_hint_height > 0 {
-                    let [_, hint_rect] = Layout::vertical([
-                        Constraint::Length(footer_spacing),
-                        Constraint::Length(footer_hint_height),
-                    ])
-                    .areas(popup_rect);
-                    hint_rect
+                if self.footer_box_visible() {
+                    // FooterBox owns its complete measure/layout/render pass.  In particular, do
+                    // not feed its rows through `render_context_right`: that helper is tied to the
+                    // legacy one-line footer and would overwrite/truncate bordered rows.
+                    let footer_layout = self.footer_box.layout(popup_rect);
+                    self.footer_box.render_layout(&footer_layout, buf);
+                    let footer_props = self.footer_props();
+                    self.render_footer_box_native_context(&footer_layout, &footer_props, buf);
                 } else {
-                    popup_rect
-                };
-                if let Some(input) = self.draft.textarea.vim_query() {
-                    input.render(inset_footer_hint_area(hint_rect), buf);
-                } else if let Some(line) = self.history_search_footer_line() {
-                    render_footer_line(hint_rect, buf, line);
-                } else {
-                    let available_width =
-                        hint_rect.width.saturating_sub(FOOTER_INDENT_COLS as u16) as usize;
-                    let status_line_active = uses_passive_footer_status_layout(&footer_props);
-                    let combined_status_line = if status_line_active {
-                        passive_footer_status_line(&footer_props)
-                    } else {
-                        None
+                    let footer_props = self.footer_props();
+                    let show_cycle_hint = !footer_props.is_task_running
+                        && self.footer.collaboration_mode_indicator.is_some();
+                    let show_shortcuts_hint = match footer_props.mode {
+                        FooterMode::ComposerEmpty => !self.is_in_paste_burst(),
+                        FooterMode::ComposerHasDraft => false,
+                        FooterMode::HistorySearch
+                        | FooterMode::QuitShortcutReminder
+                        | FooterMode::ShortcutOverlay
+                        | FooterMode::EscHint => false,
                     };
-                    let transition_visible = status_line_active
-                        && !self.footer.flash_visible()
-                        && self.footer.hint_override.is_none();
-                    let transition_active = transition_visible
-                        && self
-                            .effort_status_line_transition
-                            .as_ref()
-                            .is_some_and(|transition| !transition.is_finished());
-                    let combined_status_line = if transition_visible
-                        && let Some(transition) = &self.effort_status_line_transition
-                        && !transition.is_finished()
-                    {
-                        transition.render_line(
-                            combined_status_line.as_ref(),
-                            hint_rect.width.saturating_sub(FOOTER_INDENT_COLS as u16),
-                        )
-                    } else {
-                        combined_status_line
+                    let show_queue_hint = match footer_props.mode {
+                        FooterMode::ComposerHasDraft => footer_props.is_task_running,
+                        FooterMode::HistorySearch
+                        | FooterMode::QuitShortcutReminder
+                        | FooterMode::ComposerEmpty
+                        | FooterMode::ShortcutOverlay
+                        | FooterMode::EscHint => false,
                     };
-                    let mut truncated_status_line = if status_line_active {
-                        combined_status_line.as_ref().map(|line| {
-                            truncate_line_with_ellipsis_if_overflow(line.clone(), available_width)
-                        })
+                    let custom_height = self.custom_footer_height();
+                    let footer_hint_height =
+                        custom_height.unwrap_or_else(|| footer_height(&footer_props));
+                    let footer_spacing = Self::footer_spacing(footer_hint_height);
+                    let hint_rect = if footer_spacing > 0 && footer_hint_height > 0 {
+                        let [_, hint_rect] = Layout::vertical([
+                            Constraint::Length(footer_spacing),
+                            Constraint::Length(footer_hint_height),
+                        ])
+                        .areas(popup_rect);
+                        hint_rect
                     } else {
-                        None
+                        popup_rect
                     };
-                    let left_mode_indicator = if status_line_active {
-                        None
+                    if let Some(input) = self.draft.textarea.vim_query() {
+                        input.render(inset_footer_hint_area(hint_rect), buf);
+                    } else if let Some(line) = self.history_search_footer_line() {
+                        render_footer_line(hint_rect, buf, line);
                     } else {
-                        self.footer.collaboration_mode_indicator
-                    };
-                    let active_footer_hint_override = self.footer.hint_override.as_ref();
-                    let mut left_width = if self.footer.flash_visible() {
-                        self.footer
-                            .flash
-                            .as_ref()
-                            .map(|flash| flash.line.width() as u16)
-                            .unwrap_or(0)
-                    } else if let Some(items) = active_footer_hint_override {
-                        footer_hint_items_width(items)
-                    } else if status_line_active {
-                        truncated_status_line
-                            .as_ref()
-                            .map(|line| line.width() as u16)
-                            .unwrap_or(0)
-                    } else {
-                        footer_line_width(
-                            &footer_props,
-                            left_mode_indicator,
-                            show_cycle_hint,
-                            show_shortcuts_hint,
-                            show_queue_hint,
-                        )
-                    };
-                    let right_line =
-                        if let Some(label) = self.footer.side_conversation_context_label.as_ref() {
+                        let available_width =
+                            hint_rect.width.saturating_sub(FOOTER_INDENT_COLS as u16) as usize;
+                        let status_line_active = uses_passive_footer_status_layout(&footer_props);
+                        let combined_status_line = if status_line_active {
+                            passive_footer_status_line(&footer_props)
+                        } else {
+                            None
+                        };
+                        let transition_visible = status_line_active
+                            && !self.footer.flash_visible()
+                            && self.footer.hint_override.is_none();
+                        let transition_active = transition_visible
+                            && self
+                                .effort_status_line_transition
+                                .as_ref()
+                                .is_some_and(|transition| !transition.is_finished());
+                        let combined_status_line = if transition_visible
+                            && let Some(transition) = &self.effort_status_line_transition
+                            && !transition.is_finished()
+                        {
+                            transition.render_line(
+                                combined_status_line.as_ref(),
+                                hint_rect.width.saturating_sub(FOOTER_INDENT_COLS as u16),
+                            )
+                        } else {
+                            combined_status_line
+                        };
+                        let mut truncated_status_line = if status_line_active {
+                            combined_status_line.as_ref().map(|line| {
+                                truncate_line_with_ellipsis_if_overflow(
+                                    line.clone(),
+                                    available_width,
+                                )
+                            })
+                        } else {
+                            None
+                        };
+                        let left_mode_indicator = if status_line_active {
+                            None
+                        } else {
+                            self.footer.collaboration_mode_indicator
+                        };
+                        let active_footer_hint_override = self.footer.hint_override.as_ref();
+                        let mut left_width = if self.footer.flash_visible() {
+                            self.footer
+                                .flash
+                                .as_ref()
+                                .map(|flash| flash.line.width() as u16)
+                                .unwrap_or(0)
+                        } else if let Some(items) = active_footer_hint_override {
+                            footer_hint_items_width(items)
+                        } else if status_line_active {
+                            truncated_status_line
+                                .as_ref()
+                                .map(|line| line.width() as u16)
+                                .unwrap_or(0)
+                        } else {
+                            footer_line_width(
+                                &footer_props,
+                                left_mode_indicator,
+                                show_cycle_hint,
+                                show_shortcuts_hint,
+                                show_queue_hint,
+                            )
+                        };
+                        let right_line = if let Some(label) =
+                            self.footer.side_conversation_context_label.as_ref()
+                        {
                             Some(side_conversation_context_line(label))
                         } else if let Some(line) = self.shell_mode_footer_line() {
                             Some(line)
@@ -4834,67 +4944,82 @@ impl ChatComposer {
                         } else {
                             Some(self.right_footer_line_with_context())
                         };
-                    let right_width = right_line.as_ref().map(|l| l.width() as u16).unwrap_or(0);
-                    if status_line_active
-                        && let Some(max_left) = max_left_width_for_right(hint_rect, right_width)
-                        && left_width > max_left
-                        && let Some(line) = combined_status_line.as_ref().map(|line| {
-                            truncate_line_with_ellipsis_if_overflow(line.clone(), max_left as usize)
-                        })
-                    {
-                        left_width = line.width() as u16;
-                        truncated_status_line = Some(line);
-                    }
-                    let can_show_left_and_context =
-                        can_show_left_with_context(hint_rect, left_width, right_width);
-                    let has_override =
-                        self.footer.flash_visible() || active_footer_hint_override.is_some();
-                    let single_line_layout = if has_override || status_line_active {
-                        None
-                    } else {
-                        match footer_props.mode {
-                            FooterMode::ComposerEmpty | FooterMode::ComposerHasDraft => {
-                                // Both of these modes render the single-line footer style (with
-                                // either the shortcuts hint or the optional queue hint). We still
-                                // want the single-line collapse rules so the mode label can win over
-                                // the context indicator on narrow widths.
-                                Some(single_line_footer_layout(
-                                    hint_rect,
-                                    right_width,
-                                    left_mode_indicator,
-                                    show_cycle_hint,
-                                    show_shortcuts_hint,
-                                    show_queue_hint,
-                                    footer_props.key_hints,
-                                ))
-                            }
-                            FooterMode::EscHint
-                            | FooterMode::HistorySearch
-                            | FooterMode::QuitShortcutReminder
-                            | FooterMode::ShortcutOverlay => None,
+                        let right_width =
+                            right_line.as_ref().map(|l| l.width() as u16).unwrap_or(0);
+                        if status_line_active
+                            && let Some(max_left) = max_left_width_for_right(hint_rect, right_width)
+                            && left_width > max_left
+                            && let Some(line) = combined_status_line.as_ref().map(|line| {
+                                truncate_line_with_ellipsis_if_overflow(
+                                    line.clone(),
+                                    max_left as usize,
+                                )
+                            })
+                        {
+                            left_width = line.width() as u16;
+                            truncated_status_line = Some(line);
                         }
-                    };
-                    let show_right = if matches!(
-                        footer_props.mode,
-                        FooterMode::EscHint
-                            | FooterMode::HistorySearch
-                            | FooterMode::QuitShortcutReminder
-                            | FooterMode::ShortcutOverlay
-                    ) {
-                        false
-                    } else {
-                        single_line_layout
-                            .as_ref()
-                            .map(|(_, show_context)| *show_context)
-                            .unwrap_or(can_show_left_and_context)
-                    };
+                        let can_show_left_and_context =
+                            can_show_left_with_context(hint_rect, left_width, right_width);
+                        let has_override =
+                            self.footer.flash_visible() || active_footer_hint_override.is_some();
+                        let single_line_layout = if has_override || status_line_active {
+                            None
+                        } else {
+                            match footer_props.mode {
+                                FooterMode::ComposerEmpty | FooterMode::ComposerHasDraft => {
+                                    // Both of these modes render the single-line footer style (with
+                                    // either the shortcuts hint or the optional queue hint). We still
+                                    // want the single-line collapse rules so the mode label can win over
+                                    // the context indicator on narrow widths.
+                                    Some(single_line_footer_layout(
+                                        hint_rect,
+                                        right_width,
+                                        left_mode_indicator,
+                                        show_cycle_hint,
+                                        show_shortcuts_hint,
+                                        show_queue_hint,
+                                        footer_props.key_hints,
+                                    ))
+                                }
+                                FooterMode::EscHint
+                                | FooterMode::HistorySearch
+                                | FooterMode::QuitShortcutReminder
+                                | FooterMode::ShortcutOverlay => None,
+                            }
+                        };
+                        let show_right = if matches!(
+                            footer_props.mode,
+                            FooterMode::EscHint
+                                | FooterMode::HistorySearch
+                                | FooterMode::QuitShortcutReminder
+                                | FooterMode::ShortcutOverlay
+                        ) {
+                            false
+                        } else {
+                            single_line_layout
+                                .as_ref()
+                                .map(|(_, show_context)| *show_context)
+                                .unwrap_or(can_show_left_and_context)
+                        };
 
-                    if let Some((summary_left, _)) = single_line_layout {
-                        match summary_left {
-                            SummaryLeft::Default => {
-                                if status_line_active {
-                                    if let Some(line) = truncated_status_line.clone() {
-                                        render_footer_line(hint_rect, buf, line);
+                        if let Some((summary_left, _)) = single_line_layout {
+                            match summary_left {
+                                SummaryLeft::Default => {
+                                    if status_line_active {
+                                        if let Some(line) = truncated_status_line.clone() {
+                                            render_footer_line(hint_rect, buf, line);
+                                        } else {
+                                            render_footer_from_props(
+                                                hint_rect,
+                                                buf,
+                                                &footer_props,
+                                                left_mode_indicator,
+                                                show_cycle_hint,
+                                                show_shortcuts_hint,
+                                                show_queue_hint,
+                                            );
+                                        }
                                     } else {
                                         render_footer_from_props(
                                             hint_rect,
@@ -4906,58 +5031,48 @@ impl ChatComposer {
                                             show_queue_hint,
                                         );
                                     }
-                                } else {
-                                    render_footer_from_props(
-                                        hint_rect,
-                                        buf,
-                                        &footer_props,
-                                        left_mode_indicator,
-                                        show_cycle_hint,
-                                        show_shortcuts_hint,
-                                        show_queue_hint,
-                                    );
                                 }
+                                SummaryLeft::Custom(line) => {
+                                    render_footer_line(hint_rect, buf, line);
+                                }
+                                SummaryLeft::None => {}
                             }
-                            SummaryLeft::Custom(line) => {
+                        } else if self.footer.flash_visible() {
+                            if let Some(flash) = self.footer.flash.as_ref() {
+                                Widget::render(&flash.line, inset_footer_hint_area(hint_rect), buf);
+                            }
+                        } else if let Some(items) = active_footer_hint_override {
+                            render_footer_hint_items(hint_rect, buf, items);
+                        } else if status_line_active {
+                            if let Some(line) = truncated_status_line {
                                 render_footer_line(hint_rect, buf, line);
                             }
-                            SummaryLeft::None => {}
+                        } else {
+                            render_footer_from_props(
+                                hint_rect,
+                                buf,
+                                &footer_props,
+                                self.footer.collaboration_mode_indicator,
+                                show_cycle_hint,
+                                show_shortcuts_hint,
+                                show_queue_hint,
+                            );
                         }
-                    } else if self.footer.flash_visible() {
-                        if let Some(flash) = self.footer.flash.as_ref() {
-                            Widget::render(&flash.line, inset_footer_hint_area(hint_rect), buf);
+                        if show_right && let Some(line) = &right_line {
+                            render_context_right(hint_rect, buf, line);
                         }
-                    } else if let Some(items) = active_footer_hint_override {
-                        render_footer_hint_items(hint_rect, buf, items);
-                    } else if status_line_active {
-                        if let Some(line) = truncated_status_line {
-                            render_footer_line(hint_rect, buf, line);
+                        if status_line_active
+                            && let Some(url) = self.footer.status_line_hyperlink_url.as_deref()
+                        {
+                            mark_underlined_hyperlink(buf, hint_rect, url);
                         }
-                    } else {
-                        render_footer_from_props(
-                            hint_rect,
-                            buf,
-                            &footer_props,
-                            self.footer.collaboration_mode_indicator,
-                            show_cycle_hint,
-                            show_shortcuts_hint,
-                            show_queue_hint,
-                        );
-                    }
-                    if show_right && let Some(line) = &right_line {
-                        render_context_right(hint_rect, buf, line);
-                    }
-                    if status_line_active
-                        && let Some(url) = self.footer.status_line_hyperlink_url.as_deref()
-                    {
-                        mark_underlined_hyperlink(buf, hint_rect, url);
-                    }
-                    if transition_visible
-                        && let Some(transition) = &self.effort_status_line_transition
-                        && !transition.is_finished()
-                        && let Some(frame_requester) = &self.frame_requester
-                    {
-                        frame_requester.schedule_frame_in(EFFORT_STATUS_LINE_FRAME_TICK);
+                        if transition_visible
+                            && let Some(transition) = &self.effort_status_line_transition
+                            && !transition.is_finished()
+                            && let Some(frame_requester) = &self.frame_requester
+                        {
+                            frame_requester.schedule_frame_in(EFFORT_STATUS_LINE_FRAME_TICK);
+                        }
                     }
                 }
             }

@@ -115,6 +115,7 @@ impl OrdinalInspection {
             thread_id: Some(thread_id),
             rollout_path,
             status,
+            failure_reason: None,
             bytes_processed: self.file_identity.len,
             message: None,
             history_mode: Some(self.history_mode),

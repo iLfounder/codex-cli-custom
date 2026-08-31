@@ -2628,9 +2628,7 @@ mod tests {
     #[test]
     fn default_daemon_socket_absence_selects_embedded() -> color_eyre::Result<()> {
         let codex_home = TempDir::new()?;
-        let socket_path =
-            AbsolutePathBuf::from_absolute_path(codex_home.path().join("codex.sock"))?;
-        assert_eq!(daemon_socket_if_present(socket_path)?, None);
+        assert_eq!(default_daemon_socket_if_present(codex_home.path())?, None);
         assert_eq!(
             app_server_target_for_launch(
                 /*explicit_remote_endpoint*/ None,

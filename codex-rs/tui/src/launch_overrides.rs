@@ -105,7 +105,7 @@ pub fn classify_current_launch(
     )
 }
 
-fn current_managed_account_hint() -> std::io::Result<Option<String>> {
+pub(crate) fn current_managed_account_hint() -> std::io::Result<Option<String>> {
     std::env::var_os(MANAGED_ACCOUNT_HINT_ENV_VAR)
         .map(|value| {
             value.into_string().map_err(|_| {

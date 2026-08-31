@@ -332,6 +332,7 @@ fn request_admission(request: &ClientRequest) -> RequestAdmission {
         | ClientRequest::ThreadRead { .. }
         | ClientRequest::ThreadTurnsList { .. }
         | ClientRequest::ThreadItemsList { .. }
+        | ClientRequest::ThreadTimelineList { .. }
         | ClientRequest::SkillsList { .. }
         | ClientRequest::HooksList { .. }
         | ClientRequest::PluginList { .. }
@@ -409,6 +410,7 @@ fn request_admission(request: &ClientRequest) -> RequestAdmission {
         | ClientRequest::ThreadMetadataUpdate { .. }
         | ClientRequest::ThreadSectionMove { .. }
         | ClientRequest::ThreadSettingsUpdate { .. }
+        | ClientRequest::TurnSettingsUpdate { .. }
         | ClientRequest::ThreadMemoryModeSet { .. }
         | ClientRequest::MemoryReset { .. }
         | ClientRequest::ThreadUnarchive { .. }
@@ -459,6 +461,8 @@ fn request_admission(request: &ClientRequest) -> RequestAdmission {
         | ClientRequest::EnvironmentAdd { .. }
         | ClientRequest::McpServerOauthLogin { .. }
         | ClientRequest::McpServerRefresh { .. }
+        | ClientRequest::McpServerEventStreamStart { .. }
+        | ClientRequest::McpServerEventStreamStop { .. }
         | ClientRequest::McpServerToolCall { .. }
         | ClientRequest::WindowsSandboxSetupStart { .. }
         | ClientRequest::AccountSlotLoginStart { .. }

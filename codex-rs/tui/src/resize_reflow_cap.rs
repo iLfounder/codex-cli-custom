@@ -9,6 +9,7 @@
 //! make interactive resize feel worse without giving the user more usable history.
 
 use codex_config::types::DEFAULT_TERMINAL_RESIZE_REFLOW_FALLBACK_MAX_ROWS;
+use codex_terminal_detection::Multiplexer;
 use codex_terminal_detection::TerminalInfo;
 use codex_terminal_detection::TerminalName;
 use codex_terminal_detection::terminal_info;
@@ -31,6 +32,7 @@ pub(crate) fn resize_reflow_max_rows(config: TerminalResizeReflowConfig) -> Opti
         config,
         &terminal_info(),
         crate::tui::running_in_vscode_terminal(),
+        std::env::var_os("WT_SESSION").is_some(),
     )
 }
 
@@ -38,11 +40,13 @@ fn resize_reflow_max_rows_for(
     config: TerminalResizeReflowConfig,
     terminal: &TerminalInfo,
     running_in_vscode_terminal: bool,
+    wt_session_present: bool,
 ) -> Option<usize> {
     match config.max_rows {
         TerminalResizeReflowMaxRows::Auto => Some(auto_resize_reflow_max_rows(
-            terminal.name,
+            terminal,
             running_in_vscode_terminal,
+            wt_session_present,
         )),
         TerminalResizeReflowMaxRows::Disabled => None,
         TerminalResizeReflowMaxRows::Limit(max_rows) => Some(max_rows),
@@ -50,14 +54,18 @@ fn resize_reflow_max_rows_for(
 }
 
 fn auto_resize_reflow_max_rows(
-    terminal_name: TerminalName,
+    terminal: &TerminalInfo,
     running_in_vscode_terminal: bool,
+    wt_session_present: bool,
 ) -> usize {
     if running_in_vscode_terminal {
         return VSCODE_RESIZE_REFLOW_MAX_ROWS;
     }
+    if (terminal.name == TerminalName::WindowsTerminal || wt_session_present) && is_tmux(terminal) {
+        return DEFAULT_TERMINAL_RESIZE_REFLOW_FALLBACK_MAX_ROWS;
+    }
 
-    match terminal_name {
+    match terminal.name {
         TerminalName::VsCode => VSCODE_RESIZE_REFLOW_MAX_ROWS,
         TerminalName::WindowsTerminal => WINDOWS_TERMINAL_RESIZE_REFLOW_MAX_ROWS,
         TerminalName::WezTerm => WEZTERM_RESIZE_REFLOW_MAX_ROWS,
@@ -75,10 +83,16 @@ fn auto_resize_reflow_max_rows(
     }
 }
 
+fn is_tmux(terminal: &TerminalInfo) -> bool {
+    matches!(
+        terminal.multiplexer.as_ref(),
+        Some(Multiplexer::Tmux { .. })
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codex_terminal_detection::Multiplexer;
 
     fn test_terminal(name: TerminalName) -> TerminalInfo {
         TerminalInfo {
@@ -111,10 +125,11 @@ mod tests {
         ];
 
         for (terminal_name, expected_max_rows) in cases {
+            let terminal = test_terminal(terminal_name);
             assert_eq!(
                 auto_resize_reflow_max_rows(
-                    terminal_name,
-                    /*running_in_vscode_terminal*/ false
+                    &terminal, /*running_in_vscode_terminal*/ false,
+                    /*wt_session_present*/ false,
                 ),
                 expected_max_rows
             );
@@ -125,8 +140,9 @@ mod tests {
     fn auto_resize_reflow_max_rows_prefers_vscode_probe() {
         assert_eq!(
             auto_resize_reflow_max_rows(
-                TerminalName::WindowsTerminal,
-                /*running_in_vscode_terminal*/ true
+                &test_terminal(TerminalName::WindowsTerminal),
+                /*running_in_vscode_terminal*/ true,
+                /*wt_session_present*/ false,
             ),
             VSCODE_RESIZE_REFLOW_MAX_ROWS
         );
@@ -141,7 +157,8 @@ mod tests {
 
         assert_eq!(
             resize_reflow_max_rows_for(
-                config, &terminal, /*running_in_vscode_terminal*/ false
+                config, &terminal, /*running_in_vscode_terminal*/ false,
+                /*wt_session_present*/ false,
             ),
             Some(42)
         );
@@ -156,7 +173,8 @@ mod tests {
 
         assert_eq!(
             resize_reflow_max_rows_for(
-                config, &terminal, /*running_in_vscode_terminal*/ false
+                config, &terminal, /*running_in_vscode_terminal*/ false,
+                /*wt_session_present*/ false,
             ),
             None
         );
@@ -175,9 +193,66 @@ mod tests {
 
         assert_eq!(
             resize_reflow_max_rows_for(
-                config, &terminal, /*running_in_vscode_terminal*/ false
+                config, &terminal, /*running_in_vscode_terminal*/ false,
+                /*wt_session_present*/ false,
             ),
             Some(DEFAULT_TERMINAL_RESIZE_REFLOW_FALLBACK_MAX_ROWS)
         );
+    }
+
+    #[test]
+    fn windows_terminal_tmux_uses_fallback_without_changing_other_terminal_policies() {
+        let cases = [
+            (
+                TerminalName::WindowsTerminal,
+                None,
+                false,
+                WINDOWS_TERMINAL_RESIZE_REFLOW_MAX_ROWS,
+            ),
+            (
+                TerminalName::WindowsTerminal,
+                Some(Multiplexer::Tmux { version: None }),
+                false,
+                DEFAULT_TERMINAL_RESIZE_REFLOW_FALLBACK_MAX_ROWS,
+            ),
+            (
+                TerminalName::Unknown,
+                Some(Multiplexer::Tmux { version: None }),
+                true,
+                DEFAULT_TERMINAL_RESIZE_REFLOW_FALLBACK_MAX_ROWS,
+            ),
+            (
+                TerminalName::AppleTerminal,
+                Some(Multiplexer::Tmux { version: None }),
+                false,
+                DEFAULT_TERMINAL_RESIZE_REFLOW_FALLBACK_MAX_ROWS,
+            ),
+            (
+                TerminalName::WezTerm,
+                Some(Multiplexer::Tmux { version: None }),
+                false,
+                WEZTERM_RESIZE_REFLOW_MAX_ROWS,
+            ),
+            (
+                TerminalName::WindowsTerminal,
+                Some(Multiplexer::Zellij { version: None }),
+                true,
+                WINDOWS_TERMINAL_RESIZE_REFLOW_MAX_ROWS,
+            ),
+        ];
+
+        for (name, multiplexer, wt_session_present, expected_max_rows) in cases {
+            let mut terminal = test_terminal(name);
+            terminal.multiplexer = multiplexer;
+            assert_eq!(
+                resize_reflow_max_rows_for(
+                    TerminalResizeReflowConfig::default(),
+                    &terminal,
+                    /*running_in_vscode_terminal*/ false,
+                    wt_session_present,
+                ),
+                Some(expected_max_rows)
+            );
+        }
     }
 }

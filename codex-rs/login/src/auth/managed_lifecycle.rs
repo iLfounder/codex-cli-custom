@@ -142,13 +142,18 @@ impl ManagedAuthStaging {
         if !target_home.is_dir() {
             return Err(io::Error::other("managed credential home is unavailable"));
         }
+        #[cfg(windows)]
+        codex_utils_home_dir::ensure_owner_private(&target_home)?;
         let staging_home = loop {
             let candidate = target_home.join(format!(
                 "{STAGING_PREFIX}{}.{}",
                 std::process::id(),
                 rand::random::<u64>()
             ));
+            #[cfg(unix)]
             let mut builder = DirBuilder::new();
+            #[cfg(not(unix))]
+            let builder = DirBuilder::new();
             #[cfg(unix)]
             builder.mode(0o700);
             match builder.create(&candidate) {
@@ -157,6 +162,11 @@ impl ManagedAuthStaging {
                 Err(error) => return Err(error),
             }
         };
+        #[cfg(windows)]
+        if let Err(error) = codex_utils_home_dir::ensure_owner_private(&staging_home) {
+            let _ = fs::remove_dir_all(&staging_home);
+            return Err(error);
+        }
         Ok(Self {
             target_home,
             staging_home,

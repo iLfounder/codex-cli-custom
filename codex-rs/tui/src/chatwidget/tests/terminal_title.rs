@@ -21,6 +21,8 @@ async fn goal_clock_refresh_redraws_only_when_elapsed_label_changes() {
     chat.turn_lifecycle.goal_status_active_turn_started_at = Some(observed_at);
     let goal = AppThreadGoal {
         thread_id: "thread-1".to_string(),
+        goal_id: "goal-test".to_string(),
+        revision: 1,
         objective: "Keep improving the benchmark".to_string(),
         status: AppThreadGoalStatus::Active,
         token_budget: None,

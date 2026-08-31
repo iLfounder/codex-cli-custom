@@ -1312,6 +1312,7 @@ async fn realtime_timeline_splits_accepted_steering_and_persists_promoted_artifa
                 text_elements: Vec::new(),
             }],
             expected_turn_id: turn.turn.id.clone(),
+            expected_execution_account: None,
             additional_context: None,
             client_user_message_id: Some("accepted-steer".to_string()),
             responsesapi_client_metadata: None,

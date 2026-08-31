@@ -65,6 +65,10 @@ pub struct ThreadStartParams {
     #[experimental("thread/start.transition")]
     #[ts(optional = nullable)]
     pub transition: Option<ThreadTransitionIntent>,
+    /// Account slot to bind before a new root thread becomes observable.
+    /// Omission preserves the app-server process default.
+    #[ts(optional = nullable)]
+    pub initial_account_slot_id: Option<String>,
     #[ts(optional = nullable)]
     pub model: Option<String>,
     #[ts(optional = nullable)]

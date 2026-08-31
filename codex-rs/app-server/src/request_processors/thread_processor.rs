@@ -1685,6 +1685,7 @@ impl ThreadRequestProcessor {
     ) -> Result<(), JSONRPCErrorError> {
         let ThreadStartParams {
             transition,
+            initial_account_slot_id,
             model,
             model_provider,
             allow_provider_model_fallback,
@@ -1825,6 +1826,7 @@ impl ThreadRequestProcessor {
                 typesafe_overrides,
                 dynamic_tools,
                 selected_capability_roots.unwrap_or_default(),
+                initial_account_slot_id,
                 history_mode.map(Into::into),
                 session_start_source,
                 thread_source.map(Into::into),
@@ -2017,6 +2019,7 @@ impl ThreadRequestProcessor {
         typesafe_overrides: ConfigOverrides,
         dynamic_tools: Option<Vec<DynamicToolSpec>>,
         selected_capability_roots: Vec<SelectedCapabilityRoot>,
+        initial_account_slot_id: Option<String>,
         history_mode: Option<ThreadHistoryMode>,
         session_start_source: Option<codex_app_server_protocol::ThreadStartSource>,
         thread_source: Option<codex_protocol::protocol::ThreadSource>,
@@ -2199,6 +2202,7 @@ impl ThreadRequestProcessor {
             thread_extension_init.insert(selected_capability_roots);
         }
         let mut start_options = StartThreadOptions::new(config);
+        start_options.initial_execution_account_slot_id = initial_account_slot_id;
         let reserved_thread_id = if let Some(prepared_transition) = prepared_transition.as_ref() {
             stage_pending_project_metadata_for_reserved_thread(
                 thread_store.as_ref(),
@@ -4626,7 +4630,7 @@ impl ThreadRequestProcessor {
                 .await?
             {
                 RunningThreadResumeResult::Handled => Ok(()),
-                RunningThreadResumeResult::NotRunning(_) => Err(invalid_request(
+                RunningThreadResumeResult::NotRunning => Err(invalid_request(
                     "cannot resume an unloaded multi-agent v2 sub-agent through its parent; resume the parent first, or use thread/read to inspect it",
                 )),
             };

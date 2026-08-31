@@ -381,7 +381,8 @@ fn submit_nested_tool(
             turn_id: exec.turn.sub_id.clone(),
             call_id: call.call_id.clone(),
             cell_id: cell_id.to_string(),
-        });
+        },
+    );
     let result = tool_runtime.handle_tool_call_with_source(
         call,
         ToolCallSource::CodeMode {

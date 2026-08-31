@@ -716,6 +716,80 @@ pub struct ModelAvailabilityNuxConfig {
     pub shown_count: HashMap<String, u32>,
 }
 
+/// Border treatment for the opt-in contextual TUI footer box.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum TuiFooterBorder {
+    /// Keep the footer row borderless (the default and legacy-compatible mode).
+    #[default]
+    None,
+    /// Draw a single-line box border.
+    Plain,
+    /// Draw rounded corners.
+    Rounded,
+    /// Draw a double-line box border.
+    Double,
+}
+
+/// Row arrangement for semantic footer contributions.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum TuiFooterLayout {
+    /// Keep contributions in their preferred rows.
+    #[default]
+    Stacked,
+    /// Collapse all contributions into one deterministic row.
+    Compact,
+}
+
+/// Opt-in semantic footer presentation settings.
+///
+/// The footer is disabled by default. When enabled, the composer can reserve and render up to
+/// `max_rows` contextual rows using the configured adapter registry; the existing transient
+/// shortcut/status-line waterfall remains responsible for interactive states.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct TuiFooter {
+    /// Enable the contextual footer box. Defaults to `false`.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Maximum number of semantic rows to reserve. Values below one are treated as one by the
+    /// renderer; the schema advertises a practical upper bound of 64 rows.
+    #[serde(default = "default_tui_footer_max_rows")]
+    #[schemars(range(min = 1, max = 64))]
+    pub max_rows: u16,
+
+    /// Border style. Defaults to `none`.
+    #[serde(default, alias = "border_style")]
+    pub border: TuiFooterBorder,
+
+    /// Row arrangement. Defaults to `stacked`.
+    #[serde(default)]
+    pub layout: TuiFooterLayout,
+
+    /// Ordered adapter IDs. An empty list selects the built-in adapter order. `adapters` is
+    /// accepted as an alias for callers that prefer the shorter spelling.
+    #[serde(default, rename = "adapter_ids", alias = "adapters")]
+    pub adapter_ids: Vec<String>,
+}
+
+const fn default_tui_footer_max_rows() -> u16 {
+    1
+}
+
+impl Default for TuiFooter {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_rows: default_tui_footer_max_rows(),
+            border: TuiFooterBorder::default(),
+            layout: TuiFooterLayout::default(),
+            adapter_ids: Vec::new(),
+        }
+    }
+}
+
 /// Fallback resize-reflow row cap when Codex cannot identify a terminal-specific scrollback size.
 pub const DEFAULT_TERMINAL_RESIZE_REFLOW_FALLBACK_MAX_ROWS: usize = 1_000;
 
@@ -725,6 +799,10 @@ pub const DEFAULT_TERMINAL_RESIZE_REFLOW_FALLBACK_MAX_ROWS: usize = 1_000;
 pub struct Tui {
     #[serde(default, flatten)]
     pub notification_settings: TuiNotificationSettings,
+
+    /// Opt-in semantic contextual footer box. Disabled by default to preserve the legacy footer.
+    #[serde(default)]
+    pub footer: TuiFooter,
 
     /// Enable animations (welcome screen, shimmer effects, spinners).
     /// Defaults to `true`.

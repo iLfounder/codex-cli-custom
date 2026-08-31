@@ -9,7 +9,11 @@ import type { SandboxMode } from "./SandboxMode";
 import type { ThreadSource } from "./ThreadSource";
 import type { ThreadStartSource } from "./ThreadStartSource";
 
-export type ThreadStartParams = {model?: string | null, modelProvider?: string | null, serviceTier?: string | null | null, cwd?: string | null, approvalPolicy?: AskForApproval | null, /**
+export type ThreadStartParams = {/**
+ * Account slot to bind before a new root thread becomes observable.
+ * Omission preserves the app-server process default.
+ */
+initialAccountSlotId?: string | null, model?: string | null, modelProvider?: string | null, serviceTier?: string | null | null, cwd?: string | null, approvalPolicy?: AskForApproval | null, /**
  * Override where approval requests are routed for review on this thread
  * and subsequent turns.
  */

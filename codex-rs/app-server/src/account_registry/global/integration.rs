@@ -200,6 +200,20 @@ impl AccountRegistry {
         account_id: global::AccountId,
     ) -> Result<Arc<GlobalAccountRuntime>, CodexErr> {
         let directory = self.refresh_global_directory();
+        self.global_runtime_with_directory(account_id, &directory)
+            .await
+    }
+
+    /// Resolve a global runtime using a caller-provided directory snapshot.
+    ///
+    /// Selection probes several accounts at once; sharing the already-refreshed
+    /// directory avoids rereading the owner account catalog once per probe while
+    /// preserving the per-account credential revision check below.
+    pub(crate) async fn global_runtime_with_directory(
+        &self,
+        account_id: global::AccountId,
+        directory: &global::GlobalAccountDirectory,
+    ) -> Result<Arc<GlobalAccountRuntime>, CodexErr> {
         let auth_home = directory.homes.get(&account_id).cloned().ok_or_else(|| {
             CodexErr::InvalidRequest(format!("execution account `{account_id}` is unavailable"))
         })?;

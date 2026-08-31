@@ -16,6 +16,8 @@ use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_thread_store::ThreadAccountRotationMode as StoreRotationMode;
 use codex_thread_store::ThreadStore;
+use futures::StreamExt;
+use futures::stream;
 
 use super::AccountRegistry;
 use super::ManifestSlotStatus;
@@ -294,10 +296,27 @@ impl AccountRegistry {
         account_ids.extend(fixed_account_id);
         account_ids.sort_unstable();
         account_ids.dedup();
-        let mut runtimes = HashMap::new();
-        let mut credential_readiness = Vec::with_capacity(account_ids.len());
-        for account_id in account_ids {
-            if let Ok(runtime) = self.global_runtime(account_id).await {
+        // Every candidate is probed concurrently. The caller already supplies
+        // the candidate set, so do not impose an arbitrary account-count cap
+        // that would serialize large multi-agent selections in batches.
+        let probe_concurrency = account_ids.len().max(1);
+        let directory = self.refresh_global_directory();
+        let probes = stream::iter(account_ids.into_iter().map(|account_id| {
+            let directory = &directory;
+            async move {
+                let runtime = self
+                    .global_runtime_with_directory(account_id, directory)
+                    .await;
+                (account_id, runtime)
+            }
+        }))
+        .buffer_unordered(probe_concurrency)
+        .collect::<Vec<_>>()
+        .await;
+        let mut runtimes = HashMap::with_capacity(probes.len());
+        let mut credential_readiness = Vec::with_capacity(probes.len());
+        for (account_id, runtime) in probes {
+            if let Ok(runtime) = runtime {
                 credential_readiness.push(global::CredentialReadiness {
                     account_id,
                     ready: true,

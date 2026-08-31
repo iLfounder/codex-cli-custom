@@ -243,6 +243,9 @@ pub struct ThreadManager {
 
 pub struct StartThreadOptions {
     pub config: Config,
+    /// Explicit initial account slot for a new root thread. Resume and fork
+    /// continue to inherit their durable binding.
+    pub initial_execution_account_slot_id: Option<String>,
     pub allow_provider_model_fallback: bool,
     pub initial_history: InitialHistory,
     pub history_mode: Option<ThreadHistoryMode>,
@@ -262,6 +265,7 @@ impl StartThreadOptions {
     pub fn new(config: Config) -> Self {
         Self {
             config,
+            initial_execution_account_slot_id: None,
             allow_provider_model_fallback: false,
             initial_history: InitialHistory::New,
             history_mode: None,
@@ -618,7 +622,7 @@ impl ThreadManager {
                 || config.code_mode.disable_in_process_fallback
             {
                 Arc::new(ProcessOwnedCodeModeSessionProvider::default())
-        } else {
+            } else {
                 Arc::new(DisabledCodeModeSessionProvider)
             };
         let execution_account_resolver = Arc::new(DefaultExecutionAccountResolver::new(
@@ -1192,7 +1196,12 @@ impl ThreadManager {
         if let Ok(thread) = self.get_thread(thread_id).await {
             return Ok(thread.session.execution_account());
         }
-        let binding = match self.state.thread_store.execution_account_binding(thread_id).await {
+        let binding = match self
+            .state
+            .thread_store
+            .execution_account_binding(thread_id)
+            .await
+        {
             Ok(Some(binding)) => binding,
             Ok(None) | Err(ThreadStoreError::Unsupported { .. }) => ExecutionAccountBinding {
                 slot_id: "default".to_string(),
@@ -2560,6 +2569,7 @@ impl ThreadManagerState {
         options.ensure_reserved_thread_id_is_valid()?;
         let StartThreadOptions {
             config,
+            initial_execution_account_slot_id,
             allow_provider_model_fallback,
             initial_history,
             history_mode,
@@ -2630,6 +2640,11 @@ impl ThreadManagerState {
                         resumed.conversation_id
                     )));
                 }
+            }
+        } else if let Some(slot_id) = initial_execution_account_slot_id {
+            ExecutionAccountBinding {
+                slot_id,
+                generation: 1,
             }
         } else {
             self.execution_account_resolver

@@ -15,9 +15,9 @@ pub(crate) use history::thread_items_page_params;
 
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::FeedbackAudience;
+use crate::canonical_launch_projection::CanonicalLaunchProjection;
 use crate::dynamic_tools_mcp::DynamicToolMcpServer;
 use crate::dynamic_tools_mcp::ThreadToolTransport;
-use crate::canonical_launch_projection::CanonicalLaunchProjection;
 use crate::legacy_core::config::Config;
 use crate::service_tier_resolution;
 use crate::session_state::MessageHistoryMetadata;
@@ -948,7 +948,7 @@ impl AppServerSession {
         // tool fields on older remote servers.
         self.thread_tool_transport().configure(&mut params);
         let request_handle = self.request_handle();
-        let (response, history_support) =
+        let (response, history_support, task_tools_available) =
             request_thread_start_with_history_fallback(&request_handle, request_id, params)
                 .await
                 .map_err(|err| bootstrap_request_error("thread transition start failed", err))?;
@@ -963,8 +963,12 @@ impl AppServerSession {
                 "thread/start returned a different transition identity"
             ));
         }
-        let started =
+        let mut started =
             started_thread_from_start_response(response, config, self.thread_params_mode()).await?;
+        started.task_tools_available = task_tools_available;
+        if task_tools_available {
+            self.remember_task_tool_thread(started.session.thread_id);
+        }
         if preparation.status == ThreadTransitionStatus::Committed {
             self.pending_thread_transition = None;
         } else {

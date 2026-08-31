@@ -4,6 +4,7 @@ use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_transport::SUPERVISOR_CONTRACT_VERSION;
 use codex_app_server_transport::SupervisedAppServerSnapshot;
 use codex_uds::UnixListener;
 use futures::SinkExt;
@@ -274,6 +275,7 @@ fn ready_snapshot(
     predecessor: Option<AppServerInstanceIdentity>,
 ) -> SupervisorSnapshot {
     SupervisorSnapshot {
+        contract_version: SUPERVISOR_CONTRACT_VERSION,
         snapshot_revision,
         app_server: Some(SupervisedAppServerSnapshot {
             process_generation: snapshot_revision + 100,

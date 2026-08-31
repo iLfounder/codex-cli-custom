@@ -1,3 +1,4 @@
+use super::rate_limits::bind_rate_limit_response;
 use super::*;
 use crate::chatwidget::UserMessage;
 use crate::chatwidget::tests::helpers::normalize_snapshot_paths;
@@ -74,7 +75,7 @@ async fn backend_banner_fallback_updates_task_settings_and_keeps_notice() -> Res
         while events.try_recv().is_ok() {}
         while ops.try_recv().is_ok() {}
         requests.lock().unwrap().clear();
-        let response = fallback_response();
+        let (subject, response) = bind_rate_limit_response(&mut app, fallback_response());
         let generation = app.rate_limit_hard_stop_generation;
         let mut tui = crate::tui::test_support::make_test_tui()?;
         app.handle_event(
@@ -83,6 +84,7 @@ async fn backend_banner_fallback_updates_task_settings_and_keeps_notice() -> Res
             AppEvent::RateLimitsLoaded {
                 request_id: 1,
                 origin: RateLimitRefreshOrigin::StatusCommand { request_id: 0 },
+                subject: Some(subject),
                 hard_stop_generation: generation,
                 result: Ok(response.clone()),
             },
@@ -194,6 +196,7 @@ async fn backend_banner_fallback_uses_current_task_and_accepted_generation() -> 
     configure_fallback_model(&mut app);
     requests.lock().unwrap().clear();
     app.rate_limit_hard_stop_generation = read_generation.wrapping_add(1);
+    let (subject, response) = bind_rate_limit_response(&mut app, fallback_response());
     for generation in [read_generation, app.rate_limit_hard_stop_generation] {
         app.handle_event(
             &mut tui,
@@ -201,8 +204,9 @@ async fn backend_banner_fallback_uses_current_task_and_accepted_generation() -> 
             AppEvent::RateLimitsLoaded {
                 request_id: 1,
                 origin: RateLimitRefreshOrigin::StatusCommand { request_id: 0 },
+                subject: Some(subject.clone()),
                 hard_stop_generation: generation,
-                result: Ok(fallback_response()),
+                result: Ok(response.clone()),
             },
         )
         .await?;

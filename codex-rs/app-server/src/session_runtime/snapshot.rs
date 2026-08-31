@@ -454,12 +454,14 @@ impl RuntimeRecord {
                 forked_from_id: thread.forked_from_id.map(|id| id.to_string()),
                 parent_thread_id: thread.parent_thread_id.map(|id| id.to_string()),
                 name: thread.name,
-                source: thread.source.to_string(),
-                cwd: thread.cwd.to_string_lossy().into_owned(),
+                source: sanitize_runtime_source(&thread.source),
+                cwd: sanitized_runtime_cwd(),
                 git_info: thread.git_info.map(|git| GitInfo {
                     sha: git.commit_hash.map(|sha| sha.0),
                     branch: git.branch,
-                    origin_url: git.repository_url.and_then(sanitize_git_origin),
+                    origin_url: git
+                        .repository_url
+                        .and_then(|origin| sanitize_git_origin(origin.to_string())),
                 }),
                 settings,
             },
@@ -467,7 +469,7 @@ impl RuntimeRecord {
                 thread_id: _,
                 session_id,
                 source,
-                cwd,
+                cwd: _,
                 forked_from_id,
                 parent_thread_id,
             } => SessionRuntimeIdentity {
@@ -475,8 +477,8 @@ impl RuntimeRecord {
                 forked_from_id: forked_from_id.map(|id| id.to_string()),
                 parent_thread_id: parent_thread_id.map(|id| id.to_string()),
                 name: None,
-                source: source.to_string(),
-                cwd,
+                source: sanitize_runtime_source(&source),
+                cwd: sanitized_runtime_cwd(),
                 git_info: None,
                 settings,
             },
@@ -720,4 +722,26 @@ fn sanitize_git_origin(origin: String) -> Option<String> {
     url.set_query(None);
     url.set_fragment(None);
     Some(url.into())
+}
+
+/// Keep the runtime identity useful as a workspace marker without exporting a
+/// machine-specific filesystem path to app-server clients.
+fn sanitized_runtime_cwd() -> String {
+    "<workspace>".to_string()
+}
+
+/// Preserve the broad session-source kind while hiding custom workflow names,
+/// agent roles, and other source payloads that are not part of the public API.
+fn sanitize_runtime_source(source: &SessionSource) -> String {
+    let label = match source {
+        SessionSource::Cli => "cli",
+        SessionSource::VSCode => "vscode",
+        SessionSource::Exec => "exec",
+        SessionSource::Mcp => "mcp",
+        SessionSource::Custom(_) => "custom",
+        SessionSource::Internal(_) => "internal",
+        SessionSource::SubAgent(_) => "subagent",
+        SessionSource::Unknown => "unknown",
+    };
+    label.to_string()
 }

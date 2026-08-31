@@ -89,7 +89,7 @@ pub(super) async fn run_main_inner(
     };
     let invocation_overrides =
         launch_overrides::invocation_overrides(&cli, &cli_kv_overrides, &launch_loader_overrides);
-    let canonical_projection =
+    let mut canonical_projection =
         launch_overrides::canonical_projection(&cli, &cli_kv_overrides, &launch_loader_overrides)
             .ok();
     let launch_disposition = launch_overrides::classify_current_launch(
@@ -98,6 +98,25 @@ pub(super) async fn run_main_inner(
         requested_launch_mode,
         invocation_overrides,
     )?;
+    if launch_disposition == launch_overrides::LaunchDisposition::CanonicalLocal {
+        let managed_account_hint =
+            launch_overrides::current_managed_account_hint()?.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "canonical managed launch requires an account hint",
+                )
+            })?;
+        canonical_projection = Some(
+            canonical_projection
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "canonical launch projection is unavailable",
+                    )
+                })?
+                .with_managed_account_hint(&managed_account_hint)?,
+        );
+    }
     if cli.embedded && (explicit_remote_endpoint.is_some() || workload_identity_selected) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,

@@ -410,6 +410,13 @@
         "null"
       ]
     },
+    "initialAccountSlotId": {
+      "description": "Account slot to bind before a new root thread becomes observable. Omission preserves the app-server process default.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "model": {
       "type": [
         "string",

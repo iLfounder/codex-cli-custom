@@ -16,15 +16,15 @@ use ratatui::layout::Size;
 use ratatui::text::Line;
 
 #[test]
-fn windows_terminal_uses_full_screen_unless_zellij_is_active() {
-    let mut terminal = TerminalInfo {
+fn windows_terminal_signals_use_full_screen_only_without_tmux() {
+    let direct = TerminalInfo {
         name: TerminalName::WindowsTerminal,
         term_program: None,
         version: None,
         term: None,
         multiplexer: None,
     };
-    let mut strategy = ScrollbackStrategy::detect(&terminal);
+    let strategy = ScrollbackStrategy::detect_for(&direct, /*wt_session_present*/ false);
 
     assert_eq!(
         [
@@ -34,9 +34,51 @@ fn windows_terminal_uses_full_screen_unless_zellij_is_active() {
         [InsertHistoryMode::FullScreen, InsertHistoryMode::FullScreen]
     );
 
-    terminal.multiplexer = Some(Multiplexer::Zellij { version: None });
-    strategy = ScrollbackStrategy::detect(&terminal);
-    assert_eq!(strategy, ScrollbackStrategy::Zellij);
+    let cases = [
+        (
+            TerminalName::WindowsTerminal,
+            Some(Multiplexer::Tmux { version: None }),
+            false,
+            ScrollbackStrategy::Standard,
+        ),
+        (
+            TerminalName::Unknown,
+            Some(Multiplexer::Tmux { version: None }),
+            true,
+            ScrollbackStrategy::Standard,
+        ),
+        (
+            TerminalName::AppleTerminal,
+            Some(Multiplexer::Tmux { version: None }),
+            false,
+            ScrollbackStrategy::Standard,
+        ),
+        (
+            TerminalName::WezTerm,
+            Some(Multiplexer::Tmux { version: None }),
+            false,
+            ScrollbackStrategy::Standard,
+        ),
+        (
+            TerminalName::WindowsTerminal,
+            Some(Multiplexer::Zellij { version: None }),
+            true,
+            ScrollbackStrategy::Zellij,
+        ),
+    ];
+    for (name, multiplexer, wt_session_present, expected) in cases {
+        let terminal = TerminalInfo {
+            name,
+            term_program: None,
+            version: None,
+            term: None,
+            multiplexer,
+        };
+        assert_eq!(
+            ScrollbackStrategy::detect_for(&terminal, wt_session_present),
+            expected
+        );
+    }
 }
 
 #[test]

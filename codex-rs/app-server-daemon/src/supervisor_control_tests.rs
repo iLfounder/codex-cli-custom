@@ -1,6 +1,7 @@
 use std::os::unix::fs::PermissionsExt;
 
 use codex_app_server_transport::AppServerInstanceIdentity;
+use codex_app_server_transport::SUPERVISOR_CONTRACT_VERSION;
 use codex_app_server_transport::SupervisedAppServerSnapshot;
 use codex_app_server_transport::SupervisedAppServerStatus;
 use codex_app_server_transport::SupervisorControlErrorCode;
@@ -32,6 +33,7 @@ fn identity(id: &str, generation: u64) -> AppServerInstanceIdentity {
 
 fn ready_snapshot(instance: AppServerInstanceIdentity, revision: u64) -> SupervisorSnapshot {
     SupervisorSnapshot {
+        contract_version: SUPERVISOR_CONTRACT_VERSION,
         snapshot_revision: revision,
         app_server: Some(SupervisedAppServerSnapshot {
             process_generation: revision,
@@ -182,6 +184,7 @@ fn restart_admission_fails_closed_until_exact_instance_is_ready() {
     let current = identity("11111111-1111-4111-8111-111111111111", 1);
     let stale = identity("22222222-2222-4222-8222-222222222222", 2);
     let mut snapshot = SupervisorSnapshot {
+        contract_version: SUPERVISOR_CONTRACT_VERSION,
         snapshot_revision: 1,
         app_server: None,
     };
@@ -220,6 +223,7 @@ async fn control_server_reclaims_stale_socket_and_rejects_second_owner() {
     let socket = control_dir.join("supervisor.sock");
     drop(std::os::unix::net::UnixListener::bind(&socket).expect("bind stale socket"));
     let snapshot = SupervisorSnapshot {
+        contract_version: SUPERVISOR_CONTRACT_VERSION,
         snapshot_revision: 1,
         app_server: None,
     };

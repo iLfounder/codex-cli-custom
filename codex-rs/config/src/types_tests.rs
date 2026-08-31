@@ -2,6 +2,40 @@ use super::*;
 use pretty_assertions::assert_eq;
 
 #[test]
+fn tui_footer_defaults_to_disabled_single_borderless_row() {
+    let footer: TuiFooter = toml::from_str("").expect("empty footer should deserialize");
+
+    assert!(!footer.enabled);
+    assert_eq!(footer.max_rows, 1);
+    assert_eq!(footer.border, TuiFooterBorder::None);
+    assert_eq!(footer.layout, TuiFooterLayout::Stacked);
+    assert!(footer.adapter_ids.is_empty());
+}
+
+#[test]
+fn tui_footer_accepts_aliases_and_explicit_layout() {
+    let footer: TuiFooter = toml::from_str(
+        r#"
+enabled = true
+max_rows = 3
+border_style = "rounded"
+layout = "compact"
+adapters = ["account", "thread"]
+"#,
+    )
+    .expect("footer aliases should deserialize");
+
+    assert!(footer.enabled);
+    assert_eq!(footer.max_rows, 3);
+    assert_eq!(footer.border, TuiFooterBorder::Rounded);
+    assert_eq!(footer.layout, TuiFooterLayout::Compact);
+    assert_eq!(
+        footer.adapter_ids,
+        vec!["account".to_string(), "thread".to_string()]
+    );
+}
+
+#[test]
 fn deserialize_skill_config_with_name_selector() {
     let cfg: SkillConfig = toml::from_str(
         r#"

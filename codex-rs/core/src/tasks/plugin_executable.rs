@@ -155,6 +155,7 @@ async fn execute_plugin_executable(
     let context = UnifiedExecContext::new(
         Arc::clone(&session),
         step_context,
+        cancellation_token.clone(),
         Uuid::new_v4().to_string(),
     );
     let request = ExecCommandRequest {

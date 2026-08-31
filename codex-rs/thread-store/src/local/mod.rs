@@ -111,7 +111,6 @@ use crate::ThreadStore;
 use crate::ThreadStoreError;
 use crate::ThreadStoreFuture;
 use crate::ThreadStoreResult;
-use crate::TimelinePage;
 use crate::ThreadStoreRuntimeSnapshot;
 use crate::ThreadTransitionAbortOutcome;
 use crate::ThreadTransitionClaimOutcome;
@@ -120,6 +119,7 @@ use crate::ThreadTransitionIntent;
 use crate::ThreadTransitionPreparation;
 use crate::ThreadTransitionRecord;
 use crate::ThreadWriterEvidence;
+use crate::TimelinePage;
 use crate::TurnPage;
 use crate::UpdateProjectParams;
 use crate::UpdateThreadMetadataParams;
@@ -311,7 +311,10 @@ impl LocalThreadStore {
         let pool = self
             .config
             .sqlite
-            .open_read_only_pool(&self.config.sqlite.state_db_path(), /*busy_timeout*/ None)
+            .open_read_only_pool(
+                &self.config.sqlite.state_db_path(),
+                /*busy_timeout*/ None,
+            )
             .await
             .map_err(|err| ThreadStoreError::Internal {
                 message: format!("failed to open execution account binding store: {err}"),
