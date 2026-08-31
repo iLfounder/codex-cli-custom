@@ -7,6 +7,7 @@ use crate::ThreadMetadata;
 use crate::ThreadMetadataBuilder;
 use crate::ThreadsPage;
 use crate::apply_rollout_item;
+use crate::migrations::apply_custom_schema_migrations;
 use crate::migrations::runtime_goals_migrator;
 use crate::migrations::runtime_logs_migrator;
 use crate::migrations::runtime_memories_migrator;
@@ -54,6 +55,7 @@ pub(crate) mod test_support;
 mod thread_section_order;
 mod thread_sections;
 mod threads;
+mod writer_authority;
 
 pub use external_agent_config_imports::ExternalAgentConfigImportDetailsRecord;
 pub use external_agent_config_imports::ExternalAgentConfigImportFailureRecord;
@@ -74,6 +76,7 @@ pub use recovery::sqlite_error_detail_is_corruption;
 pub use recovery::sqlite_error_detail_is_lock;
 pub use remote_control::RemoteControlEnrollmentRecord;
 pub use threads::ThreadFilterOptions;
+pub use writer_authority::WriterGeneration;
 
 // "Partition" is the retained-log-content bucket we cap at 10 MiB:
 // - one bucket per non-null thread_id
@@ -93,6 +96,7 @@ pub struct StateRuntime {
     thread_goals: GoalStore,
     memories: MemoryStore,
     thread_queue: SqliteQueueStore,
+    writer_store_id: String,
     thread_updated_at_millis: Arc<AtomicI64>,
     thread_recency_at_millis: Arc<AtomicI64>,
 }
@@ -143,6 +147,14 @@ impl StateRuntime {
                 return Err(err);
             }
         };
+        if let Err(err) = apply_custom_schema_migrations(pool.as_ref()).await {
+            warn!(
+                "failed to migrate custom schema in state db at {}: {err}",
+                state_path.display()
+            );
+            pool.close().await;
+            return Err(err);
+        }
         let logs_pool = match sqlite
             .open_logs_db(&logs_migrator, telemetry_override)
             .await
@@ -216,6 +228,8 @@ impl StateRuntime {
             .await;
             return Err(err);
         }
+        let writer_store_id =
+            writer_authority::load_or_create_writer_store_id(pool.as_ref()).await?;
         let started = Instant::now();
         let thread_timestamp_millis_result: anyhow::Result<(Option<i64>, Option<i64>)> =
             sqlx::query_as(
@@ -252,6 +266,7 @@ impl StateRuntime {
             thread_goals: GoalStore::new(Arc::clone(&goals_pool)),
             memories: MemoryStore::new(Arc::clone(&memories_pool), Arc::clone(&pool)),
             thread_queue: SqliteQueueStore::new(queue_pool),
+            writer_store_id,
             pool,
             logs_pool,
             sqlite,

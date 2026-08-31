@@ -6,9 +6,15 @@ use sqlx::migrate::Migration;
 use sqlx::migrate::Migrator;
 use std::borrow::Cow;
 
+use super::CUSTOM_SCHEMA_V1;
+use super::CUSTOM_SCHEMA_V2;
+use super::LegacyMigrationCutover;
 use super::STATE_MIGRATOR;
 use super::THREAD_HISTORY_MIGRATOR;
+use super::apply_custom_schema_migrations;
+use super::migrate_legacy_custom_schema_migrations;
 use super::repair_legacy_recency_migration_version;
+use super::runtime_state_migrator;
 use crate::PINNED_THREAD_SECTION_ID;
 use crate::PINNED_THREAD_SECTION_NAME;
 
@@ -30,6 +36,343 @@ fn migrator_through(version: i64) -> Migrator {
         create_schemas: STATE_MIGRATOR.create_schemas.clone(),
         no_tx: STATE_MIGRATOR.no_tx,
     }
+}
+
+fn decode_checksum(checksum: &str) -> Vec<u8> {
+    (0..checksum.len())
+        .step_by(2)
+        .map(|offset| {
+            u8::from_str_radix(&checksum[offset..offset + 2], 16)
+                .expect("checksum should be hexadecimal")
+        })
+        .collect()
+}
+
+async fn insert_legacy_custom_migration(
+    pool: &sqlx::SqlitePool,
+    migration: &super::CustomSchemaMigration,
+    checksum: &str,
+) {
+    sqlx::query(
+        "INSERT INTO _sqlx_migrations \
+         (version, description, installed_on, success, checksum, execution_time) \
+         VALUES (?, ?, CURRENT_TIMESTAMP, TRUE, ?, 0)",
+    )
+    .bind(migration.legacy_upstream_version)
+    .bind(migration.legacy_description)
+    .bind(decode_checksum(checksum))
+    .execute(pool)
+    .await
+    .expect("legacy migration row should insert");
+}
+
+#[tokio::test]
+async fn custom_schema_bootstrap_serializes_concurrent_callers() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let pool = sqlite
+        .open_read_write_pool(&sqlite.state_db_path())
+        .await
+        .expect("database should open");
+
+    let (first, second) = tokio::join!(
+        apply_custom_schema_migrations(&pool),
+        apply_custom_schema_migrations(&pool)
+    );
+    first.expect("first custom bootstrap should apply");
+    second.expect("second custom bootstrap should observe the applied schema");
+
+    let applied = sqlx::query_as::<_, (i64, String, String)>(
+        "SELECT version, name, definition FROM codex_custom_schema_migrations",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("custom migration record should load");
+    assert_eq!(
+        applied,
+        vec![(
+            1,
+            "writer_authority".to_string(),
+            CUSTOM_SCHEMA_V1.definition.to_string(),
+        )]
+    );
+    let custom_tables = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' \
+         AND name IN ('writer_authority_store', 'thread_writer_generations') ORDER BY name",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("custom tables should load");
+    assert_eq!(
+        custom_tables,
+        vec![
+            "thread_writer_generations".to_string(),
+            "writer_authority_store".to_string(),
+        ]
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn legacy_v49_and_v50_require_opt_in_then_cut_over_without_losing_data() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let state_path = sqlite.state_db_path();
+    let pool = sqlite
+        .open_read_write_pool(&state_path)
+        .await
+        .expect("database should open");
+    migrator_through(/*version*/ 48)
+        .run(&pool)
+        .await
+        .expect("upstream migrations through 48 should apply");
+    sqlx::raw_sql(CUSTOM_SCHEMA_V1.definition)
+        .execute(&pool)
+        .await
+        .expect("legacy writer schema should apply");
+    sqlx::raw_sql(CUSTOM_SCHEMA_V2.definition)
+        .execute(&pool)
+        .await
+        .expect("legacy execution binding schema should apply");
+    insert_legacy_custom_migration(&pool, &CUSTOM_SCHEMA_V1, CUSTOM_SCHEMA_V1.legacy_checksum)
+        .await;
+    insert_legacy_custom_migration(&pool, &CUSTOM_SCHEMA_V2, CUSTOM_SCHEMA_V2.legacy_checksum)
+        .await;
+    sqlx::query("INSERT INTO writer_authority_store (singleton, store_id) VALUES (1, ?)")
+        .bind("legacy-store")
+        .execute(&pool)
+        .await
+        .expect("legacy store identity should insert");
+    sqlx::query("INSERT INTO thread_writer_generations (thread_id, generation) VALUES (?, ?)")
+        .bind("00000000-0000-0000-0000-000000000049")
+        .bind(7_i64)
+        .execute(&pool)
+        .await
+        .expect("legacy writer generation should insert");
+    sqlx::query(
+        "INSERT INTO thread_execution_account_bindings \
+         (thread_id, slot_id, generation) VALUES (?, ?, ?)",
+    )
+    .bind("00000000-0000-0000-0000-000000000049")
+    .bind("account-a")
+    .bind(3_i64)
+    .execute(&pool)
+    .await
+    .expect("legacy execution binding should insert");
+    sqlx::query(
+        "INSERT INTO thread_turn_execution_accounts \
+         (thread_id, turn_id, slot_id, generation) VALUES (?, ?, ?, ?)",
+    )
+    .bind("00000000-0000-0000-0000-000000000049")
+    .bind("turn-1")
+    .bind("account-a")
+    .bind(3_i64)
+    .execute(&pool)
+    .await
+    .expect("legacy turn provenance should insert");
+    let state_migrator = runtime_state_migrator();
+    let error = migrate_legacy_custom_schema_migrations(
+        &pool,
+        &state_migrator,
+        LegacyMigrationCutover::Disabled,
+    )
+    .await
+    .expect_err("legacy migration versions should require an exclusive cutover");
+    let error = error.to_string();
+    assert!(error.contains("stop all older Codex app-server and TUI processes"));
+    assert!(error.contains("CODEX_STATE_LEGACY_MIGRATION_CUTOVER=1"));
+
+    assert_eq!(
+        sqlx::query_as::<_, (i64, String)>(
+            "SELECT version, lower(hex(checksum)) FROM _sqlx_migrations \
+             WHERE version IN (49, 50) ORDER BY version",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("legacy rows should remain unchanged"),
+        vec![
+            (49, CUSTOM_SCHEMA_V1.legacy_checksum.to_string()),
+            (50, CUSTOM_SCHEMA_V2.legacy_checksum.to_string()),
+        ]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' \
+             AND name = 'codex_custom_schema_migrations'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("custom registry absence should load"),
+        0
+    );
+
+    migrate_legacy_custom_schema_migrations(
+        &pool,
+        &state_migrator,
+        LegacyMigrationCutover::Enabled,
+    )
+    .await
+    .expect("explicit cutover should adopt validated legacy migrations");
+    STATE_MIGRATOR
+        .run(&pool)
+        .await
+        .expect("official migrations should apply after explicit cutover");
+    assert_eq!(
+        sqlx::query_as::<_, (i64, Vec<u8>)>(
+            "SELECT version, checksum FROM _sqlx_migrations \
+             WHERE version IN (49, 50) ORDER BY version",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("official migration rows should load"),
+        STATE_MIGRATOR
+            .migrations
+            .iter()
+            .filter(|migration| matches!(migration.version, 49 | 50))
+            .map(|migration| (migration.version, migration.checksum.to_vec()))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, String, String)>(
+            "SELECT version, name, definition FROM codex_custom_schema_migrations ORDER BY version",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("adopted custom rows should load"),
+        vec![
+            (
+                1,
+                CUSTOM_SCHEMA_V1.name.to_string(),
+                CUSTOM_SCHEMA_V1.definition.to_string(),
+            ),
+            (
+                2,
+                CUSTOM_SCHEMA_V2.name.to_string(),
+                CUSTOM_SCHEMA_V2.definition.to_string(),
+            ),
+        ]
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, i64)>(
+            "SELECT thread_id, generation FROM thread_writer_generations",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("legacy writer generations should load"),
+        vec![("00000000-0000-0000-0000-000000000049".to_string(), 7,)]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT store_id FROM writer_authority_store WHERE singleton = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("legacy store identity should load"),
+        "legacy-store"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, i64)>(
+            "SELECT slot_id, generation FROM thread_execution_account_bindings",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("legacy execution binding should load"),
+        ("account-a".to_string(), 3)
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, String, i64)>(
+            "SELECT turn_id, slot_id, generation FROM thread_turn_execution_accounts",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("legacy turn provenance should load"),
+        ("turn-1".to_string(), "account-a".to_string(), 3)
+    );
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn unknown_v50_fails_without_mutation() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let state_path = sqlite.state_db_path();
+    let pool = sqlite
+        .open_read_write_pool(&state_path)
+        .await
+        .expect("database should open");
+    migrator_through(/*version*/ 48)
+        .run(&pool)
+        .await
+        .expect("upstream migrations through 48 should apply");
+    sqlx::raw_sql(CUSTOM_SCHEMA_V1.definition)
+        .execute(&pool)
+        .await
+        .expect("legacy writer schema should apply");
+    insert_legacy_custom_migration(&pool, &CUSTOM_SCHEMA_V1, CUSTOM_SCHEMA_V1.legacy_checksum)
+        .await;
+    insert_legacy_custom_migration(
+        &pool,
+        &CUSTOM_SCHEMA_V2,
+        "05b8f0203829d22c122233012fa066fe6be269395e9e0f7a16848722f8ecd34124097826db94bef9925f88b381c2223b",
+    )
+    .await;
+    let state_migrator = runtime_state_migrator();
+    let error = migrate_legacy_custom_schema_migrations(
+        &pool,
+        &state_migrator,
+        LegacyMigrationCutover::Enabled,
+    )
+    .await
+    .expect_err("unknown v50 should fail before changing v49");
+    assert!(error.to_string().contains("unknown checksum"));
+
+    assert_eq!(
+        sqlx::query_as::<_, (i64, String)>(
+            "SELECT version, lower(hex(checksum)) FROM _sqlx_migrations \
+             WHERE version IN (49, 50) ORDER BY version",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("legacy rows should remain unchanged"),
+        vec![
+            (49, CUSTOM_SCHEMA_V1.legacy_checksum.to_string()),
+            (
+                50,
+                "05b8f0203829d22c122233012fa066fe6be269395e9e0f7a16848722f8ecd34124097826db94bef9925f88b381c2223b"
+                    .to_string(),
+            ),
+        ]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' \
+             AND name = 'codex_custom_schema_migrations'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("custom registry absence should load"),
+        0
+    );
+    pool.close().await;
 }
 
 #[tokio::test]

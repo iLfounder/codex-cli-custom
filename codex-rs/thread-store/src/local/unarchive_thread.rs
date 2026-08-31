@@ -23,7 +23,7 @@ pub(super) async fn unarchive_thread(
     let _lifecycle_guard = store.live_writer_locks.lock_lifecycle(thread_id).await;
     // Archive, delete, and revert use the same cross-process lock while moving or selecting
     // rollout files. Unarchive must participate before it moves those files back.
-    let _writer_lock = store.writer_lock_coordinator.acquire(thread_id)?;
+    let _writer_lock = store.acquire_writer_lock(thread_id).await?;
     let state_db_ctx = store.state_db().await;
     let selected_archived_path =
         thread_rollout_resolver::resolve_current_including_archived(store, thread_id)
