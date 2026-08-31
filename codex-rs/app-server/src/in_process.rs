@@ -68,6 +68,7 @@ use crate::transport::CHANNEL_CAPACITY;
 use crate::transport::OutboundConnectionState;
 use crate::transport::route_outgoing_envelope;
 use codex_analytics::AppServerRpcTransport;
+use codex_app_server_protocol::AccountFailoverMode;
 use codex_app_server_protocol::AgentMessageDelivery;
 use codex_app_server_protocol::ClientNotification;
 use codex_app_server_protocol::ClientRequest;
@@ -364,7 +365,21 @@ impl InProcessClientHandle {
 /// This function sends `initialize` followed by `initialized` before returning
 /// the handle, so callers receive a ready-to-use runtime. If initialize fails,
 /// the runtime is shut down and an `InvalidData` error is returned.
-pub async fn start(mut args: InProcessStartArgs) -> IoResult<InProcessClientHandle> {
+pub async fn start(args: InProcessStartArgs) -> IoResult<InProcessClientHandle> {
+    start_with_account_failover(args, AccountFailoverMode::Disabled).await
+}
+
+/// Starts an in-process app-server with the process-local exec account failover mode.
+pub async fn start_with_account_failover(
+    mut args: InProcessStartArgs,
+    account_failover_mode: AccountFailoverMode,
+) -> IoResult<InProcessClientHandle> {
+    if account_failover_mode.is_pre_semantic() && args.initialize.client_info.name != "codex_exec" {
+        return Err(IoError::new(
+            ErrorKind::InvalidInput,
+            "account failover is restricted to the in-process exec client",
+        ));
+    }
     if let Ok(Some(err)) = check_execpolicy_for_warnings(&args.config.config_layer_stack).await {
         let (path, range) = crate::exec_policy_warning_location(&err);
         args.config_warnings.push(ConfigWarningNotification {
@@ -375,7 +390,7 @@ pub async fn start(mut args: InProcessStartArgs) -> IoResult<InProcessClientHand
         });
     }
     let initialize = args.initialize.clone();
-    let client = start_uninitialized(args).await?;
+    let client = start_uninitialized(args, account_failover_mode).await?;
 
     let initialize_response = client
         .request(ClientRequest::Initialize {
@@ -414,7 +429,10 @@ async fn run_outbound_router(
     }
 }
 
-async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClientHandle> {
+async fn start_uninitialized(
+    args: InProcessStartArgs,
+    account_failover_mode: AccountFailoverMode,
+) -> IoResult<InProcessClientHandle> {
     args.config.auth_config().validate()?;
     let channel_capacity = args.channel_capacity.max(1);
     let installation_id = resolve_installation_id(&args.config.codex_home).await?;
@@ -488,6 +506,7 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                 rpc_transport: AppServerRpcTransport::InProcess,
                 remote_control_handle: None,
                 plugin_startup_tasks: Some(PluginStartupConfig::Current),
+                account_failover_mode,
             }));
             let mut thread_created_rx = processor.thread_created_receiver();
             let session = Arc::new(ConnectionSessionState::new());

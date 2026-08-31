@@ -333,6 +333,26 @@ impl Session {
     ) -> Arc<codex_mcp::McpBinding> {
         let ready_selected_capability_roots =
             Self::ready_selected_capability_roots(selected_capability_roots);
+        if let Some(failover) = turn_context
+            .extension_data
+            .get::<super::account_failover::PreSemanticAccountFailover>()
+            .filter(|failover| failover.is_provisional())
+        {
+            let account_runtime = failover.turn_runtime(self.as_ref());
+            if account_runtime
+                .mcp_runtime
+                .current_ready_selected_capability_roots()
+                == ready_selected_capability_roots
+                && let Some(binding) = account_runtime
+                    .mcp_runtime
+                    .current_binding_with_required_servers(required_servers)
+                    .await
+            {
+                return binding;
+            }
+            let config = Arc::new(self.runtime_mcp_config(&turn_context.config).await);
+            return Arc::new(codex_mcp::McpBinding::empty(config));
+        }
         let account_runtime = self.execution_account_runtime();
         if account_runtime
             .mcp_runtime

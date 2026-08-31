@@ -3,6 +3,7 @@ use std::collections::HashSet;
 
 use codex_app_server_protocol::GitInfo;
 use codex_app_server_protocol::JSONRPCErrorError;
+use codex_app_server_protocol::SESSION_RUNTIME_ACCOUNT_FAILOVER_CAPABILITY;
 use codex_app_server_protocol::SESSION_RUNTIME_ACCOUNT_ROTATION_CAPABILITY;
 use codex_app_server_protocol::SessionRuntimeAccountBinding;
 use codex_app_server_protocol::SessionRuntimeAccountRef;
@@ -355,6 +356,18 @@ impl SessionRuntimeEngine {
                     .then(|| "persistent account rotation store is unavailable".to_string()),
             },
         ]
+        .into_iter()
+        .chain(
+            self.account_failover_mode
+                .is_pre_semantic()
+                .then(|| SessionRuntimeCapability {
+                    name: SESSION_RUNTIME_ACCOUNT_FAILOVER_CAPABILITY.to_string(),
+                    available,
+                    deny_reason: (!available)
+                        .then(|| "persistent account rotation store is unavailable".to_string()),
+                }),
+        )
+        .collect()
     }
 }
 

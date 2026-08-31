@@ -79,6 +79,7 @@ fn fixed_uses_matching_identity_and_auth_without_quota_freshness_gate() {
         automatic_account_ids: &[],
         current_account_id: None,
         last_committed_account_id: None,
+        excluded_account_ids: &[],
         credential_readiness: &ready,
         now: NOW,
     }) else {
@@ -111,6 +112,7 @@ fn quota_aware_uses_bottleneck_ratio_and_natural_tie_break() {
             automatic_account_ids: &membership,
             current_account_id: None,
             last_committed_account_id: None,
+            excluded_account_ids: &[],
             credential_readiness: &ready,
             now: NOW,
         })),
@@ -133,6 +135,7 @@ fn quota_aware_rejects_stale_utilization() {
             automatic_account_ids: &[account_id(1)],
             current_account_id: None,
             last_committed_account_id: None,
+            excluded_account_ids: &[],
             credential_readiness: &ready,
             now: NOW,
         }),
@@ -158,6 +161,7 @@ fn sequential_modes_respect_membership_and_skip_exhausted_accounts() {
             automatic_account_ids: &membership,
             current_account_id: anchor,
             last_committed_account_id: None,
+            excluded_account_ids: &[],
             credential_readiness: &ready,
             now: NOW,
         }))
@@ -191,9 +195,62 @@ fn exhaust_then_next_does_not_reuse_expired_exhaustion_evidence() {
             automatic_account_ids: &[account_id(1)],
             current_account_id: Some(account_id(1)),
             last_committed_account_id: None,
+            excluded_account_ids: &[],
             credential_readiness: &ready,
             now: NOW,
         })),
         Some(account_id(1))
+    );
+}
+
+#[test]
+fn selection_excludes_accounts_already_tried_by_the_execution() {
+    let catalog = GlobalAccountCatalog::default();
+    let c1 = snapshot("C1", NOW, "one", 0.1, NOW + 100);
+    let c2 = snapshot("C2", NOW, "two", 0.9, NOW + 100);
+    catalog.replace(vec![c1, c2]).unwrap();
+    let ready = readiness(&[1, 2]);
+    let membership = [account_id(1), account_id(2)];
+    let excluded_c1 = [account_id(1)];
+    let excluded_c2 = [account_id(2)];
+
+    assert_eq!(
+        selected_id(catalog.select(CatalogSelectionRequest {
+            mode: RotationMode::QuotaAware,
+            fixed_account_id: None,
+            automatic_account_ids: &membership,
+            current_account_id: None,
+            last_committed_account_id: None,
+            excluded_account_ids: &excluded_c1,
+            credential_readiness: &ready,
+            now: NOW,
+        })),
+        Some(account_id(2))
+    );
+    assert_eq!(
+        selected_id(catalog.select(CatalogSelectionRequest {
+            mode: RotationMode::RoundRobin,
+            fixed_account_id: None,
+            automatic_account_ids: &membership,
+            current_account_id: Some(account_id(1)),
+            last_committed_account_id: None,
+            excluded_account_ids: &excluded_c2,
+            credential_readiness: &ready,
+            now: NOW,
+        })),
+        Some(account_id(1))
+    );
+    assert_eq!(
+        selected_id(catalog.select(CatalogSelectionRequest {
+            mode: RotationMode::ExhaustThenNext,
+            fixed_account_id: None,
+            automatic_account_ids: &membership,
+            current_account_id: Some(account_id(1)),
+            last_committed_account_id: None,
+            excluded_account_ids: &excluded_c1,
+            credential_readiness: &ready,
+            now: NOW,
+        })),
+        Some(account_id(2))
     );
 }

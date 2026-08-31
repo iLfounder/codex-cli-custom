@@ -3,6 +3,28 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::tempdir;
 
+fn token_usage(seed: i64) -> ThreadTokenUsage {
+    ThreadTokenUsage {
+        last: codex_app_server_protocol::TokenUsageBreakdown {
+            total_tokens: seed,
+            input_tokens: seed + 1,
+            cached_input_tokens: seed + 2,
+            cache_write_input_tokens: seed + 3,
+            output_tokens: seed + 4,
+            reasoning_output_tokens: seed + 5,
+        },
+        total: codex_app_server_protocol::TokenUsageBreakdown {
+            total_tokens: seed + 10,
+            input_tokens: seed + 11,
+            cached_input_tokens: seed + 12,
+            cache_write_input_tokens: seed + 13,
+            output_tokens: seed + 14,
+            reasoning_output_tokens: seed + 15,
+        },
+        model_context_window: Some(seed + 100),
+    }
+}
+
 #[test]
 fn failed_turn_does_not_overwrite_output_last_message_file() {
     let tempdir = tempdir().expect("create tempdir");
@@ -140,4 +162,202 @@ fn mcp_tool_call_result_preserves_meta_in_jsonl_event() {
         json!({"raw_messages": [{"ref_id": "turn0search0"}]})
     );
     assert!(serialized["item"]["result"].get("meta").is_none());
+}
+
+#[test]
+fn compaction_processor_emits_full_lifecycle_and_retry_error_without_relabeling() {
+    let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
+    assert_eq!(
+        processor
+            .collect_thread_events(ServerNotification::ThreadTokenUsageUpdated(
+                codex_app_server_protocol::ThreadTokenUsageUpdatedNotification {
+                    thread_id: "thread-1".to_string(),
+                    turn_id: "turn-1".to_string(),
+                    token_usage: token_usage(10),
+                },
+            ))
+            .events,
+        Vec::new()
+    );
+
+    let started = processor.collect_thread_events(ServerNotification::ItemStarted(
+        codex_app_server_protocol::ItemStartedNotification {
+            item: ThreadItem::ContextCompaction {
+                id: "compact-1".to_string(),
+            },
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            started_at_ms: 1_000,
+        },
+    ));
+    assert_eq!(
+        serde_json::to_value(&started.events).expect("serialize started event"),
+        json!([{
+            "type": "item.started",
+            "item": {
+                "id": "item_0",
+                "type": "context_compaction",
+                "status": "compacting",
+                "started_at_ms": 1_000,
+                "completed_at_ms": null,
+                "duration_ms": null,
+                "before": {
+                    "reported_last_usage": {
+                        "total_tokens": 10,
+                        "input_tokens": 11,
+                        "cached_input_tokens": 12,
+                        "cache_write_input_tokens": 13,
+                        "output_tokens": 14,
+                        "reasoning_output_tokens": 15,
+                    },
+                    "reported_total_usage": {
+                        "total_tokens": 20,
+                        "input_tokens": 21,
+                        "cached_input_tokens": 22,
+                        "cache_write_input_tokens": 23,
+                        "output_tokens": 24,
+                        "reasoning_output_tokens": 25,
+                    },
+                    "model_context_window": 110,
+                },
+                "latest_reported": null,
+            }
+        }])
+    );
+
+    let updated = processor.collect_thread_events(ServerNotification::ThreadTokenUsageUpdated(
+        codex_app_server_protocol::ThreadTokenUsageUpdatedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            token_usage: token_usage(30),
+        },
+    ));
+    assert_eq!(updated.events.len(), 1);
+    assert!(matches!(updated.events[0], ThreadEvent::ItemUpdated(_)));
+
+    let retry = processor.collect_thread_events(ServerNotification::Error(
+        codex_app_server_protocol::ErrorNotification {
+            error: codex_app_server_protocol::TurnError {
+                message: "retrying summarizer".to_string(),
+                codex_error_info: None,
+                additional_details: None,
+            },
+            will_retry: true,
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+        },
+    ));
+    assert_eq!(
+        retry.events,
+        vec![ThreadEvent::Error(ThreadErrorEvent {
+            message: "retrying summarizer".to_string(),
+        })]
+    );
+
+    let completed = processor.collect_thread_events(ServerNotification::ItemCompleted(
+        codex_app_server_protocol::ItemCompletedNotification {
+            item: ThreadItem::ContextCompaction {
+                id: "compact-1".to_string(),
+            },
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            completed_at_ms: 7_500,
+        },
+    ));
+    let serialized = serde_json::to_value(&completed.events[0]).expect("serialize completed event");
+    assert_eq!(serialized["type"], "item.completed");
+    assert_eq!(serialized["item"]["status"], "completed");
+    assert_eq!(serialized["item"]["duration_ms"], 6_500);
+    assert_eq!(
+        serialized["item"]["latest_reported"]["reported_last_usage"]["total_tokens"],
+        30
+    );
+    assert_eq!(processor.collect_final_events(), Vec::new());
+}
+
+#[test]
+fn completion_without_start_and_stream_shutdown_preserve_missing_boundaries() {
+    let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
+    let _ = processor.collect_thread_events(ServerNotification::ThreadTokenUsageUpdated(
+        codex_app_server_protocol::ThreadTokenUsageUpdatedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            token_usage: token_usage(10),
+        },
+    ));
+
+    let missing_start = processor.collect_thread_events(ServerNotification::ItemCompleted(
+        codex_app_server_protocol::ItemCompletedNotification {
+            item: ThreadItem::ContextCompaction {
+                id: "missing-start".to_string(),
+            },
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            completed_at_ms: 2_000,
+        },
+    ));
+    assert_eq!(
+        serde_json::to_value(&missing_start.events[0]).expect("serialize missing-start event"),
+        json!({
+            "type": "item.completed",
+            "item": {
+                "id": "item_0",
+                "type": "context_compaction",
+                "status": "completed",
+                "started_at_ms": null,
+                "completed_at_ms": 2_000,
+                "duration_ms": null,
+                "before": null,
+                "latest_reported": null,
+            }
+        })
+    );
+
+    let _ = processor.collect_thread_events(ServerNotification::ItemStarted(
+        codex_app_server_protocol::ItemStartedNotification {
+            item: ThreadItem::ContextCompaction {
+                id: "unfinished".to_string(),
+            },
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            started_at_ms: 3_000,
+        },
+    ));
+    let shutdown = processor.collect_final_events();
+    assert_eq!(shutdown.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&shutdown[0]).expect("serialize shutdown terminal"),
+        json!({
+            "type": "item.completed",
+            "item": {
+                "id": "item_1",
+                "type": "context_compaction",
+                "status": "outcome_unknown",
+                "started_at_ms": 3_000,
+                "completed_at_ms": null,
+                "duration_ms": null,
+                "before": {
+                    "reported_last_usage": {
+                        "total_tokens": 10,
+                        "input_tokens": 11,
+                        "cached_input_tokens": 12,
+                        "cache_write_input_tokens": 13,
+                        "output_tokens": 14,
+                        "reasoning_output_tokens": 15,
+                    },
+                    "reported_total_usage": {
+                        "total_tokens": 20,
+                        "input_tokens": 21,
+                        "cached_input_tokens": 22,
+                        "cache_write_input_tokens": 23,
+                        "output_tokens": 24,
+                        "reasoning_output_tokens": 25,
+                    },
+                    "model_context_window": 110,
+                },
+                "latest_reported": null,
+            }
+        })
+    );
+    assert_eq!(processor.collect_final_events(), Vec::new());
 }

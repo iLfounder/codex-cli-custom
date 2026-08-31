@@ -188,6 +188,9 @@ pub(super) fn server_notification_thread_target(
                 None => return ServerNotificationThreadTarget::AppScoped,
             }
         }
+        ServerNotification::McpServerStartupCompleted(notification) => {
+            Some(notification.thread_id.as_str())
+        }
         ServerNotification::AppListUpdated(notification) => {
             match notification.thread_id.as_deref() {
                 Some(thread_id) => Some(thread_id),
@@ -247,6 +250,7 @@ mod tests {
     use crate::test_support::PathBufExt;
     use crate::test_support::test_path_buf;
     use codex_app_server_protocol::GuardianWarningNotification;
+    use codex_app_server_protocol::McpServerStartupCompletedNotification;
     use codex_app_server_protocol::McpServerStartupState;
     use codex_app_server_protocol::McpServerStatusUpdatedNotification;
     use codex_app_server_protocol::ServerNotification;
@@ -356,6 +360,22 @@ mod tests {
         let target = server_notification_thread_target(&notification);
 
         assert_eq!(target, ServerNotificationThreadTarget::AppScoped);
+    }
+
+    #[test]
+    fn mcp_startup_completion_routes_to_its_thread() {
+        let thread_id = ThreadId::new();
+        let notification =
+            ServerNotification::McpServerStartupCompleted(McpServerStartupCompletedNotification {
+                thread_id: thread_id.to_string(),
+                ready: vec!["sentry".to_string()],
+                failed: Vec::new(),
+                cancelled: Vec::new(),
+            });
+
+        let target = server_notification_thread_target(&notification);
+
+        assert_eq!(target, ServerNotificationThreadTarget::Thread(thread_id));
     }
 
     #[test]

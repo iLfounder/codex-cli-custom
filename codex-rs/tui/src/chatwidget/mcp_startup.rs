@@ -6,6 +6,7 @@
 
 use std::collections::BTreeSet;
 
+use codex_app_server_protocol::McpServerStartupCompletedNotification;
 use codex_app_server_protocol::McpServerStartupState;
 use codex_app_server_protocol::McpServerStatusUpdatedNotification;
 
@@ -283,6 +284,45 @@ impl ChatWidget {
             notification.name,
             status,
             /*complete_when_settled*/ true,
+        );
+        if refresh_connector_mentions {
+            self.refresh_connector_mentions(/*force_refresh*/ false);
+        }
+    }
+
+    /// Settle startup from the Core-authored aggregate instead of waiting for
+    /// the locally configured server set to infer completion.
+    pub(super) fn on_mcp_server_startup_completed(
+        &mut self,
+        notification: McpServerStartupCompletedNotification,
+    ) {
+        if self.mcp_startup_status.is_none()
+            && self.mcp_startup_ignore_updates_until_next_start
+            && self.mcp_startup_pending_next_round.is_empty()
+        {
+            return;
+        }
+        let refresh_connector_mentions = notification
+            .ready
+            .iter()
+            .any(|server| server == "codex_apps");
+        for failure in &notification.failed {
+            let already_reported = self
+                .mcp_startup_status
+                .as_ref()
+                .and_then(|statuses| statuses.get(&failure.server))
+                .is_some_and(|status| matches!(status, McpStartupStatus::Failed { .. }));
+            if !already_reported {
+                self.on_warning(failure.error.clone());
+            }
+        }
+        self.finish_mcp_startup(
+            notification
+                .failed
+                .into_iter()
+                .map(|failure| failure.server)
+                .collect(),
+            notification.cancelled,
         );
         if refresh_connector_mentions {
             self.refresh_connector_mentions(/*force_refresh*/ false);

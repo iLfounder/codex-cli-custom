@@ -31,7 +31,10 @@ use crate::MarkThreadTransitionPrepared;
 use crate::MoveProjectParams;
 use crate::MoveThreadToSectionParams;
 use crate::PrepareForkParams;
+use crate::PrepareThreadResumeParams;
 use crate::PreparedFork;
+use crate::PreparedThreadResume;
+use crate::PreparedThreadResumeAuthority;
 use crate::ProjectMoveOutcome;
 use crate::ReadThreadByRolloutPathParams;
 use crate::ReadThreadParams;
@@ -47,6 +50,8 @@ use crate::StoredThread;
 use crate::StoredThreadHistory;
 use crate::StoredThreadSection;
 use crate::StoredThreadSectionsPage;
+use crate::SuccessfulAccountBindingTransition;
+use crate::SuccessfulAccountRotationCommit;
 use crate::ThreadAccountRotationPolicy;
 use crate::ThreadAccountRotationPolicyUpdate;
 use crate::ThreadMetadataPatch;
@@ -264,6 +269,21 @@ pub trait ThreadStore: Any + Send + Sync {
         })
     }
 
+    fn compare_and_swap_successful_account_rotation(
+        &self,
+        _thread_id: ThreadId,
+        _expected_binding: ExecutionAccountBinding,
+        _expected_policy_revision: u64,
+        _accepted_account_slot_id: String,
+        _binding_transition: SuccessfulAccountBindingTransition,
+    ) -> ThreadStoreFuture<'_, Option<SuccessfulAccountRotationCommit>> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "compare_and_swap_successful_account_rotation",
+            })
+        })
+    }
+
     fn remove_account_slot_from_automatic_rotation_policies(
         &self,
         _account_slot_id: String,
@@ -418,6 +438,31 @@ pub trait ThreadStore: Any + Send + Sync {
 
     /// Reopens an existing thread for live appends.
     fn resume_thread(&self, params: ResumeThreadParams) -> ThreadStoreFuture<'_, ()>;
+
+    /// Acquires exact writer authority before reading the history used for a cold resume.
+    fn prepare_thread_resume(
+        &self,
+        _params: PrepareThreadResumeParams,
+    ) -> ThreadStoreFuture<'_, PreparedThreadResume> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "prepare_thread_resume",
+            })
+        })
+    }
+
+    /// Converts prepared authority into the live writer used by the resumed session.
+    fn activate_prepared_thread_resume(
+        &self,
+        _authority: PreparedThreadResumeAuthority,
+        _metadata: crate::ThreadPersistenceMetadata,
+    ) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "activate_prepared_thread_resume",
+            })
+        })
+    }
 
     /// Appends raw rollout items to a live thread.
     ///

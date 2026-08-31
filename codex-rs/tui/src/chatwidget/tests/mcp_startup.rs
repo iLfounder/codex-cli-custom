@@ -27,6 +27,25 @@ fn notify_mcp_status_error(chat: &mut ChatWidget, name: &str, error: &str) {
     );
 }
 
+fn notify_mcp_startup_completed(chat: &mut ChatWidget, ready: &[&str], failed: &[(&str, &str)]) {
+    chat.on_mcp_server_startup_completed(
+        codex_app_server_protocol::McpServerStartupCompletedNotification {
+            thread_id: chat.thread_id().unwrap_or_default().to_string(),
+            ready: ready.iter().map(ToString::to_string).collect(),
+            failed: failed
+                .iter()
+                .map(
+                    |(server, error)| codex_app_server_protocol::McpServerStartupFailure {
+                        server: (*server).to_string(),
+                        error: (*error).to_string(),
+                    },
+                )
+                .collect(),
+            cancelled: Vec::new(),
+        },
+    );
+}
+
 #[tokio::test]
 async fn mcp_startup_ignores_status_for_other_thread() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
@@ -125,6 +144,124 @@ async fn mcp_startup_dedupes_same_round_duplicate_failure_warning() {
         .map(|lines| lines_to_single_string(lines))
         .collect::<String>();
     assert_eq!(summary_text, "⚠ MCP startup incomplete (failed: alpha)\n");
+}
+
+#[tokio::test]
+async fn active_mcp_aggregate_dedupes_failure_by_server_and_settles() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.show_welcome_banner = false;
+    chat.set_mcp_startup_expected_servers(["alpha".to_string(), "beta".to_string()]);
+
+    notify_mcp_status(&mut chat, "alpha", McpServerStartupState::Starting);
+    notify_mcp_status_error(
+        &mut chat,
+        "alpha",
+        "MCP client for `alpha` failed to start: handshake failed",
+    );
+    let warning_text = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<String>();
+    assert_eq!(
+        warning_text,
+        "⚠ MCP client for `alpha` failed to start: handshake failed\n"
+    );
+
+    notify_mcp_startup_completed(&mut chat, &["beta"], &[("alpha", "handshake failed")]);
+
+    let aggregate_text = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<String>();
+    assert_eq!(aggregate_text, "⚠ MCP startup incomplete (failed: alpha)\n");
+    assert!(!chat.bottom_pane.is_task_running());
+}
+
+#[tokio::test]
+async fn buffered_mcp_round_is_settled_by_authoritative_aggregate() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.show_welcome_banner = false;
+    chat.set_mcp_startup_expected_servers(["alpha".to_string(), "beta".to_string()]);
+    chat.finish_mcp_startup(Vec::new(), Vec::new());
+
+    notify_mcp_status(&mut chat, "alpha", McpServerStartupState::Starting);
+    notify_mcp_status_error(
+        &mut chat,
+        "alpha",
+        "MCP client for `alpha` failed to start: handshake failed",
+    );
+    assert!(drain_insert_history(&mut rx).is_empty());
+    assert!(!chat.mcp_startup_pending_next_round.is_empty());
+
+    notify_mcp_startup_completed(&mut chat, &["beta"], &[("alpha", "handshake failed")]);
+
+    let aggregate_text = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<String>();
+    assert_eq!(
+        aggregate_text,
+        "⚠ handshake failed\n\n⚠ MCP startup incomplete (failed: alpha)\n"
+    );
+    assert!(chat.mcp_startup_pending_next_round.is_empty());
+    assert!(!chat.bottom_pane.is_task_running());
+}
+
+#[tokio::test]
+async fn settled_mcp_round_ignores_late_aggregate_side_effects() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.show_welcome_banner = false;
+    chat.thread_id = Some(ThreadId::new());
+    set_chatgpt_auth(&mut chat);
+    chat.set_feature_enabled(Feature::Apps, /*enabled*/ true);
+    chat.set_mcp_startup_expected_servers(["alpha".to_string(), "codex_apps".to_string()]);
+
+    for notification in [
+        McpServerStatusUpdatedNotification {
+            thread_id: None,
+            name: "alpha".to_string(),
+            status: McpServerStartupState::Starting,
+            error: None,
+            failure_reason: None,
+        },
+        McpServerStatusUpdatedNotification {
+            thread_id: None,
+            name: "alpha".to_string(),
+            status: McpServerStartupState::Failed,
+            error: Some("MCP client for `alpha` failed to start: handshake failed".to_string()),
+            failure_reason: None,
+        },
+        McpServerStatusUpdatedNotification {
+            thread_id: None,
+            name: "codex_apps".to_string(),
+            status: McpServerStartupState::Starting,
+            error: None,
+            failure_reason: None,
+        },
+        McpServerStatusUpdatedNotification {
+            thread_id: None,
+            name: "codex_apps".to_string(),
+            status: McpServerStartupState::Ready,
+            error: None,
+            failure_reason: None,
+        },
+    ] {
+        chat.on_mcp_server_status_updated(notification);
+    }
+    let settled_text = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<String>();
+    assert!(settled_text.contains("MCP client for `alpha` failed to start: handshake failed"));
+    assert!(settled_text.contains("MCP startup incomplete (failed: alpha)"));
+    assert!(chat.connectors.mention_refresh_in_flight);
+    assert_eq!(chat.connectors.mention_refresh_pending, None);
+
+    notify_mcp_startup_completed(&mut chat, &["codex_apps"], &[("alpha", "handshake failed")]);
+
+    assert!(drain_insert_history(&mut rx).is_empty());
+    assert_eq!(chat.connectors.mention_refresh_pending, None);
+    assert!(chat.mcp_startup_status.is_none());
 }
 
 #[tokio::test]

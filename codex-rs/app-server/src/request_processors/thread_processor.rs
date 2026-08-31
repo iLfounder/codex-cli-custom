@@ -610,10 +610,7 @@ enum RunningThreadResumeResult {
     /// The request was delegated to the loaded thread.
     Handled,
     /// No loaded thread handled the request.
-    ///
-    /// The optional stored thread contains the history-bearing probe that cold
-    /// resume can reuse instead of reading the rollout again.
-    NotRunning(Option<Box<StoredThread>>),
+    NotRunning,
 }
 
 impl ThreadRequestProcessor {
@@ -3078,15 +3075,8 @@ impl ThreadRequestProcessor {
             execution_account,
         } = runtime_snapshot;
         let thread_id_string = thread_id.to_string();
-        let stored_thread = self
-            .read_stored_thread_for_resume(
-                thread_id_string.as_str(),
-                /*path*/ None,
-                /*include_history*/ false,
-            )
-            .await?;
-        let (thread_history, resume_source_thread) = self
-            .load_resume_initial_history_from_stored_thread(stored_thread)
+        let (thread_history, resume_source_thread, prepared_resume) = self
+            .prepare_resume_initial_history(thread_id_string.as_str(), /*path*/ None)
             .await?;
         let response_history = thread_history.clone();
         let NewThread {
@@ -3096,9 +3086,10 @@ impl ThreadRequestProcessor {
             ..
         } = self
             .thread_manager
-            .resume_thread_with_history_and_execution_account(
+            .resume_prepared_thread_with_history_and_execution_account(
                 config,
                 thread_history,
+                prepared_resume,
                 execution_account,
                 Vec::new(),
                 self.request_trace_context(request_id).await,
@@ -4506,7 +4497,7 @@ impl ThreadRequestProcessor {
                 return Ok(());
             }
         };
-        let stored_thread_from_running_probe = match self
+        match self
             .resume_running_thread(
                 &request_id,
                 &params,
@@ -4517,12 +4508,12 @@ impl ThreadRequestProcessor {
             .await
         {
             Ok(RunningThreadResumeResult::Handled) => return Ok(()),
-            Ok(RunningThreadResumeResult::NotRunning(stored_thread)) => stored_thread,
+            Ok(RunningThreadResumeResult::NotRunning) => {}
             Err(error) => {
                 self.outgoing.send_error(request_id, error).await;
                 return Ok(());
             }
-        };
+        }
 
         let ThreadResumeParams {
             thread_id,
@@ -4546,32 +4537,19 @@ impl ThreadRequestProcessor {
             initial_turns_page,
         } = params;
         let include_turns = !exclude_turns;
+        let has_supplied_history = history.is_some();
 
         let resume_result = if let Some(history) = history {
-            self.resume_thread_from_history(history.as_slice())
+            self.prepare_supplied_resume_history(&thread_id, path.as_ref(), history.as_slice())
                 .await
-                .map(|thread_history| (thread_history, None))
-        } else if let Some(stored_thread) = stored_thread_from_running_probe {
-            self.load_resume_initial_history_from_stored_thread(*stored_thread)
-                .await
-                .map(|(thread_history, stored_thread)| (thread_history, Some(stored_thread)))
         } else {
-            match self
-                .read_stored_thread_for_resume(
-                    &thread_id,
-                    path.as_ref(),
-                    /*include_history*/ false,
-                )
+            self.prepare_resume_initial_history(&thread_id, path.as_ref())
                 .await
-            {
-                Ok(stored_thread) => self
-                    .load_resume_initial_history_from_stored_thread(stored_thread)
-                    .await
-                    .map(|(thread_history, stored_thread)| (thread_history, Some(stored_thread))),
-                Err(error) => Err(error),
-            }
+                .map(|(thread_history, stored_thread, authority)| {
+                    (thread_history, Some(stored_thread), Some(authority))
+                })
         };
-        let (thread_history, resume_source_thread) = match resume_result {
+        let (thread_history, resume_source_thread, prepared_resume) = match resume_result {
             Ok(value) => value,
             Err(error) => {
                 self.outgoing.send_error(request_id, error).await;
@@ -4720,18 +4698,31 @@ impl ThreadRequestProcessor {
         let response_history = thread_history.clone();
         let dynamic_tools = dynamic_tools.unwrap_or_default();
 
-        match self
-            .thread_manager
-            .resume_thread_with_history(
-                config,
-                thread_history,
-                self.auth_manager.clone(),
-                dynamic_tools,
-                self.request_trace_context(&request_id).await,
-                client_mcp_extensions,
-            )
-            .await
-        {
+        let resumed_thread = if let Some(prepared_resume) = prepared_resume {
+            self.thread_manager
+                .resume_prepared_thread_with_history(
+                    config,
+                    thread_history,
+                    prepared_resume,
+                    self.auth_manager.clone(),
+                    dynamic_tools,
+                    self.request_trace_context(&request_id).await,
+                    client_mcp_extensions,
+                )
+                .await
+        } else {
+            self.thread_manager
+                .resume_thread_with_history(
+                    config,
+                    thread_history,
+                    self.auth_manager.clone(),
+                    dynamic_tools,
+                    self.request_trace_context(&request_id).await,
+                    client_mcp_extensions,
+                )
+                .await
+        };
+        match resumed_thread {
             Ok(NewThread {
                 thread_id,
                 thread: codex_thread,
@@ -4770,11 +4761,19 @@ impl ThreadRequestProcessor {
                             codex_thread.as_ref(),
                             &response_history,
                             rollout_path.as_path(),
-                            resume_source_thread,
+                            if has_supplied_history {
+                                None
+                            } else {
+                                resume_source_thread
+                            },
                             include_turns && !paginated_resume,
                         )
                         .await
                         .map_err(internal_error)?;
+                    if has_supplied_history {
+                        thread.preview =
+                            preview_from_rollout_items(response_history.get_rollout_items());
+                    }
                     thread.thread_source = codex_thread
                         .config_snapshot()
                         .await
@@ -5027,23 +5026,33 @@ impl ThreadRequestProcessor {
                 )
                 .await?;
             Some((existing_thread_id, existing_thread, source_thread))
-        } else {
-            let source_thread = self
-                .read_stored_thread_for_resume(
-                    &params.thread_id,
-                    params.path.as_ref(),
-                    /*include_history*/ false,
-                )
-                .await?;
-            let existing_thread_id = source_thread.thread_id;
-            match self.thread_manager.get_thread(existing_thread_id).await {
-                Ok(existing_thread) => Some((existing_thread_id, existing_thread, source_thread)),
-                Err(_) => {
-                    return Ok(RunningThreadResumeResult::NotRunning(Some(Box::new(
-                        source_thread,
-                    ))));
+        } else if let Some(requested_path) = params.path.as_ref() {
+            let mut running_thread = None;
+            for thread_id in self.thread_manager.list_thread_ids().await {
+                let Ok(existing_thread) = self.thread_manager.get_thread(thread_id).await else {
+                    continue;
+                };
+                if existing_thread
+                    .rollout_path()
+                    .as_ref()
+                    .is_some_and(|active_path| {
+                        path_utils::paths_match_after_normalization(requested_path, active_path)
+                    })
+                {
+                    let source_thread = self
+                        .read_stored_thread_for_resume(
+                            &thread_id.to_string(),
+                            /*path*/ None,
+                            /*include_history*/ false,
+                        )
+                        .await?;
+                    running_thread = Some((thread_id, existing_thread, source_thread));
+                    break;
                 }
             }
+            running_thread
+        } else {
+            None
         };
 
         if let Some((existing_thread_id, existing_thread, mut source_thread)) = running_thread {
@@ -5098,7 +5107,7 @@ impl ThreadRequestProcessor {
                             self.finalize_thread_teardown(existing_thread_id).await;
                             // Shutdown can flush newer rollout items, so reload the
                             // stored thread before starting the replacement session.
-                            return Ok(RunningThreadResumeResult::NotRunning(None));
+                            return Ok(RunningThreadResumeResult::NotRunning);
                         }
                         ThreadShutdownResult::SubmitFailed => {
                             warn!("failed to submit Shutdown to thread {existing_thread_id}");
@@ -5289,7 +5298,7 @@ impl ThreadRequestProcessor {
             }
             return Ok(RunningThreadResumeResult::Handled);
         }
-        Ok(RunningThreadResumeResult::NotRunning(None))
+        Ok(RunningThreadResumeResult::NotRunning)
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
@@ -5309,40 +5318,110 @@ impl ThreadRequestProcessor {
         ))
     }
 
-    async fn load_resume_initial_history_from_stored_thread(
+    async fn prepare_resume_initial_history(
         &self,
-        stored_thread: StoredThread,
-    ) -> Result<(InitialHistory, StoredThread), JSONRPCErrorError> {
-        if matches!(stored_thread.history_mode, ThreadHistoryMode::Paginated) {
-            let model_context = self
+        thread_id: &str,
+        path: Option<&PathBuf>,
+    ) -> Result<(InitialHistory, StoredThread, PreparedThreadResumeAuthority), JSONRPCErrorError>
+    {
+        let target = if let Some(path) = path {
+            StorePrepareThreadResumeTarget::RolloutPath(path.clone())
+        } else {
+            let thread_id = ThreadId::from_string(thread_id)
+                .map_err(|err| invalid_request(format!("invalid session id: {err}")))?;
+            StorePrepareThreadResumeTarget::ThreadId(thread_id)
+        };
+        let prepared = self
+            .thread_store
+            .prepare_thread_resume(StorePrepareThreadResumeParams {
+                target,
+                include_archived: true,
+            })
+            .await
+            .map_err(thread_store_resume_read_error)?;
+        let (stored_thread, history, authority) = prepared.into_parts();
+        if let Some(requested_path) = path
+            && matches!(stored_thread.history_mode, ThreadHistoryMode::Paginated)
+        {
+            let current_thread = self
                 .thread_store
-                .load_latest_model_context(StoreLoadThreadHistoryParams {
+                .read_thread(StoreReadThreadParams {
                     thread_id: stored_thread.thread_id,
                     include_archived: true,
+                    include_history: false,
                 })
                 .await
                 .map_err(thread_store_resume_read_error)?;
-            let history = InitialHistory::Resumed(ResumedHistory {
-                conversation_id: model_context.thread_id,
-                history: Arc::new(model_context.items),
-                rollout_path: stored_thread.rollout_path.clone(),
-            });
-            return Ok((history, stored_thread));
+            if let Some(current_path) = current_thread.rollout_path.as_ref()
+                && !path_utils::paths_match_after_normalization(
+                    codex_rollout::plain_rollout_path(requested_path).as_path(),
+                    codex_rollout::plain_rollout_path(current_path).as_path(),
+                )
+            {
+                return Err(invalid_request(format!(
+                    "cannot resume paginated thread {} with stale path: requested {}, current {}; omit path and resume by thread id",
+                    stored_thread.thread_id,
+                    requested_path.display(),
+                    current_path.display()
+                )));
+            }
         }
+        if stored_thread.archived_at.is_some() {
+            let thread_id = stored_thread.thread_id;
+            return Err(invalid_request(format!(
+                "session {thread_id} is archived. Run `codex unarchive {thread_id}` to unarchive it first."
+            )));
+        }
+        let history = InitialHistory::Resumed(ResumedHistory {
+            conversation_id: stored_thread.thread_id,
+            history,
+            rollout_path: stored_thread.rollout_path.clone(),
+        });
+        Ok((history, stored_thread, authority))
+    }
 
-        let thread_id = stored_thread.thread_id.to_string();
-        let rollout_path = stored_thread.rollout_path.clone();
-        let mut stored_thread = self
-            .read_stored_thread_for_resume(
-                &thread_id,
-                rollout_path.as_ref(),
-                /*include_history*/ true,
-            )
+    async fn prepare_supplied_resume_history(
+        &self,
+        requested_thread_id: &str,
+        path: Option<&PathBuf>,
+        supplied_history: &[ResponseItem],
+    ) -> Result<
+        (
+            InitialHistory,
+            Option<StoredThread>,
+            Option<PreparedThreadResumeAuthority>,
+        ),
+        JSONRPCErrorError,
+    > {
+        let (prepared_history, stored_thread, authority) = self
+            .prepare_resume_initial_history(requested_thread_id, path)
             .await?;
-        let history = self
-            .stored_thread_to_initial_history(&mut stored_thread)
-            .await?;
-        Ok((history, stored_thread))
+        let requested_thread_id = ThreadId::from_string(requested_thread_id)
+            .map_err(|err| invalid_request(format!("invalid session id: {err}")))?;
+        if requested_thread_id != stored_thread.thread_id {
+            return Err(invalid_request(format!(
+                "supplied history targets thread {requested_thread_id}, but the resume path belongs to thread {}",
+                stored_thread.thread_id
+            )));
+        }
+        let supplied_history = self.resume_thread_from_history(supplied_history).await?;
+        let InitialHistory::Forked(mut supplied_history) = supplied_history else {
+            unreachable!("supplied resume history is represented as forked rollout items")
+        };
+        if let Some(session_meta) = prepared_history
+            .get_rollout_items()
+            .iter()
+            .find(|item| matches!(item, RolloutItem::SessionMeta(_)))
+            .cloned()
+        {
+            supplied_history.insert(0, session_meta);
+        }
+        let initial_history = InitialHistory::Resumed(ResumedHistory {
+            conversation_id: stored_thread.thread_id,
+            history: Arc::new(supplied_history),
+            rollout_path: stored_thread.rollout_path.clone(),
+        });
+        Ok((initial_history, Some(stored_thread), Some(authority)))
     }
 
     async fn read_stored_thread_for_resume(
@@ -5409,28 +5488,6 @@ impl ThreadRequestProcessor {
         }
 
         Ok(stored_thread)
-    }
-
-    #[tracing::instrument(level = "trace", skip_all)]
-    async fn stored_thread_to_initial_history(
-        &self,
-        stored_thread: &mut StoredThread,
-    ) -> Result<InitialHistory, JSONRPCErrorError> {
-        let thread_id = stored_thread.thread_id;
-        let history = stored_thread
-            .history
-            .take()
-            .map(|history| history.items)
-            .ok_or_else(|| {
-                internal_error(format!(
-                    "thread {thread_id} did not include persisted history"
-                ))
-            })?;
-        Ok(InitialHistory::Resumed(ResumedHistory {
-            conversation_id: thread_id,
-            history: Arc::new(history),
-            rollout_path: stored_thread.rollout_path.clone(),
-        }))
     }
 
     fn stored_thread_to_api_thread(
@@ -6655,7 +6712,9 @@ fn thread_store_list_error(err: ThreadStoreError) -> JSONRPCErrorError {
 
 fn thread_store_resume_read_error(err: ThreadStoreError) -> JSONRPCErrorError {
     match err {
-        ThreadStoreError::InvalidRequest { message } => invalid_request(message),
+        ThreadStoreError::InvalidRequest { message } | ThreadStoreError::Conflict { message } => {
+            invalid_request(message)
+        }
         ThreadStoreError::Unsupported { operation } => {
             unsupported_thread_store_operation(operation)
         }

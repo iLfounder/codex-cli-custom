@@ -1025,6 +1025,11 @@ async fn provider_owned_auth_recovery_is_bounded_and_preserves_unauthorized_fail
             }
             other => panic!("unexpected error after provider recovery: {other}"),
         }
+        assert_eq!(
+            error.account_rejection_kind(),
+            (!should_fail)
+                .then_some(codex_protocol::error::AccountRejectionKind::UnauthorizedFinal)
+        );
         assert_eq!(attempts.load(Ordering::Relaxed), 1);
 
         let events = std::iter::from_fn(|| event_receiver.try_recv().ok())

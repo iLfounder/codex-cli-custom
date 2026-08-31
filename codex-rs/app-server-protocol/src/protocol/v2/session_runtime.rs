@@ -9,6 +9,23 @@ use serde::Serialize;
 /// Capability name published when durable per-thread account rotation is available.
 pub const SESSION_RUNTIME_ACCOUNT_ROTATION_CAPABILITY: &str = "ananke_account_rotation_v1";
 
+/// Capability name published by exec runtimes that enable same-turn account failover.
+pub const SESSION_RUNTIME_ACCOUNT_FAILOVER_CAPABILITY: &str = "ananke_account_failover_v1";
+
+/// Process-local mode controlling whether same-turn account failover is available.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AccountFailoverMode {
+    #[default]
+    Disabled,
+    PreSemantic,
+}
+
+impl AccountFailoverMode {
+    pub fn is_pre_semantic(self) -> bool {
+        matches!(self, Self::PreSemantic)
+    }
+}
+
 /// Parameters for reading a revision-consistent page of session runtime snapshots.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]

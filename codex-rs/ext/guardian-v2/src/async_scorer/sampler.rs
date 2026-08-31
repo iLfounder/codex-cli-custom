@@ -437,6 +437,7 @@ impl LunaSampler {
                 | ApiError::ContextWindowExceeded
                 | ApiError::QuotaExceeded
                 | ApiError::UsageNotIncluded
+                | ApiError::ModelAccessDenied
                 | ApiError::RateLimit(_)
                 | ApiError::InvalidRequest { .. }
                 | ApiError::MisalignmentPolicyViolation { .. }

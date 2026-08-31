@@ -19,6 +19,8 @@ pub enum ApiError {
     QuotaExceeded,
     #[error("usage not included")]
     UsageNotIncluded,
+    #[error("model access denied")]
+    ModelAccessDenied,
     #[error("retryable error: {message}")]
     Retryable {
         message: String,

@@ -7,6 +7,8 @@ use crate::app_server_session::list_account_slots;
 use crate::app_server_session::relinquish_thread;
 use crate::app_server_session::session_runtime_for_thread;
 use codex_app_server_protocol::SessionRuntimeAction;
+use codex_app_server_protocol::SessionRuntimeLifecycle;
+use codex_app_server_protocol::SessionRuntimeLifecycleState;
 use codex_app_server_protocol::SessionRuntimeOperation;
 use codex_app_server_protocol::SessionRuntimeOperationAction;
 use codex_app_server_protocol::SessionRuntimeOperationStatus;
@@ -17,6 +19,30 @@ use codex_app_server_protocol::ThreadRelinquishParams;
 pub(crate) enum ShutdownIntent {
     Exit,
     LogoutDefault,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShutdownFailureDisposition {
+    RetrySafeRelease,
+    AllowImmediateExit,
+}
+
+fn shutdown_failure_disposition(
+    writer_state: SessionRuntimeWriterState,
+    lifecycle: &SessionRuntimeLifecycle,
+) -> ShutdownFailureDisposition {
+    if writer_state != SessionRuntimeWriterState::OwnedHere {
+        return ShutdownFailureDisposition::AllowImmediateExit;
+    }
+
+    if lifecycle.state != SessionRuntimeLifecycleState::Idle
+        || lifecycle.active_turn_id.is_some()
+        || !lifecycle.waiting_on.is_empty()
+    {
+        ShutdownFailureDisposition::RetrySafeRelease
+    } else {
+        ShutdownFailureDisposition::AllowImmediateExit
+    }
 }
 
 #[derive(Debug)]
@@ -120,13 +146,14 @@ impl App {
         if self.current_displayed_thread_id() != Some(thread_id) {
             self.shutdown_control_failed(
                 "The displayed session changed before release.".to_string(),
+                ShutdownFailureDisposition::AllowImmediateExit,
             );
             return;
         }
         let ShutdownLookup { runtime, slots } = match result {
             Ok(lookup) => lookup,
             Err(error) => {
-                self.shutdown_control_failed(error);
+                self.shutdown_control_failed(error, ShutdownFailureDisposition::AllowImmediateExit);
                 return;
             }
         };
@@ -134,6 +161,7 @@ impl App {
         if snapshot.thread_id != thread_id.to_string() {
             self.shutdown_control_failed(
                 "The release snapshot did not match the displayed session.".to_string(),
+                ShutdownFailureDisposition::AllowImmediateExit,
             );
             return;
         }
@@ -148,12 +176,17 @@ impl App {
                 .and_then(|availability| availability.deny_reason.clone())
                 .or(snapshot.writer.deny_reason)
                 .unwrap_or_else(|| "This session cannot release its writer yet.".to_string());
-            self.shutdown_control_failed(reason);
+            let disposition =
+                shutdown_failure_disposition(snapshot.writer.state, &snapshot.lifecycle);
+            self.shutdown_control_failed(reason, disposition);
             return;
         }
         if intent == ShutdownIntent::LogoutDefault {
             let Some(slots) = slots else {
-                self.shutdown_control_failed("The account registry was unavailable.".to_string());
+                self.shutdown_control_failed(
+                    "The account registry was unavailable.".to_string(),
+                    ShutdownFailureDisposition::AllowImmediateExit,
+                );
                 return;
             };
             let bound_slot = snapshot
@@ -168,12 +201,16 @@ impl App {
             {
                 self.shutdown_control_failed(
                     "Switch this session to the default account before using /logout.".to_string(),
+                    ShutdownFailureDisposition::AllowImmediateExit,
                 );
                 return;
             }
         }
         let Some(writer_generation) = snapshot.writer.writer_generation else {
-            self.shutdown_control_failed("The session writer fence is unavailable.".to_string());
+            self.shutdown_control_failed(
+                "The session writer fence is unavailable.".to_string(),
+                ShutdownFailureDisposition::AllowImmediateExit,
+            );
             return;
         };
         let operation_id = format!("tui-relinquish-{}", Uuid::new_v4());
@@ -224,12 +261,23 @@ impl App {
         match operation.status {
             SessionRuntimeOperationStatus::Released => pending.released = true,
             SessionRuntimeOperationStatus::Failed => {
-                let message = operation
-                    .error
-                    .as_ref()
-                    .map(|error| error.message.clone())
-                    .unwrap_or_else(|| "Session release failed.".to_string());
-                self.shutdown_control_failed(message);
+                let (message, disposition) = operation.error.as_ref().map_or_else(
+                    || {
+                        (
+                            "Session release failed.".to_string(),
+                            ShutdownFailureDisposition::AllowImmediateExit,
+                        )
+                    },
+                    |error| {
+                        let disposition = if error.code == "thread_not_idle" {
+                            ShutdownFailureDisposition::RetrySafeRelease
+                        } else {
+                            ShutdownFailureDisposition::AllowImmediateExit
+                        };
+                        (error.message.clone(), disposition)
+                    },
+                );
+                self.shutdown_control_failed(message, disposition);
                 return true;
             }
             SessionRuntimeOperationStatus::Accepted | SessionRuntimeOperationStatus::Running => {}
@@ -255,7 +303,9 @@ impl App {
             Ok(operation) => {
                 self.handle_shutdown_operation(/*instance_epoch*/ None, &operation);
             }
-            Err(error) => self.shutdown_control_failed(error),
+            Err(error) => {
+                self.shutdown_control_failed(error, ShutdownFailureDisposition::AllowImmediateExit)
+            }
         }
     }
 
@@ -289,13 +339,26 @@ impl App {
         }
     }
 
-    fn shutdown_control_failed(&mut self, message: String) {
+    fn shutdown_control_failed(
+        &mut self,
+        message: String,
+        disposition: ShutdownFailureDisposition,
+    ) {
         self.shutdown_lookup_in_flight = false;
         self.pending_shutdown = None;
-        self.shutdown_force_exit_armed = true;
+        self.shutdown_force_exit_armed =
+            disposition == ShutdownFailureDisposition::AllowImmediateExit;
         self.chat_widget.restore_after_shutdown_failure();
+        let retry_hint = match disposition {
+            ShutdownFailureDisposition::RetrySafeRelease => {
+                "Retry the quit shortcut after the session becomes idle."
+            }
+            ShutdownFailureDisposition::AllowImmediateExit => {
+                "Repeat the quit shortcut to exit immediately."
+            }
+        };
         self.chat_widget.add_error_message(format!(
-            "Could not safely release this session: {message} Repeat the quit shortcut to exit immediately."
+            "Could not safely release this session: {message} {retry_hint}"
         ));
     }
 }

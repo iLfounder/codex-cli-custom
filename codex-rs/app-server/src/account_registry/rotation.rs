@@ -2,12 +2,16 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use codex_app_server_protocol::AccountFailoverMode;
 use codex_app_server_protocol::RateLimitSnapshot;
 use codex_app_server_protocol::ThreadAccountRotationMode;
 use codex_core::TurnExecutionAccountDecision;
+use codex_core::TurnExecutionAccountFailoverSelection;
 use codex_core::TurnExecutionAccountSelection;
 use codex_core::TurnExecutionAccountSelector;
 use codex_core::TurnExecutionAccountSelectorFuture;
+use codex_core::TurnExecutionAccountSuccessCommit;
+use codex_core::TurnExecutionAccountSuccessCommitFuture;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_thread_store::ThreadAccountRotationMode as StoreRotationMode;
@@ -48,6 +52,7 @@ pub(crate) struct RotationSelectionRequest<'a> {
     pub(crate) automatic_account_slot_ids: &'a [String],
     pub(crate) current_account_slot_id: Option<&'a str>,
     pub(crate) last_committed_account_slot_id: Option<&'a str>,
+    pub(crate) excluded_account_slot_ids: &'a [String],
     pub(crate) now: i64,
 }
 
@@ -61,14 +66,114 @@ pub(crate) struct ExhaustionHintKey {
 pub(crate) struct AccountRotationService {
     registry: Arc<AccountRegistry>,
     thread_store: Arc<dyn ThreadStore>,
+    account_failover_mode: AccountFailoverMode,
 }
 
 impl AccountRotationService {
-    pub(crate) fn new(registry: Arc<AccountRegistry>, thread_store: Arc<dyn ThreadStore>) -> Self {
+    pub(crate) fn new(
+        registry: Arc<AccountRegistry>,
+        thread_store: Arc<dyn ThreadStore>,
+        account_failover_mode: AccountFailoverMode,
+    ) -> Self {
         Self {
             registry,
             thread_store,
+            account_failover_mode,
         }
+    }
+
+    pub(crate) async fn select_with_exclusions(
+        &self,
+        selection: TurnExecutionAccountSelection,
+        excluded_account_slot_ids: &[String],
+    ) -> Result<TurnExecutionAccountDecision, CodexErr> {
+        let policy = match self
+            .thread_store
+            .thread_account_rotation_policy(selection.thread_id)
+            .await
+        {
+            Ok(policy) => policy,
+            Err(ThreadStoreError::Unsupported { .. }) => {
+                return Ok(TurnExecutionAccountDecision::Keep);
+            }
+            Err(error) => {
+                return Err(CodexErr::Fatal(format!(
+                    "account rotation store failed: {error}"
+                )));
+            }
+        };
+        let mode = api_mode(policy.mode);
+        if global_policy(&policy) {
+            let selected = self
+                .registry
+                .select_global_account(
+                    mode,
+                    policy.fixed_account_slot_id.as_deref(),
+                    &policy.automatic_account_slot_ids,
+                    Some(&selection.current_binding.slot_id),
+                    policy.last_committed_account_slot_id.as_deref(),
+                    excluded_account_slot_ids,
+                )
+                .await?;
+            let Some((token, runtime)) = selected else {
+                return Err(CodexErr::InvalidRequest(
+                    "no eligible account slot is available".to_string(),
+                ));
+            };
+            let target_slot_id = token.account_id.to_string();
+            if target_slot_id == selection.current_binding.slot_id
+                && runtime.credential_revision != selection.credential_revision
+            {
+                return Ok(TurnExecutionAccountDecision::ReprepareCurrent {
+                    policy_revision: policy.revision,
+                });
+            }
+            return Ok(selection_decision(
+                mode,
+                target_slot_id,
+                &selection.current_binding.slot_id,
+                policy.revision,
+            ));
+        }
+        if mode == ThreadAccountRotationMode::Fixed
+            && policy.fixed_account_slot_id.as_deref()
+                == Some(selection.current_binding.slot_id.as_str())
+            && !excluded_account_slot_ids.contains(&selection.current_binding.slot_id)
+        {
+            return Ok(TurnExecutionAccountDecision::Keep);
+        }
+        let candidates = self
+            .registry
+            .rotation_candidates(
+                selection.thread_id,
+                selection.current_binding.generation,
+                mode == ThreadAccountRotationMode::ExhaustThenNext,
+            )
+            .await
+            .map_err(|error| CodexErr::Fatal(error.message))?;
+        let selected = select_account(
+            RotationSelectionRequest {
+                mode,
+                fixed_account_slot_id: policy.fixed_account_slot_id.as_deref(),
+                automatic_account_slot_ids: &policy.automatic_account_slot_ids,
+                current_account_slot_id: Some(&selection.current_binding.slot_id),
+                last_committed_account_slot_id: policy.last_committed_account_slot_id.as_deref(),
+                excluded_account_slot_ids,
+                now: chrono::Utc::now().timestamp(),
+            },
+            &candidates,
+        );
+        let RotationSelection::Selected(target_slot_id) = selected else {
+            return Err(CodexErr::InvalidRequest(
+                "no eligible account slot is available".to_string(),
+            ));
+        };
+        Ok(selection_decision(
+            mode,
+            target_slot_id,
+            &selection.current_binding.slot_id,
+            policy.revision,
+        ))
     }
 }
 
@@ -77,93 +182,74 @@ impl TurnExecutionAccountSelector for AccountRotationService {
         &self,
         selection: TurnExecutionAccountSelection,
     ) -> TurnExecutionAccountSelectorFuture<'_> {
+        Box::pin(self.select_with_exclusions(selection, &[]))
+    }
+
+    fn pre_semantic_failover_enabled(&self) -> bool {
+        self.account_failover_mode.is_pre_semantic()
+    }
+
+    fn select_failover(
+        &self,
+        selection: TurnExecutionAccountFailoverSelection,
+    ) -> TurnExecutionAccountSelectorFuture<'_> {
         Box::pin(async move {
-            let policy = match self
-                .thread_store
-                .thread_account_rotation_policy(selection.thread_id)
-                .await
-            {
-                Ok(policy) => policy,
-                Err(ThreadStoreError::Unsupported { .. }) => {
-                    return Ok(TurnExecutionAccountDecision::Keep);
-                }
-                Err(error) => {
-                    return Err(CodexErr::Fatal(format!(
-                        "account rotation store failed: {error}"
-                    )));
-                }
-            };
-            let mode = api_mode(policy.mode);
-            if global_policy(&policy) {
-                let selected = self
-                    .registry
-                    .select_global_account(
-                        mode,
-                        policy.fixed_account_slot_id.as_deref(),
-                        &policy.automatic_account_slot_ids,
-                        Some(&selection.current_binding.slot_id),
-                        policy.last_committed_account_slot_id.as_deref(),
-                    )
-                    .await?;
-                let Some((token, runtime)) = selected else {
-                    return Err(CodexErr::InvalidRequest(
-                        "no eligible account slot is available".to_string(),
-                    ));
-                };
-                let target_slot_id = token.account_id.to_string();
-                if target_slot_id == selection.current_binding.slot_id
-                    && runtime.credential_revision != selection.credential_revision
-                {
-                    return Ok(TurnExecutionAccountDecision::ReprepareCurrent {
-                        policy_revision: policy.revision,
-                    });
-                }
-                return Ok(selection_decision(
-                    mode,
-                    target_slot_id,
-                    &selection.current_binding.slot_id,
-                    policy.revision,
+            if !self.account_failover_mode.is_pre_semantic() {
+                return Err(CodexErr::InvalidRequest(
+                    "pre-semantic account failover is unavailable".to_string(),
                 ));
             }
-            if mode == ThreadAccountRotationMode::Fixed
-                && policy.fixed_account_slot_id.as_deref()
-                    == Some(selection.current_binding.slot_id.as_str())
+            if !selection
+                .excluded_account_slot_ids
+                .contains(&selection.rejected_slot_id)
             {
-                return Ok(TurnExecutionAccountDecision::Keep);
+                return Err(CodexErr::InvalidRequest(
+                    "account failover rejection is missing from the tried set".to_string(),
+                ));
             }
-            let candidates = self
-                .registry
-                .rotation_candidates(
-                    selection.thread_id,
-                    selection.current_binding.generation,
-                    mode == ThreadAccountRotationMode::ExhaustThenNext,
+            let excluded_account_slot_ids = selection
+                .excluded_account_slot_ids
+                .into_iter()
+                .collect::<Vec<_>>();
+            self.select_with_exclusions(selection.selection, &excluded_account_slot_ids)
+                .await
+        })
+    }
+
+    fn commit_successful_selection(
+        &self,
+        commit: TurnExecutionAccountSuccessCommit,
+    ) -> TurnExecutionAccountSuccessCommitFuture<'_> {
+        Box::pin(async move {
+            let transition = match commit.binding_transition {
+                codex_core::SuccessfulAccountBindingTransition::Keep => {
+                    codex_thread_store::SuccessfulAccountBindingTransition::Keep
+                }
+                codex_core::SuccessfulAccountBindingTransition::AdvanceGeneration => {
+                    codex_thread_store::SuccessfulAccountBindingTransition::AdvanceGeneration
+                }
+            };
+            let Some(committed) = self
+                .thread_store
+                .compare_and_swap_successful_account_rotation(
+                    commit.thread_id,
+                    commit.expected_binding,
+                    commit.policy_revision,
+                    commit.target_slot_id,
+                    transition,
                 )
                 .await
-                .map_err(|error| CodexErr::Fatal(error.message))?;
-            let selected = select_account(
-                RotationSelectionRequest {
-                    mode,
-                    fixed_account_slot_id: policy.fixed_account_slot_id.as_deref(),
-                    automatic_account_slot_ids: &policy.automatic_account_slot_ids,
-                    current_account_slot_id: Some(&selection.current_binding.slot_id),
-                    last_committed_account_slot_id: policy
-                        .last_committed_account_slot_id
-                        .as_deref(),
-                    now: chrono::Utc::now().timestamp(),
-                },
-                &candidates,
-            );
-            let RotationSelection::Selected(target_slot_id) = selected else {
+                .map_err(|error| {
+                    CodexErr::Fatal(format!(
+                        "successful account rotation commit failed: {error}"
+                    ))
+                })?
+            else {
                 return Err(CodexErr::InvalidRequest(
-                    "no eligible account slot is available".to_string(),
+                    "successful account rotation commit became stale".to_string(),
                 ));
             };
-            Ok(selection_decision(
-                mode,
-                target_slot_id,
-                &selection.current_binding.slot_id,
-                policy.revision,
-            ))
+            Ok(committed.binding)
         })
     }
 }
@@ -207,6 +293,7 @@ impl AccountRegistry {
         automatic_account_slot_ids: &[String],
         current_account_slot_id: Option<&str>,
         last_committed_account_slot_id: Option<&str>,
+        excluded_account_slot_ids: &[String],
     ) -> Result<
         Option<(
             global::CatalogSelectionToken,
@@ -223,6 +310,10 @@ impl AccountRegistry {
         let current_account_id = current_account_slot_id.and_then(global::AccountId::parse);
         let last_committed_account_id =
             last_committed_account_slot_id.and_then(global::AccountId::parse);
+        let excluded_account_ids = excluded_account_slot_ids
+            .iter()
+            .filter_map(|account_slot_id| global::AccountId::parse(account_slot_id))
+            .collect::<Vec<_>>();
         let mut account_ids = automatic_account_ids.clone();
         account_ids.extend(fixed_account_id);
         account_ids.sort_unstable();
@@ -249,6 +340,7 @@ impl AccountRegistry {
             automatic_account_ids: &automatic_account_ids,
             current_account_id,
             last_committed_account_id,
+            excluded_account_ids: &excluded_account_ids,
             credential_readiness: &credential_readiness,
             now: chrono::Utc::now().timestamp(),
         });
@@ -350,9 +442,13 @@ pub(crate) fn select_account(
         return request
             .fixed_account_slot_id
             .and_then(|slot_id| {
-                candidates
-                    .iter()
-                    .find(|candidate| candidate.account_slot_id == slot_id && candidate.ready)
+                candidates.iter().find(|candidate| {
+                    candidate.account_slot_id == slot_id
+                        && candidate.ready
+                        && !request
+                            .excluded_account_slot_ids
+                            .contains(&candidate.account_slot_id)
+                })
             })
             .map(|candidate| RotationSelection::Selected(candidate.account_slot_id.clone()))
             .unwrap_or(RotationSelection::Unavailable);
@@ -366,7 +462,11 @@ pub(crate) fn select_account(
     let mut eligible = candidates
         .iter()
         .filter(|candidate| {
-            candidate.ready && membership.contains(candidate.account_slot_id.as_str())
+            candidate.ready
+                && membership.contains(candidate.account_slot_id.as_str())
+                && !request
+                    .excluded_account_slot_ids
+                    .contains(&candidate.account_slot_id)
         })
         .collect::<Vec<_>>();
     eligible.sort_by_key(|candidate| candidate.account_number);

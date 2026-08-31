@@ -62,6 +62,7 @@ use crate::transport::RemoteControlHandle;
 use crate::turn_cost_worker::TurnCostWorker;
 use codex_analytics::AnalyticsEventsClient;
 use codex_analytics::AppServerRpcTransport;
+use codex_app_server_protocol::AccountFailoverMode;
 use codex_app_server_protocol::ClientNotification;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ClientResponsePayload;
@@ -266,6 +267,7 @@ pub(crate) struct MessageProcessorArgs {
     pub(crate) remote_control_handle: Option<RemoteControlHandle>,
     /// `None` skips startup tasks; otherwise preserve the initial config-loading path.
     pub(crate) plugin_startup_tasks: Option<PluginStartupConfig>,
+    pub(crate) account_failover_mode: AccountFailoverMode,
 }
 
 impl MessageProcessor {
@@ -290,6 +292,7 @@ impl MessageProcessor {
             rpc_transport,
             remote_control_handle,
             plugin_startup_tasks,
+            account_failover_mode,
         } = args;
         let thread_state_manager = ThreadStateManager::new();
         // The thread store is intentionally process-scoped. Config reloads can
@@ -339,6 +342,7 @@ impl MessageProcessor {
             crate::account_registry::rotation::AccountRotationService::new(
                 Arc::clone(&account_registry),
                 Arc::clone(&thread_store),
+                account_failover_mode,
             ),
         );
         let mut queue_service = None;
@@ -428,6 +432,7 @@ impl MessageProcessor {
             Arc::clone(&thread_list_state_permit),
             Arc::clone(&account_registry),
             outgoing.clone(),
+            account_failover_mode,
         ));
         thread_state_manager.attach_runtime_engine(&session_runtime);
         thread_watch_manager.attach_runtime_engine(&session_runtime);

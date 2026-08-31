@@ -1,5 +1,6 @@
 use super::*;
 use base64::Engine;
+use codex_protocol::error::AccountRejectionKind;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::RateLimitReachedType;
 use pretty_assertions::assert_eq;
@@ -48,6 +49,85 @@ fn map_api_error_preserves_retry_delay() {
                 expected_message.to_string(),
             )
         );
+    }
+}
+
+#[test]
+fn map_api_error_tags_authoritative_account_rejections() {
+    let cases = [
+        (ApiError::QuotaExceeded, AccountRejectionKind::UsageLimit),
+        (
+            ApiError::UsageNotIncluded,
+            AccountRejectionKind::UsageNotIncluded,
+        ),
+        (
+            ApiError::ModelAccessDenied,
+            AccountRejectionKind::ModelAccessDenied,
+        ),
+        (
+            ApiError::Api {
+                status: http::StatusCode::PAYMENT_REQUIRED,
+                message: "payment required".to_string(),
+            },
+            AccountRejectionKind::PaymentRequired,
+        ),
+        (
+            ApiError::Transport(TransportError::Http {
+                status: http::StatusCode::PAYMENT_REQUIRED,
+                url: Some("http://example.com/v1/responses".to_string()),
+                headers: None,
+                body: Some("payment required".to_string()),
+            }),
+            AccountRejectionKind::PaymentRequired,
+        ),
+        (
+            ApiError::Transport(TransportError::Http {
+                status: http::StatusCode::TOO_MANY_REQUESTS,
+                url: Some("http://example.com/v1/responses".to_string()),
+                headers: None,
+                body: Some(r#"{"error":{"type":"usage_limit_reached"}}"#.to_string()),
+            }),
+            AccountRejectionKind::UsageLimit,
+        ),
+        (
+            ApiError::Transport(TransportError::Http {
+                status: http::StatusCode::TOO_MANY_REQUESTS,
+                url: Some("http://example.com/v1/responses".to_string()),
+                headers: None,
+                body: Some(r#"{"error":{"type":"usage_not_included"}}"#.to_string()),
+            }),
+            AccountRejectionKind::UsageNotIncluded,
+        ),
+        (
+            ApiError::Transport(TransportError::Http {
+                status: http::StatusCode::NOT_FOUND,
+                url: Some("http://example.com/v1/responses".to_string()),
+                headers: None,
+                body: Some(r#"{"error":{"code":"model_not_found"}}"#.to_string()),
+            }),
+            AccountRejectionKind::ModelAccessDenied,
+        ),
+    ];
+
+    for (error, expected) in cases {
+        assert_eq!(
+            map_api_error(error).account_rejection_kind(),
+            Some(expected)
+        );
+    }
+}
+
+#[test]
+fn map_api_error_does_not_tag_generic_unauthorized_or_forbidden_statuses() {
+    for status in [http::StatusCode::UNAUTHORIZED, http::StatusCode::FORBIDDEN] {
+        let error = map_api_error(ApiError::Transport(TransportError::Http {
+            status,
+            url: Some("http://example.com/v1/responses".to_string()),
+            headers: None,
+            body: Some("generic rejection".to_string()),
+        }));
+
+        assert_eq!(error.account_rejection_kind(), None);
     }
 }
 

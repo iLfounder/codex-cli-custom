@@ -6,6 +6,7 @@
 #![deny(clippy::print_stdout)]
 
 mod cli;
+mod compaction_observer;
 mod event_processor;
 mod event_processor_with_human_output;
 pub(crate) mod event_processor_with_jsonl_output;
@@ -21,6 +22,9 @@ use codex_app_server_client::InProcessAppServerClient;
 use codex_app_server_client::InProcessClientStartArgs;
 use codex_app_server_client::InProcessServerEvent;
 use codex_app_server_client::TypedRequestError;
+use codex_app_server_protocol::AccountFailoverMode;
+use codex_app_server_protocol::AccountSlotListParams;
+use codex_app_server_protocol::AccountSlotListResponse;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ConfigWarningNotification;
 use codex_app_server_protocol::JSONRPCErrorError;
@@ -33,6 +37,11 @@ use codex_app_server_protocol::ReviewTarget as ApiReviewTarget;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::Thread as AppServerThread;
+use codex_app_server_protocol::ThreadAccountRotationMode;
+use codex_app_server_protocol::ThreadAccountRotationReadParams;
+use codex_app_server_protocol::ThreadAccountRotationReadResponse;
+use codex_app_server_protocol::ThreadAccountRotationUpdateParams;
+use codex_app_server_protocol::ThreadAccountRotationUpdateResponse;
 use codex_app_server_protocol::ThreadForkParams;
 use codex_app_server_protocol::ThreadForkResponse;
 use codex_app_server_protocol::ThreadHistoryMode;
@@ -118,9 +127,15 @@ pub use exec_events::CollabToolCallItem;
 pub use exec_events::CollabToolCallStatus;
 pub use exec_events::CommandExecutionItem;
 pub use exec_events::CommandExecutionStatus;
+pub use exec_events::ContextCompactionItem;
+pub use exec_events::ContextCompactionStatus;
+pub use exec_events::ContextCompactionUsage;
 pub use exec_events::ErrorItem;
 pub use exec_events::FileChangeItem;
 pub use exec_events::FileUpdateChange;
+pub use exec_events::InvocationReadyAccountRotation;
+pub use exec_events::InvocationReadyEvent;
+pub use exec_events::InvocationReadyRotationMode;
 pub use exec_events::ItemCompletedEvent;
 pub use exec_events::ItemStartedEvent;
 pub use exec_events::ItemUpdatedEvent;
@@ -138,6 +153,7 @@ pub use exec_events::ThreadItemDetails;
 pub use exec_events::ThreadStartedEvent;
 pub use exec_events::TodoItem;
 pub use exec_events::TodoListItem;
+pub use exec_events::TokenUsageBreakdown;
 pub use exec_events::TurnCompletedEvent;
 pub use exec_events::TurnFailedEvent;
 pub use exec_events::TurnStartedEvent;
@@ -145,6 +161,7 @@ pub use exec_events::Usage;
 pub use exec_events::WebSearchItem;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::future::Future;
 use std::io::IsTerminal;
 use std::io::Read;
@@ -208,6 +225,9 @@ impl RequestIdSequencer {
 }
 
 struct ExecRunArgs {
+    account_failover: cli::AccountFailover,
+    account_rotation: Option<cli::AccountRotation>,
+    invocation_ready_id: Option<String>,
     in_process_start_args: InProcessClientStartArgs,
     state_db: Option<StateDbHandle>,
     command: Option<ExecCommand>,
@@ -261,10 +281,34 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         color,
         last_message_file,
         json: json_mode,
+        account_failover,
+        account_rotation,
+        invocation_ready_id,
         prompt,
         output_schema: output_schema_path,
         mut config_overrides,
     } = cli;
+    if invocation_ready_id.is_some() {
+        if matches!(
+            command.as_ref(),
+            Some(ExecCommand::Fork(_) | ExecCommand::Review(_))
+        ) {
+            anyhow::bail!(
+                "--invocation-ready-id is supported only for exec and resume invocations"
+            );
+        }
+        if !json_mode {
+            anyhow::bail!("--invocation-ready-id requires --json");
+        }
+        if !cli::has_forced_stdin_prompt(command.as_ref(), prompt.as_deref()) {
+            anyhow::bail!(
+                "--invocation-ready-id requires a forced stdin prompt represented by '-'"
+            );
+        }
+        if !matches!(account_failover, cli::AccountFailover::PreSemantic) {
+            anyhow::bail!("--invocation-ready-id requires --account-failover pre-semantic");
+        }
+    }
     let mut shared = shared.into_inner();
     shared.take_auto_review_config_overrides(&mut config_overrides);
     let SharedCliOptions {
@@ -561,6 +605,9 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         channel_capacity: DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
     };
     run_exec_session(ExecRunArgs {
+        account_failover,
+        account_rotation,
+        invocation_ready_id,
         in_process_start_args,
         state_db,
         command,
@@ -658,8 +705,105 @@ async fn load_bootstrap_config_or_exit(
     }
 }
 
+fn build_initial_operation(
+    command: Option<&ExecCommand>,
+    root_prompt: Option<String>,
+    images: Vec<PathBuf>,
+    output_schema_path: Option<PathBuf>,
+    ephemeral: bool,
+    has_last_message_file: bool,
+) -> anyhow::Result<(InitialOperation, String)> {
+    match (command, root_prompt, images) {
+        (Some(ExecCommand::Review(review_cli)), _, _) => {
+            let review_request = build_review_request(review_cli)?;
+            let summary = codex_core::review_prompts::user_facing_hint(&review_request.target);
+            Ok((InitialOperation::Review { review_request }, summary))
+        }
+        (Some(ExecCommand::Resume(args)), root_prompt, imgs) => {
+            let prompt_arg = args
+                .prompt
+                .clone()
+                .or_else(|| args.last.then_some(args.session_id.clone()).flatten())
+                .or(root_prompt);
+            let prompt_text = resolve_prompt(prompt_arg);
+            let mut items: Vec<UserInput> = imgs
+                .into_iter()
+                .chain(args.images.iter().cloned())
+                .map(|path| UserInput::LocalImage { path, detail: None })
+                .collect();
+            items.push(UserInput::Text {
+                text: prompt_text.clone(),
+                // CLI input doesn't track UI element ranges, so none are available here.
+                text_elements: Vec::new(),
+            });
+            let output_schema = load_output_schema(output_schema_path);
+            Ok((
+                InitialOperation::UserTurn {
+                    items,
+                    output_schema,
+                },
+                prompt_text,
+            ))
+        }
+        (Some(ExecCommand::Fork(args)), root_prompt, imgs) => {
+            let prompt_arg = args.prompt.clone().or(root_prompt);
+            if let Some(prompt_arg) = prompt_arg {
+                let prompt_text = resolve_prompt(Some(prompt_arg));
+                let mut items: Vec<UserInput> = imgs
+                    .into_iter()
+                    .chain(args.images.iter().cloned())
+                    .map(|path| UserInput::LocalImage { path, detail: None })
+                    .collect();
+                items.push(UserInput::Text {
+                    text: prompt_text.clone(),
+                    text_elements: Vec::new(),
+                });
+                let output_schema = load_output_schema(output_schema_path);
+                Ok((
+                    InitialOperation::UserTurn {
+                        items,
+                        output_schema,
+                    },
+                    prompt_text,
+                ))
+            } else if !imgs.is_empty() || !args.images.is_empty() {
+                anyhow::bail!("Forking with images requires a prompt");
+            } else if output_schema_path.is_some() || has_last_message_file {
+                anyhow::bail!("Forking with output options requires a prompt");
+            } else if ephemeral {
+                anyhow::bail!("Ephemeral forks require a prompt");
+            } else {
+                Ok((InitialOperation::ForkOnly, String::new()))
+            }
+        }
+        (None, root_prompt, imgs) => {
+            let prompt_text = resolve_root_prompt(root_prompt);
+            let mut items: Vec<UserInput> = imgs
+                .into_iter()
+                .map(|path| UserInput::LocalImage { path, detail: None })
+                .collect();
+            items.push(UserInput::Text {
+                text: prompt_text.clone(),
+                // CLI input doesn't track UI element ranges, so none are available here.
+                text_elements: Vec::new(),
+            });
+            let output_schema = load_output_schema(output_schema_path);
+            Ok((
+                InitialOperation::UserTurn {
+                    items,
+                    output_schema,
+                },
+                prompt_text,
+            ))
+        }
+    }
+}
+
 async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     let ExecRunArgs {
+        account_failover,
+        account_rotation,
+        invocation_ready_id,
         in_process_start_args,
         state_db,
         command,
@@ -708,95 +852,18 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     let default_approval_policy = config.permissions.approval_policy.value();
     let default_effort = config.model_reasoning_effort.clone();
 
-    let (initial_operation, prompt_summary) = match (command.as_ref(), prompt, images) {
-        (Some(ExecCommand::Review(review_cli)), _, _) => {
-            let review_request = build_review_request(review_cli)?;
-            let summary = codex_core::review_prompts::user_facing_hint(&review_request.target);
-            (InitialOperation::Review { review_request }, summary)
-        }
-        (Some(ExecCommand::Resume(args)), root_prompt, imgs) => {
-            let prompt_arg = args
-                .prompt
-                .clone()
-                .or_else(|| {
-                    if args.last {
-                        args.session_id.clone()
-                    } else {
-                        None
-                    }
-                })
-                .or(root_prompt);
-            let prompt_text = resolve_prompt(prompt_arg);
-            let mut items: Vec<UserInput> = imgs
-                .into_iter()
-                .chain(args.images.iter().cloned())
-                .map(|path| UserInput::LocalImage { path, detail: None })
-                .collect();
-            items.push(UserInput::Text {
-                text: prompt_text.clone(),
-                // CLI input doesn't track UI element ranges, so none are available here.
-                text_elements: Vec::new(),
-            });
-            let output_schema = load_output_schema(output_schema_path.clone());
-            (
-                InitialOperation::UserTurn {
-                    items,
-                    output_schema,
-                },
-                prompt_text,
-            )
-        }
-        (Some(ExecCommand::Fork(args)), root_prompt, imgs) => {
-            let prompt_arg = args.prompt.clone().or(root_prompt);
-            if let Some(prompt_arg) = prompt_arg {
-                let prompt_text = resolve_prompt(Some(prompt_arg));
-                let mut items: Vec<UserInput> = imgs
-                    .into_iter()
-                    .chain(args.images.iter().cloned())
-                    .map(|path| UserInput::LocalImage { path, detail: None })
-                    .collect();
-                items.push(UserInput::Text {
-                    text: prompt_text.clone(),
-                    text_elements: Vec::new(),
-                });
-                let output_schema = load_output_schema(output_schema_path);
-                (
-                    InitialOperation::UserTurn {
-                        items,
-                        output_schema,
-                    },
-                    prompt_text,
-                )
-            } else if !imgs.is_empty() || !args.images.is_empty() {
-                anyhow::bail!("Forking with images requires a prompt");
-            } else if output_schema_path.is_some() || last_message_file.is_some() {
-                anyhow::bail!("Forking with output options requires a prompt");
-            } else if config.ephemeral {
-                anyhow::bail!("Ephemeral forks require a prompt");
-            } else {
-                (InitialOperation::ForkOnly, String::new())
-            }
-        }
-        (None, root_prompt, imgs) => {
-            let prompt_text = resolve_root_prompt(root_prompt);
-            let mut items: Vec<UserInput> = imgs
-                .into_iter()
-                .map(|path| UserInput::LocalImage { path, detail: None })
-                .collect();
-            items.push(UserInput::Text {
-                text: prompt_text.clone(),
-                // CLI input doesn't track UI element ranges, so none are available here.
-                text_elements: Vec::new(),
-            });
-            let output_schema = load_output_schema(output_schema_path);
-            (
-                InitialOperation::UserTurn {
-                    items,
-                    output_schema,
-                },
-                prompt_text,
-            )
-        }
+    let handshake_enabled = invocation_ready_id.is_some();
+    let mut initial_operation = if handshake_enabled {
+        None
+    } else {
+        Some(build_initial_operation(
+            command.as_ref(),
+            prompt.clone(),
+            images.clone(),
+            output_schema_path.clone(),
+            config.ephemeral,
+            last_message_file.is_some(),
+        )?)
     };
 
     // When --yolo (dangerously_bypass_approvals_and_sandbox) is set, also skip the git repo check
@@ -810,11 +877,29 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     }
 
     let mut request_ids = RequestIdSequencer::new();
-    let mut client = InProcessAppServerClient::start(in_process_start_args)
-        .await
-        .map_err(|err| {
-            anyhow::anyhow!("failed to initialize in-process app-server client: {err}")
-        })?;
+    let mut client = InProcessAppServerClient::start_for_exec(
+        in_process_start_args,
+        exec_account_failover_mode(account_failover),
+    )
+    .await
+    .map_err(|err| anyhow::anyhow!("failed to initialize in-process app-server client: {err}"))?;
+
+    if let Some(invocation_id) = invocation_ready_id.as_deref() {
+        event_processor
+            .print_invocation_ready(invocation_ready_event(invocation_id, account_rotation))
+            .map_err(|err| anyhow::anyhow!("failed to flush invocation readiness: {err}"))?;
+        initial_operation = Some(build_initial_operation(
+            command.as_ref(),
+            prompt,
+            images,
+            output_schema_path,
+            config.ephemeral,
+            last_message_file.is_some(),
+        )?);
+    }
+    let Some((initial_operation, prompt_summary)) = initial_operation else {
+        anyhow::bail!("initial operation must be built before thread lifecycle requests");
+    };
 
     // Resolve resume and fork through existing app-server thread lifecycle APIs.
     let (primary_thread_id, fallback_session_configured) = if let Some(ExecCommand::Resume(args)) =
@@ -930,6 +1015,19 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     // avoidable startup latency on the in-process path.
     let session_configured = fallback_session_configured;
 
+    if let Some(account_rotation) = account_rotation
+        && !matches!(&initial_operation, InitialOperation::UserTurn { .. })
+    {
+        bootstrap_account_rotation(
+            &client,
+            &mut request_ids,
+            primary_thread_id_for_span.as_str(),
+            account_rotation,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+    }
+
     exec_span.record("thread.id", primary_thread_id_for_span.as_str());
 
     // Print the effective configuration and initial request so users can see what Codex
@@ -968,39 +1066,37 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
             items,
             output_schema,
         } => {
-            let response: TurnStartResponse = send_request_with_response(
+            let response = start_turn_with_account_rotation(
                 &client,
-                ClientRequest::TurnStart {
-                    request_id: request_ids.next(),
-                    params: TurnStartParams {
-                        thread_id: primary_thread_id_for_span.clone(),
-                        turn_trigger: None,
-                        expected_execution_account: None,
-                        client_user_message_id: None,
-                        input: items.into_iter().map(Into::into).collect(),
-                        tool_output: None,
-                        responsesapi_client_metadata: None,
-                        additional_context: None,
-                        environments: None,
-                        cwd: Some(default_cwd),
-                        runtime_workspace_roots: None,
-                        approval_policy: Some(default_approval_policy.into()),
-                        approvals_reviewer: None,
-                        sandbox_policy: None,
-                        permissions: None,
-                        model: None,
-                        service_tier: None,
-                        service_tier_for_turn: None,
-                        effort: default_effort,
-                        summary: None,
-                        personality: None,
-                        output_schema,
-                        collaboration_mode: None,
-                        multi_agent_mode: None,
-                        cyber_access_program: None,
-                    },
+                &mut request_ids,
+                account_rotation.map(|mode| (primary_thread_id_for_span.as_str(), mode)),
+                TurnStartParams {
+                    thread_id: primary_thread_id_for_span.clone(),
+                    turn_trigger: None,
+                    expected_execution_account: None,
+                    client_user_message_id: None,
+                    input: items.into_iter().map(Into::into).collect(),
+                    tool_output: None,
+                    responsesapi_client_metadata: None,
+                    additional_context: None,
+                    environments: None,
+                    cwd: Some(default_cwd),
+                    runtime_workspace_roots: None,
+                    approval_policy: Some(default_approval_policy.into()),
+                    approvals_reviewer: None,
+                    sandbox_policy: None,
+                    permissions: None,
+                    model: None,
+                    service_tier: None,
+                    service_tier_for_turn: None,
+                    effort: default_effort,
+                    summary: None,
+                    personality: None,
+                    output_schema,
+                    collaboration_mode: None,
+                    multi_agent_mode: None,
+                    cyber_access_program: None,
                 },
-                "turn/start",
             )
             .await
             .map_err(anyhow::Error::msg)?;
@@ -1174,6 +1270,199 @@ async fn start_thread(
             Err(err) => return Err(format!("thread/start: {err}")),
         }
     }
+}
+
+fn exec_account_failover_mode(account_failover: cli::AccountFailover) -> AccountFailoverMode {
+    match account_failover {
+        cli::AccountFailover::Disabled => AccountFailoverMode::Disabled,
+        cli::AccountFailover::PreSemantic => AccountFailoverMode::PreSemantic,
+    }
+}
+
+fn invocation_ready_event(
+    invocation_id: &str,
+    account_rotation: Option<cli::AccountRotation>,
+) -> InvocationReadyEvent {
+    let requested = account_rotation.map(Into::into);
+    InvocationReadyEvent {
+        protocol_version: 1,
+        invocation_id: invocation_id.to_string(),
+        provenance: "codex_exec".to_string(),
+        process_scope: "in_process".to_string(),
+        capabilities: vec![
+            "ananke_account_rotation_v1".to_string(),
+            "ananke_account_failover_v1".to_string(),
+        ],
+        account_failover: "pre_semantic".to_string(),
+        account_rotation: InvocationReadyAccountRotation {
+            supported: vec![
+                InvocationReadyRotationMode::QuotaAware,
+                InvocationReadyRotationMode::RoundRobin,
+                InvocationReadyRotationMode::ExhaustThenNext,
+            ],
+            requested,
+        },
+    }
+}
+
+impl From<cli::AccountRotation> for InvocationReadyRotationMode {
+    fn from(mode: cli::AccountRotation) -> Self {
+        match mode {
+            cli::AccountRotation::QuotaAware => Self::QuotaAware,
+            cli::AccountRotation::RoundRobin => Self::RoundRobin,
+            cli::AccountRotation::ExhaustThenNext => Self::ExhaustThenNext,
+        }
+    }
+}
+
+/// Sends lifecycle requests for the exec account-rotation bootstrap.
+///
+/// Production uses the in-process app-server client; focused tests provide a scripted client so
+/// bootstrap ordering and fail-closed behavior can be observed without starting a model turn.
+trait ExecRequestClient {
+    fn request_typed<T>(
+        &self,
+        request: ClientRequest,
+    ) -> impl Future<Output = Result<T, TypedRequestError>> + Send
+    where
+        T: serde::de::DeserializeOwned + Send;
+}
+
+impl ExecRequestClient for InProcessAppServerClient {
+    async fn request_typed<T>(&self, request: ClientRequest) -> Result<T, TypedRequestError>
+    where
+        T: serde::de::DeserializeOwned + Send,
+    {
+        InProcessAppServerClient::request_typed(self, request).await
+    }
+}
+
+async fn send_exec_request_with_response<T, C>(
+    client: &C,
+    request: ClientRequest,
+    method: &str,
+) -> Result<T, String>
+where
+    T: serde::de::DeserializeOwned + Send,
+    C: ExecRequestClient,
+{
+    client.request_typed(request).await.map_err(|err| {
+        if method.is_empty() {
+            err.to_string()
+        } else {
+            format!("{method}: {err}")
+        }
+    })
+}
+
+async fn start_turn_with_account_rotation<C>(
+    client: &C,
+    request_ids: &mut RequestIdSequencer,
+    account_rotation: Option<(&str, cli::AccountRotation)>,
+    params: TurnStartParams,
+) -> Result<TurnStartResponse, String>
+where
+    C: ExecRequestClient,
+{
+    if let Some((thread_id, mode)) = account_rotation {
+        bootstrap_account_rotation(client, request_ids, thread_id, mode).await?;
+    }
+    send_exec_request_with_response(
+        client,
+        ClientRequest::TurnStart {
+            request_id: request_ids.next(),
+            params,
+        },
+        "turn/start",
+    )
+    .await
+}
+
+async fn bootstrap_account_rotation<C>(
+    client: &C,
+    request_ids: &mut RequestIdSequencer,
+    thread_id: &str,
+    mode: cli::AccountRotation,
+) -> Result<(), String>
+where
+    C: ExecRequestClient,
+{
+    let mut cursor = None;
+    let mut registry_revision = None;
+    let mut account_slots = Vec::new();
+    let mut seen_cursors = HashSet::new();
+    loop {
+        let response: AccountSlotListResponse = send_exec_request_with_response(
+            client,
+            ClientRequest::AccountSlotList {
+                request_id: request_ids.next(),
+                params: AccountSlotListParams {
+                    cursor,
+                    limit: Some(100),
+                },
+            },
+            "accountSlot/list",
+        )
+        .await?;
+        if registry_revision.is_some_and(|revision| revision != response.registry_revision) {
+            return Err("account rotation inventory changed during bootstrap".to_string());
+        }
+        registry_revision = Some(response.registry_revision);
+        account_slots.extend(
+            response
+                .data
+                .into_iter()
+                .map(|slot| (slot.account_number, slot.account_slot_id)),
+        );
+        let Some(next_cursor) = response.next_cursor else {
+            break;
+        };
+        if next_cursor.is_empty() || !seen_cursors.insert(next_cursor.clone()) {
+            return Err("account rotation inventory returned an invalid cursor".to_string());
+        }
+        cursor = Some(next_cursor);
+    }
+    if account_slots.is_empty() {
+        return Err("account rotation requires at least one registered account".to_string());
+    }
+    account_slots.sort_by_key(|(account_number, _)| *account_number);
+    let automatic_account_slot_ids = account_slots
+        .into_iter()
+        .map(|(_, account_slot_id)| account_slot_id)
+        .collect();
+    let current: ThreadAccountRotationReadResponse = send_exec_request_with_response(
+        client,
+        ClientRequest::ThreadAccountRotationRead {
+            request_id: request_ids.next(),
+            params: ThreadAccountRotationReadParams {
+                thread_id: thread_id.to_string(),
+            },
+        },
+        "thread/account/rotation/read",
+    )
+    .await?;
+    let _: ThreadAccountRotationUpdateResponse = send_exec_request_with_response(
+        client,
+        ClientRequest::ThreadAccountRotationUpdate {
+            request_id: request_ids.next(),
+            params: ThreadAccountRotationUpdateParams {
+                thread_id: thread_id.to_string(),
+                expected_rotation_revision: current.rotation.revision,
+                mode: match mode {
+                    cli::AccountRotation::QuotaAware => ThreadAccountRotationMode::QuotaAware,
+                    cli::AccountRotation::RoundRobin => ThreadAccountRotationMode::RoundRobin,
+                    cli::AccountRotation::ExhaustThenNext => {
+                        ThreadAccountRotationMode::ExhaustThenNext
+                    }
+                },
+                fixed_account_slot_id: current.rotation.fixed_account_slot_id,
+                automatic_account_slot_ids,
+            },
+        },
+        "thread/account/rotation/update",
+    )
+    .await?;
+    Ok(())
 }
 
 fn thread_start_params_from_config(

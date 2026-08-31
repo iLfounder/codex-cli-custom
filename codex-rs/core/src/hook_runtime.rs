@@ -157,8 +157,18 @@ pub(crate) async fn run_pending_session_start_hooks(
             permission_mode: hook_permission_mode(turn_context),
             target,
         };
-        let hooks = sess.hooks();
+        let failover = turn_context
+            .extension_data
+            .get::<crate::session::account_failover::PreSemanticAccountFailover>();
+        let hooks = failover
+            .as_ref()
+            .map_or_else(|| sess.hooks(), |failover| failover.hooks(sess));
         let preview_runs = hooks.preview_session_start(&request);
+        if !preview_runs.is_empty()
+            && let Some(failover) = failover
+        {
+            failover.mark_effect(crate::session::account_failover::AttemptEffect::Hook);
+        }
         if run_context_injecting_hook(
             sess,
             turn_context,
@@ -676,8 +686,18 @@ pub(crate) async fn inspect_pending_input(
                 permission_mode: hook_permission_mode(turn_context),
                 prompt: UserMessageItem::new(content).message(),
             };
-            let hooks = sess.hooks();
+            let failover = turn_context
+                .extension_data
+                .get::<crate::session::account_failover::PreSemanticAccountFailover>();
+            let hooks = failover
+                .as_ref()
+                .map_or_else(|| sess.hooks(), |failover| failover.hooks(sess));
             let preview_runs = hooks.preview_user_prompt_submit(&request);
+            if !preview_runs.is_empty()
+                && let Some(failover) = failover
+            {
+                failover.mark_effect(crate::session::account_failover::AttemptEffect::Hook);
+            }
             run_context_injecting_hook(
                 sess,
                 turn_context,

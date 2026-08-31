@@ -41,6 +41,8 @@ use codex_thread_store::ThreadStore;
 use codex_thread_store::ThreadStoreError;
 use serde::Deserialize;
 use serde::Serialize;
+use sha2::Digest;
+use sha2::Sha256;
 use tokio::sync::Mutex;
 use tokio::sync::OwnedMutexGuard;
 use tokio::sync::Semaphore;
@@ -338,6 +340,20 @@ struct AccountRegistryState {
     projection_dirty: bool,
 }
 
+#[derive(Default)]
+struct GlobalInventoryRevision {
+    directory_fingerprint: Option<[u8; 32]>,
+    fingerprint: Option<[u8; 32]>,
+    revision: u64,
+    notified_directory_fingerprint: Option<[u8; 32]>,
+    notified_revision: u64,
+}
+
+#[derive(Clone, Copy)]
+struct GlobalInventoryUpdate {
+    revision: u64,
+}
+
 pub(crate) struct AccountRegistry {
     config: Arc<Config>,
     config_manager: ConfigManager,
@@ -349,6 +365,7 @@ pub(crate) struct AccountRegistry {
     quota_cache: quota::QuotaCache,
     exhaustion_hints: Mutex<HashSet<rotation::ExhaustionHintKey>>,
     global_catalog: Arc<global::GlobalAccountCatalog>,
+    global_inventory_revision: StdMutex<GlobalInventoryRevision>,
     global_directory_user_home: Option<PathBuf>,
     global_directory: RwLock<global::GlobalAccountDirectory>,
     global_runtimes: Mutex<HashMap<global::AccountId, Arc<global::GlobalAccountRuntime>>>,
@@ -446,6 +463,7 @@ impl AccountRegistry {
             quota_cache: quota::QuotaCache::default(),
             exhaustion_hints: Mutex::new(HashSet::new()),
             global_catalog: Arc::new(global::GlobalAccountCatalog::default()),
+            global_inventory_revision: StdMutex::new(GlobalInventoryRevision::default()),
             global_directory_user_home,
             global_directory: RwLock::new(global_directory),
             global_runtimes: Mutex::new(HashMap::new()),
@@ -467,42 +485,93 @@ impl AccountRegistry {
         refreshed
     }
 
+    async fn global_inventory_snapshot(
+        &self,
+        directory: &global::GlobalAccountDirectory,
+        now: i64,
+    ) -> (Vec<AccountSlotSnapshot>, GlobalInventoryUpdate) {
+        let mut snapshots = Vec::with_capacity(directory.homes.len());
+        for account_id in directory.homes.keys() {
+            snapshots.push(
+                self.global_snapshot(
+                    *account_id,
+                    directory.process_account_id == Some(*account_id),
+                    /*registry_revision*/ 0,
+                    now,
+                )
+                .await,
+            );
+        }
+        let directory_fingerprint = directory.inventory_fingerprint();
+        let mut digest = Sha256::new();
+        digest.update(b"codex-visible-account-inventory/v1\0");
+        digest.update(directory_fingerprint);
+        for snapshot in &snapshots {
+            match serde_json::to_vec(snapshot) {
+                Ok(encoded) => {
+                    digest.update((encoded.len() as u64).to_be_bytes());
+                    digest.update(encoded);
+                }
+                Err(_) => digest.update(0_u64.to_be_bytes()),
+            }
+        }
+        let fingerprint = digest.finalize().into();
+        let mut state = self
+            .global_inventory_revision
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let changed = state.fingerprint != Some(fingerprint);
+        if changed {
+            state.fingerprint = Some(fingerprint);
+            state.revision = state.revision.saturating_add(1).max(1);
+        }
+        state.directory_fingerprint = Some(directory_fingerprint);
+        let update = GlobalInventoryUpdate {
+            revision: state.revision,
+        };
+        drop(state);
+        for snapshot in &mut snapshots {
+            snapshot.registry_revision = update.revision;
+        }
+        (snapshots, update)
+    }
+
+    fn claim_global_inventory_notification(&self, revision: u64) -> Option<bool> {
+        let mut state = self
+            .global_inventory_revision
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.notified_revision == revision {
+            return None;
+        }
+        let directory_changed = state.notified_directory_fingerprint != state.directory_fingerprint;
+        state.notified_revision = revision;
+        state.notified_directory_fingerprint = state.directory_fingerprint;
+        Some(directory_changed)
+    }
+
     pub(crate) async fn list(
         &self,
         params: AccountSlotListParams,
     ) -> Result<AccountSlotListResponse, JSONRPCErrorError> {
         let global_directory = self.refresh_global_directory();
-        if global_directory.process_account_id.is_some() && self.global_catalog.generation() == 0 {
-            let _ = self.ensure_global_catalog().await;
-        }
-        let generation = self.global_catalog.generation();
-        let projections = self
-            .global_catalog
-            .projection(chrono::Utc::now().timestamp());
-        if global_directory.process_account_id.is_some()
-            && generation > 0
-            && !projections.is_empty()
-        {
+        if global_directory.process_account_id.is_some() {
+            let (snapshots, update) = self
+                .global_inventory_snapshot(&global_directory, chrono::Utc::now().timestamp())
+                .await;
             let limit = match params.limit.map(|limit| limit as usize) {
                 Some(0) => return Err(invalid_params("accountSlot/list limit must be positive")),
                 Some(limit) => limit.min(MAX_LIST_LIMIT),
                 None => DEFAULT_LIST_LIMIT,
             };
-            let start = global_cursor_start(params.cursor.as_deref(), generation, &projections)?;
-            let end = start.saturating_add(limit).min(projections.len());
-            let now = chrono::Utc::now().timestamp();
-            let mut data = Vec::with_capacity(end.saturating_sub(start));
-            for projection in &projections[start..end] {
-                data.push(
-                    self.global_snapshot(projection.clone(), generation, now)
-                        .await,
-                );
-            }
-            let next_cursor = if end < projections.len() {
+            let start = global_cursor_start(params.cursor.as_deref(), update.revision, &snapshots)?;
+            let end = start.saturating_add(limit).min(snapshots.len());
+            let data = snapshots[start..end].to_vec();
+            let next_cursor = if end < snapshots.len() {
                 Some(
                     encode_cursor(AccountSlotCursor {
-                        revision: generation,
-                        after_slot_id: projections[end - 1].account_slot_id.clone(),
+                        revision: update.revision,
+                        after_slot_id: snapshots[end - 1].account_slot_id.clone(),
                     })
                     .map_err(|_| internal_error("account slot cursor could not be serialized"))?,
                 )
@@ -512,7 +581,7 @@ impl AccountRegistry {
             return Ok(AccountSlotListResponse {
                 data,
                 next_cursor,
-                registry_revision: generation,
+                registry_revision: update.revision,
                 catalog_kind: AccountSlotCatalogKind::Global,
                 multi_account: AccountSlotCapability {
                     available: true,
@@ -933,21 +1002,13 @@ impl AccountRegistry {
         &self,
     ) -> Result<Vec<RotationSlotIdentity>, JSONRPCErrorError> {
         let global_directory = self.refresh_global_directory();
-        if global_directory.process_account_id.is_some() && self.global_catalog.generation() == 0 {
-            let _ = self.ensure_global_catalog().await;
-        }
-        let projections = self
-            .global_catalog
-            .projection(chrono::Utc::now().timestamp());
-        if global_directory.process_account_id.is_some()
-            && self.global_catalog.generation() > 0
-            && !projections.is_empty()
-        {
-            return Ok(projections
-                .into_iter()
-                .map(|account| RotationSlotIdentity {
-                    account_slot_id: account.account_slot_id,
-                    account_number: account.account_number,
+        if global_directory.process_account_id.is_some() {
+            return Ok(global_directory
+                .homes
+                .keys()
+                .map(|account_id| RotationSlotIdentity {
+                    account_slot_id: account_id.to_string(),
+                    account_number: account_id.number(),
                 })
                 .collect());
         }
@@ -1078,16 +1139,8 @@ pub(crate) mod rotation;
 
 impl ExecutionAccountResolver for AccountRegistry {
     fn initial_binding_for_new_thread(&self) -> ExecutionAccountBinding {
-        let process_account_id = self.refresh_global_directory().process_account_id;
-        process_account_id
-            .filter(|account_id| {
-                self.global_catalog.generation() > 0
-                    && self
-                        .global_catalog
-                        .projection(chrono::Utc::now().timestamp())
-                        .iter()
-                        .any(|projection| projection.account_slot_id == account_id.to_string())
-            })
+        self.refresh_global_directory()
+            .process_account_id
             .map_or_else(
                 || ExecutionAccountBinding {
                     slot_id: DEFAULT_SLOT_ID.to_string(),
@@ -1252,7 +1305,7 @@ fn cursor_start(
 fn global_cursor_start(
     cursor: Option<&str>,
     revision: u64,
-    accounts: &[global::CatalogAccountProjection],
+    accounts: &[AccountSlotSnapshot],
 ) -> Result<usize, JSONRPCErrorError> {
     let Some(cursor) = cursor else {
         return Ok(0);

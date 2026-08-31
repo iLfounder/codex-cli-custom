@@ -33,6 +33,42 @@ fn codex_err_debug_preserves_legacy_shape() {
 }
 
 #[test]
+fn account_rejection_sidecar_preserves_public_error_projection() {
+    let untagged = CodexErr::UnexpectedStatus(UnexpectedResponseError {
+        status: StatusCode::PAYMENT_REQUIRED,
+        body: "payment required".to_string(),
+        user_message: None,
+        url: None,
+        cf_ray: None,
+        request_id: None,
+        identity_authorization_error: None,
+        identity_error_code: None,
+    });
+    let tagged = CodexErr::UnexpectedStatus(UnexpectedResponseError {
+        status: StatusCode::PAYMENT_REQUIRED,
+        body: "payment required".to_string(),
+        user_message: None,
+        url: None,
+        cf_ray: None,
+        request_id: None,
+        identity_authorization_error: None,
+        identity_error_code: None,
+    })
+    .with_account_rejection(AccountRejectionKind::PaymentRequired);
+
+    assert_eq!(tagged.to_string(), untagged.to_string());
+    assert_eq!(format!("{tagged:?}"), format!("{untagged:?}"));
+    assert_eq!(
+        tagged.to_codex_protocol_error(),
+        untagged.to_codex_protocol_error()
+    );
+    assert_eq!(
+        tagged.account_rejection_kind(),
+        Some(AccountRejectionKind::PaymentRequired)
+    );
+}
+
+#[test]
 fn retryability_preserves_error_details_distinctions() {
     let errors = [
         (CodexErr::ServerOverloaded, false),

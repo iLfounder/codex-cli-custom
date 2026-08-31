@@ -77,6 +77,18 @@ impl GlobalAccountDirectory {
             process_account_id,
         }
     }
+
+    pub(crate) fn inventory_fingerprint(&self) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(b"codex-account-inventory/v1\0");
+        for (account_id, home) in &self.homes {
+            digest.update(account_id.number().to_be_bytes());
+            digest.update(b"\0");
+            digest.update(home.to_string_lossy().as_bytes());
+            digest.update(b"\0");
+        }
+        digest.finalize().into()
+    }
 }
 
 fn read_registry(path: &Path) -> Option<String> {

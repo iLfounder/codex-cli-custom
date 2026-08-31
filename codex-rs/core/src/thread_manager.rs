@@ -85,7 +85,11 @@ use codex_thread_store::LoadThreadHistoryParams;
 use codex_thread_store::LocalThreadStore;
 use codex_thread_store::LocalThreadStoreConfig;
 use codex_thread_store::MoveThreadToSectionParams;
+use codex_thread_store::PrepareThreadResumeParams;
+use codex_thread_store::PrepareThreadResumeTarget;
 use codex_thread_store::PreparedFork;
+use codex_thread_store::PreparedThreadResume;
+use codex_thread_store::PreparedThreadResumeAuthority;
 use codex_thread_store::ReadThreadByRolloutPathParams;
 use codex_thread_store::ReadThreadParams;
 use codex_thread_store::StoredModelContext;
@@ -272,12 +276,24 @@ impl StartThreadOptions {
             reserved_thread_id: None,
         }
     }
+
+    fn ensure_reserved_thread_id_is_valid(&self) -> CodexResult<()> {
+        if self.reserved_thread_id.is_some()
+            && matches!(&self.initial_history, InitialHistory::Resumed(_))
+        {
+            return Err(CodexErr::InvalidRequest(
+                "reserved thread ID cannot be used when resuming a thread".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 struct ThreadSpawnRequest {
     options: StartThreadOptions,
     auth_manager: Arc<AuthManager>,
     execution_account: Option<Arc<ExecutionAccountContext>>,
+    prepared_resume: Option<PreparedThreadResumeAuthority>,
     agent_control: AgentControl,
     parent_thread_id: Option<ThreadId>,
     forked_from_thread_id: Option<ThreadId>,
@@ -297,6 +313,7 @@ impl ThreadSpawnRequest {
             options,
             auth_manager,
             execution_account: None,
+            prepared_resume: None,
             agent_control,
             parent_thread_id: None,
             forked_from_thread_id: None,
@@ -348,6 +365,7 @@ pub(crate) struct ResumeThreadWithHistoryOptions {
     pub(crate) inherited_environments: Option<TurnEnvironmentSnapshot>,
     pub(crate) inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
     pub(crate) client_mcp_extensions: Option<ClientMcpExtensions>,
+    pub(crate) prepared_resume: PreparedThreadResumeAuthority,
 }
 
 /// Shared, `Arc`-owned state for [`ThreadManager`]. This `Arc` is required to have a single
@@ -1344,6 +1362,20 @@ impl ThreadManager {
         options: StartThreadOptions,
         execution_account: Arc<ExecutionAccountContext>,
     ) -> CodexResult<NewThread> {
+        options.ensure_reserved_thread_id_is_valid()?;
+        if let Some(thread) = self
+            .state
+            .running_thread_for_resume(&options.initial_history)
+            .await?
+        {
+            return Ok(thread);
+        }
+        let prepared_resume = self
+            .prepare_resume_authority_if_needed(
+                &options.initial_history,
+                /*prepared_resume*/ None,
+            )
+            .await?;
         let agent_control = self.agent_control_for_config(&options.config);
         let mut request = ThreadSpawnRequest::new(
             options,
@@ -1351,6 +1383,7 @@ impl ThreadManager {
             agent_control,
         );
         request.execution_account = Some(execution_account);
+        request.prepared_resume = prepared_resume;
         Box::pin(self.state.spawn_thread(request)).await
     }
 
@@ -1386,6 +1419,22 @@ impl ThreadManager {
         mut options: StartThreadOptions,
         forked_from_thread_id: Option<ThreadId>,
     ) -> CodexResult<NewThread> {
+        options.ensure_reserved_thread_id_is_valid()?;
+        if let Some(thread) = self
+            .state
+            .running_thread_for_resume(&options.initial_history)
+            .await?
+        {
+            return Ok(thread);
+        }
+        // Fork and subagent paths convert source history to `InitialHistory::Forked`
+        // before reaching this point, so only an actual cold resume acquires writer authority.
+        let prepared_resume = self
+            .prepare_resume_authority_if_needed(
+                &options.initial_history,
+                /*prepared_resume*/ None,
+            )
+            .await?;
         let agent_control = self.agent_control_for_config(&options.config);
         let (resumed_session_source, resumed_thread_source) = options
             .initial_history
@@ -1401,6 +1450,7 @@ impl ThreadManager {
         let mut request =
             ThreadSpawnRequest::new(options, Arc::clone(&self.state.auth_manager), agent_control);
         request.forked_from_thread_id = forked_from_thread_id;
+        request.prepared_resume = prepared_resume;
         Box::pin(self.state.spawn_thread(request)).await
     }
 
@@ -1449,10 +1499,15 @@ impl ThreadManager {
         parent_trace: Option<W3cTraceContext>,
         client_mcp_extensions: ClientMcpExtensions,
     ) -> CodexResult<NewThread> {
-        let initial_history = self.initial_history_from_rollout_path(rollout_path).await?;
-        Box::pin(self.resume_thread_with_history(
+        let prepared = self
+            .state
+            .prepare_thread_resume(PrepareThreadResumeTarget::RolloutPath(rollout_path))
+            .await?;
+        let (initial_history, prepared_resume) = prepared_resume_to_initial_history(prepared)?;
+        Box::pin(self.resume_prepared_thread_with_history(
             config,
             initial_history,
+            prepared_resume,
             auth_manager,
             Vec::new(),
             parent_trace,
@@ -1504,6 +1559,55 @@ impl ThreadManager {
         parent_trace: Option<W3cTraceContext>,
         client_mcp_extensions: ClientMcpExtensions,
     ) -> CodexResult<NewThread> {
+        self.resume_thread_with_history_inner(
+            config,
+            initial_history,
+            /*prepared_resume*/ None,
+            auth_manager,
+            dynamic_tools,
+            parent_trace,
+            client_mcp_extensions,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn resume_prepared_thread_with_history(
+        &self,
+        config: Config,
+        initial_history: InitialHistory,
+        prepared_resume: PreparedThreadResumeAuthority,
+        auth_manager: Arc<AuthManager>,
+        dynamic_tools: Vec<codex_protocol::dynamic_tools::DynamicToolSpec>,
+        parent_trace: Option<W3cTraceContext>,
+        client_mcp_extensions: ClientMcpExtensions,
+    ) -> CodexResult<NewThread> {
+        self.resume_thread_with_history_inner(
+            config,
+            initial_history,
+            Some(prepared_resume),
+            auth_manager,
+            dynamic_tools,
+            parent_trace,
+            client_mcp_extensions,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn resume_thread_with_history_inner(
+        &self,
+        config: Config,
+        initial_history: InitialHistory,
+        prepared_resume: Option<PreparedThreadResumeAuthority>,
+        auth_manager: Arc<AuthManager>,
+        dynamic_tools: Vec<codex_protocol::dynamic_tools::DynamicToolSpec>,
+        parent_trace: Option<W3cTraceContext>,
+        client_mcp_extensions: ClientMcpExtensions,
+    ) -> CodexResult<NewThread> {
+        let prepared_resume = self
+            .prepare_resume_authority_if_needed(&initial_history, prepared_resume)
+            .await?;
         let agent_control = self.agent_control_for_config(&config);
         let (session_source, thread_source) = initial_history
             .get_resumed_session_sources()
@@ -1525,12 +1629,9 @@ impl ThreadManager {
             client_mcp_extensions,
             ..StartThreadOptions::new(config)
         };
-        Box::pin(self.state.spawn_thread(ThreadSpawnRequest::new(
-            options,
-            auth_manager,
-            agent_control,
-        )))
-        .await
+        let mut request = ThreadSpawnRequest::new(options, auth_manager, agent_control);
+        request.prepared_resume = prepared_resume;
+        Box::pin(self.state.spawn_thread(request)).await
     }
 
     #[instrument(level = "trace", skip_all)]
@@ -1543,6 +1644,55 @@ impl ThreadManager {
         parent_trace: Option<W3cTraceContext>,
         client_mcp_extensions: ClientMcpExtensions,
     ) -> CodexResult<NewThread> {
+        self.resume_thread_with_history_and_execution_account_inner(
+            config,
+            initial_history,
+            /*prepared_resume*/ None,
+            execution_account,
+            dynamic_tools,
+            parent_trace,
+            client_mcp_extensions,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn resume_prepared_thread_with_history_and_execution_account(
+        &self,
+        config: Config,
+        initial_history: InitialHistory,
+        prepared_resume: PreparedThreadResumeAuthority,
+        execution_account: Arc<ExecutionAccountContext>,
+        dynamic_tools: Vec<codex_protocol::dynamic_tools::DynamicToolSpec>,
+        parent_trace: Option<W3cTraceContext>,
+        client_mcp_extensions: ClientMcpExtensions,
+    ) -> CodexResult<NewThread> {
+        self.resume_thread_with_history_and_execution_account_inner(
+            config,
+            initial_history,
+            Some(prepared_resume),
+            execution_account,
+            dynamic_tools,
+            parent_trace,
+            client_mcp_extensions,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn resume_thread_with_history_and_execution_account_inner(
+        &self,
+        config: Config,
+        initial_history: InitialHistory,
+        prepared_resume: Option<PreparedThreadResumeAuthority>,
+        execution_account: Arc<ExecutionAccountContext>,
+        dynamic_tools: Vec<codex_protocol::dynamic_tools::DynamicToolSpec>,
+        parent_trace: Option<W3cTraceContext>,
+        client_mcp_extensions: ClientMcpExtensions,
+    ) -> CodexResult<NewThread> {
+        let prepared_resume = self
+            .prepare_resume_authority_if_needed(&initial_history, prepared_resume)
+            .await?;
         let agent_control = self.agent_control_for_config(&config);
         let (session_source, thread_source) = initial_history
             .get_resumed_session_sources()
@@ -1570,7 +1720,33 @@ impl ThreadManager {
             agent_control,
         );
         request.execution_account = Some(execution_account);
+        request.prepared_resume = prepared_resume;
         Box::pin(self.state.spawn_thread(request)).await
+    }
+
+    async fn prepare_resume_authority_if_needed(
+        &self,
+        initial_history: &InitialHistory,
+        prepared_resume: Option<PreparedThreadResumeAuthority>,
+    ) -> CodexResult<Option<PreparedThreadResumeAuthority>> {
+        if prepared_resume.is_some() {
+            return Ok(prepared_resume);
+        }
+        let InitialHistory::Resumed(resumed) = initial_history else {
+            return Ok(None);
+        };
+        let prepared = self
+            .state
+            .prepare_thread_resume(PrepareThreadResumeTarget::ThreadId(resumed.conversation_id))
+            .await?;
+        let (stored_thread, _, authority) = prepared.into_parts();
+        if stored_thread.thread_id != resumed.conversation_id {
+            return Err(CodexErr::Fatal(format!(
+                "prepared resume returned thread {}, not {}",
+                stored_thread.thread_id, resumed.conversation_id
+            )));
+        }
+        Ok(Some(authority))
     }
 
     pub(crate) async fn start_thread_with_user_shell_override_for_tests(
@@ -1599,7 +1775,11 @@ impl ThreadManager {
         client_mcp_extensions: ClientMcpExtensions,
     ) -> CodexResult<NewThread> {
         let agent_control = self.agent_control_for_config(&config);
-        let initial_history = self.initial_history_from_rollout_path(rollout_path).await?;
+        let prepared = self
+            .state
+            .prepare_thread_resume(PrepareThreadResumeTarget::RolloutPath(rollout_path))
+            .await?;
+        let (initial_history, prepared_resume) = prepared_resume_to_initial_history(prepared)?;
         let (session_source, thread_source) = initial_history
             .get_resumed_session_sources()
             .unwrap_or_else(|| (self.state.session_source.clone(), None));
@@ -1611,6 +1791,7 @@ impl ThreadManager {
             ..StartThreadOptions::new(config)
         };
         let mut request = ThreadSpawnRequest::new(options, auth_manager, agent_control);
+        request.prepared_resume = Some(prepared_resume);
         request.user_shell_override = Some(user_shell_override);
         Box::pin(self.state.spawn_thread(request)).await
     }
@@ -2240,6 +2421,7 @@ impl ThreadManagerState {
             inherited_environments,
             inherited_exec_policy,
             client_mcp_extensions,
+            prepared_resume,
         } = options;
         let client_mcp_extensions = match client_mcp_extensions {
             Some(client_mcp_extensions) => client_mcp_extensions,
@@ -2261,10 +2443,24 @@ impl ThreadManagerState {
         };
         let mut request =
             ThreadSpawnRequest::new(options, Arc::clone(&self.auth_manager), agent_control);
+        request.prepared_resume = Some(prepared_resume);
         request.parent_thread_id = parent_thread_id;
         request.inherited_environments = inherited_environments;
         request.inherited_exec_policy = inherited_exec_policy;
         Box::pin(self.spawn_thread(request)).await
+    }
+
+    pub(crate) async fn prepare_thread_resume(
+        &self,
+        target: PrepareThreadResumeTarget,
+    ) -> CodexResult<PreparedThreadResume> {
+        self.thread_store
+            .prepare_thread_resume(PrepareThreadResumeParams {
+                target,
+                include_archived: true,
+            })
+            .await
+            .map_err(thread_store_resume_prepare_error)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2316,12 +2512,43 @@ impl ThreadManagerState {
             .unwrap_or_default()
     }
 
+    async fn running_thread_for_resume(
+        &self,
+        initial_history: &InitialHistory,
+    ) -> CodexResult<Option<NewThread>> {
+        let InitialHistory::Resumed(resumed) = initial_history else {
+            return Ok(None);
+        };
+        let mut threads = self.threads.write().await;
+        let Some(thread) = threads.get(&resumed.conversation_id).cloned() else {
+            return Ok(None);
+        };
+        if !thread.is_running() {
+            threads.remove(&resumed.conversation_id);
+            return Ok(None);
+        }
+        if let Some(requested_rollout_path) = resumed.rollout_path.as_deref()
+            && thread.rollout_path().as_deref() != Some(requested_rollout_path)
+        {
+            return Err(CodexErr::InvalidRequest(format!(
+                "thread {} is already running with a different rollout path",
+                resumed.conversation_id
+            )));
+        }
+        Ok(Some(NewThread {
+            thread_id: resumed.conversation_id,
+            session_configured: thread.session_configured(),
+            thread,
+        }))
+    }
+
     /// Spawn a new thread with optional history and register it with the manager.
     async fn spawn_thread(&self, request: ThreadSpawnRequest) -> CodexResult<NewThread> {
         let ThreadSpawnRequest {
             options,
             auth_manager: _auth_manager,
             execution_account,
+            prepared_resume,
             agent_control,
             parent_thread_id,
             forked_from_thread_id,
@@ -2330,6 +2557,7 @@ impl ThreadManagerState {
             inherited_exec_policy,
             user_shell_override,
         } = request;
+        options.ensure_reserved_thread_id_is_valid()?;
         let StartThreadOptions {
             config,
             allow_provider_model_fallback,
@@ -2354,31 +2582,8 @@ impl ThreadManagerState {
             )
         });
         let is_resumed_thread = matches!(&initial_history, InitialHistory::Resumed(_));
-        if reserved_thread_id.is_some() && matches!(&initial_history, InitialHistory::Resumed(_)) {
-            return Err(CodexErr::InvalidRequest(
-                "reserved thread ID cannot be used when resuming a thread".to_string(),
-            ));
-        }
-        if let InitialHistory::Resumed(resumed) = &initial_history {
-            let mut threads = self.threads.write().await;
-            if let Some(thread) = threads.get(&resumed.conversation_id).cloned() {
-                if thread.is_running() {
-                    if let Some(requested_rollout_path) = resumed.rollout_path.as_deref()
-                        && thread.rollout_path().as_deref() != Some(requested_rollout_path)
-                    {
-                        return Err(CodexErr::InvalidRequest(format!(
-                            "thread {} is already running with a different rollout path",
-                            resumed.conversation_id
-                        )));
-                    }
-                    return Ok(NewThread {
-                        thread_id: resumed.conversation_id,
-                        session_configured: thread.session_configured(),
-                        thread,
-                    });
-                }
-                threads.remove(&resumed.conversation_id);
-            }
+        if let Some(thread) = self.running_thread_for_resume(&initial_history).await? {
+            return Ok(thread);
         }
         // Keep the slot readiness lease through session construction. This fences start,
         // resume, and fork against a same-slot runtime replacement that was enumerated before
@@ -2531,6 +2736,7 @@ impl ThreadManagerState {
             code_mode_session_provider: Arc::clone(&self.code_mode_session_provider),
             extensions,
             conversation_history: initial_history,
+            prepared_resume,
             requested_history_mode: history_mode,
             fork_persistence,
             session_source,
@@ -2684,6 +2890,37 @@ fn stored_thread_to_initial_history(
         history: Arc::new(history.items),
         rollout_path: rollout_path.or(stored_thread.rollout_path),
     }))
+}
+
+pub(crate) fn prepared_resume_to_initial_history(
+    prepared: PreparedThreadResume,
+) -> CodexResult<(InitialHistory, PreparedThreadResumeAuthority)> {
+    let (stored_thread, history, authority) = prepared.into_parts();
+    let thread_id = stored_thread.thread_id;
+    if authority.thread_id() != thread_id {
+        return Err(CodexErr::Fatal(format!(
+            "prepared resume authority belongs to thread {}, not {thread_id}",
+            authority.thread_id()
+        )));
+    }
+    Ok((
+        InitialHistory::Resumed(ResumedHistory {
+            conversation_id: thread_id,
+            history,
+            rollout_path: stored_thread.rollout_path,
+        }),
+        authority,
+    ))
+}
+
+fn thread_store_resume_prepare_error(err: ThreadStoreError) -> CodexErr {
+    match err {
+        ThreadStoreError::ThreadNotFound { thread_id } => CodexErr::ThreadNotFound(thread_id),
+        ThreadStoreError::InvalidRequest { message } | ThreadStoreError::Conflict { message } => {
+            CodexErr::InvalidRequest(message)
+        }
+        err => CodexErr::Fatal(format!("failed to prepare thread resume: {err}")),
+    }
 }
 
 fn thread_store_rollout_read_error(err: ThreadStoreError) -> CodexErr {

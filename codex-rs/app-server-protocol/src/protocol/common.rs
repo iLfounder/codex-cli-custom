@@ -2003,6 +2003,7 @@ server_notification_definitions! {
     McpServerStatusUpdated => "mcpServer/startupStatus/updated" (v2::McpServerStatusUpdatedNotification),
     #[experimental("mcpServer/event/stream/notification")]
     McpServerEventStream => "mcpServer/event/stream/notification" (v2::McpServerEventStreamNotification),
+    McpServerStartupCompleted => "mcpServer/startupCompleted" (v2::McpServerStartupCompletedNotification),
     AccountUpdated => "account/updated" (v2::AccountUpdatedNotification),
     AccountRateLimitsUpdated => "account/rateLimits/updated" (v2::AccountRateLimitsUpdatedNotification),
     AccountSlotChanged => "accountSlot/changed" (v2::AccountSlotChangedNotification),

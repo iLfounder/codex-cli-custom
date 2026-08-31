@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+use codex_app_server_protocol::AccountFailoverMode;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::SessionRuntimeChangedNotification;
@@ -51,6 +52,7 @@ pub(crate) struct SessionRuntimeEngine {
     thread_list_state_permit: Arc<Semaphore>,
     account_registry: Arc<AccountRegistry>,
     outgoing: Arc<OutgoingMessageSender>,
+    account_failover_mode: AccountFailoverMode,
 }
 
 #[derive(Default)]
@@ -83,6 +85,7 @@ impl SessionRuntimeEngine {
         thread_list_state_permit: Arc<Semaphore>,
         account_registry: Arc<AccountRegistry>,
         outgoing: Arc<OutgoingMessageSender>,
+        account_failover_mode: AccountFailoverMode,
     ) -> Self {
         Self {
             instance_epoch: uuid::Uuid::new_v4().to_string(),
@@ -97,6 +100,7 @@ impl SessionRuntimeEngine {
             thread_list_state_permit,
             account_registry,
             outgoing,
+            account_failover_mode,
         }
     }
 

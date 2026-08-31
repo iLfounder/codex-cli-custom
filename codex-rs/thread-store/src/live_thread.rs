@@ -16,6 +16,7 @@ use crate::CreateThreadParams;
 use crate::LoadThreadHistoryParams;
 use crate::LocalThreadStore;
 use crate::PersistContext;
+use crate::PreparedThreadResumeAuthority;
 use crate::ReadThreadParams;
 use crate::ResumeThreadParams;
 use crate::StoredThread;
@@ -186,6 +187,47 @@ impl LiveThread {
                 }
             }
         }
+        Ok(Self {
+            thread_id,
+            history_mode,
+            thread_store,
+            metadata_sync: Arc::new(Mutex::new(metadata_sync)),
+            persistence_telemetry: RolloutPersistenceTelemetry::new(thread_id),
+        })
+    }
+
+    pub async fn resume_prepared(
+        thread_store: Arc<dyn ThreadStore>,
+        history_mode: ThreadHistoryMode,
+        authority: PreparedThreadResumeAuthority,
+        params: ResumeThreadParams,
+    ) -> ThreadStoreResult<Self> {
+        let thread_id = params.thread_id;
+        if authority.thread_id() != thread_id {
+            return Err(ThreadStoreError::InvalidRequest {
+                message: format!(
+                    "prepared resume authority belongs to thread {}, not {thread_id}",
+                    authority.thread_id()
+                ),
+            });
+        }
+        let metadata = if history_mode == ThreadHistoryMode::Paginated
+            && let Some(local_store) = thread_store.as_any().downcast_ref::<LocalThreadStore>()
+            && let Some(state_db) = local_store.state_db().await
+        {
+            state_db
+                .get_thread(thread_id)
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!("failed to read thread metadata for {thread_id}: {err}"),
+                })?
+        } else {
+            None
+        };
+        let metadata_sync = ThreadMetadataSync::for_resume(&params, metadata.as_ref());
+        thread_store
+            .activate_prepared_thread_resume(authority, params.metadata)
+            .await?;
         Ok(Self {
             thread_id,
             history_mode,

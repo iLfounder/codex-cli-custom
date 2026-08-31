@@ -105,6 +105,102 @@ fn parses_config_isolation_flags() {
 }
 
 #[test]
+fn account_failover_is_default_off_and_accepts_pre_semantic_opt_in() {
+    let default_cli = Cli::parse_from(["codex-exec", "summarize"]);
+    let opted_in_cli = Cli::parse_from([
+        "codex-exec",
+        "resume",
+        "--last",
+        "--account-failover=pre-semantic",
+    ]);
+
+    assert_eq!(default_cli.account_failover, AccountFailover::Disabled);
+    assert_eq!(opted_in_cli.account_failover, AccountFailover::PreSemantic);
+}
+
+#[test]
+fn account_rotation_is_optional_and_accepts_logical_modes() {
+    let default_cli = Cli::parse_from(["codex-exec", "summarize"]);
+    assert_eq!(default_cli.account_rotation, None);
+
+    for (value, expected) in [
+        ("quota-aware", AccountRotation::QuotaAware),
+        ("round-robin", AccountRotation::RoundRobin),
+        ("exhaust-then-next", AccountRotation::ExhaustThenNext),
+    ] {
+        let cli = Cli::parse_from([
+            "codex-exec",
+            "--account-failover=pre-semantic",
+            "--account-rotation",
+            value,
+            "summarize",
+        ]);
+        assert_eq!(cli.account_rotation, Some(expected));
+    }
+}
+
+#[test]
+fn invocation_ready_id_accepts_bounded_opaque_values() {
+    let cli = Cli::parse_from([
+        "codex-exec",
+        "--json",
+        "--account-failover",
+        "pre-semantic",
+        "--invocation-ready-id",
+        "turn-01:a_b",
+        "-",
+    ]);
+    assert_eq!(cli.invocation_ready_id.as_deref(), Some("turn-01:a_b"));
+
+    let max_length_id = "a".repeat(128);
+    let cli = Cli::parse_from([
+        "codex-exec",
+        "--invocation-ready-id",
+        max_length_id.as_str(),
+        "-",
+    ]);
+    assert_eq!(
+        cli.invocation_ready_id.as_deref(),
+        Some(max_length_id.as_str())
+    );
+}
+
+#[test]
+fn invocation_ready_id_rejects_invalid_values() {
+    for id in ["", "-leading", "has space", &"a".repeat(129)] {
+        let result = Cli::try_parse_from(["codex-exec", "--invocation-ready-id", id, "-"]);
+        assert!(result.is_err(), "expected invalid invocation id: {id:?}");
+    }
+}
+
+#[test]
+fn forced_stdin_prompt_detection_matches_exec_and_resume_forms() {
+    let root = Cli::parse_from(["codex-exec", "-"]);
+    assert!(has_forced_stdin_prompt(
+        root.command.as_ref(),
+        root.prompt.as_deref()
+    ));
+
+    let resume = Cli::parse_from(["codex-exec", "resume", "session-1", "-"]);
+    assert!(has_forced_stdin_prompt(
+        resume.command.as_ref(),
+        resume.prompt.as_deref()
+    ));
+
+    let fork = Cli::parse_from(["codex-exec", "fork", "session-1", "-"]);
+    assert!(!has_forced_stdin_prompt(
+        fork.command.as_ref(),
+        fork.prompt.as_deref()
+    ));
+
+    let review = Cli::parse_from(["codex-exec", "review", "-"]);
+    assert!(!has_forced_stdin_prompt(
+        review.command.as_ref(),
+        review.prompt.as_deref()
+    ));
+}
+
+#[test]
 fn approve_for_me_flag_applies_to_resume_when_passed_at_exec_root() {
     for flag in ["--approve-for-me", "--not-so-yolo"] {
         let cli = Cli::parse_from(["codex-exec", flag, "resume", "--last"]);

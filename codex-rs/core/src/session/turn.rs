@@ -156,19 +156,40 @@ pub(crate) async fn run_turn(
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<Option<String>> {
+    let mut turn_context = turn_context;
+    let account_failover = turn_context
+        .extension_data
+        .get::<super::account_failover::PreSemanticAccountFailover>();
+    let _account_failover_cleanup = account_failover
+        .as_ref()
+        .map(|failover| failover.cleanup_guard());
     // Record results from hooks that finished after the previous turn before this turn's user prompt.
     drain_async_hook_results(&sess, &turn_context, /*before_user_prompt*/ true).await;
 
-    let mut client_session =
-        prewarmed_client_session.unwrap_or_else(|| turn_context.model_client.new_session());
+    // Compaction mutates shared history, so it must retain the already-published account
+    // provenance instead of tentatively binding that history to an uncommitted candidate.
+    let (pre_compaction_turn_context, mut pre_compaction_client_session) = if account_failover
+        .as_ref()
+        .is_some_and(|failover| failover.is_provisional())
+    {
+        let global_turn_context = sess
+            .new_turn_context_for_account_attempt(&turn_context, sess.execution_account_runtime())
+            .await;
+        let client_session = global_turn_context.model_client.new_session();
+        (global_turn_context, client_session)
+    } else {
+        let client_session =
+            prewarmed_client_session.unwrap_or_else(|| turn_context.model_client.new_session());
+        (Arc::clone(&turn_context), client_session)
+    };
     // TODO(ccunningham): Pre-turn compaction runs before context updates and the
     // new user message are recorded. Estimate pending incoming items (context
     // diffs/full reinjection + user input) and trigger compaction preemptively
     // when they would push the thread over the compaction threshold.
     if let Err(err) = run_pre_sampling_compact(
         &sess,
-        &turn_context,
-        &mut client_session,
+        &pre_compaction_turn_context,
+        &mut pre_compaction_client_session,
         &cancellation_token,
     )
     .await
@@ -187,6 +208,12 @@ pub(crate) async fn run_turn(
         error!("Failed to run pre-sampling compact");
         return Ok(None);
     }
+
+    let mut client_session = if account_failover.is_some() {
+        turn_context.model_client.new_session()
+    } else {
+        pre_compaction_client_session
+    };
 
     let user_input = turn_user_input(&input);
     let (required_servers, mentioned_plugins) =
@@ -582,6 +609,34 @@ pub(crate) async fn run_turn(
                 break;
             }
             Err(e) => {
+                if let Some(failover) = &account_failover
+                    && failover.can_fail_over(&e)
+                {
+                    match failover
+                        .prepare_next_turn_context(&sess, &turn_context, &e, &cancellation_token)
+                        .await
+                    {
+                        Ok(next_turn_context) => {
+                            turn_context = next_turn_context;
+                            client_session = turn_context.model_client.new_session();
+                            next_step_context = Some(
+                                sess.capture_step_context_with_required_mcp_servers(
+                                    Arc::clone(&turn_context),
+                                    &cancellation_token,
+                                    &required_servers,
+                                )
+                                .await?,
+                            );
+                            continue;
+                        }
+                        Err(failover_error) => {
+                            if matches!(failover_error.details(), CodexErrorDetails::TurnAborted) {
+                                return Err(failover_error);
+                            }
+                            info!("Account failover preparation failed: {failover_error:#}");
+                        }
+                    }
+                }
                 info!("Turn error: {e:#}");
                 let error = e.to_codex_protocol_error();
                 sess.emit_turn_error_lifecycle(turn_context.as_ref(), error.clone())
@@ -675,12 +730,26 @@ async fn required_mcp_servers_for_input(
 
     // Plugin capabilities depend on authentication, so project them only after
     // the runtime has aligned the plugin manager with its current account.
-    sess.refresh_mcp_if_dirty().await;
+    let failover = turn_context
+        .extension_data
+        .get::<super::account_failover::PreSemanticAccountFailover>()
+        .filter(|failover| failover.is_provisional());
+    if failover.is_none() {
+        sess.refresh_mcp_if_dirty().await;
+    }
     let loaded_plugins = turn_context
         .plugins_manager
         .plugins_for_config(&turn_context.config.plugins_config_input())
         .await;
-    let current_config = sess.services.mcp_runtime.current_config();
+    let current_config = failover.map_or_else(
+        || sess.services.mcp_runtime.current_config(),
+        |failover| {
+            failover
+                .turn_runtime(sess.as_ref())
+                .mcp_runtime
+                .current_config()
+        },
+    );
     let mentioned_plugins =
         collect_explicit_plugin_mentions(user_input, loaded_plugins.capability_summaries());
     let mut required_servers = mentioned_plugins
@@ -1210,6 +1279,12 @@ async fn run_auto_compact(
     phase: CompactionPhase,
 ) -> CodexResult<()> {
     let turn_context = &step_context.turn;
+    if let Some(failover) = turn_context
+        .extension_data
+        .get::<super::account_failover::PreSemanticAccountFailover>()
+    {
+        failover.mark_effect(super::account_failover::AttemptEffect::Compaction);
+    }
     let _profile_guard = turn_context.turn_timing_state.begin_compaction();
     if turn_context.config.features.enabled(Feature::TokenBudget) {
         // Compaction is the reset request, so force a new context window
@@ -1446,7 +1521,12 @@ async fn run_sampling_request(
             original_input = Some(prompt.input);
         }
 
-        if !err.is_retryable() {
+        if turn_context
+            .extension_data
+            .get::<super::account_failover::PreSemanticAccountFailover>()
+            .is_some_and(|failover| failover.has_irreversible_effect())
+            || !err.is_retryable()
+        {
             return Err(err);
         }
 
@@ -2320,8 +2400,27 @@ async fn try_run_sampling_request(
             .record_responses(&handle_responses, &event);
         record_turn_ttft_metric(&turn_context, &event).await;
 
+        if !matches!(
+            &event,
+            ResponseEvent::Created | ResponseEvent::RateLimits(_) | ResponseEvent::ModelsEtag(_)
+        ) && let Some(failover) = turn_context
+            .extension_data
+            .get::<super::account_failover::PreSemanticAccountFailover>()
+        {
+            failover.mark_effect(super::account_failover::AttemptEffect::SemanticResponse);
+        }
+
         match event {
-            ResponseEvent::Created => {}
+            ResponseEvent::Created => {
+                if let Some(failover) = turn_context
+                    .extension_data
+                    .get::<super::account_failover::PreSemanticAccountFailover>(
+                ) {
+                    failover
+                        .commit_response_created(&sess, turn_context.as_ref())
+                        .await?;
+                }
+            }
             ResponseEvent::OutputItemDone(mut item) => {
                 assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
                 if analytics_tool_call_ids.len() < MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE {

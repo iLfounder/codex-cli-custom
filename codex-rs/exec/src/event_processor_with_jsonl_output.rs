@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -18,6 +19,7 @@ use codex_protocol::models::WebSearchAction;
 use codex_protocol::protocol::SessionConfiguredEvent;
 use serde_json::json;
 
+use crate::compaction_observer::CompactionObserver;
 pub use crate::event_processor::CodexStatus;
 use crate::event_processor::EventProcessor;
 use crate::event_processor::handle_last_message;
@@ -32,6 +34,7 @@ use crate::exec_events::CommandExecutionStatus as ExecCommandExecutionStatus;
 use crate::exec_events::ErrorItem;
 use crate::exec_events::FileChangeItem;
 use crate::exec_events::FileUpdateChange;
+use crate::exec_events::InvocationReadyEvent;
 use crate::exec_events::ItemCompletedEvent;
 use crate::exec_events::ItemStartedEvent;
 use crate::exec_events::ItemUpdatedEvent;
@@ -59,6 +62,7 @@ pub struct EventProcessorWithJsonOutput {
     last_message_path: Option<PathBuf>,
     next_item_id: AtomicU64,
     raw_to_exec_item_id: HashMap<String, String>,
+    compaction_observer: CompactionObserver,
     running_todo_list: Option<RunningTodoList>,
     last_total_token_usage: Option<ThreadTokenUsage>,
     last_critical_error: Option<ThreadErrorEvent>,
@@ -84,6 +88,7 @@ impl EventProcessorWithJsonOutput {
             last_message_path,
             next_item_id: AtomicU64::new(0),
             raw_to_exec_item_id: HashMap::new(),
+            compaction_observer: CompactionObserver::default(),
             running_todo_list: None,
             last_total_token_usage: None,
             last_critical_error: None,
@@ -97,7 +102,11 @@ impl EventProcessorWithJsonOutput {
     }
 
     fn next_item_id(&self) -> String {
-        format!("item_{}", self.next_item_id.fetch_add(1, Ordering::SeqCst))
+        Self::next_item_id_from(&self.next_item_id)
+    }
+
+    fn next_item_id_from(next_item_id: &AtomicU64) -> String {
+        format!("item_{}", next_item_id.fetch_add(1, Ordering::SeqCst))
     }
 
     #[allow(clippy::print_stdout)]
@@ -112,6 +121,12 @@ impl EventProcessorWithJsonOutput {
                 .to_string()
             })
         );
+    }
+
+    #[allow(clippy::print_stdout)]
+    fn emit_and_flush(&self, event: ThreadEvent) -> std::io::Result<()> {
+        self.emit(event);
+        std::io::stdout().flush()
     }
 
     fn usage_from_last_total(&self) -> Usage {
@@ -411,6 +426,10 @@ impl EventProcessorWithJsonOutput {
         }
     }
 
+    fn collect_final_events(&mut self) -> Vec<ThreadEvent> {
+        self.compaction_observer.shutdown().into_iter().collect()
+    }
+
     pub fn collect_thread_events(
         &mut self,
         notification: ServerNotification,
@@ -468,19 +487,45 @@ impl EventProcessorWithJsonOutput {
                 CodexStatus::Running
             }
             ServerNotification::ItemStarted(notification) => {
-                if let Some(item) = self.map_started_item(notification.item) {
-                    events.push(ThreadEvent::ItemStarted(ItemStartedEvent { item }));
+                match notification.item {
+                    ThreadItem::ContextCompaction { id } => {
+                        let exec_id = self.next_item_id();
+                        events.extend(self.compaction_observer.start(
+                            id,
+                            exec_id,
+                            notification.thread_id,
+                            notification.turn_id,
+                            notification.started_at_ms,
+                        ));
+                    }
+                    item => {
+                        if let Some(item) = self.map_started_item(item) {
+                            events.push(ThreadEvent::ItemStarted(ItemStartedEvent { item }));
+                        }
+                    }
                 }
                 CodexStatus::Running
             }
             ServerNotification::ItemCompleted(notification) => {
-                if let Some(item) = self.map_completed_item_mut(notification.item) {
-                    if let ThreadItemDetails::AgentMessage(AgentMessageItem { text }) =
-                        &item.details
-                    {
-                        self.final_message = Some(text.clone());
+                match notification.item {
+                    ThreadItem::ContextCompaction { id } => {
+                        let next_item_id = &self.next_item_id;
+                        events.push(self.compaction_observer.complete(
+                            &id,
+                            notification.completed_at_ms,
+                            || Self::next_item_id_from(next_item_id),
+                        ));
                     }
-                    events.push(ThreadEvent::ItemCompleted(ItemCompletedEvent { item }));
+                    item => {
+                        if let Some(item) = self.map_completed_item_mut(item) {
+                            if let ThreadItemDetails::AgentMessage(AgentMessageItem { text }) =
+                                &item.details
+                            {
+                                self.final_message = Some(text.clone());
+                            }
+                            events.push(ThreadEvent::ItemCompleted(ItemCompletedEvent { item }));
+                        }
+                    }
                 }
                 CodexStatus::Running
             }
@@ -500,10 +545,23 @@ impl EventProcessorWithJsonOutput {
             }
             ServerNotification::ModelVerification(_) => CodexStatus::Running,
             ServerNotification::ThreadTokenUsageUpdated(notification) => {
-                self.last_total_token_usage = Some(notification.token_usage);
+                self.last_total_token_usage = Some(notification.token_usage.clone());
+                if let Some(event) = self.compaction_observer.observe_token_usage(
+                    notification.thread_id,
+                    notification.turn_id,
+                    notification.token_usage,
+                ) {
+                    events.push(event);
+                }
                 CodexStatus::Running
             }
             ServerNotification::TurnCompleted(notification) => {
+                if let Some(event) = self
+                    .compaction_observer
+                    .turn_completed(&notification.thread_id, &notification.turn.id)
+                {
+                    events.push(event);
+                }
                 if let Some(running) = self.running_todo_list.take() {
                     events.push(ThreadEvent::ItemCompleted(ItemCompletedEvent {
                         item: ExecThreadItem {
@@ -596,6 +654,10 @@ impl EventProcessorWithJsonOutput {
 }
 
 impl EventProcessor for EventProcessorWithJsonOutput {
+    fn print_invocation_ready(&mut self, event: InvocationReadyEvent) -> std::io::Result<()> {
+        self.emit_and_flush(ThreadEvent::InvocationReady(event))
+    }
+
     fn print_config_summary(
         &mut self,
         _: &Config,
@@ -622,6 +684,9 @@ impl EventProcessor for EventProcessorWithJsonOutput {
     }
 
     fn print_final_output(&mut self) {
+        for event in self.collect_final_events() {
+            self.emit(event);
+        }
         if self.emit_final_message_on_shutdown
             && let Some(path) = self.last_message_path.as_deref()
         {

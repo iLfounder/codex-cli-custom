@@ -7,6 +7,7 @@ use crate::AccountBindingCommitIntent;
 use crate::InMemoryThreadStore;
 use crate::LocalThreadStore;
 use crate::LocalThreadStoreConfig;
+use crate::SuccessfulAccountBindingTransition;
 use crate::ThreadAccountRotationMode;
 use crate::ThreadAccountRotationPolicy;
 use crate::ThreadAccountRotationPolicyUpdate;
@@ -96,6 +97,62 @@ async fn in_memory_rotation_matches_revision_cursor_and_binding_intent_contract(
             revision: 2,
             last_committed_account_slot_id: Some("default".to_string()),
         }
+    );
+}
+
+#[tokio::test]
+async fn successful_rotation_commits_binding_and_cursor_atomically() {
+    let store = InMemoryThreadStore::default();
+    let thread_id = ThreadId::default();
+    let initial = ExecutionAccountBinding {
+        slot_id: "default".to_string(),
+        generation: 1,
+    };
+    store
+        .initialize_execution_account_binding(thread_id, initial.clone())
+        .await
+        .expect("initialize binding");
+    store
+        .compare_and_swap_thread_account_rotation_policy(thread_id, 0, automatic_update())
+        .await
+        .expect("create policy")
+        .expect("matching revision");
+
+    let committed = store
+        .compare_and_swap_successful_account_rotation(
+            thread_id,
+            initial.clone(),
+            1,
+            "secondary".to_string(),
+            SuccessfulAccountBindingTransition::AdvanceGeneration,
+        )
+        .await
+        .expect("commit successful rotation")
+        .expect("matching binding and policy");
+    assert_eq!(
+        committed.binding,
+        ExecutionAccountBinding {
+            slot_id: "secondary".to_string(),
+            generation: 2,
+        }
+    );
+    assert_eq!(
+        committed.policy.last_committed_account_slot_id,
+        Some("secondary".to_string())
+    );
+
+    assert_eq!(
+        store
+            .compare_and_swap_successful_account_rotation(
+                thread_id,
+                initial,
+                1,
+                "default".to_string(),
+                SuccessfulAccountBindingTransition::Keep,
+            )
+            .await
+            .expect("stale commit is not an error"),
+        None
     );
 }
 

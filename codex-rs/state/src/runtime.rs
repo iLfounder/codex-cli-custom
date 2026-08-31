@@ -62,6 +62,8 @@ mod threads;
 mod writer_authority;
 
 pub use account_rotation::AccountBindingCommitIntent;
+pub use account_rotation::SuccessfulAccountBindingTransition;
+pub use account_rotation::SuccessfulAccountRotationCommit;
 pub use account_rotation::ThreadAccountRotationMode;
 pub use account_rotation::ThreadAccountRotationPolicy;
 pub use account_rotation::ThreadAccountRotationPolicyUpdate;

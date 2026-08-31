@@ -71,6 +71,21 @@ pub enum SandboxErr {
 pub struct CodexErr {
     details: CodexErrorDetails,
     retry_delay: Option<Duration>,
+    account_rejection_kind: Option<AccountRejectionKind>,
+}
+
+/// Internal account-scoped rejection classification used by model sampling.
+///
+/// This sidecar is intentionally separate from [`CodexErrorDetails`] so it does not alter the
+/// client-facing error protocol or persisted rollout schema.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AccountRejectionKind {
+    UsageLimit,
+    UsageNotIncluded,
+    UnauthorizedFinal,
+    PaymentRequired,
+    ModelAccessDenied,
 }
 
 /// The semantic category and diagnostic payload for a [`CodexErr`].
@@ -225,6 +240,7 @@ impl From<CodexErrorDetails> for CodexErr {
         Self {
             details,
             retry_delay: None,
+            account_rejection_kind: None,
         }
     }
 }
@@ -289,6 +305,7 @@ macro_rules! codex_err_unit_constructors {
             pub const $variant: Self = Self {
                 details: CodexErrorDetails::$variant,
                 retry_delay: None,
+                account_rejection_kind: None,
             };
         )*
     };
@@ -418,6 +435,19 @@ impl CodexErr {
     pub fn with_retry_delay(mut self, retry_delay: Duration) -> Self {
         self.retry_delay = Some(retry_delay);
         self
+    }
+
+    /// Attaches an internal account-scoped rejection classification.
+    #[doc(hidden)]
+    pub fn with_account_rejection(mut self, kind: AccountRejectionKind) -> Self {
+        self.account_rejection_kind = Some(kind);
+        self
+    }
+
+    /// Returns the internal account-scoped rejection classification, if one was authoritative.
+    #[doc(hidden)]
+    pub fn account_rejection_kind(&self) -> Option<AccountRejectionKind> {
+        self.account_rejection_kind
     }
 
     /// Minimal shim so that existing `e.downcast_ref::<CodexErr>()` checks continue to compile

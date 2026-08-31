@@ -9,6 +9,7 @@
 //! options only apply on Started.
 
 use super::TurnInput;
+use super::account_failover::PreSemanticAccountFailover;
 use super::session::IdleExecutionAccountReservation;
 use super::session::Session;
 use super::session::SessionConfiguration;
@@ -94,6 +95,7 @@ struct RootExecutionAccountAdmission {
     initial_binding: ExecutionAccountBinding,
     accepted_binding: ExecutionAccountBinding,
     policy_revision: Option<u64>,
+    failover: Option<PreSemanticAccountFailover>,
 }
 
 impl RootExecutionAccountAdmission {
@@ -105,7 +107,12 @@ impl RootExecutionAccountAdmission {
         if !session
             .idle_execution_account_reservation_matches(&self.reservation)
             .await
-            || session.execution_account().binding != self.accepted_binding
+            || session.execution_account().binding
+                != if self.failover.is_some() {
+                    self.initial_binding.clone()
+                } else {
+                    self.accepted_binding.clone()
+                }
             || client_expected_binding.is_some_and(|expected| expected != &self.initial_binding)
         {
             return Err(CodexErr::InvalidRequest(
@@ -129,6 +136,9 @@ impl RootExecutionAccountAdmission {
     }
 
     async fn commit_cursor_after_started(&self, session: &Session) {
+        if self.failover.is_some() {
+            return;
+        }
         let Some(policy_revision) = self.policy_revision else {
             return;
         };
@@ -151,6 +161,21 @@ impl RootExecutionAccountAdmission {
             }
         }
     }
+
+    fn turn_runtime(
+        &self,
+        session: &Session,
+    ) -> Option<Arc<crate::execution_account::ExecutionAccountRuntime>> {
+        self.failover
+            .as_ref()
+            .map(|failover| failover.turn_runtime(session))
+    }
+
+    fn attach_failover(&self, turn_context: &TurnContext) {
+        if let Some(failover) = &self.failover {
+            turn_context.extension_data.insert(failover.clone());
+        }
+    }
 }
 
 fn prepare_root_execution_account_admission(
@@ -162,6 +187,36 @@ fn prepare_root_execution_account_admission(
             .reserve_idle_execution_account_preparation()
             .await
             .map_err(execution_account_admission_error)?;
+        let selector = session.turn_execution_account_selector();
+        if selector.pre_semantic_failover_enabled() {
+            let cancellation = reservation.cancellation_token();
+            let decision = tokio::select! {
+                _ = cancellation.cancelled() => {
+                    return Err(execution_account_admission_error(ExecutionAccountSwitchError::ThreadBusy));
+                }
+                decision = selector.select(TurnExecutionAccountSelection {
+                    thread_id: session.thread_id(),
+                    current_binding: initial_binding.clone(),
+                    credential_revision: session
+                        .execution_account()
+                        .auth_manager
+                        .credential_revision(),
+                }) => decision?,
+            };
+            let failover = super::account_failover::prepare_initial(
+                session,
+                initial_binding.clone(),
+                decision,
+            )
+            .await?;
+            return Ok(RootExecutionAccountAdmission {
+                reservation,
+                accepted_binding: failover.accepted_binding(),
+                policy_revision: failover.policy_revision(),
+                initial_binding,
+                failover: Some(failover),
+            });
+        }
         let result =
             select_root_execution_account(session, &reservation, initial_binding.clone()).await;
         match result {
@@ -170,6 +225,7 @@ fn prepare_root_execution_account_admission(
                 initial_binding,
                 accepted_binding,
                 policy_revision,
+                failover: None,
             }),
             Err(error) => {
                 session
@@ -323,6 +379,7 @@ impl PreparedTurnInputSettings {
         session: &Arc<Session>,
         submission_id: String,
         kind: TurnStartKind,
+        account_runtime: Option<Arc<crate::execution_account::ExecutionAccountRuntime>>,
     ) -> CodexResult<Option<Arc<TurnContext>>> {
         let TurnStartOptions {
             turn_trigger,
@@ -345,23 +402,15 @@ impl PreparedTurnInputSettings {
             final_output_json_schema,
             cyber_access_program,
         };
-        let turn_context = match kind {
-            TurnStartKind::User | TurnStartKind::Recovery => Some(
-                session
-                    .new_turn_with_sub_id(submission_id.clone(), updates, options)
-                    .await?,
-            ),
-            TurnStartKind::Automatic => {
-                session
-                    .new_turn_with_sub_id_if(
-                        submission_id.clone(),
-                        updates,
-                        options,
-                        |current, proposed| kind.permits_settings(current, proposed),
-                    )
-                    .await?
-            }
-        };
+        let turn_context = session
+            .new_turn_with_sub_id_if_for_account_runtime(
+                submission_id.clone(),
+                updates,
+                options,
+                |current, proposed| kind.permits_settings(current, proposed),
+                account_runtime,
+            )
+            .await?;
         let Some((turn_context, settings_snapshot)) = turn_context else {
             return Ok(None);
         };
@@ -544,8 +593,16 @@ async fn start_or_steer(
             } else {
                 None
             };
+            let account_runtime = root_execution_account_admission
+                .as_ref()
+                .and_then(|admission| admission.turn_runtime(session));
             let turn_context = match settings
-                .apply_started(session, submission_id.clone(), TurnStartKind::User)
+                .apply_started(
+                    session,
+                    submission_id.clone(),
+                    TurnStartKind::User,
+                    account_runtime,
+                )
                 .await
             {
                 Ok(Some(turn_context)) => turn_context,
@@ -568,6 +625,9 @@ async fn start_or_steer(
                     return Err(error);
                 }
             };
+            if let Some(admission) = root_execution_account_admission.as_ref() {
+                admission.attach_failover(turn_context.as_ref());
+            }
             if can_start_root_turn
                 && has_explicit_input
                 && turn_context
@@ -715,8 +775,11 @@ async fn start_if_idle(
             return Err(error);
         }
     };
+    let account_runtime = root_execution_account_admission
+        .as_ref()
+        .and_then(|admission| admission.turn_runtime(session));
     let turn_context = match settings
-        .apply_started(session, submission_id.clone(), kind)
+        .apply_started(session, submission_id.clone(), kind, account_runtime)
         .await
     {
         Ok(Some(turn_context)) => turn_context,
@@ -743,6 +806,9 @@ async fn start_if_idle(
             return Err(error);
         }
     };
+    if let Some(admission) = root_execution_account_admission.as_ref() {
+        admission.attach_failover(turn_context.as_ref());
+    }
     if let Some(responsesapi_client_metadata) = responsesapi_client_metadata {
         turn_context
             .turn_metadata_state

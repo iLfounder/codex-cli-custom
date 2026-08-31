@@ -16,6 +16,8 @@ use codex_app_server_protocol::JSONRPCNotification;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::ListMcpServerStatusParams;
 use codex_app_server_protocol::ListMcpServerStatusResponse;
+use codex_app_server_protocol::McpServerStartupCompletedNotification;
+use codex_app_server_protocol::McpServerStartupFailure;
 use codex_app_server_protocol::McpServerStartupState;
 use codex_app_server_protocol::McpServerStatusDetail;
 use codex_app_server_protocol::McpServerStatusUpdatedNotification;
@@ -1570,17 +1572,44 @@ async fn thread_start_emits_mcp_server_status_updated_notifications() -> Result<
     let ServerNotification::McpServerStatusUpdated(failed) = failed else {
         anyhow::bail!("unexpected notification variant");
     };
-    assert_eq!(failed.thread_id, Some(start_response.thread.id));
+    assert_eq!(failed.thread_id, Some(start_response.thread.id.clone()));
     assert_eq!(failed.name, "optional_broken");
     assert_eq!(failed.status, McpServerStartupState::Failed);
     assert_eq!(failed.failure_reason, None);
+    let failed_error = failed
+        .error
+        .context("MCP startup failure should include an error")?;
     assert!(
-        failed
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("MCP client for `optional_broken` failed to start")),
-        "unexpected MCP startup error: {:?}",
-        failed.error
+        failed_error.contains("MCP client for `optional_broken` failed to start"),
+        "unexpected MCP startup error: {failed_error:?}"
+    );
+
+    let completed: McpServerStartupCompletedNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_notification("mcpServer/startupCompleted"),
+    )
+    .await??;
+    let aggregate_error = completed
+        .failed
+        .first()
+        .context("MCP startup aggregate should include the failed server")?
+        .error
+        .clone();
+    assert!(
+        aggregate_error.contains("handshaking with MCP server failed"),
+        "unexpected MCP startup aggregate error: {aggregate_error:?}"
+    );
+    assert_eq!(
+        completed,
+        McpServerStartupCompletedNotification {
+            thread_id: start_response.thread.id,
+            ready: Vec::new(),
+            failed: vec![McpServerStartupFailure {
+                server: "optional_broken".to_string(),
+                error: aggregate_error,
+            }],
+            cancelled: Vec::new(),
+        }
     );
 
     Ok(())

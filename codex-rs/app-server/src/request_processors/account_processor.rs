@@ -193,6 +193,7 @@ impl AccountRequestProcessor {
         if let Some(response) = self
             .account_registry
             .global_rate_limits(&params.account_slot_id)
+            .await
         {
             return response;
         }

@@ -7,6 +7,7 @@ use base64::Engine;
 use chrono::DateTime;
 use chrono::Utc;
 use codex_protocol::auth::PlanType;
+use codex_protocol::error::AccountRejectionKind;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::ConnectionFailedError;
@@ -21,8 +22,13 @@ use serde_json::Value;
 pub fn map_api_error(err: ApiError) -> CodexErr {
     match err {
         ApiError::ContextWindowExceeded => CodexErr::ContextWindowExceeded,
-        ApiError::QuotaExceeded => CodexErr::QuotaExceeded,
-        ApiError::UsageNotIncluded => CodexErr::UsageNotIncluded,
+        ApiError::QuotaExceeded => {
+            CodexErr::QuotaExceeded.with_account_rejection(AccountRejectionKind::UsageLimit)
+        }
+        ApiError::UsageNotIncluded => CodexErr::UsageNotIncluded
+            .with_account_rejection(AccountRejectionKind::UsageNotIncluded),
+        ApiError::ModelAccessDenied => CodexErr::InvalidRequest("model access denied".to_string())
+            .with_account_rejection(AccountRejectionKind::ModelAccessDenied),
         ApiError::Retryable { message, delay } => {
             let error = CodexErr::Stream(message);
             match delay {
@@ -40,8 +46,9 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
         ApiError::Stream(msg) => CodexErr::Stream(msg),
         ApiError::ServerOverloaded => CodexErr::ServerOverloaded,
         ApiError::Api { status, message } => {
+            let model_access_denied = is_model_access_denied_body(&message);
             let user_message = api_error_user_message(status, &message);
-            CodexErr::UnexpectedStatus(UnexpectedResponseError {
+            let error = CodexErr::UnexpectedStatus(UnexpectedResponseError {
                 status,
                 body: message,
                 user_message,
@@ -50,7 +57,8 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
                 request_id: None,
                 identity_authorization_error: None,
                 identity_error_code: None,
-            })
+            });
+            with_http_account_rejection(status, model_access_denied, error)
         }
         ApiError::InvalidRequest { message } => CodexErr::InvalidRequest(message),
         ApiError::CyberPolicy { message } => {
@@ -156,9 +164,11 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
                                 rate_limits: rate_limits.map(Box::new),
                                 promo_message,
                                 rate_limit_reached_type,
-                            });
+                            })
+                            .with_account_rejection(AccountRejectionKind::UsageLimit);
                         } else if err.error.error_type.as_deref() == Some("usage_not_included") {
-                            return CodexErr::UsageNotIncluded;
+                            return CodexErr::UsageNotIncluded
+                                .with_account_rejection(AccountRejectionKind::UsageNotIncluded);
                         }
                     }
 
@@ -167,7 +177,8 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
                         request_id: extract_request_tracking_id(headers.as_ref()),
                     })
                 } else {
-                    CodexErr::UnexpectedStatus(UnexpectedResponseError {
+                    let model_access_denied = is_model_access_denied_body(&body_text);
+                    let error = CodexErr::UnexpectedStatus(UnexpectedResponseError {
                         status,
                         user_message: api_error_user_message(status, &body_text),
                         body: body_text,
@@ -179,7 +190,8 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
                             X_OPENAI_AUTHORIZATION_ERROR_HEADER,
                         ),
                         identity_error_code: extract_x_error_json_code(headers.as_ref()),
-                    })
+                    });
+                    with_http_account_rejection(status, model_access_denied, error)
                 }
             }
             TransportError::RetryLimit => CodexErr::RetryLimit(RetryLimitReachedError {
@@ -196,6 +208,30 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
     }
 }
 
+fn with_http_account_rejection(
+    status: http::StatusCode,
+    model_access_denied: bool,
+    error: CodexErr,
+) -> CodexErr {
+    if status == http::StatusCode::PAYMENT_REQUIRED {
+        error.with_account_rejection(AccountRejectionKind::PaymentRequired)
+    } else if model_access_denied {
+        error.with_account_rejection(AccountRejectionKind::ModelAccessDenied)
+    } else {
+        error
+    }
+}
+
+fn is_model_access_denied_body(body: &str) -> bool {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .as_ref()
+        .and_then(|value| value.get("error"))
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_str)
+        == Some(MODEL_NOT_FOUND_ERROR_CODE)
+}
+
 const ACTIVE_LIMIT_HEADER: &str = "x-codex-active-limit";
 const REQUEST_ID_HEADER: &str = "x-request-id";
 const OAI_REQUEST_ID_HEADER: &str = "x-oai-request-id";
@@ -206,6 +242,7 @@ const CYBER_POLICY_ERROR_CODE: &str = "cyber_policy";
 const CYBER_POLICY_FALLBACK_MESSAGE: &str =
     "This request has been flagged for possible cybersecurity risk.";
 const MISALIGNMENT_POLICY_VIOLATION_ERROR_CODE: &str = "misalignment_policy_violation";
+const MODEL_NOT_FOUND_ERROR_CODE: &str = "model_not_found";
 const MISALIGNMENT_POLICY_VIOLATION_FALLBACK_MESSAGE: &str =
     "This request was blocked due to a misalignment policy violation.";
 const CLOUDFLARE_BLOCKED_MESSAGE: &str =

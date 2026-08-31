@@ -8,6 +8,7 @@ mod model_context;
 mod move_thread_to_section;
 mod paginated_fork;
 mod pending_thread_metadata;
+mod prepared_resume;
 mod projects;
 mod read_thread;
 mod revert_thread;
@@ -80,7 +81,10 @@ use crate::MoveProjectParams;
 use crate::MoveThreadToSectionParams;
 use crate::PersistContext;
 use crate::PrepareForkParams;
+use crate::PrepareThreadResumeParams;
 use crate::PreparedFork;
+use crate::PreparedThreadResume;
+use crate::PreparedThreadResumeAuthority;
 use crate::ProjectMoveOutcome;
 use crate::ReadThreadByRolloutPathParams;
 use crate::ReadThreadParams;
@@ -144,6 +148,7 @@ const STATE_DB_POSITION_UNAVAILABLE_REASON: &str =
     "SQLite projection position requires the state database";
 const SQLITE_PROJECTION_UNAVAILABLE_REASON: &str =
     "paginated SQLite projection position is unavailable";
+const PROJECTION_FAILED_REASON: &str = "projection_failed";
 
 /// Local filesystem/SQLite-backed implementation of [`ThreadStore`].
 ///
@@ -167,6 +172,12 @@ pub struct LocalThreadStore {
     writer_lock_coordinator: Arc<WriterLockCoordinator>,
     state_db: Option<StateDbHandle>,
     thread_history_db: Arc<OnceCell<sqlx::SqlitePool>>,
+    projection_failures: Arc<Mutex<HashMap<ThreadId, ProjectionFailureEvidence>>>,
+}
+
+#[derive(Clone, Copy)]
+struct ProjectionFailureEvidence {
+    jsonl: Option<RuntimePersistencePosition>,
 }
 
 struct LiveRecorderEntry {
@@ -280,6 +291,7 @@ impl LocalThreadStore {
             writer_lock_coordinator,
             state_db,
             thread_history_db: Arc::new(OnceCell::new()),
+            projection_failures: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -559,6 +571,12 @@ impl ThreadStore for LocalThreadStore {
                     .get(&thread_id)
                     .map(|entry| (entry.recorder.clone(), entry.history_mode))
             };
+            let projection_failure = self
+                .projection_failures
+                .lock()
+                .await
+                .get(&thread_id)
+                .copied();
             let (jsonl, live_history_mode) =
                 match live {
                     Some((recorder, history_mode)) => {
@@ -577,9 +595,14 @@ impl ThreadStore for LocalThreadStore {
                             Some(history_mode),
                         )
                     }
-                    None => (None, None),
+                    None => (projection_failure.and_then(|failure| failure.jsonl), None),
                 };
-            let projection = thread_history::projection_state(self, thread_id).await?;
+            let relinquish_projection_failed = projection_failure.is_some();
+            let projection = match thread_history::projection_state(self, thread_id).await {
+                Ok(projection) => projection,
+                Err(_) if relinquish_projection_failed => None,
+                Err(err) => return Err(err),
+            };
             let sqlite = projection.as_ref().map(|state| RuntimePersistencePosition {
                 ordinal: state.next_ordinal,
                 offset: state.next_byte_offset,
@@ -597,7 +620,9 @@ impl ThreadStore for LocalThreadStore {
             } else {
                 None
             };
-            let persistence_deny_reason = if self.state_db.is_none() {
+            let persistence_deny_reason = if relinquish_projection_failed {
+                Some(PROJECTION_FAILED_REASON.to_string())
+            } else if self.state_db.is_none() {
                 Some(STATE_DB_POSITION_UNAVAILABLE_REASON.to_string())
             } else if jsonl.is_none() && matches!(history_mode, Some(ThreadHistoryMode::Legacy)) {
                 Some(LEGACY_POSITION_UNAVAILABLE_REASON.to_string())
@@ -631,7 +656,9 @@ impl ThreadStore for LocalThreadStore {
                 } else {
                     RuntimePersistenceHealth::Unknown
                 },
-                materialize_health: if sqlite.is_some() {
+                materialize_health: if relinquish_projection_failed {
+                    RuntimePersistenceHealth::Degraded
+                } else if sqlite.is_some() {
                     RuntimePersistenceHealth::Healthy
                 } else {
                     RuntimePersistenceHealth::Unknown
@@ -798,6 +825,37 @@ impl ThreadStore for LocalThreadStore {
                 .map_err(|err| ThreadStoreError::Internal {
                     message: format!(
                         "failed to compare and swap thread account rotation cursor: {err}"
+                    ),
+                })
+        })
+    }
+
+    fn compare_and_swap_successful_account_rotation(
+        &self,
+        thread_id: ThreadId,
+        expected_binding: ExecutionAccountBinding,
+        expected_policy_revision: u64,
+        accepted_account_slot_id: String,
+        binding_transition: crate::SuccessfulAccountBindingTransition,
+    ) -> ThreadStoreFuture<'_, Option<crate::SuccessfulAccountRotationCommit>> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "compare_and_swap_successful_account_rotation",
+                });
+            };
+            state_db
+                .compare_and_swap_successful_account_rotation(
+                    thread_id,
+                    &expected_binding,
+                    expected_policy_revision,
+                    accepted_account_slot_id.as_str(),
+                    binding_transition,
+                )
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!(
+                        "failed to commit successful account rotation atomically: {err}"
                     ),
                 })
         })
@@ -1089,6 +1147,21 @@ impl ThreadStore for LocalThreadStore {
         Box::pin(async move { live_writer::resume_thread(self, params).await })
     }
 
+    fn prepare_thread_resume(
+        &self,
+        params: PrepareThreadResumeParams,
+    ) -> ThreadStoreFuture<'_, PreparedThreadResume> {
+        Box::pin(async move { prepared_resume::prepare(self, params).await })
+    }
+
+    fn activate_prepared_thread_resume(
+        &self,
+        authority: PreparedThreadResumeAuthority,
+        metadata: crate::ThreadPersistenceMetadata,
+    ) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move { prepared_resume::activate(self, authority, metadata).await })
+    }
+
     fn append_items(&self, params: AppendThreadItemsParams) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move { live_writer::append_items(self, params).await })
     }
@@ -1337,6 +1410,9 @@ impl ThreadStore for LocalThreadStore {
 
 #[cfg(test)]
 mod tests {
+    #[path = "prepared_resume_tests.rs"]
+    mod prepared_resume_tests;
+
     #[path = "relinquish_tests.rs"]
     mod relinquish_tests;
 

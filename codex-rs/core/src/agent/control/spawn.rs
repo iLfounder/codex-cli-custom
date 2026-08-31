@@ -336,24 +336,18 @@ impl AgentControl {
         }
         let mut environment_selections = self.state.evicted_environments(thread_id);
 
-        let stored_thread = state
-            .read_stored_thread(ReadThreadParams {
-                thread_id,
-                include_archived: true,
-                include_history: false,
-            })
+        let prepared_resume = state
+            .prepare_thread_resume(PrepareThreadResumeTarget::ThreadId(thread_id))
             .await?;
+        let (stored_thread, history, prepared_resume) = prepared_resume.into_parts();
         let stored_model = stored_thread.model.clone();
         let stored_model_provider = stored_thread.model_provider.clone();
         let stored_reasoning_effort = stored_thread.reasoning_effort.clone();
         let stored_source = stored_thread.source.clone();
         let stored_parent_thread_id = stored_thread.parent_thread_id;
-        let history = load_agent_model_context(&state, thread_id, stored_thread.history_mode)
-            .await?
-            .ok_or(CodexErr::ThreadNotFound(thread_id))?;
         let initial_history = InitialHistory::Resumed(ResumedHistory {
             conversation_id: thread_id,
-            history: Arc::new(history),
+            history,
             rollout_path: stored_thread.rollout_path,
         });
         if initial_history.get_multi_agent_version() != Some(MultiAgentVersion::V2) {
@@ -556,6 +550,7 @@ impl AgentControl {
                 inherited_environments,
                 inherited_exec_policy,
                 client_mcp_extensions,
+                prepared_resume,
             })
             .await
         {
@@ -1169,13 +1164,10 @@ impl AgentControl {
         session_source: SessionSource,
     ) -> CodexResult<(ThreadId, MultiAgentVersion)> {
         let state = self.upgrade()?;
-        let stored_thread = state
-            .read_stored_thread(ReadThreadParams {
-                thread_id,
-                include_archived: true,
-                include_history: false,
-            })
+        let prepared_resume = state
+            .prepare_thread_resume(PrepareThreadResumeTarget::ThreadId(thread_id))
             .await?;
+        let (stored_thread, history, prepared_resume) = prepared_resume.into_parts();
         let resumed_agent_path = stored_thread
             .agent_path
             .as_deref()
@@ -1184,12 +1176,9 @@ impl AgentControl {
             .map_err(|err| CodexErr::InvalidRequest(format!("invalid stored agent path: {err}")))?;
         let resumed_agent_nickname = stored_thread.agent_nickname.clone();
         let resumed_agent_role = stored_thread.agent_role.clone();
-        let history = load_agent_model_context(&state, thread_id, stored_thread.history_mode)
-            .await?
-            .ok_or(CodexErr::ThreadNotFound(thread_id))?;
         let initial_history = InitialHistory::Resumed(ResumedHistory {
             conversation_id: thread_id,
-            history: Arc::new(history),
+            history,
             rollout_path: stored_thread.rollout_path,
         });
         let parent_thread_id = stored_thread.parent_thread_id;
@@ -1241,6 +1230,7 @@ impl AgentControl {
                 inherited_environments,
                 inherited_exec_policy,
                 client_mcp_extensions: None,
+                prepared_resume,
             })
             .await?;
         let mut agent_metadata = agent_metadata;

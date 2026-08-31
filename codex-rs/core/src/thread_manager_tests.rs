@@ -1926,6 +1926,128 @@ async fn resume_active_thread_from_rollout_returns_running_thread() {
 }
 
 #[tokio::test]
+async fn public_start_apis_prepare_resume_after_the_running_thread_fast_path() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    config.cwd = config.codex_home.abs();
+    config.experimental_thread_store = ThreadStoreConfig::InMemory {
+        id: format!("public-start-resume-{}", uuid::Uuid::new_v4()),
+    };
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+
+    let auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    let thread_store = thread_store_from_config(&config, /*state_db*/ None);
+    let in_memory_store = thread_store
+        .as_any()
+        .downcast_ref::<InMemoryThreadStore>()
+        .expect("configured in-memory store");
+    let manager = ThreadManager::new(
+        &config,
+        auth_manager.clone(),
+        build_models_manager(&config, auth_manager),
+        crate::CodexAppsToolsCache::default(),
+        SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        empty_extension_registry(),
+        Arc::new(crate::test_support::EmptyUserInstructionsProvider),
+        /*analytics_events_client*/ None,
+        thread_store.clone(),
+        /*agent_graph_store*/ None,
+        TEST_INSTALLATION_ID.to_string(),
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    );
+
+    let source = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("start source thread");
+    let execution_account = source.thread.execution_account();
+    let rollout_path = source.thread.rollout_path();
+    let resumed_history = || {
+        InitialHistory::Resumed(ResumedHistory {
+            conversation_id: source.thread_id,
+            history: Arc::new(Vec::new()),
+            rollout_path: rollout_path.clone(),
+        })
+    };
+
+    let mut running_options = StartThreadOptions::new(config.clone());
+    running_options.initial_history = resumed_history();
+    let running = manager
+        .start_thread(running_options)
+        .await
+        .expect("return already-running thread");
+    let mut running_with_account_options = StartThreadOptions::new(config.clone());
+    running_with_account_options.initial_history = resumed_history();
+    let running_with_account = manager
+        .start_thread_with_execution_account(
+            running_with_account_options,
+            Arc::clone(&execution_account),
+        )
+        .await
+        .expect("return already-running thread with execution account");
+    assert!(Arc::ptr_eq(&source.thread, &running.thread));
+    assert!(Arc::ptr_eq(&source.thread, &running_with_account.thread));
+
+    source
+        .thread
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown source thread");
+    let _ = manager.remove_thread(&source.thread_id).await;
+    let prepared = manager
+        .state
+        .prepare_thread_resume(PrepareThreadResumeTarget::ThreadId(source.thread_id))
+        .await
+        .expect("hold prepared resume authority");
+
+    let mut resumed_options = StartThreadOptions::new(config.clone());
+    resumed_options.initial_history = resumed_history();
+    let start_error = manager
+        .start_thread(resumed_options)
+        .await
+        .err()
+        .expect("start should respect prepared resume authority");
+    let mut resumed_with_account_options = StartThreadOptions::new(config.clone());
+    resumed_with_account_options.initial_history = resumed_history();
+    let start_with_account_error = manager
+        .start_thread_with_execution_account(resumed_with_account_options, execution_account)
+        .await
+        .err()
+        .expect("account start should respect prepared resume authority");
+    let expected_error = format!("thread {} already has a prepared resume", source.thread_id);
+    assert!(matches!(
+        start_error.details(),
+        codex_protocol::error::CodexErrorDetails::InvalidRequest(message)
+            if message == &expected_error
+    ));
+    assert!(matches!(
+        start_with_account_error.details(),
+        codex_protocol::error::CodexErrorDetails::InvalidRequest(message)
+            if message == &expected_error
+    ));
+
+    drop(prepared);
+    let mut resumed_options = StartThreadOptions::new(config);
+    resumed_options.initial_history = resumed_history();
+    let resumed = manager
+        .start_thread(resumed_options)
+        .await
+        .expect("resume after releasing prepared authority");
+    let calls = in_memory_store.calls().await;
+    assert_eq!(calls.resume_thread, 1);
+
+    resumed
+        .thread
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown resumed thread");
+}
+
+#[tokio::test]
 async fn resume_stopped_thread_from_rollout_spawns_new_thread() {
     let temp_dir = tempdir().expect("tempdir");
     let mut config = test_config().await;

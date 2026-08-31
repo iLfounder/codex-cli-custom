@@ -7,12 +7,26 @@ impl ChatWidget {
         replay_kind: Option<ReplayKind>,
     ) {
         // Reject misrouted child updates before shared notification handling mutates parent state.
-        if let ServerNotification::McpServerStatusUpdated(notification) = &notification
-            && let (Some(notification_thread_id), Some(thread_id)) =
-                (notification.thread_id.as_deref(), self.thread_id())
-            && notification_thread_id != thread_id.to_string()
-        {
-            return;
+        match &notification {
+            ServerNotification::McpServerStatusUpdated(notification)
+                if notification
+                    .thread_id
+                    .as_deref()
+                    .zip(self.thread_id())
+                    .is_some_and(|(notification_thread_id, thread_id)| {
+                        notification_thread_id != thread_id.to_string()
+                    }) =>
+            {
+                return;
+            }
+            ServerNotification::McpServerStartupCompleted(notification)
+                if self
+                    .thread_id()
+                    .is_some_and(|thread_id| notification.thread_id != thread_id.to_string()) =>
+            {
+                return;
+            }
+            _ => {}
         }
 
         let was_replaying_turn_completion = self.thread_usage.replaying_turn_completion;
@@ -189,6 +203,9 @@ impl ChatWidget {
             ),
             ServerNotification::McpServerStatusUpdated(notification) => {
                 self.on_mcp_server_status_updated(notification)
+            }
+            ServerNotification::McpServerStartupCompleted(notification) => {
+                self.on_mcp_server_startup_completed(notification)
             }
             ServerNotification::ItemGuardianApprovalReviewStarted(notification) => {
                 self.on_guardian_review_notification(

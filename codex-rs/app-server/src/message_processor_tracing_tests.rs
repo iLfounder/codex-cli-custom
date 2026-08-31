@@ -281,6 +281,7 @@ async fn build_test_processor(
         rpc_transport: AppServerRpcTransport::Stdio,
         remote_control_handle: None,
         plugin_startup_tasks: Some(PluginStartupConfig::Current),
+        account_failover_mode: codex_app_server_protocol::AccountFailoverMode::Disabled,
     }));
     (processor, outgoing_rx)
 }

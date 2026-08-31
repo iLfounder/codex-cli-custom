@@ -335,6 +335,24 @@ pub struct McpServerStatusUpdatedNotification {
     pub failure_reason: Option<McpServerStartupFailureReason>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct McpServerStartupFailure {
+    pub server: String,
+    pub error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct McpServerStartupCompletedNotification {
+    pub thread_id: String,
+    pub ready: Vec<String>,
+    pub failed: Vec<McpServerStartupFailure>,
+    pub cancelled: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase")]

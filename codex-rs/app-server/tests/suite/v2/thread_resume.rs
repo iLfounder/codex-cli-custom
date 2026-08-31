@@ -413,16 +413,43 @@ async fn thread_resume_paginated_model_context_preserves_original_metadata() -> 
 
 #[tokio::test]
 async fn thread_resume_rejects_legacy_writer_owned_by_another_process() -> Result<()> {
-    assert_thread_resume_rejects_writer_owned_by_another_process(ThreadHistoryMode::Legacy).await
+    assert_thread_resume_rejects_writer_owned_by_another_process(
+        ThreadHistoryMode::Legacy,
+        /*supplied_history*/ None,
+    )
+    .await
 }
 
 #[tokio::test]
 async fn thread_resume_rejects_paginated_writer_owned_by_another_process() -> Result<()> {
-    assert_thread_resume_rejects_writer_owned_by_another_process(ThreadHistoryMode::Paginated).await
+    assert_thread_resume_rejects_writer_owned_by_another_process(
+        ThreadHistoryMode::Paginated,
+        /*supplied_history*/ None,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn thread_resume_with_supplied_history_rejects_competing_writer_before_session_start()
+-> Result<()> {
+    assert_thread_resume_rejects_writer_owned_by_another_process(
+        ThreadHistoryMode::Legacy,
+        Some(vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "supplied history".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }]),
+    )
+    .await
 }
 
 async fn assert_thread_resume_rejects_writer_owned_by_another_process(
     history_mode: ThreadHistoryMode,
+    supplied_history: Option<Vec<ResponseItem>>,
 ) -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
@@ -463,6 +490,7 @@ async fn assert_thread_resume_rejects_writer_owned_by_another_process(
     let resume_id = secondary
         .send_thread_resume_request(ThreadResumeParams {
             thread_id: thread.id.clone(),
+            history: supplied_history,
             ..Default::default()
         })
         .await?;

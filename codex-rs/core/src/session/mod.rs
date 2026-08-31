@@ -164,6 +164,7 @@ use codex_thread_store::LiveThread;
 use codex_thread_store::LiveThreadInitGuard;
 use codex_thread_store::LocalThreadStore;
 use codex_thread_store::PersistContext;
+use codex_thread_store::PreparedThreadResumeAuthority;
 use codex_thread_store::ReadThreadParams;
 use codex_thread_store::ResumeThreadParams;
 use codex_thread_store::ThreadPersistenceMetadata;
@@ -217,6 +218,7 @@ use codex_protocol::error::Result as CodexResult;
 #[cfg(test)]
 use codex_protocol::exec_output::StreamOutput;
 
+pub(crate) mod account_failover;
 mod code_mode_warning;
 pub(crate) mod context_window;
 mod environment;
@@ -428,6 +430,7 @@ pub(crate) struct SessionSpawnArgs {
     pub(crate) code_mode_session_provider: Arc<dyn codex_code_mode::CodeModeSessionProvider>,
     pub(crate) extensions: Arc<codex_extension_api::ExtensionRegistry<crate::config::Config>>,
     pub(crate) conversation_history: InitialHistory,
+    pub(crate) prepared_resume: Option<PreparedThreadResumeAuthority>,
     pub(crate) requested_history_mode: Option<ThreadHistoryMode>,
     pub(crate) fork_persistence: ForkPersistence,
     pub(crate) session_source: SessionSource,
@@ -533,6 +536,7 @@ impl Session {
             code_mode_session_provider,
             extensions,
             conversation_history,
+            prepared_resume,
             requested_history_mode,
             fork_persistence,
             session_source,
@@ -789,6 +793,7 @@ impl Session {
             tx_event.clone(),
             agent_status_tx.clone(),
             conversation_history,
+            prepared_resume,
             fork_persistence,
             session_source_clone,
             skills_service,
@@ -4357,6 +4362,23 @@ impl Session {
         let mut state = self.state.lock().await;
         state.set_reference_context_item(Some(turn_context_item));
         Ok(world_state)
+    }
+
+    pub(super) async fn persist_accepted_execution_account_context(
+        &self,
+        turn_context: &TurnContext,
+    ) {
+        let turn_context_item = turn_context.to_turn_context_item();
+        if turn_context_item.execution_account.is_none() {
+            tracing::error!("accepted account context remained provisional after commit");
+            return;
+        }
+        self.persist_rollout_items(&[RolloutItem::TurnContext(turn_context_item.clone())])
+            .await;
+        self.state
+            .lock()
+            .await
+            .set_reference_context_item(Some(turn_context_item));
     }
 
     pub(crate) async fn update_token_usage_info(

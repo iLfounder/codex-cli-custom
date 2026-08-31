@@ -64,6 +64,28 @@ pub struct Cli {
     )]
     pub json: bool,
 
+    /// Retry an account-rejected model attempt before any semantic effect is observed.
+    #[arg(
+        long = "account-failover",
+        value_enum,
+        default_value_t = AccountFailover::Disabled,
+        global = true
+    )]
+    pub account_failover: AccountFailover,
+
+    /// Configure the registered-account rotation policy before the first turn.
+    #[arg(long = "account-rotation", value_enum, global = true)]
+    pub account_rotation: Option<AccountRotation>,
+
+    /// Emit a flushed invocation readiness record before reading a forced stdin prompt.
+    #[arg(
+        long = "invocation-ready-id",
+        value_name = "OPAQUE_ID",
+        value_parser = parse_invocation_ready_id,
+        global = true
+    )]
+    pub invocation_ready_id: Option<String>,
+
     /// Specifies file where the last message from the agent should be written.
     #[arg(
         long = "output-last-message",
@@ -311,6 +333,51 @@ pub enum Color {
     Never,
     #[default]
     Auto,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum AccountFailover {
+    #[default]
+    Disabled,
+    PreSemantic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum AccountRotation {
+    QuotaAware,
+    RoundRobin,
+    ExhaustThenNext,
+}
+
+fn parse_invocation_ready_id(value: &str) -> Result<String, String> {
+    let bytes = value.as_bytes();
+    if !(1..=128).contains(&bytes.len()) {
+        return Err("invocation-ready-id must be 1-128 ASCII characters".to_string());
+    }
+    let is_alphanumeric = |byte: u8| byte.is_ascii_alphanumeric();
+    if !is_alphanumeric(bytes[0])
+        || bytes[1..]
+            .iter()
+            .any(|byte| !is_alphanumeric(*byte) && !b"._:-".contains(byte))
+    {
+        return Err("invocation-ready-id must match [A-Za-z0-9][A-Za-z0-9._:-]{0,127}".to_string());
+    }
+    Ok(value.to_string())
+}
+
+pub fn has_forced_stdin_prompt(command: Option<&Command>, root_prompt: Option<&str>) -> bool {
+    let prompt = match command {
+        Some(Command::Resume(args)) => args
+            .prompt
+            .as_deref()
+            .or_else(|| args.last.then_some(args.session_id.as_deref()).flatten())
+            .or(root_prompt),
+        Some(Command::Fork(_) | Command::Review(_)) => None,
+        None => root_prompt,
+    };
+    prompt == Some("-")
 }
 
 #[cfg(test)]

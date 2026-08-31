@@ -599,7 +599,11 @@ impl TurnContext {
         TurnContextItem {
             turn_id: Some(self.sub_id.clone()),
             root_turn_id: self.turn_metadata_state.root_turn_id(),
-            execution_account: Some(self.execution_account.binding.clone()),
+            execution_account: self
+                .extension_data
+                .get::<super::account_failover::PreSemanticAccountFailover>()
+                .is_none_or(|attempt| !attempt.is_provisional())
+                .then(|| self.execution_account.binding.clone()),
             cwd,
             workspace_roots: (!workspace_roots.is_empty()).then_some(workspace_roots),
             current_date: self.current_date.clone(),
@@ -863,6 +867,30 @@ impl Session {
         Ok((turn_context, snapshot))
     }
 
+    /// Constructs a turn using an account runtime selected during root-turn admission.
+    /// The settings commit and published snapshot remain identical to the native path.
+    pub(super) async fn new_turn_with_sub_id_for_account_runtime(
+        &self,
+        sub_id: String,
+        updates: SessionSettingsUpdate,
+        options: NewTurnContextOptions,
+        account_runtime: Arc<crate::execution_account::ExecutionAccountRuntime>,
+    ) -> CodexResult<(Arc<TurnContext>, ThreadSettingsSnapshot)> {
+        let Some((turn_context, snapshot)) = self
+            .new_turn_with_sub_id_if_for_account_runtime(
+                sub_id,
+                updates,
+                options,
+                |_, _| true,
+                Some(account_runtime),
+            )
+            .await?
+        else {
+            unreachable!("unconditional turn construction must accept valid settings");
+        };
+        Ok((turn_context, snapshot))
+    }
+
     /// Commits accepted settings atomically, then constructs the turn without holding
     /// the state lock. The caller owns admission policy.
     ///
@@ -875,6 +903,24 @@ impl Session {
         updates: SessionSettingsUpdate,
         options: NewTurnContextOptions,
         should_start: impl FnOnce(&SessionConfiguration, &SessionConfiguration) -> bool + Send,
+    ) -> CodexResult<Option<(Arc<TurnContext>, ThreadSettingsSnapshot)>> {
+        self.new_turn_with_sub_id_if_for_account_runtime(
+            sub_id,
+            updates,
+            options,
+            should_start,
+            None,
+        )
+        .await
+    }
+
+    pub(super) async fn new_turn_with_sub_id_if_for_account_runtime(
+        &self,
+        sub_id: String,
+        updates: SessionSettingsUpdate,
+        options: NewTurnContextOptions,
+        should_start: impl FnOnce(&SessionConfiguration, &SessionConfiguration) -> bool + Send,
+        account_runtime: Option<Arc<crate::execution_account::ExecutionAccountRuntime>>,
     ) -> CodexResult<Option<(Arc<TurnContext>, ThreadSettingsSnapshot)>> {
         let service_tier_for_turn = updates.service_tier_for_turn.clone();
         let commit = match self.update_settings_if(updates, should_start).await {
@@ -899,9 +945,23 @@ impl Session {
         if let Some(service_tier) = service_tier_for_turn {
             Arc::make_mut(&mut configuration.step_settings).service_tier = Some(service_tier);
         }
-        let turn_context = self
-            .new_turn_from_configuration(sub_id, configuration, options)
-            .await;
+        let turn_context = match account_runtime {
+            Some(account_runtime) => {
+                self.new_turn_context_from_configuration(
+                    sub_id,
+                    configuration,
+                    account_runtime,
+                    options,
+                    TurnMultiAgentRuntime::ResolveAndStore,
+                    self.git_enrichment_policy,
+                )
+                .await
+            }
+            None => {
+                self.new_turn_from_configuration(sub_id, configuration, options)
+                    .await
+            }
+        };
         Ok(Some((turn_context, commit.snapshot)))
     }
 
@@ -922,6 +982,46 @@ impl Session {
             self.git_enrichment_policy,
         )
         .await
+    }
+
+    pub(super) async fn new_turn_context_for_account_attempt(
+        &self,
+        previous: &Arc<TurnContext>,
+        account_runtime: Arc<crate::execution_account::ExecutionAccountRuntime>,
+    ) -> Arc<TurnContext> {
+        let session_configuration = self.state.lock().await.session_configuration.clone();
+        let next = self
+            .new_turn_context_from_configuration(
+                previous.sub_id.clone(),
+                session_configuration,
+                account_runtime,
+                NewTurnContextOptions {
+                    final_output_json_schema: previous.final_output_json_schema.clone(),
+                    cyber_access_program: previous.cyber_access_program,
+                },
+                TurnMultiAgentRuntime::Preview,
+                GitEnrichmentPolicy::Skip,
+            )
+            .await;
+        let mut next = Arc::try_unwrap(next)
+            .unwrap_or_else(|_| unreachable!("new account attempt context is uniquely owned"));
+        next.trace_id.clone_from(&previous.trace_id);
+        next.realtime_active = previous.realtime_active;
+        next.code_mode_available = previous.code_mode_available;
+        next.turn_metadata_state = Arc::clone(&previous.turn_metadata_state);
+        next.turn_timing_state = Arc::clone(&previous.turn_timing_state);
+        next.terminal_error = Arc::clone(&previous.terminal_error);
+        next.server_model_warning_emitted.store(
+            previous
+                .server_model_warning_emitted
+                .load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        next.model_verification_emitted.store(
+            previous.model_verification_emitted.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        Arc::new(next)
     }
 
     async fn new_startup_prewarm_turn_from_configuration(
