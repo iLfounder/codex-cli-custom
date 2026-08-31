@@ -1,0 +1,38 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Compare-and-swap parameters for switching a thread's next-turn account.",
+  "properties": {
+    "expectedExecutionGeneration": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "expectedInstanceEpoch": {
+      "type": "string"
+    },
+    "expectedStateRevision": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "operationId": {
+      "type": "string"
+    },
+    "targetAccountSlotId": {
+      "type": "string"
+    },
+    "threadId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "expectedExecutionGeneration",
+    "expectedInstanceEpoch",
+    "expectedStateRevision",
+    "operationId",
+    "targetAccountSlotId",
+    "threadId"
+  ],
+  "title": "ThreadAccountSwitchParams",
+  "type": "object"
+}

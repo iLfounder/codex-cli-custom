@@ -352,6 +352,19 @@ ignored at startup remain ignored during this check.
 enabled layer of the operation's loaded config stack. Otherwise it removes the
 snapshot and any base-user entry; a base-user entry is not required for cleanup.
 
+### Session runtime and account control
+
+- `sessionRuntime/list` — page through sanitized full runtime snapshots, optionally filtered by one exact `threadId`. Every page carries the same `instanceEpoch` and `snapshotSequence`; its opaque `nextCursor` is also bound to that pair and a stable sort anchor. If the sequence changes between pages, the server returns a stale-cursor error and the client must restart from the first page.
+- `thread/account/switch` — request an idle next-turn account switch with an `operationId`, target slot, expected process epoch, state revision, and execution generation.
+- `thread/relinquish` — request a strict durable writer release with an `operationId`, expected process epoch, state revision, and writer generation.
+- `accountSlot/list` — page through sanitized account slots. Responses never include email addresses, tokens, credential homes, or credential paths. The opaque cursor is bound to `registryRevision` and a stable sort anchor; any intervening registry mutation makes it stale and requires a first-page restart.
+- `accountSlot/login/start` — create a server-managed private account slot when `slotId` is omitted, or retry the same failed/login-required slot when it is supplied. The response includes the sanitized slot, operation state, and an optional browser or device-code challenge.
+- `accountSlot/changed` (notify) — emits the complete sanitized changed slot and its new `registryRevision`.
+
+The session-runtime control contract is operation-based. `thread/account/switch` and `thread/relinquish` return an operation whose status distinguishes acknowledgement (`accepted` or `running`) from terminal completion (`ready`, `released`, or `failed`). `sessionRuntime/operation/updated` publishes later operation states, while `sessionRuntime/changed` publishes a complete changed-thread snapshot with an `instanceEpoch` and monotonic `sequence`. Operation ids are idempotent only within the same process epoch and only when the normalized request fingerprint is identical; reusing an id with a different thread, action, or arguments is invalid.
+
+`thread/relinquish` validates the process epoch, thread state revision, writer generation, idle/wait state, and subscriber ownership before entering `running`. A failed precondition or durability step returns a terminal `failed` operation without dropping the current writer or subscription. `released` means strict persistence completed, the old writer was released, and the terminal runtime snapshot was published. `thread/account/switch` validates the process epoch, state and execution revisions, writer ownership, idle/wait state, and subscriber ownership, then prepares the target account runtime before atomically changing the durable next-turn binding. A terminal `ready` operation preserves the thread id, writer, listener, and subscriptions; later turns use the target slot while an already-running turn cannot be switched.
+
 ### Example: Start or resume a thread
 
 The shared `Thread` object includes nullable `model` and `reasoningEffort` fields,

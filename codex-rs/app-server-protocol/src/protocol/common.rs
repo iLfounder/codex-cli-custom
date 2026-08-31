@@ -544,6 +544,16 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ThreadUnsubscribeResponse,
     },
+    ThreadAccountSwitch => "thread/account/switch" {
+        params: v2::ThreadAccountSwitchParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadAccountSwitchResponse,
+    },
+    ThreadRelinquish => "thread/relinquish" {
+        params: v2::ThreadRelinquishParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadRelinquishResponse,
+    },
     #[experimental("thread/increment_elicitation")]
     /// Increment the thread-local out-of-band elicitation counter.
     ///
@@ -782,6 +792,11 @@ client_request_definitions! {
         params: v2::ThreadLoadedListParams,
         serialization: None,
         response: v2::ThreadLoadedListResponse,
+    },
+    SessionRuntimeList => "sessionRuntime/list" {
+        params: v2::SessionRuntimeListParams,
+        serialization: None,
+        response: v2::SessionRuntimeListResponse,
     },
     ThreadRead => "thread/read" {
         params: v2::ThreadReadParams,
@@ -1196,6 +1211,18 @@ client_request_definitions! {
         params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
         serialization: global("config"),
         response: v2::WindowsSandboxReadinessResponse,
+    },
+
+    AccountSlotList => "accountSlot/list" {
+        params: v2::AccountSlotListParams,
+        serialization: global_shared_read("account-slots"),
+        response: v2::AccountSlotListResponse,
+    },
+
+    AccountSlotLoginStart => "accountSlot/login/start" {
+        params: v2::AccountSlotLoginStartParams,
+        serialization: global("account-slots"),
+        response: v2::AccountSlotLoginStartResponse,
     },
 
     LoginAccount => "account/login/start" {
@@ -1905,6 +1932,9 @@ server_notification_definitions! {
     McpServerEventStream => "mcpServer/event/stream/notification" (v2::McpServerEventStreamNotification),
     AccountUpdated => "account/updated" (v2::AccountUpdatedNotification),
     AccountRateLimitsUpdated => "account/rateLimits/updated" (v2::AccountRateLimitsUpdatedNotification),
+    AccountSlotChanged => "accountSlot/changed" (v2::AccountSlotChangedNotification),
+    SessionRuntimeChanged => "sessionRuntime/changed" (v2::SessionRuntimeChangedNotification),
+    SessionRuntimeOperationUpdated => "sessionRuntime/operation/updated" (v2::SessionRuntimeOperationUpdatedNotification),
     AppListUpdated => "app/list/updated" (v2::AppListUpdatedNotification),
     RemoteControlStatusChanged => "remoteControl/status/changed" (v2::RemoteControlStatusChangedNotification),
     ExternalAgentConfigImportProgress => "externalAgentConfig/import/progress" (v2::ExternalAgentConfigImportProgressNotification),

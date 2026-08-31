@@ -274,6 +274,63 @@
       ],
       "type": "string"
     },
+    "ThreadTransitionIntent": {
+      "properties": {
+        "expectedInstanceEpoch": {
+          "type": "string"
+        },
+        "expectedStateRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "expectedWriter": {
+          "$ref": "#/definitions/ThreadWriterEvidence"
+        },
+        "previousThreadId": {
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/definitions/ThreadTransitionReason"
+        },
+        "transitionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expectedInstanceEpoch",
+        "expectedStateRevision",
+        "expectedWriter",
+        "previousThreadId",
+        "reason",
+        "transitionId"
+      ],
+      "type": "object"
+    },
+    "ThreadTransitionReason": {
+      "enum": [
+        "clear",
+        "new"
+      ],
+      "type": "string"
+    },
+    "ThreadWriterEvidence": {
+      "properties": {
+        "storeId": {
+          "type": "string"
+        },
+        "writerGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "storeId",
+        "writerGeneration"
+      ],
+      "type": "object"
+    },
     "TurnEnvironmentParams": {
       "properties": {
         "cwd": {
