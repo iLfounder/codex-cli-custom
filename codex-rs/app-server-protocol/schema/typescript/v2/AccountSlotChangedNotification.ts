@@ -4,6 +4,6 @@
 import type { AccountSlotSnapshot } from "./AccountSlotSnapshot";
 
 /**
- * Full changed-slot snapshot at a new registry revision.
+ * Full upserted account snapshot at a new registry revision.
  */
 export type AccountSlotChangedNotification = { registryRevision: number, slot: AccountSlotSnapshot, };

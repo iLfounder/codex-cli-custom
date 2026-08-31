@@ -6,7 +6,10 @@ export type { AccountRateLimitsUpdatedNotification } from "./AccountRateLimitsUp
 export type { AccountSlotAction } from "./AccountSlotAction";
 export type { AccountSlotActionAvailability } from "./AccountSlotActionAvailability";
 export type { AccountSlotCapability } from "./AccountSlotCapability";
+export type { AccountSlotCatalogKind } from "./AccountSlotCatalogKind";
 export type { AccountSlotChangedNotification } from "./AccountSlotChangedNotification";
+export type { AccountSlotHealth } from "./AccountSlotHealth";
+export type { AccountSlotInventoryChangedNotification } from "./AccountSlotInventoryChangedNotification";
 export type { AccountSlotListParams } from "./AccountSlotListParams";
 export type { AccountSlotListResponse } from "./AccountSlotListResponse";
 export type { AccountSlotLoginChallenge } from "./AccountSlotLoginChallenge";
@@ -14,6 +17,8 @@ export type { AccountSlotLoginStartParams } from "./AccountSlotLoginStartParams"
 export type { AccountSlotLoginStartResponse } from "./AccountSlotLoginStartResponse";
 export type { AccountSlotLogoutParams } from "./AccountSlotLogoutParams";
 export type { AccountSlotLogoutResponse } from "./AccountSlotLogoutResponse";
+export type { AccountSlotQuotaMeter } from "./AccountSlotQuotaMeter";
+export type { AccountSlotQuotaSnapshot } from "./AccountSlotQuotaSnapshot";
 export type { AccountSlotRateLimitsReadParams } from "./AccountSlotRateLimitsReadParams";
 export type { AccountSlotRateLimitsReadResponse } from "./AccountSlotRateLimitsReadResponse";
 export type { AccountSlotSnapshot } from "./AccountSlotSnapshot";
