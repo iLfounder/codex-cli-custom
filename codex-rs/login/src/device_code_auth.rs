@@ -9,6 +9,7 @@ use std::time::Instant;
 
 use crate::default_client::create_raw_auth_client;
 use crate::pkce::PkceCodes;
+use crate::server::LoginCredentialCommitHook;
 use crate::server::ServerOptions;
 use std::io;
 
@@ -182,6 +183,22 @@ pub async fn complete_device_code_login(
     opts: ServerOptions,
     device_code: DeviceCode,
 ) -> std::io::Result<()> {
+    complete_device_code_login_inner(opts, device_code, None).await
+}
+
+pub async fn complete_device_code_login_with_commit_hook(
+    opts: ServerOptions,
+    device_code: DeviceCode,
+    commit_hook: LoginCredentialCommitHook,
+) -> std::io::Result<()> {
+    complete_device_code_login_inner(opts, device_code, Some(commit_hook)).await
+}
+
+async fn complete_device_code_login_inner(
+    opts: ServerOptions,
+    device_code: DeviceCode,
+    commit_hook: Option<LoginCredentialCommitHook>,
+) -> std::io::Result<()> {
     let base_url = opts.issuer.trim_end_matches('/');
     let client = create_raw_auth_client(base_url, &opts.auth_route_config)?;
     let api_base_url = format!("{base_url}/api/accounts");
@@ -219,7 +236,13 @@ pub async fn complete_device_code_login(
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, message));
     }
 
-    crate::server::persist_tokens_async(
+    if commit_hook.as_ref().is_some_and(|hook| !hook.begin()) {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "login was canceled before credentials were saved",
+        ));
+    }
+    let persist_result = crate::server::persist_tokens_async(
         &opts.codex_home,
         /*api_key*/ None,
         tokens.id_token,
@@ -228,7 +251,11 @@ pub async fn complete_device_code_login(
         opts.cli_auth_credentials_store_mode,
         opts.auth_keyring_backend_kind,
     )
-    .await
+    .await;
+    if let Some(hook) = commit_hook {
+        hook.finish(persist_result.is_ok());
+    }
+    persist_result
 }
 
 pub async fn run_device_code_login(opts: ServerOptions) -> std::io::Result<()> {

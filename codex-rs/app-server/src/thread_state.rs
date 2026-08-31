@@ -22,7 +22,6 @@ use codex_rollout::state_db::StateDbHandle;
 use codex_utils_path_uri::LegacyAppPathString;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::Weak;
@@ -130,7 +129,25 @@ pub(crate) struct ThreadSubscriptionSnapshot {
 pub(crate) enum PendingUnloadSubscription<T> {
     PendingUnload,
     ConnectionClosed,
+    TransitionInProgress,
     Subscribed(T),
+}
+
+pub(crate) enum ConversationSubscription {
+    PendingUnload,
+    ConnectionClosed,
+    TransitionInProgress,
+    Subscribed {
+        thread_state: Arc<Mutex<ThreadState>>,
+        subscription_changed: bool,
+        transition_admission_permit: Option<OwnedSemaphorePermit>,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum InitiatorTransitionReconnect {
+    PreserveReservation,
+    AbortReservation,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -497,10 +514,19 @@ impl ThreadStateManager {
                 .transition_admission
                 .clone()
         };
-        let admission_permit = admission
-            .acquire_owned()
-            .await
-            .map_err(|_| "transition_thread_unavailable")?;
+        let admission_permit = match admission.try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let state = self.state.lock().await;
+                if let Some(reservation) = state.transition_reservations.get(&previous_thread_id)
+                    && reservation.snapshot.transition_id == transition_id
+                    && reservation.snapshot.initiator_connection_id == connection_id
+                {
+                    return Ok(reservation.snapshot.initiator_client_incarnation.clone());
+                }
+                return Err("outgoing_transition_conflict");
+            }
+        };
         let mut state = self.state.lock().await;
         if let Some(reservation) = state.transition_reservations.get(&previous_thread_id) {
             if reservation.snapshot.transition_id == transition_id
@@ -878,9 +904,10 @@ impl ThreadStateManager {
                 return false;
             }
 
-            if let Some(reservation) = state.transition_reservations.get_mut(&thread_id) {
-                if reservation.snapshot.initiator_connection_id == connection_id
-                    && reservation.snapshot.phase == ThreadTransitionReservationPhase::Prepared
+            if let Some(reservation) = state.transition_reservations.get_mut(&thread_id)
+                && reservation.snapshot.initiator_connection_id == connection_id
+            {
+                if reservation.snapshot.phase == ThreadTransitionReservationPhase::Prepared
                     && reservation.snapshot.invalid_reason.is_none()
                 {
                     reservation.snapshot.phase =
@@ -926,32 +953,41 @@ impl ThreadStateManager {
         connection_id: ConnectionId,
         experimental_raw_events: bool,
     ) -> Option<Arc<Mutex<ThreadState>>> {
-        let thread_state = self
+        let subscription = self
             .try_ensure_connection_subscribed_without_runtime_publish(
                 thread_id,
                 connection_id,
                 experimental_raw_events,
+                InitiatorTransitionReconnect::AbortReservation,
             )
-            .await?;
+            .await;
+        let ConversationSubscription::Subscribed { thread_state, .. } = subscription else {
+            return None;
+        };
         self.publish_runtime(thread_id).await;
         Some(thread_state)
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "the pending-unload fence must cover the subscriber-state mutation"
+    )]
     pub(crate) async fn try_ensure_connection_subscribed_unless_pending_unload(
         &self,
         pending_thread_unloads: &Mutex<HashSet<ThreadId>>,
         thread_id: ThreadId,
         connection_id: ConnectionId,
         experimental_raw_events: bool,
-    ) -> PendingUnloadSubscription<Arc<Mutex<ThreadState>>> {
-        self.subscribe_unless_pending_unload(
-            pending_thread_unloads,
+    ) -> ConversationSubscription {
+        let pending_thread_unloads = pending_thread_unloads.lock().await;
+        if pending_thread_unloads.contains(&thread_id) {
+            return ConversationSubscription::PendingUnload;
+        }
+        self.try_ensure_connection_subscribed_without_runtime_publish(
             thread_id,
-            self.try_ensure_connection_subscribed_without_runtime_publish(
-                thread_id,
-                connection_id,
-                experimental_raw_events,
-            ),
+            connection_id,
+            experimental_raw_events,
+            InitiatorTransitionReconnect::PreserveReservation,
         )
         .await
     }
@@ -961,38 +997,51 @@ impl ThreadStateManager {
         thread_id: ThreadId,
         connection_id: ConnectionId,
         experimental_raw_events: bool,
-    ) -> Option<Arc<Mutex<ThreadState>>> {
-        self.mark_runtime_dirty();
-        let thread_state = {
+        initiator_reconnect: InitiatorTransitionReconnect,
+    ) -> ConversationSubscription {
+        let (thread_state, subscription_changed, transition_admission_permit) = {
             let mut state = self.state.lock().await;
             if !state.live_connections.contains_key(&connection_id) {
-                return None;
+                return ConversationSubscription::ConnectionClosed;
             }
             let already_subscribed = state
                 .thread_ids_by_connection
                 .get(&connection_id)
                 .is_some_and(|thread_ids| thread_ids.contains(&thread_id));
             if !already_subscribed && state.transition_reservations.contains_key(&thread_id) {
-                let restores_initiator =
-                    state
-                        .transition_reservations
-                        .get(&thread_id)
-                        .is_some_and(|reservation| {
-                            reservation.snapshot.initiator_connection_id == connection_id
-                                && reservation.snapshot.phase
-                                    == ThreadTransitionReservationPhase::InitiatorUnsubscribed
-                        });
-                if restores_initiator {
+                let aborts_transition = matches!(
+                    initiator_reconnect,
+                    InitiatorTransitionReconnect::AbortReservation
+                ) && state
+                    .transition_reservations
+                    .get(&thread_id)
+                    .is_some_and(|reservation| {
+                        reservation.snapshot.initiator_connection_id == connection_id
+                            && reservation.snapshot.phase
+                                == ThreadTransitionReservationPhase::InitiatorUnsubscribed
+                    });
+                if aborts_transition {
                     state.transition_reservations.remove(&thread_id);
                 } else {
-                    if let Some(reservation) = state.transition_reservations.get_mut(&thread_id) {
-                        reservation
-                            .snapshot
-                            .invalid_reason
-                            .get_or_insert("unexpected_subscriber_mutation");
-                    }
-                    return None;
+                    return ConversationSubscription::TransitionInProgress;
                 }
+            }
+            let transition_admission_permit = if already_subscribed {
+                None
+            } else {
+                let admission = state
+                    .threads
+                    .entry(thread_id)
+                    .or_default()
+                    .transition_admission
+                    .clone();
+                let Ok(permit) = admission.try_acquire_owned() else {
+                    return ConversationSubscription::TransitionInProgress;
+                };
+                Some(permit)
+            };
+            if !already_subscribed {
+                self.mark_runtime_dirty();
             }
             state
                 .thread_ids_by_connection
@@ -1002,7 +1051,11 @@ impl ThreadStateManager {
             let thread_entry = state.threads.entry(thread_id).or_default();
             thread_entry.connection_ids.insert(connection_id);
             thread_entry.update_has_connections();
-            thread_entry.state.clone()
+            (
+                thread_entry.state.clone(),
+                !already_subscribed,
+                transition_admission_permit,
+            )
         };
         {
             let mut thread_state_guard = thread_state.lock().await;
@@ -1010,7 +1063,11 @@ impl ThreadStateManager {
                 thread_state_guard.set_experimental_raw_events(/*enabled*/ true);
             }
         }
-        Some(thread_state)
+        ConversationSubscription::Subscribed {
+            thread_state,
+            subscription_changed,
+            transition_admission_permit,
+        }
     }
 
     #[cfg(test)]
@@ -1019,98 +1076,60 @@ impl ThreadStateManager {
         thread_id: ThreadId,
         connection_id: ConnectionId,
     ) -> bool {
-        let subscribed = self
-            .try_add_connection_to_thread_without_runtime_publish(thread_id, connection_id)
-            .await;
-        if subscribed.is_some() {
+        let subscribed = matches!(
+            self.try_ensure_connection_subscribed_without_runtime_publish(
+                thread_id,
+                connection_id,
+                /*experimental_raw_events*/ false,
+                InitiatorTransitionReconnect::AbortReservation,
+            )
+            .await,
+            ConversationSubscription::Subscribed { .. }
+        );
+        if subscribed {
             self.publish_runtime(thread_id).await;
         }
-        subscribed.is_some()
-    }
-
-    pub(crate) async fn try_add_connection_to_thread_unless_pending_unload(
-        &self,
-        pending_thread_unloads: &Mutex<HashSet<ThreadId>>,
-        thread_id: ThreadId,
-        connection_id: ConnectionId,
-    ) -> PendingUnloadSubscription<()> {
-        self.subscribe_unless_pending_unload(
-            pending_thread_unloads,
-            thread_id,
-            self.try_add_connection_to_thread_without_runtime_publish(thread_id, connection_id),
-        )
-        .await
-    }
-
-    async fn try_add_connection_to_thread_without_runtime_publish(
-        &self,
-        thread_id: ThreadId,
-        connection_id: ConnectionId,
-    ) -> Option<()> {
-        self.mark_runtime_dirty();
-        let mut state = self.state.lock().await;
-        if !state.live_connections.contains_key(&connection_id) {
-            return None;
-        }
-        let already_subscribed = state
-            .thread_ids_by_connection
-            .get(&connection_id)
-            .is_some_and(|thread_ids| thread_ids.contains(&thread_id));
-        if !already_subscribed && state.transition_reservations.contains_key(&thread_id) {
-            let restores_initiator =
-                state
-                    .transition_reservations
-                    .get(&thread_id)
-                    .is_some_and(|reservation| {
-                        reservation.snapshot.initiator_connection_id == connection_id
-                            && reservation.snapshot.phase
-                                == ThreadTransitionReservationPhase::InitiatorUnsubscribed
-                    });
-            if restores_initiator {
-                state.transition_reservations.remove(&thread_id);
-            } else {
-                if let Some(reservation) = state.transition_reservations.get_mut(&thread_id) {
-                    reservation
-                        .snapshot
-                        .invalid_reason
-                        .get_or_insert("unexpected_subscriber_mutation");
-                }
-                return None;
-            }
-        }
-        state
-            .thread_ids_by_connection
-            .entry(connection_id)
-            .or_default()
-            .insert(thread_id);
-        let thread_entry = state.threads.entry(thread_id).or_default();
-        thread_entry.connection_ids.insert(connection_id);
-        thread_entry.update_has_connections();
-        Some(())
+        subscribed
     }
 
     #[expect(
         clippy::await_holding_invalid_type,
         reason = "the pending-unload fence must cover the subscriber-state mutation"
     )]
-    async fn subscribe_unless_pending_unload<T>(
+    pub(crate) async fn try_add_connection_to_thread_unless_pending_unload(
         &self,
         pending_thread_unloads: &Mutex<HashSet<ThreadId>>,
         thread_id: ThreadId,
-        subscription: impl Future<Output = Option<T>>,
-    ) -> PendingUnloadSubscription<T> {
-        let subscribed = {
+        connection_id: ConnectionId,
+    ) -> PendingUnloadSubscription<()> {
+        let subscription = {
             let pending_thread_unloads = pending_thread_unloads.lock().await;
             if pending_thread_unloads.contains(&thread_id) {
                 return PendingUnloadSubscription::PendingUnload;
             }
-            let Some(subscribed) = subscription.await else {
-                return PendingUnloadSubscription::ConnectionClosed;
-            };
-            subscribed
+            self.try_ensure_connection_subscribed_without_runtime_publish(
+                thread_id,
+                connection_id,
+                /*experimental_raw_events*/ false,
+                InitiatorTransitionReconnect::AbortReservation,
+            )
+            .await
         };
-        self.publish_runtime(thread_id).await;
-        PendingUnloadSubscription::Subscribed(subscribed)
+        match subscription {
+            ConversationSubscription::ConnectionClosed => {
+                PendingUnloadSubscription::ConnectionClosed
+            }
+            ConversationSubscription::TransitionInProgress => {
+                PendingUnloadSubscription::TransitionInProgress
+            }
+            ConversationSubscription::Subscribed { .. } => {
+                self.publish_runtime(thread_id).await;
+                PendingUnloadSubscription::Subscribed(())
+            }
+            ConversationSubscription::PendingUnload => {
+                unreachable!("pending unload is checked before the subscription attempt")
+            }
+        }
     }
 
     pub(crate) async fn remove_connection(&self, connection_id: ConnectionId) -> Vec<ThreadId> {
@@ -1134,12 +1153,6 @@ impl ThreadStateManager {
                 state.transition_reservations.remove(&thread_id);
             }
             for thread_id in &thread_ids {
-                if let Some(reservation) = state.transition_reservations.get_mut(thread_id) {
-                    reservation
-                        .snapshot
-                        .invalid_reason
-                        .get_or_insert("unexpected_subscriber_mutation");
-                }
                 if let Some(thread_entry) = state.threads.get_mut(thread_id) {
                     thread_entry.connection_ids.remove(&connection_id);
                     thread_entry.update_has_connections();

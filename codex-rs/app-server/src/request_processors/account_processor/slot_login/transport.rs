@@ -4,6 +4,7 @@ use std::sync::Arc;
 use codex_app_server_protocol::AccountSlotLoginChallenge;
 use codex_app_server_protocol::AccountSlotLoginStartResponse;
 use codex_app_server_protocol::JSONRPCErrorError;
+use codex_app_server_protocol::ServerNotification;
 use codex_login::LoginSuccessPage;
 use codex_login::LoginSuccessPageBrand;
 use codex_login::ServerOptions as LoginServerOptions;
@@ -94,6 +95,29 @@ impl AccountRequestProcessor {
             .lock()
             .await
             .insert(prepared.operation_id.clone(), active);
+        let started = match self
+            .account_registry
+            .mark_login_cancelable(
+                &prepared.account_slot_id,
+                prepared.attempt_generation,
+                &prepared.operation_id,
+            )
+            .await
+        {
+            Ok(started) => started,
+            Err(error) => {
+                self.complete_active_slot_login(&prepared.operation_id)
+                    .await;
+                completion.complete();
+                self.account_registry.finish_browser_login(&owner).await;
+                self.finish_slot_failure(&prepared, ERROR_LOGIN_FAILED)
+                    .await;
+                return Err(error);
+            }
+        };
+        self.outgoing
+            .send_server_notification(ServerNotification::AccountSlotChanged(started))
+            .await;
 
         let processor = self.clone();
         let operation_id = prepared.operation_id.clone();
@@ -163,6 +187,28 @@ impl AccountRequestProcessor {
             .lock()
             .await
             .insert(prepared.operation_id.clone(), active);
+        let started = match self
+            .account_registry
+            .mark_login_cancelable(
+                &prepared.account_slot_id,
+                prepared.attempt_generation,
+                &prepared.operation_id,
+            )
+            .await
+        {
+            Ok(started) => started,
+            Err(error) => {
+                self.complete_active_slot_login(&prepared.operation_id)
+                    .await;
+                completion.complete();
+                self.finish_slot_failure(&prepared, ERROR_LOGIN_FAILED)
+                    .await;
+                return Err(error);
+            }
+        };
+        self.outgoing
+            .send_server_notification(ServerNotification::AccountSlotChanged(started))
+            .await;
 
         let processor = self.clone();
         let operation_id = prepared.operation_id.clone();

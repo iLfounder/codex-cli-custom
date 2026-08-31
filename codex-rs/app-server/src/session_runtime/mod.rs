@@ -1,3 +1,4 @@
+mod account_rotation;
 pub(crate) mod continuity;
 #[allow(dead_code)]
 mod operations;
@@ -18,8 +19,11 @@ use codex_app_server_protocol::SessionRuntimeChangedNotification;
 use codex_app_server_protocol::SessionRuntimeListParams;
 use codex_app_server_protocol::SessionRuntimeListResponse;
 use codex_app_server_protocol::SessionRuntimeSnapshot;
+use codex_app_server_protocol::ThreadStatus;
 use codex_core::ThreadManager;
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::ExecutionAccountBinding;
+use codex_protocol::protocol::RateLimitSnapshot as CoreRateLimitSnapshot;
 use codex_thread_store::LocalThreadStore;
 use codex_thread_store::ThreadStore;
 use tokio::sync::Mutex;
@@ -344,6 +348,84 @@ impl SessionRuntimeEngine {
         Ok(false)
     }
 
+    pub(crate) async fn account_slot_has_active_turn(
+        &self,
+        account_slot_id: &str,
+    ) -> Result<bool, JSONRPCErrorError> {
+        let _build_guard = self
+            .build_lock
+            .acquire()
+            .await
+            .map_err(|_| internal_error("session runtime publisher is unavailable"))?;
+        for thread_id in self.thread_manager.list_thread_ids().await {
+            let status = self
+                .thread_watch_manager
+                .loaded_status_for_thread(&thread_id.to_string())
+                .await;
+            if !is_actual_active_status(&status) {
+                continue;
+            }
+            let subscriptions = self.thread_state_manager.runtime_snapshot(thread_id).await;
+            let Ok(thread) = self.thread_manager.get_thread(thread_id).await else {
+                continue;
+            };
+            let turn_binding = match subscriptions.active_turn_id {
+                Some(turn_id) => self
+                    .thread_store
+                    .turn_execution_account(thread_id, turn_id)
+                    .await
+                    .map_err(|_| internal_error("turn execution account store is unavailable"))?,
+                None => None,
+            };
+            if active_status_matches_account_slot(
+                &status,
+                turn_binding.as_ref(),
+                &thread.execution_account().binding,
+                account_slot_id,
+            ) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    pub(crate) async fn observe_rate_limit_update(
+        &self,
+        thread_id: ThreadId,
+        turn_id: &str,
+        rate_limits: &CoreRateLimitSnapshot,
+    ) {
+        let Ok(Some(turn_binding)) = self
+            .thread_store
+            .turn_execution_account(thread_id, turn_id.to_string())
+            .await
+        else {
+            return;
+        };
+        let Ok(Some(current_binding)) =
+            self.thread_store.execution_account_binding(thread_id).await
+        else {
+            return;
+        };
+        if turn_binding != current_binding {
+            return;
+        }
+        self.account_registry
+            .invalidate_slot_quota(&current_binding.slot_id)
+            .await;
+        if rate_limits.spend_control_reached == Some(true)
+            || rate_limits.rate_limit_reached_type.is_some()
+        {
+            self.account_registry
+                .record_exhaustion_hint(crate::account_registry::rotation::ExhaustionHintKey {
+                    thread_id,
+                    account_slot_id: current_binding.slot_id,
+                    execution_generation: current_binding.generation,
+                })
+                .await;
+        }
+    }
+
     async fn build_consistent_snapshots(
         &self,
         thread_id: Option<&str>,
@@ -433,6 +515,23 @@ impl SessionRuntimeEngine {
             .revisions
             .retain(|thread_id, _revision| retained.contains(thread_id));
     }
+}
+
+fn is_actual_active_status(status: &ThreadStatus) -> bool {
+    matches!(status, ThreadStatus::Active { .. })
+}
+
+fn active_status_matches_account_slot(
+    status: &ThreadStatus,
+    active_turn_binding: Option<&ExecutionAccountBinding>,
+    current_binding: &ExecutionAccountBinding,
+    account_slot_id: &str,
+) -> bool {
+    is_actual_active_status(status)
+        && active_turn_binding
+            .unwrap_or(current_binding)
+            .slot_id
+            .eq(account_slot_id)
 }
 
 #[derive(Clone, Copy)]

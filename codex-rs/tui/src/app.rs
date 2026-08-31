@@ -205,9 +205,11 @@ use tokio::task::JoinHandle;
 use toml::Value as TomlValue;
 use uuid::Uuid;
 mod account_controls;
-mod account_login;
+pub(crate) mod account_login;
 pub(crate) mod account_picker;
 mod account_picker_view;
+pub(crate) mod account_rotation;
+mod account_rotation_view;
 mod account_validation;
 mod agent_message_consolidation;
 mod agent_navigation;
@@ -610,7 +612,10 @@ pub(crate) struct App {
     account_slot_capability: Option<AccountSlotCapability>,
     account_registry_revision: u64,
     account_runtime: Option<(String, SessionRuntimeSnapshot)>,
+    account_rotation_available: bool,
+    account_rotation_request_generation: u64,
     account_request_generation: u64,
+    account_detail_slot_id: Option<String>,
     pending_account_control: Option<account_picker::PendingAccountControl>,
     pending_dynamic_thread_control: Option<dynamic_thread_controls::PendingDynamicThreadControl>,
     plugin_command_state: plugin_commands::PluginCommandState,

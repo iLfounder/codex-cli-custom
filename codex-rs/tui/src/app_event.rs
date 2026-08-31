@@ -13,10 +13,10 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use crate::inline_visualization::InlineVisualizationContext;
-use codex_app_server_protocol::AccountSlotLoginStartResponse;
 use codex_app_server_protocol::AccountSlotLogoutResponse;
 use codex_app_server_protocol::AddCreditsNudgeCreditType;
 use codex_app_server_protocol::AddCreditsNudgeEmailStatus;
+use codex_app_server_protocol::CancelLoginAccountResponse;
 use codex_app_server_protocol::ConsumeAccountRateLimitResetCreditResponse;
 use codex_app_server_protocol::DynamicToolCallResponse;
 use codex_app_server_protocol::GetAccountRateLimitsResponse;
@@ -39,6 +39,8 @@ use codex_app_server_protocol::SessionRuntimeAccountRef;
 use codex_app_server_protocol::SessionRuntimeOperation;
 use codex_app_server_protocol::SkillsListResponse;
 use codex_app_server_protocol::Thread;
+use codex_app_server_protocol::ThreadAccountRotationReadResponse;
+use codex_app_server_protocol::ThreadAccountRotationUpdateResponse;
 use codex_app_server_protocol::ThreadGoalStatus;
 use codex_app_server_protocol::ThreadItemsListResponse;
 use codex_app_server_protocol::ThreadPresentation;
@@ -53,8 +55,10 @@ use codex_utils_approval_presets::ApprovalPreset;
 use strum_macros::IntoStaticStr;
 use uuid::Uuid;
 
+use crate::app::account_login::AccountLoginStartOutcome;
 use crate::app::account_picker::AccountControlIntent;
 use crate::app::account_picker::AccountPickerSnapshot;
+use crate::app::account_rotation::AccountRotationEdit;
 use crate::app::runtime_controls::ShutdownIntent;
 use crate::app::runtime_controls::ShutdownLookup;
 use crate::app_command::AppCommand;
@@ -255,6 +259,28 @@ pub(crate) enum AppEvent {
         request_generation: u64,
         result: Result<AccountPickerSnapshot, String>,
     },
+    AccountStateRefreshed {
+        thread_id: ThreadId,
+        request_generation: u64,
+        result: Result<AccountPickerSnapshot, String>,
+    },
+    OpenAccountDetail {
+        slot_id: String,
+    },
+    OpenAccountRotation,
+    AccountRotationLoaded {
+        thread_id: ThreadId,
+        request_generation: u64,
+        result: Result<ThreadAccountRotationReadResponse, String>,
+    },
+    EditAccountRotation {
+        edit: AccountRotationEdit,
+    },
+    AccountRotationUpdated {
+        thread_id: ThreadId,
+        expected_rotation_revision: u64,
+        result: Result<ThreadAccountRotationUpdateResponse, String>,
+    },
     OpenAccountLoginMethods {
         slot_id: Option<String>,
     },
@@ -270,7 +296,16 @@ pub(crate) enum AppEvent {
     AccountSlotLoginStarted {
         thread_id: ThreadId,
         instance_epoch: String,
-        result: Result<AccountSlotLoginStartResponse, String>,
+        result: Result<AccountLoginStartOutcome, String>,
+    },
+    CancelAccountLogin {
+        slot_id: String,
+        login_id: String,
+    },
+    AccountLoginCanceled {
+        slot_id: String,
+        login_id: String,
+        result: Result<CancelLoginAccountResponse, String>,
     },
     AccountSwitchFinished {
         operation_id: String,
@@ -278,7 +313,7 @@ pub(crate) enum AppEvent {
     },
     AccountSlotLogoutFinished {
         slot_id: String,
-        result: Result<AccountSlotLogoutResponse, String>,
+        result: Result<Option<AccountSlotLogoutResponse>, String>,
     },
     ShutdownRuntimeLoaded {
         thread_id: ThreadId,

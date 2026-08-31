@@ -7,8 +7,6 @@ use codex_app_server_protocol::DynamicToolCallStatus;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::ThreadItem;
-use codex_app_server_protocol::TurnCompletedNotification;
-use codex_app_server_protocol::TurnStatus;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DynamicThreadControl {
@@ -23,7 +21,6 @@ pub(super) struct PendingDynamicThreadControl {
     call_id: String,
     tool: String,
     control: DynamicThreadControl,
-    item_completed: bool,
 }
 
 impl App {
@@ -78,7 +75,6 @@ impl App {
             call_id: params.call_id.clone(),
             tool: params.tool.clone(),
             control,
-            item_completed: false,
         });
         let response = DynamicToolCallResponse {
             content_items: vec![DynamicToolCallOutputContentItem::InputText {
@@ -135,49 +131,23 @@ impl App {
         {
             return false;
         }
-        if *status != DynamicToolCallStatus::Completed || *success != Some(true) {
-            self.pending_dynamic_thread_control = None;
-            return true;
-        }
-        if let Some(pending) = self.pending_dynamic_thread_control.as_mut() {
-            pending.item_completed = true;
-        }
-        true
-    }
-
-    pub(super) fn handle_dynamic_thread_control_turn_completed(
-        &mut self,
-        notification: &TurnCompletedNotification,
-    ) -> bool {
-        let Some(pending) = self.pending_dynamic_thread_control.as_ref() else {
-            return false;
-        };
-        if notification.thread_id != pending.thread_id.to_string()
-            || notification.turn.id != pending.turn_id
-        {
-            return false;
-        }
-        let Some(pending) = self.pending_dynamic_thread_control.take() else {
-            return false;
-        };
-        if notification.turn.status == TurnStatus::Completed && pending.item_completed {
-            self.dispatch_dynamic_thread_control(pending);
-        }
-        true
-    }
-
-    fn dispatch_dynamic_thread_control(&mut self, pending: PendingDynamicThreadControl) {
-        if self.primary_thread_id != Some(pending.thread_id)
-            || self.current_displayed_thread_id() != Some(pending.thread_id)
-        {
-            return;
-        }
-        match pending.control {
-            DynamicThreadControl::Clear => self.app_event_tx.send(AppEvent::ClearUi { name: None }),
-            DynamicThreadControl::New => {
-                self.app_event_tx.send(AppEvent::NewSession { name: None })
+        let successful = *status == DynamicToolCallStatus::Completed
+            && *success == Some(true)
+            && self.primary_thread_id == Some(pending.thread_id)
+            && self.current_displayed_thread_id() == Some(pending.thread_id);
+        let control = pending.control;
+        self.pending_dynamic_thread_control = None;
+        if successful {
+            match control {
+                DynamicThreadControl::Clear => {
+                    self.app_event_tx.send(AppEvent::ClearUi { name: None })
+                }
+                DynamicThreadControl::New => {
+                    self.app_event_tx.send(AppEvent::NewSession { name: None })
+                }
             }
         }
+        true
     }
 }
 

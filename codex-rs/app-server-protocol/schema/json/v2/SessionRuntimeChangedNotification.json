@@ -323,6 +323,16 @@
             "null"
           ]
         },
+        "rotation": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadAccountRotationSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "switchState": {
           "$ref": "#/definitions/SessionRuntimeAccountSwitchState"
         },
@@ -771,6 +781,51 @@
       },
       "required": [
         "model"
+      ],
+      "type": "object"
+    },
+    "ThreadAccountRotationMode": {
+      "enum": [
+        "fixed",
+        "quotaAware",
+        "roundRobin",
+        "exhaustThenNext"
+      ],
+      "type": "string"
+    },
+    "ThreadAccountRotationSnapshot": {
+      "properties": {
+        "automaticAccountSlotIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "fixedAccountSlotId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastCommittedAccountSlotId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/definitions/ThreadAccountRotationMode"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "automaticAccountSlotIds",
+        "mode",
+        "revision"
       ],
       "type": "object"
     },

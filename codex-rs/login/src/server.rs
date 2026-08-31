@@ -82,6 +82,37 @@ pub struct ServerOptions {
     pub auth_route_config: AuthRouteConfig,
 }
 
+/// Coordinates credential persistence with a caller-owned login lifecycle.
+///
+/// `begin` reserves the right to persist credentials. `finish` records whether
+/// persistence succeeded. A rejected reservation must leave credentials
+/// unchanged.
+#[derive(Clone)]
+pub struct LoginCredentialCommitHook {
+    begin: Arc<dyn Fn() -> bool + Send + Sync>,
+    finish: Arc<dyn Fn(bool) + Send + Sync>,
+}
+
+impl LoginCredentialCommitHook {
+    pub fn new(
+        begin: impl Fn() -> bool + Send + Sync + 'static,
+        finish: impl Fn(bool) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            begin: Arc::new(begin),
+            finish: Arc::new(finish),
+        }
+    }
+
+    pub(crate) fn begin(&self) -> bool {
+        (self.begin)()
+    }
+
+    pub(crate) fn finish(&self, success: bool) {
+        (self.finish)(success);
+    }
+}
+
 impl ServerOptions {
     /// Creates a server configuration with the default issuer and port.
     pub fn new(
@@ -158,12 +189,21 @@ impl ShutdownHandle {
 
 /// Starts a local callback server and returns the browser auth URL.
 pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
-    run_login_server_with_bind_mode(opts, LoginServerBindMode::CancelExisting)
+    run_login_server_with_bind_mode(opts, LoginServerBindMode::CancelExisting, None)
 }
 
 /// Starts a local callback server without sending `/cancel` to an existing listener.
 pub fn run_login_server_fail_if_busy(opts: ServerOptions) -> io::Result<LoginServer> {
-    run_login_server_with_bind_mode(opts, LoginServerBindMode::FailIfBusy)
+    run_login_server_with_bind_mode(opts, LoginServerBindMode::FailIfBusy, None)
+}
+
+/// Starts a local callback server whose credential write is admitted by
+/// `commit_hook`.
+pub fn run_login_server_fail_if_busy_with_commit_hook(
+    opts: ServerOptions,
+    commit_hook: LoginCredentialCommitHook,
+) -> io::Result<LoginServer> {
+    run_login_server_with_bind_mode(opts, LoginServerBindMode::FailIfBusy, Some(commit_hook))
 }
 
 #[derive(Clone, Copy)]
@@ -175,6 +215,7 @@ enum LoginServerBindMode {
 fn run_login_server_with_bind_mode(
     opts: ServerOptions,
     bind_mode: LoginServerBindMode,
+    commit_hook: Option<LoginCredentialCommitHook>,
 ) -> io::Result<LoginServer> {
     let pkce = generate_pkce();
     let state = opts.force_state.clone().unwrap_or_else(generate_state);
@@ -251,6 +292,7 @@ fn run_login_server_with_bind_mode(
                                 &pkce,
                                 actual_port,
                                 &state,
+                                commit_hook.as_ref(),
                             )
                             .await;
 
@@ -373,6 +415,7 @@ async fn process_request(
     pkce: &PkceCodes,
     actual_port: u16,
     state: &str,
+    commit_hook: Option<&LoginCredentialCommitHook>,
 ) -> HandledRequest {
     let parsed_url = match url::Url::parse(&format!("http://localhost{url_raw}")) {
         Ok(u) => u,
@@ -477,7 +520,15 @@ async fn process_request(
                     )
                     .await
                     .ok();
-                    if let Err(err) = persist_tokens_async(
+                    if commit_hook.is_some_and(|hook| !hook.begin()) {
+                        return login_error_response(
+                            "Login was canceled before credentials were saved.",
+                            io::ErrorKind::Interrupted,
+                            Some("login_canceled"),
+                            /*error_description*/ None,
+                        );
+                    }
+                    let persist_result = persist_tokens_async(
                         &opts.codex_home,
                         api_key.clone(),
                         tokens.id_token.clone(),
@@ -486,8 +537,11 @@ async fn process_request(
                         opts.cli_auth_credentials_store_mode,
                         opts.auth_keyring_backend_kind,
                     )
-                    .await
-                    {
+                    .await;
+                    if let Some(hook) = commit_hook {
+                        hook.finish(persist_result.is_ok());
+                    }
+                    if let Err(err) = persist_result {
                         eprintln!("Persist error: {err}");
                         return login_error_response(
                             "Sign-in completed but credentials could not be saved locally.",

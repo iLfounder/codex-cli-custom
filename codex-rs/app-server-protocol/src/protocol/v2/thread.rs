@@ -2181,6 +2181,7 @@ pub struct ThreadGoalClearedNotification {
     pub thread_id: String,
     pub turn_id: Option<String>,
     pub previous_goal: Option<ThreadGoal>,
+    #[serde(default)]
     #[ts(type = "number")]
     pub revision: i64,
 }

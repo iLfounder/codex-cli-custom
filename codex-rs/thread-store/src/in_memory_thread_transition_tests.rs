@@ -90,3 +90,66 @@ async fn in_memory_transition_matches_claim_prepare_commit_contract() {
         ])
     );
 }
+
+#[tokio::test]
+async fn in_memory_exact_abort_allows_a_clean_retry() {
+    let store = InMemoryThreadStore::default();
+    let previous = thread_id(10);
+    let current = thread_id(11);
+    let intent = ThreadTransitionIntent {
+        transition_id: "transition-abort".to_string(),
+        request_fingerprint: "fingerprint-abort".to_string(),
+        reason: crate::ThreadTransitionReason::Clear,
+        previous_thread_id: previous,
+        previous_precondition_state_revision: 5,
+    };
+    let previous_writer = ThreadWriterEvidence {
+        store_id: "store-1".to_string(),
+        writer_generation: 2,
+    };
+    store
+        .claim_thread_transition(
+            intent.clone(),
+            current,
+            "epoch-1".to_string(),
+            "client-1".to_string(),
+            previous_writer.clone(),
+        )
+        .await
+        .expect("claim should succeed");
+    let abort = AbortThreadTransition {
+        transition_id: intent.transition_id.clone(),
+        expected_request_fingerprint: intent.request_fingerprint.clone(),
+        expected_origin_instance_epoch: "epoch-1".to_string(),
+        expected_initiator_client_incarnation: "client-1".to_string(),
+        expected_previous_thread_id: previous,
+        expected_current_thread_id: current,
+    };
+    assert_eq!(
+        store
+            .abort_thread_transition(abort.clone())
+            .await
+            .expect("abort should succeed"),
+        ThreadTransitionAbortOutcome::Aborted
+    );
+    assert_eq!(
+        store
+            .abort_thread_transition(abort)
+            .await
+            .expect("abort retry should succeed"),
+        ThreadTransitionAbortOutcome::AlreadyAbsent
+    );
+    assert!(matches!(
+        store
+            .claim_thread_transition(
+                intent,
+                current,
+                "epoch-1".to_string(),
+                "client-1".to_string(),
+                previous_writer,
+            )
+            .await
+            .expect("claim after abort should succeed"),
+        ThreadTransitionClaimOutcome::NewPreparing(_)
+    ));
+}

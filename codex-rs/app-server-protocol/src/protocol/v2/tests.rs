@@ -115,6 +115,24 @@ fn external_agent_config_detect_response_defaults_connectors_for_older_servers()
 }
 
 #[test]
+fn thread_goal_cleared_notification_defaults_revision_for_older_servers() {
+    let notification = serde_json::from_value::<ThreadGoalClearedNotification>(json!({
+        "threadId": "thread-1",
+    }))
+    .expect("older goal-cleared notification should deserialize");
+
+    assert_eq!(
+        notification,
+        ThreadGoalClearedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: None,
+            previous_goal: None,
+            revision: 0,
+        }
+    );
+}
+
+#[test]
 fn thread_background_terminals_list_response_round_trips_foreign_paths() {
     for (uri, expected_cwd) in [
         ("file:///home/alice/repo", "/home/alice/repo"),

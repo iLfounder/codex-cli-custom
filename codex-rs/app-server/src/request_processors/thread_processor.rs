@@ -43,6 +43,16 @@ struct PreparedThreadTransitionStart {
     disposition: ThreadTransitionStartDisposition,
 }
 
+struct FailedThreadTransitionCleanup {
+    transition_id: String,
+    request_fingerprint: String,
+    origin_instance_epoch: String,
+    initiator_client_incarnation: String,
+    previous_thread_id: ThreadId,
+    current_thread_id: ThreadId,
+    project_metadata_staged: bool,
+}
+
 enum ThreadTransitionStartDisposition {
     Start,
     ExistingPrepared(codex_thread_store::ThreadTransitionPreparation),
@@ -114,6 +124,95 @@ async fn remove_pending_project_metadata(
     };
     if let Err(error) = thread_store.remove_pending_thread_metadata(thread_id).await {
         warn!("failed to remove staged project metadata for {thread_id}: {error}");
+    }
+}
+
+async fn cleanup_failed_thread_transition_start(
+    listener_task_context: &ListenerTaskContext,
+    thread_store: &dyn ThreadStore,
+    cleanup: &FailedThreadTransitionCleanup,
+) {
+    let runtime_removed = match listener_task_context
+        .thread_manager
+        .get_thread(cleanup.current_thread_id)
+        .await
+    {
+        Ok(thread) => match wait_for_thread_shutdown(&thread).await {
+            ThreadShutdownResult::Complete => listener_task_context
+                .thread_manager
+                .remove_thread_if_matches(&cleanup.current_thread_id, &thread)
+                .await
+                .is_some(),
+            ThreadShutdownResult::SubmitFailed => {
+                warn!(
+                    "failed to submit Shutdown while rolling back transition thread {}",
+                    cleanup.current_thread_id
+                );
+                false
+            }
+            ThreadShutdownResult::TimedOut => {
+                warn!(
+                    "transition thread {} shutdown timed out; retaining durable transition",
+                    cleanup.current_thread_id
+                );
+                false
+            }
+        },
+        Err(_) => true,
+    };
+    if !runtime_removed {
+        warn!(
+            "could not prove exact removal of transition thread {}; retaining durable transition {}",
+            cleanup.current_thread_id, cleanup.transition_id
+        );
+        return;
+    }
+
+    listener_task_context
+        .pending_thread_unloads
+        .lock()
+        .await
+        .remove(&cleanup.current_thread_id);
+    listener_task_context
+        .outgoing
+        .cancel_requests_for_thread(cleanup.current_thread_id, /*error*/ None)
+        .await;
+    listener_task_context
+        .thread_state_manager
+        .remove_thread_state(cleanup.current_thread_id)
+        .await;
+    listener_task_context
+        .thread_watch_manager
+        .remove_thread(&cleanup.current_thread_id.to_string())
+        .await;
+
+    if cleanup.project_metadata_staged
+        && let Err(error) = thread_store
+            .remove_pending_thread_metadata(cleanup.current_thread_id)
+            .await
+    {
+        warn!(
+            "failed to remove staged project metadata for transition thread {}: {error}; retaining durable transition {}",
+            cleanup.current_thread_id, cleanup.transition_id
+        );
+        return;
+    }
+
+    if let Err(error) = thread_store
+        .abort_thread_transition(codex_thread_store::AbortThreadTransition {
+            transition_id: cleanup.transition_id.clone(),
+            expected_request_fingerprint: cleanup.request_fingerprint.clone(),
+            expected_origin_instance_epoch: cleanup.origin_instance_epoch.clone(),
+            expected_initiator_client_incarnation: cleanup.initiator_client_incarnation.clone(),
+            expected_previous_thread_id: cleanup.previous_thread_id,
+            expected_current_thread_id: cleanup.current_thread_id,
+        })
+        .await
+    {
+        warn!(
+            "failed to exact-abort durable thread transition {} after startup rollback: {error}",
+            cleanup.transition_id
+        );
     }
 }
 
@@ -607,6 +706,9 @@ impl ThreadRequestProcessor {
                 return Err(thread_transition_invalid_request("transition_not_prepared"));
             }
             codex_thread_store::ThreadTransitionRecord::Committed(receipt) => {
+                if receipt.origin_instance_epoch != params.expected_instance_epoch {
+                    return Err(thread_transition_invalid_request("stale_instance_epoch"));
+                }
                 if receipt.previous.thread_id != previous_thread_id
                     || receipt.current.thread_id != current_thread_id
                 {
@@ -1262,6 +1364,43 @@ impl ThreadRequestProcessor {
             .await;
     }
 
+    async fn rollback_cold_resume_thread(
+        &self,
+        thread_id: ThreadId,
+        thread: &Arc<CodexThread>,
+        context: &'static str,
+    ) {
+        match wait_for_thread_shutdown(thread).await {
+            ThreadShutdownResult::Complete => {
+                if self
+                    .thread_manager
+                    .remove_thread_if_matches(&thread_id, thread)
+                    .await
+                    .is_some()
+                {
+                    self.finalize_thread_teardown(thread_id).await;
+                } else {
+                    warn!(
+                        %context,
+                        "cold-resume rollback found thread {thread_id} replaced before exact removal"
+                    );
+                }
+            }
+            ThreadShutdownResult::SubmitFailed => {
+                warn!(
+                    %context,
+                    "failed to submit Shutdown while rolling back cold-resumed thread {thread_id}"
+                );
+            }
+            ThreadShutdownResult::TimedOut => {
+                warn!(
+                    %context,
+                    "cold-resumed thread {thread_id} shutdown timed out during rollback"
+                );
+            }
+        }
+    }
+
     async fn thread_unsubscribe_response_inner(
         &self,
         params: ThreadUnsubscribeParams,
@@ -1317,6 +1456,7 @@ impl ThreadRequestProcessor {
         ListenerTaskContext {
             thread_manager: Arc::clone(&self.thread_manager),
             thread_store: Arc::clone(&self.thread_store),
+            session_runtime: Arc::clone(&self.session_runtime),
             thread_state_manager: self.thread_state_manager.clone(),
             outgoing: Arc::clone(&self.outgoing),
             pending_thread_unloads: Arc::clone(&self.pending_thread_unloads),
@@ -1355,6 +1495,7 @@ impl ThreadRequestProcessor {
             conversation_id,
             conversation,
             thread_state,
+            super::thread_lifecycle::ListenerAdmission::Acquire,
         )
         .await
     }
@@ -1636,6 +1777,7 @@ impl ThreadRequestProcessor {
         let listener_task_context = ListenerTaskContext {
             thread_manager: Arc::clone(&self.thread_manager),
             thread_store: Arc::clone(&self.thread_store),
+            session_runtime: Arc::clone(&self.session_runtime),
             thread_state_manager: self.thread_state_manager.clone(),
             outgoing: Arc::clone(&self.outgoing),
             pending_thread_unloads: Arc::clone(&self.pending_thread_unloads),
@@ -1657,14 +1799,19 @@ impl ThreadRequestProcessor {
                 transition.disposition,
                 ThreadTransitionStartDisposition::Start
             )
-            .then(|| {
-                (
-                    transition.previous_thread_id,
-                    transition.intent.transition_id.clone(),
-                )
+            .then(|| FailedThreadTransitionCleanup {
+                transition_id: transition.intent.transition_id.clone(),
+                request_fingerprint: transition.request_fingerprint.clone(),
+                origin_instance_epoch: transition.intent.expected_instance_epoch.clone(),
+                initiator_client_incarnation: transition.initiator_client_incarnation.clone(),
+                previous_thread_id: transition.previous_thread_id,
+                current_thread_id: transition.current_thread_id,
+                project_metadata_staged: project_id.is_some(),
             })
         });
         let transition_state_manager = self.thread_state_manager.clone();
+        let transition_cleanup_context = listener_task_context.clone();
+        let transition_cleanup_store = Arc::clone(&thread_store);
         let thread_start_task = async move {
             if let Err(error) = Self::thread_start_task(
                 listener_task_context,
@@ -1692,9 +1839,18 @@ impl ThreadRequestProcessor {
             )
             .await
             {
-                if let Some((previous_thread_id, transition_id)) = transition_cleanup {
+                if let Some(cleanup) = transition_cleanup {
+                    cleanup_failed_thread_transition_start(
+                        &transition_cleanup_context,
+                        transition_cleanup_store.as_ref(),
+                        &cleanup,
+                    )
+                    .await;
                     transition_state_manager
-                        .release_thread_transition(previous_thread_id, &transition_id)
+                        .release_thread_transition(
+                            cleanup.previous_thread_id,
+                            &cleanup.transition_id,
+                        )
                         .await;
                 }
                 outgoing.send_error(error_request_id, error).await;
@@ -1732,7 +1888,15 @@ impl ThreadRequestProcessor {
             EnsureConversationListenerResult::Attached
         ) {
             return Err(thread_transition_invalid_request(
-                "transition_initiator_disconnected",
+                match listener_attach_result {
+                    EnsureConversationListenerResult::ConnectionClosed => {
+                        "transition_initiator_disconnected"
+                    }
+                    EnsureConversationListenerResult::TransitionInProgress => {
+                        "thread_transition_in_progress"
+                    }
+                    EnsureConversationListenerResult::Attached => unreachable!(),
+                },
             ));
         }
 
@@ -2132,20 +2296,35 @@ impl ThreadRequestProcessor {
         );
         thread.project_id = project_id.clone();
 
-        // Auto-attach a thread listener when starting a thread.
-        let listener_attach_result = super::thread_lifecycle::ensure_conversation_listener(
-            listener_task_context.clone(),
-            thread_id,
-            request_id.connection_id,
-            experimental_raw_events,
-        )
+        let is_transition_start = prepared_transition.is_some();
+        // Subscribe before exposing the new thread. Ordinary starts defer only the initial
+        // runtime projection until after the response; transition starts publish immediately.
+        let listener_attach_result = async {
+            if is_transition_start {
+                super::thread_lifecycle::ensure_conversation_listener(
+                    listener_task_context.clone(),
+                    thread_id,
+                    request_id.connection_id,
+                    experimental_raw_events,
+                )
+                .await
+            } else {
+                super::thread_lifecycle::ensure_conversation_listener_before_response(
+                    listener_task_context.clone(),
+                    thread_id,
+                    request_id.connection_id,
+                    experimental_raw_events,
+                )
+                .await
+            }
+        }
         .instrument(tracing::info_span!(
             "app_server.thread_start.attach_listener",
             otel.name = "app_server.thread_start.attach_listener",
             thread_start.experimental_raw_events = experimental_raw_events,
         ))
         .await;
-        if prepared_transition.is_some()
+        if is_transition_start
             && !matches!(
                 listener_attach_result,
                 Ok(EnsureConversationListenerResult::Attached)
@@ -2154,6 +2333,9 @@ impl ThreadRequestProcessor {
             return Err(match listener_attach_result {
                 Ok(EnsureConversationListenerResult::ConnectionClosed) => {
                     thread_transition_invalid_request("transition_initiator_disconnected")
+                }
+                Ok(EnsureConversationListenerResult::TransitionInProgress) => {
+                    thread_transition_invalid_request("thread_transition_in_progress")
                 }
                 Err(error) => error,
                 Ok(EnsureConversationListenerResult::Attached) => unreachable!(),
@@ -2255,7 +2437,6 @@ impl ThreadRequestProcessor {
                 otel.name = "app_server.thread_start.send_response",
             ))
             .await;
-
         listener_task_context
             .outgoing
             .send_server_notification(ServerNotification::ThreadStarted(notif))
@@ -2264,6 +2445,12 @@ impl ThreadRequestProcessor {
                 otel.name = "app_server.thread_start.notify_started",
             ))
             .await;
+        if !is_transition_start {
+            listener_task_context
+                .thread_state_manager
+                .publish_runtime(thread_id)
+                .await;
+        }
         session_telemetry.record_startup_phase(
             "thread_start_total",
             thread_start_started_at.elapsed(),
@@ -2340,6 +2527,11 @@ impl ThreadRequestProcessor {
                 if thread.archived_at.is_none() {
                     archive_thread_ids.push(thread_id);
                 }
+            }
+            Err(ThreadStoreError::ThreadNotFound { .. }) => {
+                return Err(invalid_request(format!(
+                    "no rollout found for thread id {thread_id}"
+                )));
             }
             Err(err) => return Err(thread_store_mutation_error("archive", err)),
         }
@@ -2780,18 +2972,23 @@ impl ThreadRequestProcessor {
         // Subscribe before shutdown so a pending idle unload either rejects this request or can
         // no longer race the replacement runtime. The same listener then drains Core's shutdown
         // events before we replace it.
-        if matches!(
-            self.ensure_conversation_listener(
+        match self
+            .ensure_conversation_listener(
                 thread_id,
                 request_id.connection_id,
                 /*raw_events_enabled*/ false,
             )
-            .await?,
-            EnsureConversationListenerResult::ConnectionClosed
-        ) {
-            return Err(internal_error(format!(
-                "connection closed before thread {thread_id} could be reverted"
-            )));
+            .await?
+        {
+            EnsureConversationListenerResult::Attached => {}
+            EnsureConversationListenerResult::ConnectionClosed => {
+                return Err(internal_error(format!(
+                    "connection closed before thread {thread_id} could be reverted"
+                )));
+            }
+            EnsureConversationListenerResult::TransitionInProgress => {
+                return Err(invalid_request("thread transition in progress"));
+            }
         }
         let thread_state = self.thread_state_manager.thread_state(thread_id).await;
         let shutdown_drain_rx = thread_state.lock().await.register_shutdown_drain_waiter();
@@ -4541,184 +4738,187 @@ impl ThreadRequestProcessor {
                 session_configured,
                 ..
             }) => {
-                if let Err(err) = Self::set_app_server_client_info(
-                    codex_thread.as_ref(),
-                    app_server_client_name,
-                    app_server_client_version,
-                )
-                .await
-                {
-                    self.outgoing.send_error(request_id, err).await;
-                    return Ok(());
-                }
-                let instruction_sources = codex_thread.legacy_instruction_sources().await;
-                let SessionConfiguredEvent { rollout_path, .. } = session_configured;
-                let Some(rollout_path) = rollout_path else {
-                    let error =
-                        internal_error(format!("rollout path missing for thread {thread_id}"));
-                    self.outgoing.send_error(request_id, error).await;
-                    return Ok(());
-                };
-                // Paginated JSONL is canonical, but its SQLite projection can lag after a
-                // previous write failure. Persist after reopening the live writer so legacy
-                // response hydration reads the latest durable turns and items.
-                if paginated_resume
-                    && let Err(error) = self
-                        .thread_store
-                        .persist_thread(thread_id, PersistContext::Standard)
+                let response_preparation = async {
+                    Self::set_app_server_client_info(
+                        codex_thread.as_ref(),
+                        app_server_client_name,
+                        app_server_client_version,
+                    )
+                    .await?;
+                    let instruction_sources = codex_thread.legacy_instruction_sources().await;
+                    let SessionConfiguredEvent { rollout_path, .. } = session_configured;
+                    let rollout_path = rollout_path.ok_or_else(|| {
+                        internal_error(format!("rollout path missing for thread {thread_id}"))
+                    })?;
+                    // Paginated JSONL is canonical, but its SQLite projection can lag after a
+                    // previous write failure. Persist after reopening the live writer so legacy
+                    // response hydration reads the latest durable turns and items.
+                    if paginated_resume {
+                        self.thread_store
+                            .persist_thread(thread_id, PersistContext::Standard)
+                            .await
+                            .map_err(thread_store_resume_read_error)?;
+                    }
+                    let materialized_turns = if paginated_resume && include_turns {
+                        Some(self.paginated_thread_full_turns(thread_id).await?)
+                    } else {
+                        None
+                    };
+                    let mut thread = self
+                        .load_thread_from_resume_source_or_send_internal(
+                            thread_id,
+                            codex_thread.as_ref(),
+                            &response_history,
+                            rollout_path.as_path(),
+                            resume_source_thread,
+                            include_turns && !paginated_resume,
+                        )
                         .await
-                        .map_err(thread_store_resume_read_error)
-                {
-                    self.outgoing.send_error(request_id, error).await;
-                    return Ok(());
-                }
-                let materialized_turns = if paginated_resume && include_turns {
-                    match self.paginated_thread_full_turns(thread_id).await {
-                        Ok(turns) => Some(turns),
-                        Err(error) => {
-                            self.outgoing.send_error(request_id, error).await;
-                            return Ok(());
+                        .map_err(internal_error)?;
+                    thread.thread_source = codex_thread
+                        .config_snapshot()
+                        .await
+                        .thread_source
+                        .map(Into::into);
+                    if let Some(materialized_turns) = materialized_turns {
+                        thread.turns = materialized_turns;
+                    }
+
+                    self.thread_watch_manager.upsert_thread(&thread.id).await;
+                    let thread_status = self
+                        .thread_watch_manager
+                        .loaded_status_for_thread(&thread.id)
+                        .await;
+                    set_thread_status_and_interrupt_stale_turns(
+                        &mut thread,
+                        thread_status,
+                        /*has_live_in_progress_turn*/ false,
+                    );
+                    let config_snapshot = codex_thread.config_snapshot().await;
+                    let (turns_backwards_cursor, items_backwards_cursor) =
+                        if matches!(config_snapshot.history_mode, ThreadHistoryMode::Paginated) {
+                            Self::paginated_resume_backwards_cursors(
+                                self.thread_store.as_ref(),
+                                thread_id,
+                            )
+                            .await?
+                        } else {
+                            (None, None)
+                        };
+                    let sandbox = config_snapshot.sandbox_policy().into();
+                    let active_permission_profile = thread_response_active_permission_profile(
+                        config_snapshot.active_permission_profile,
+                    );
+                    let mut initial_turns_page = if let Some(params) = initial_turns_page.as_ref() {
+                        Some(if paginated_resume {
+                            self.paginated_resume_initial_turns_page(thread_id, params)
+                                .await?
+                        } else {
+                            build_thread_resume_initial_turns_page(
+                                response_history.get_rollout_items(),
+                                thread.status.clone(),
+                                /*has_live_running_thread*/ false,
+                                /*active_turn*/ None,
+                                params,
+                            )?
+                        })
+                    } else {
+                        None
+                    };
+                    let token_usage_turn_id = (include_turns || paginated_resume)
+                        .then(|| {
+                            let turns = if thread.turns.is_empty() {
+                                initial_turns_page
+                                    .as_ref()
+                                    .map_or(&[][..], |page| page.data.as_slice())
+                            } else {
+                                thread.turns.as_slice()
+                            };
+                            restored_token_usage_turn_id(
+                                response_history.get_rollout_items(),
+                                turns,
+                            )
+                        })
+                        .filter(|turn_id| !turn_id.is_empty());
+                    if redact_resume_payloads {
+                        redact_thread_resume_payloads(&mut thread.turns);
+                        if let Some(initial_turns_page) = initial_turns_page.as_mut() {
+                            redact_thread_resume_payloads(&mut initial_turns_page.data);
                         }
                     }
-                } else {
-                    None
-                };
-                // Auto-attach a thread listener when resuming a thread.
-                log_listener_attach_result(
-                    self.ensure_conversation_listener(
-                        thread_id,
-                        request_id.connection_id,
-                        /*raw_events_enabled*/ false,
-                    )
-                    .await,
-                    thread_id,
-                    request_id.connection_id,
-                    "thread",
-                );
 
-                let mut thread = match self
-                    .load_thread_from_resume_source_or_send_internal(
-                        thread_id,
-                        codex_thread.as_ref(),
-                        &response_history,
-                        rollout_path.as_path(),
-                        resume_source_thread,
-                        include_turns && !paginated_resume,
-                    )
-                    .await
+                    let thread_originator = config_snapshot.originator.clone();
+                    let response = ThreadResumeResponse {
+                        thread,
+                        model: session_configured.model,
+                        model_provider: session_configured.model_provider_id,
+                        service_tier: session_configured.service_tier,
+                        cwd: session_configured.cwd,
+                        runtime_workspace_roots: config_snapshot.workspace_roots,
+                        instruction_sources,
+                        approval_policy: session_configured.approval_policy.into(),
+                        approvals_reviewer: session_configured.approvals_reviewer.into(),
+                        sandbox,
+                        active_permission_profile,
+                        reasoning_effort: session_configured.reasoning_effort,
+                        multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
+                        initial_turns_page,
+                        turns_backwards_cursor,
+                        items_backwards_cursor,
+                    };
+                    Ok::<_, JSONRPCErrorError>((response, thread_originator, token_usage_turn_id))
+                }
+                .await;
+                let (response, thread_originator, token_usage_turn_id) = match response_preparation
                 {
-                    Ok(thread) => thread,
-                    Err(message) => {
-                        self.outgoing
-                            .send_error(request_id, internal_error(message))
-                            .await;
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        drop(_thread_list_state_permit);
+                        self.rollback_cold_resume_thread(
+                            thread_id,
+                            &codex_thread,
+                            "response_preparation_failed",
+                        )
+                        .await;
+                        self.outgoing.send_error(request_id, error).await;
                         return Ok(());
                     }
                 };
-                thread.thread_source = codex_thread
-                    .config_snapshot()
+
+                let attach_error =
+                    match super::thread_lifecycle::ensure_conversation_listener_for_thread(
+                        self.listener_task_context(),
+                        thread_id,
+                        Arc::clone(&codex_thread),
+                        request_id.connection_id,
+                        /*raw_events_enabled*/ false,
+                    )
                     .await
-                    .thread_source
-                    .map(Into::into);
-                if let Some(materialized_turns) = materialized_turns {
-                    thread.turns = materialized_turns;
-                }
-
-                self.thread_watch_manager.upsert_thread(&thread.id).await;
-
-                let thread_status = self
-                    .thread_watch_manager
-                    .loaded_status_for_thread(&thread.id)
+                    {
+                        Ok(EnsureConversationListenerResult::Attached) => None,
+                        Ok(EnsureConversationListenerResult::ConnectionClosed) => Some(None),
+                        Ok(EnsureConversationListenerResult::TransitionInProgress) => {
+                            Some(Some(invalid_request("thread transition in progress")))
+                        }
+                        Err(error) => Some(Some(error)),
+                    };
+                if let Some(attach_error) = attach_error {
+                    // Session construction registers the exact runtime before listener
+                    // attachment. Keep that Arc registered while bounded shutdown runs so a
+                    // failed or timed-out shutdown remains visible instead of becoming an
+                    // orphaned writer.
+                    drop(_thread_list_state_permit);
+                    self.rollback_cold_resume_thread(
+                        thread_id,
+                        &codex_thread,
+                        "listener_attachment_failed",
+                    )
                     .await;
-
-                set_thread_status_and_interrupt_stale_turns(
-                    &mut thread,
-                    thread_status,
-                    /*has_live_in_progress_turn*/ false,
-                );
-                let config_snapshot = codex_thread.config_snapshot().await;
-                let (turns_backwards_cursor, items_backwards_cursor) =
-                    if matches!(config_snapshot.history_mode, ThreadHistoryMode::Paginated) {
-                        match Self::paginated_resume_backwards_cursors(
-                            self.thread_store.as_ref(),
-                            thread_id,
-                        )
-                        .await
-                        {
-                            Ok(cursors) => cursors,
-                            Err(error) => {
-                                self.outgoing.send_error(request_id, error).await;
-                                return Ok(());
-                            }
-                        }
-                    } else {
-                        (None, None)
-                    };
-                let sandbox = config_snapshot.sandbox_policy().into();
-                let active_permission_profile = thread_response_active_permission_profile(
-                    config_snapshot.active_permission_profile,
-                );
-                let mut initial_turns_page = if let Some(params) = initial_turns_page.as_ref() {
-                    let initial_turns_page_result = if paginated_resume {
-                        self.paginated_resume_initial_turns_page(thread_id, params)
-                            .await
-                    } else {
-                        build_thread_resume_initial_turns_page(
-                            response_history.get_rollout_items(),
-                            thread.status.clone(),
-                            /*has_live_running_thread*/ false,
-                            /*active_turn*/ None,
-                            params,
-                        )
-                    };
-                    match initial_turns_page_result {
-                        Ok(page) => Some(page),
-                        Err(error) => {
-                            self.outgoing.send_error(request_id, error).await;
-                            return Ok(());
-                        }
+                    if let Some(error) = attach_error {
+                        self.outgoing.send_error(request_id, error).await;
                     }
-                } else {
-                    None
-                };
-                let token_usage_turn_id = (include_turns || paginated_resume)
-                    .then(|| {
-                        let turns = if thread.turns.is_empty() {
-                            initial_turns_page
-                                .as_ref()
-                                .map_or(&[][..], |page| page.data.as_slice())
-                        } else {
-                            thread.turns.as_slice()
-                        };
-                        restored_token_usage_turn_id(response_history.get_rollout_items(), turns)
-                    })
-                    .filter(|turn_id| !turn_id.is_empty());
-                if redact_resume_payloads {
-                    redact_thread_resume_payloads(&mut thread.turns);
-                    if let Some(initial_turns_page) = initial_turns_page.as_mut() {
-                        redact_thread_resume_payloads(&mut initial_turns_page.data);
-                    }
+                    return Ok(());
                 }
-
-                let thread_originator = config_snapshot.originator.clone();
-                let response = ThreadResumeResponse {
-                    thread,
-                    model: session_configured.model,
-                    model_provider: session_configured.model_provider_id,
-                    service_tier: session_configured.service_tier,
-                    cwd: session_configured.cwd,
-                    runtime_workspace_roots: config_snapshot.workspace_roots,
-                    instruction_sources,
-                    approval_policy: session_configured.approval_policy.into(),
-                    approvals_reviewer: session_configured.approvals_reviewer.into(),
-                    sandbox,
-                    active_permission_profile,
-                    reasoning_effort: session_configured.reasoning_effort,
-                    multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
-                    initial_turns_page,
-                    turns_backwards_cursor,
-                    items_backwards_cursor,
-                };
 
                 let connection_id = request_id.connection_id;
                 self.outgoing
@@ -5778,9 +5978,11 @@ impl ThreadRequestProcessor {
 
         let instruction_sources = forked_thread.legacy_instruction_sources().await;
 
-        // Auto-attach a conversation listener when forking a thread.
+        // Reserve the child subscription before exposing it, but defer the initial runtime
+        // projection until after the response identifies the new thread.
         log_listener_attach_result(
-            self.ensure_conversation_listener(
+            super::thread_lifecycle::ensure_conversation_listener_before_response(
+                self.listener_task_context(),
                 thread_id,
                 request_id.connection_id,
                 /*raw_events_enabled*/ false,
@@ -5893,6 +6095,10 @@ impl ThreadRequestProcessor {
         self.outgoing
             .send_response_with_thread_originator(request_id, response, thread_originator)
             .await;
+        self.outgoing
+            .send_server_notification(ServerNotification::ThreadStarted(notif))
+            .await;
+        self.thread_state_manager.publish_runtime(thread_id).await;
         // `excludeTurns` is the cheap fork path, so skip restored usage replay
         // instead of rebuilding history only to attribute a historical update.
         if let Some(token_usage_turn_id) = token_usage_turn_id {
@@ -5908,9 +6114,6 @@ impl ThreadRequestProcessor {
             .await;
         }
 
-        self.outgoing
-            .send_server_notification(ServerNotification::ThreadStarted(notif))
-            .await;
         if inherited_goal {
             self.thread_goal_processor
                 .emit_thread_goal_snapshot(thread_id)

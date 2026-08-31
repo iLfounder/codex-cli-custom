@@ -240,6 +240,9 @@ impl ThreadGoalRequestProcessor {
                             thread_id,
                             snapshot.revision,
                             objective,
+                            request
+                                .status
+                                .unwrap_or(codex_protocol::protocol::ThreadGoalStatus::Active),
                             match request.token_budget {
                                 GoalTokenBudgetUpdate::Keep => None,
                                 GoalTokenBudgetUpdate::Set(budget) => budget,
@@ -434,6 +437,7 @@ impl ThreadGoalRequestProcessor {
                 thread_id,
                 params.expected_revision,
                 &params.objective,
+                codex_protocol::protocol::ThreadGoalStatus::Active,
                 params.token_budget,
                 max_goal_token_budget,
             )

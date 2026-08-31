@@ -4,11 +4,13 @@ use std::collections::HashMap;
 
 use super::InMemoryThreadStore;
 use super::InMemoryThreadTransition;
+use crate::AbortThreadTransition;
 use crate::CommitThreadTransition;
 use crate::CommittedThreadTransitions;
 use crate::MarkThreadTransitionPrepared;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
+use crate::ThreadTransitionAbortOutcome;
 use crate::ThreadTransitionClaimOutcome;
 use crate::ThreadTransitionCommitOutcome;
 use crate::ThreadTransitionEndpointEvidence;
@@ -188,11 +190,10 @@ pub(super) async fn mark_prepared(
         preparing,
         current_writer: request.current_writer,
     };
-    state
-        .thread_transitions
-        .get_mut(&request.transition_id)
-        .expect("transition exists while state lock is held")
-        .record = ThreadTransitionRecord::Prepared(preparation.clone());
+    let Some(transition) = state.thread_transitions.get_mut(&request.transition_id) else {
+        return Err(conflict("transition_not_prepared"));
+    };
+    transition.record = ThreadTransitionRecord::Prepared(preparation.clone());
     Ok(preparation)
 }
 
@@ -276,12 +277,38 @@ pub(super) async fn commit(
         transition_revision: existing.revision,
         committed_at: Utc::now().timestamp(),
     };
-    state
-        .thread_transitions
-        .get_mut(&request.transition_id)
-        .expect("transition exists while state lock is held")
-        .record = ThreadTransitionRecord::Committed(receipt.clone());
+    let Some(transition) = state.thread_transitions.get_mut(&request.transition_id) else {
+        return Err(conflict("transition_not_prepared"));
+    };
+    transition.record = ThreadTransitionRecord::Committed(receipt.clone());
     Ok(ThreadTransitionCommitOutcome::Committed(receipt))
+}
+
+pub(super) async fn abort(
+    store: &InMemoryThreadStore,
+    request: AbortThreadTransition,
+) -> ThreadStoreResult<ThreadTransitionAbortOutcome> {
+    let mut state = store.state.lock().await;
+    let Some(existing) = state.thread_transitions.get(&request.transition_id) else {
+        return Ok(ThreadTransitionAbortOutcome::AlreadyAbsent);
+    };
+    let preparing = match &existing.record {
+        ThreadTransitionRecord::Preparing(value) => value,
+        ThreadTransitionRecord::Prepared(value) => &value.preparing,
+        ThreadTransitionRecord::Committed(_) => {
+            return Err(conflict("transition_already_committed"));
+        }
+    };
+    if existing.request_fingerprint != request.expected_request_fingerprint
+        || preparing.origin_instance_epoch != request.expected_origin_instance_epoch
+        || preparing.initiator_client_incarnation != request.expected_initiator_client_incarnation
+        || preparing.previous_thread_id != request.expected_previous_thread_id
+        || preparing.current_thread_id != request.expected_current_thread_id
+    {
+        return Err(conflict("transition_abort_mismatch"));
+    }
+    state.thread_transitions.remove(&request.transition_id);
+    Ok(ThreadTransitionAbortOutcome::Aborted)
 }
 
 pub(super) async fn by_id(

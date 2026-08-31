@@ -79,7 +79,7 @@ impl StateRuntime {
             transaction.rollback().await?;
             if error
                 .as_database_error()
-                .is_some_and(|error| error.is_unique_violation())
+                .is_some_and(sqlx::error::DatabaseError::is_unique_violation)
             {
                 return Err(conflict("transition_thread_mismatch"));
             }
@@ -238,6 +238,54 @@ impl StateRuntime {
             anyhow::bail!("thread transition did not persist as committed");
         };
         Ok(ThreadTransitionCommitOutcome::Committed(receipt))
+    }
+
+    pub async fn abort_thread_transition(
+        &self,
+        request: &AbortThreadTransition,
+    ) -> anyhow::Result<ThreadTransitionAbortOutcome> {
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let Some(row) = transition_row_by_id(&mut *transaction, &request.transition_id).await?
+        else {
+            transaction.commit().await?;
+            return Ok(ThreadTransitionAbortOutcome::AlreadyAbsent);
+        };
+        if row.request_fingerprint != request.expected_request_fingerprint
+            || row.origin_instance_epoch != request.expected_origin_instance_epoch
+            || row.initiator_client_incarnation != request.expected_initiator_client_incarnation
+            || row.previous_thread_id != request.expected_previous_thread_id
+            || row.current_thread_id != request.expected_current_thread_id
+        {
+            transaction.rollback().await?;
+            return Err(conflict("transition_abort_mismatch"));
+        }
+        if matches!(
+            transition_record(&row)?,
+            ThreadTransitionRecord::Committed(_)
+        ) {
+            transaction.rollback().await?;
+            return Err(conflict("transition_already_committed"));
+        }
+        let deleted = sqlx::query(
+            "DELETE FROM thread_transitions WHERE transition_id = ? \
+             AND request_fingerprint = ? AND origin_instance_epoch = ? \
+             AND initiator_client_incarnation = ? AND previous_thread_id = ? \
+             AND current_thread_id = ? AND status IN ('preparing', 'prepared')",
+        )
+        .bind(&request.transition_id)
+        .bind(&request.expected_request_fingerprint)
+        .bind(&request.expected_origin_instance_epoch)
+        .bind(&request.expected_initiator_client_incarnation)
+        .bind(request.expected_previous_thread_id.to_string())
+        .bind(request.expected_current_thread_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        if deleted.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Err(conflict("transition_abort_mismatch"));
+        }
+        transaction.commit().await?;
+        Ok(ThreadTransitionAbortOutcome::Aborted)
     }
 
     pub async fn thread_transition_by_id(

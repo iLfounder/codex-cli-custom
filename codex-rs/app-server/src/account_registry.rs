@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io;
 use std::path::Path;
@@ -6,6 +7,7 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -15,6 +17,7 @@ use codex_app_server_protocol::AccountSlotListResponse;
 use codex_app_server_protocol::AccountSlotSnapshot;
 use codex_app_server_protocol::AccountSlotStatus;
 use codex_app_server_protocol::JSONRPCErrorError;
+use codex_backend_client::Client as BackendClient;
 use codex_core::ExecutionAccountContext;
 use codex_core::ExecutionAccountResolver;
 use codex_core::ExecutionAccountResolverFuture;
@@ -25,11 +28,15 @@ use codex_core::path_utils::write_atomically;
 use codex_login::AuthConfig;
 use codex_login::AuthManager;
 use codex_login::AuthSourceKind;
+use codex_login::CodexAuth;
 use codex_model_provider::create_model_provider;
 use codex_models_manager::manager::SharedModelsManager;
+use codex_protocol::ThreadId;
+use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::error::CodexErr;
 use codex_protocol::protocol::ExecutionAccountBinding;
 use codex_thread_store::ThreadStore;
+use codex_thread_store::ThreadStoreError;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::Mutex;
@@ -37,6 +44,7 @@ use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
 
 use crate::auth_mode::auth_mode_to_api;
+use crate::config_manager::ConfigManager;
 use crate::error_code::internal_error;
 use crate::error_code::invalid_params;
 use crate::error_code::invalid_request;
@@ -56,6 +64,21 @@ const DENY_HOST_PROVIDER_AUTH: &str = "host_owned_provider_auth";
 const DENY_HOST_WORKLOAD_IDENTITY: &str = "host_owned_workload_identity";
 const DENY_LOGIN_NOT_AVAILABLE: &str = "account_slot_login_not_available";
 const DENY_SWITCH_NOT_AVAILABLE: &str = "thread_account_switch_not_available";
+const DENY_DEFAULT_LOGIN_EXTERNAL_AUTH: &str = "external_auth_active";
+const DENY_DEFAULT_LOGIN_METHOD: &str = "chatgpt_login_not_allowed";
+const DENY_DEFAULT_LOGOUT_PROVIDER: &str = "provider_managed_logout_not_allowed";
+const DENY_DEFAULT_WORKLOAD_IDENTITY: &str = "workload_identity_managed_auth";
+
+pub(crate) fn default_logout_uses_host_managed_provider(
+    config: &Config,
+    auth_manager: &AuthManager,
+) -> bool {
+    config.model_provider.is_amazon_bedrock()
+        && !matches!(
+            auth_manager.auth_cached(),
+            Some(CodexAuth::BedrockApiKey(_))
+        )
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -257,9 +280,11 @@ fn valid_manifest_token(value: &str) -> bool {
 #[derive(Clone)]
 struct AccountSlotRecord {
     manifest: AccountSlotManifest,
+    account_number: u32,
     runtime: Arc<AccountRuntimeCell>,
     binding_transition: Arc<Mutex<()>>,
     active_login_operation_id: Option<String>,
+    active_login_cancelable: bool,
     active_logout_operation_id: Option<String>,
     completed_login_operation_id: Option<String>,
 }
@@ -311,11 +336,20 @@ struct AccountRegistryState {
 
 pub(crate) struct AccountRegistry {
     config: Arc<Config>,
+    config_manager: ConfigManager,
     auth_config_template: AuthConfig,
     thread_store: Arc<dyn ThreadStore>,
     state: RwLock<AccountRegistryState>,
     mutation_lock: Mutex<()>,
     browser_login: StdMutex<Option<BrowserLoginOwner>>,
+    quota_cache: quota::QuotaCache,
+    exhaustion_hints: Mutex<HashSet<rotation::ExhaustionHintKey>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RotationSlotIdentity {
+    pub(crate) account_slot_id: String,
+    pub(crate) account_number: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -327,6 +361,7 @@ pub(crate) enum BrowserLoginOwner {
 impl AccountRegistry {
     pub(crate) fn new(
         config: Arc<Config>,
+        config_manager: ConfigManager,
         default_auth_manager: Arc<AuthManager>,
         default_models_manager: SharedModelsManager,
         thread_store: Arc<dyn ThreadStore>,
@@ -347,19 +382,23 @@ impl AccountRegistry {
             auth_manager: default_auth_manager,
             models_manager: default_models_manager,
         });
+        let account_numbers = assign_account_numbers(&manifest.slots);
         let mut slots = manifest
             .slots
             .into_iter()
-            .map(|manifest| {
+            .zip(account_numbers)
+            .map(|(manifest, account_number)| {
                 let runtime = Arc::new(AccountRuntimeCell::default());
                 if manifest.is_default {
                     let _ = runtime.set(Arc::clone(&default_runtime));
                 }
                 AccountSlotRecord {
                     manifest,
+                    account_number,
                     runtime,
                     binding_transition: Arc::new(Mutex::new(())),
                     active_login_operation_id: None,
+                    active_login_cancelable: false,
                     active_logout_operation_id: None,
                     completed_login_operation_id: None,
                 }
@@ -374,6 +413,7 @@ impl AccountRegistry {
         Self {
             auth_config_template: config.auth_config(),
             thread_store,
+            config_manager,
             config,
             state: RwLock::new(AccountRegistryState {
                 revision: manifest.revision,
@@ -384,6 +424,8 @@ impl AccountRegistry {
             }),
             mutation_lock: Mutex::new(()),
             browser_login: StdMutex::new(None),
+            quota_cache: quota::QuotaCache::default(),
+            exhaustion_hints: Mutex::new(HashSet::new()),
         }
     }
 
@@ -407,9 +449,13 @@ impl AccountRegistry {
         };
         let start = cursor_start(params.cursor.as_deref(), revision, &slots)?;
         let end = start.saturating_add(limit).min(slots.len());
+        let current_config = self.load_latest_config().await;
         let mut data = Vec::with_capacity(end.saturating_sub(start));
         for slot in &slots[start..end] {
-            data.push(self.snapshot(slot, revision, &capability).await);
+            data.push(
+                self.snapshot(slot, revision, &capability, &current_config)
+                    .await,
+            );
         }
         let next_cursor = if end < slots.len() {
             Some(
@@ -443,6 +489,20 @@ impl AccountRegistry {
         Ok(self.capability(manifest_error))
     }
 
+    async fn load_latest_config(&self) -> Config {
+        match self
+            .config_manager
+            .load_latest_config(/*fallback_cwd*/ None)
+            .await
+        {
+            Ok(config) => config,
+            Err(error) => {
+                tracing::warn!("failed to reload config, using startup config: {error}");
+                self.config.as_ref().clone()
+            }
+        }
+    }
+
     pub(crate) async fn lock_slot_binding_transition(
         &self,
         account_slot_id: &str,
@@ -469,6 +529,7 @@ impl AccountRegistry {
         slot: &AccountSlotRecord,
         revision: u64,
         capability: &AccountSlotCapability,
+        current_config: &Config,
     ) -> AccountSlotSnapshot {
         let runtime = if capability.available || slot.manifest.is_default {
             Some(self.runtime(slot).await)
@@ -483,26 +544,63 @@ impl AccountRegistry {
             (true, Some(_)) => AccountSlotStatus::Ready,
             _ => slot.manifest.status.into(),
         };
-        let error_code = (status == AccountSlotStatus::Failed)
-            .then(|| slot.manifest.error_code.clone())
-            .flatten();
+        let error_code = slot.manifest.error_code.clone();
+        let default_policy = slot.manifest.is_default.then(|| {
+            let auth_manager = runtime.as_ref().map(|runtime| &runtime.auth_manager);
+            let login_deny_reason = if auth_manager
+                .is_none_or(|auth_manager| auth_manager.is_workload_identity_selected())
+            {
+                Some(DENY_DEFAULT_WORKLOAD_IDENTITY)
+            } else if auth_manager
+                .is_some_and(|auth_manager| auth_manager.is_external_chatgpt_auth_active())
+            {
+                Some(DENY_DEFAULT_LOGIN_EXTERNAL_AUTH)
+            } else if auth_manager.is_none_or(|auth_manager| {
+                !auth_manager.is_login_method_allowed(ForcedLoginMethod::Chatgpt)
+            }) {
+                Some(DENY_DEFAULT_LOGIN_METHOD)
+            } else {
+                None
+            };
+            let logout_deny_reason = if auth_manager
+                .is_none_or(|auth_manager| auth_manager.is_workload_identity_selected())
+            {
+                Some(DENY_DEFAULT_WORKLOAD_IDENTITY)
+            } else if auth_manager.is_some_and(|auth_manager| {
+                default_logout_uses_host_managed_provider(current_config, auth_manager)
+            }) {
+                Some(DENY_DEFAULT_LOGOUT_PROVIDER)
+            } else {
+                None
+            };
+            live_registration::DefaultAccountActionPolicy {
+                login_deny_reason,
+                logout_deny_reason,
+            }
+        });
 
         AccountSlotSnapshot {
             account_slot_id: slot.manifest.account_slot_id.clone(),
+            account_number: slot.account_number,
             label: slot.manifest.label.clone(),
             is_default: slot.manifest.is_default,
             status,
             auth_mode,
             attempt_generation: slot.manifest.attempt_generation,
             registry_revision: revision,
-            active_login_operation_id: slot.active_login_operation_id.clone(),
+            active_login_operation_id: if slot.active_login_cancelable {
+                slot.active_login_operation_id.clone()
+            } else {
+                None
+            },
             error_code,
             actions: live_registration::available_actions(
                 status,
                 capability,
                 slot.manifest.is_default,
-                slot.active_login_operation_id.is_some()
-                    || slot.active_logout_operation_id.is_some(),
+                slot.active_login_operation_id.is_some(),
+                slot.active_logout_operation_id.is_some(),
+                default_policy.as_ref(),
             ),
             updated_at: slot.manifest.updated_at,
         }
@@ -709,9 +807,161 @@ impl AccountRegistry {
             binding_transition,
         ))
     }
+
+    pub(crate) async fn slot_quota_subject(
+        &self,
+        account_slot_id: &str,
+    ) -> Result<(quota::QuotaCacheKey, Arc<AuthManager>), JSONRPCErrorError> {
+        self.reconcile().await?;
+        let slot = self
+            .state
+            .read()
+            .map_err(|_| internal_error("account slot registry is unavailable"))?
+            .slots
+            .iter()
+            .find(|slot| slot.manifest.account_slot_id == account_slot_id)
+            .cloned()
+            .ok_or_else(|| invalid_request("account slot is unavailable"))?;
+        if slot.manifest.status != ManifestSlotStatus::Ready && !slot.manifest.is_default {
+            return Err(invalid_request("account slot is not ready"));
+        }
+        let runtime = self.runtime(&slot).await;
+        Ok((
+            quota::QuotaCacheKey {
+                account_slot_id: slot.manifest.account_slot_id,
+                attempt_generation: slot.manifest.attempt_generation,
+                runtime_version: runtime.runtime_version.load(Ordering::Acquire),
+            },
+            Arc::clone(&runtime.auth_manager),
+        ))
+    }
+
+    pub(crate) async fn rotation_slot_inventory(
+        &self,
+    ) -> Result<Vec<RotationSlotIdentity>, JSONRPCErrorError> {
+        self.reconcile().await?;
+        let state = self
+            .state
+            .read()
+            .map_err(|_| internal_error("account slot registry is unavailable"))?;
+        Ok(state
+            .slots
+            .iter()
+            .map(|slot| RotationSlotIdentity {
+                account_slot_id: slot.manifest.account_slot_id.clone(),
+                account_number: slot.account_number,
+            })
+            .collect())
+    }
+
+    pub(crate) async fn fetch_slot_quota(
+        &self,
+        key: quota::QuotaCacheKey,
+        auth_manager: Arc<AuthManager>,
+    ) -> Result<quota::QuotaSnapshot, quota::QuotaFetchError> {
+        self.quota_cache
+            .read_or_fetch(key, || async {
+                let Some(auth) = auth_manager.auth().await else {
+                    return Err(quota::QuotaFetchError::Unsupported);
+                };
+                if !auth.uses_codex_backend() {
+                    return Err(quota::QuotaFetchError::Unsupported);
+                }
+                let client = BackendClient::from_auth(
+                    self.config.chatgpt_base_url.clone(),
+                    &auth,
+                    self.config.http_client_factory(),
+                );
+                let response =
+                    client
+                        .get_rate_limits_with_reset_credits()
+                        .await
+                        .map_err(|error| {
+                            quota::QuotaFetchError::Transient(format!(
+                                "failed to fetch account slot rate limits: {error}"
+                            ))
+                        })?;
+                if response.rate_limits.is_empty() {
+                    return Err(quota::QuotaFetchError::Transient(
+                        "failed to fetch account slot rate limits: no snapshots returned"
+                            .to_string(),
+                    ));
+                }
+                let rate_limits_by_limit_id: HashMap<_, _> = response
+                    .rate_limits
+                    .iter()
+                    .cloned()
+                    .map(|snapshot| {
+                        let limit_id = snapshot
+                            .limit_id
+                            .clone()
+                            .unwrap_or_else(|| "codex".to_string());
+                        (limit_id, snapshot.into())
+                    })
+                    .collect();
+                let rate_limits = response
+                    .rate_limits
+                    .iter()
+                    .find(|snapshot| snapshot.limit_id.as_deref() == Some("codex"))
+                    .cloned()
+                    .unwrap_or_else(|| response.rate_limits[0].clone())
+                    .into();
+                Ok(quota::QuotaSnapshot {
+                    captured_at: chrono::Utc::now().timestamp(),
+                    rate_limits,
+                    rate_limits_by_limit_id,
+                })
+            })
+            .await
+    }
+
+    fn spawn_quota_refresh(
+        self: &Arc<Self>,
+        key: quota::QuotaCacheKey,
+        auth_manager: Arc<AuthManager>,
+    ) {
+        let registry = Arc::clone(self);
+        tokio::spawn(async move {
+            let _ = registry.fetch_slot_quota(key, auth_manager).await;
+        });
+    }
+
+    pub(crate) async fn invalidate_slot_quota(&self, account_slot_id: &str) {
+        self.quota_cache.invalidate_slot(account_slot_id).await;
+        self.exhaustion_hints
+            .lock()
+            .await
+            .retain(|hint| hint.account_slot_id != account_slot_id);
+    }
+
+    pub(crate) async fn reset_automatic_rotation_memberships(
+        &self,
+        account_slot_id: &str,
+    ) -> Result<Vec<ThreadId>, JSONRPCErrorError> {
+        self.thread_store
+            .remove_account_slot_from_automatic_rotation_policies(account_slot_id.to_string())
+            .await
+            .or_else(|error| match error {
+                ThreadStoreError::Unsupported { .. } => Ok(Vec::new()),
+                error => Err(error),
+            })
+            .map(|updated| {
+                updated
+                    .into_iter()
+                    .map(|(thread_id, _)| thread_id)
+                    .collect()
+            })
+            .map_err(|error| {
+                internal_error(format!(
+                    "failed to reset account rotation memberships: {error}"
+                ))
+            })
+    }
 }
 
 pub(crate) mod live_registration;
+pub(crate) mod quota;
+pub(crate) mod rotation;
 
 impl ExecutionAccountResolver for AccountRegistry {
     fn resolve(&self, binding: ExecutionAccountBinding) -> ExecutionAccountResolverFuture<'_> {
@@ -752,6 +1002,52 @@ fn virtual_default_manifest(process_home: &Path) -> AccountSlotsManifest {
             error_code: None,
         }],
     }
+}
+
+fn assign_account_numbers(slots: &[AccountSlotManifest]) -> Vec<u32> {
+    let mut assigned = vec![0; slots.len()];
+    let mut used = HashSet::with_capacity(slots.len());
+    used.insert(1_u32);
+    let mut secondary_indices = slots
+        .iter()
+        .enumerate()
+        .filter_map(|(index, slot)| (!slot.is_default).then_some(index))
+        .collect::<Vec<_>>();
+    secondary_indices.sort_by(|left, right| {
+        slots[*left]
+            .account_slot_id
+            .cmp(&slots[*right].account_slot_id)
+    });
+    for (index, slot) in slots.iter().enumerate() {
+        if slot.is_default {
+            assigned[index] = 1;
+        }
+    }
+    for &index in &secondary_indices {
+        if let Some(number) = parse_account_number(&slots[index].label)
+            && used.insert(number)
+        {
+            assigned[index] = number;
+        }
+    }
+    let mut next = 2_u32;
+    for index in secondary_indices {
+        if assigned[index] != 0 {
+            continue;
+        }
+        while used.contains(&next) {
+            next = next.saturating_add(1);
+        }
+        assigned[index] = next;
+        used.insert(next);
+        next = next.saturating_add(1);
+    }
+    assigned
+}
+
+fn parse_account_number(label: &str) -> Option<u32> {
+    let number = label.strip_prefix("Account ")?.parse::<u32>().ok()?;
+    (number >= 2 && label == format!("Account {number}")).then_some(number)
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]

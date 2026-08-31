@@ -1401,6 +1401,110 @@ mod thread_processor_behavior_tests {
     }
 
     #[tokio::test]
+    async fn non_initiator_subscription_removals_preserve_transition_reservation() -> Result<()> {
+        let manager = ThreadStateManager::new();
+        let thread_id = ThreadId::new();
+        let current_thread_id = ThreadId::new();
+        let initiator = ConnectionId(1);
+        let unsubscribing_connection = ConnectionId(2);
+        let disconnecting_connection = ConnectionId(3);
+        for connection_id in [
+            initiator,
+            unsubscribing_connection,
+            disconnecting_connection,
+        ] {
+            manager
+                .connection_initialized(connection_id, ConnectionCapabilities::default())
+                .await;
+            manager
+                .try_ensure_connection_subscribed(
+                    thread_id,
+                    connection_id,
+                    /*experimental_raw_events*/ false,
+                )
+                .await
+                .expect("connection should subscribe");
+        }
+        manager
+            .reserve_thread_transition(thread_id, initiator, "transition-1".to_string())
+            .await
+            .expect("transition should reserve the thread");
+        manager
+            .mark_thread_transition_prepared(thread_id, "transition-1", current_thread_id)
+            .await
+            .expect("transition should become prepared");
+
+        assert!(
+            manager
+                .unsubscribe_connection_from_thread(thread_id, unsubscribing_connection)
+                .await
+        );
+        assert_eq!(
+            manager.remove_connection(disconnecting_connection).await,
+            Vec::<ThreadId>::new()
+        );
+
+        let reservation = manager
+            .thread_transition_reservation(thread_id)
+            .await
+            .expect("non-initiator removal should preserve the reservation");
+        assert_eq!(
+            (
+                reservation.initiator_connection_id,
+                reservation.current_thread_id,
+                reservation.phase,
+                reservation.invalid_reason,
+            ),
+            (
+                initiator,
+                Some(current_thread_id),
+                crate::thread_state::ThreadTransitionReservationPhase::Prepared,
+                None,
+            )
+        );
+        assert_eq!(
+            manager.subscribed_connection_ids(thread_id).await,
+            vec![initiator]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn transition_reservation_fails_fast_while_admission_is_busy() -> Result<()> {
+        let manager = ThreadStateManager::new();
+        let thread_id = ThreadId::new();
+        let connection = ConnectionId(1);
+        manager
+            .connection_initialized(connection, ConnectionCapabilities::default())
+            .await;
+        manager
+            .try_ensure_connection_subscribed(
+                thread_id, connection, /*experimental_raw_events*/ false,
+            )
+            .await
+            .expect("connection should subscribe");
+        let mutation_permit = manager
+            .acquire_thread_mutation_permit(thread_id)
+            .await
+            .expect("test should hold admission");
+
+        let reservation = tokio::time::timeout(
+            Duration::from_millis(50),
+            manager.reserve_thread_transition(thread_id, connection, "transition-1".to_string()),
+        )
+        .await
+        .expect("transition reservation must not wait for admission");
+        assert_eq!(reservation, Err("outgoing_transition_conflict"));
+
+        drop(mutation_permit);
+        manager
+            .reserve_thread_transition(thread_id, connection, "transition-1".to_string())
+            .await
+            .expect("transition should reserve after admission is released");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn exact_transition_retry_can_release_the_original_mutation_fence() -> Result<()> {
         let manager = ThreadStateManager::new();
         let thread_id = ThreadId::new();

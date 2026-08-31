@@ -15,12 +15,18 @@ mod thread_metadata_sync;
 mod thread_sections;
 mod types;
 
+pub use codex_state::AbortThreadTransition;
+pub use codex_state::AccountBindingCommitIntent;
 pub use codex_state::CommitThreadTransition;
 pub use codex_state::CommittedThreadTransitions;
 pub use codex_state::MAX_QUEUE_ITEMS;
 pub use codex_state::ProjectSortKey;
 pub use codex_state::MarkThreadTransitionPrepared;
 pub use codex_state::QueuedUserSubmissionRecord;
+pub use codex_state::ThreadAccountRotationMode;
+pub use codex_state::ThreadAccountRotationPolicy;
+pub use codex_state::ThreadAccountRotationPolicyUpdate;
+pub use codex_state::ThreadTransitionAbortOutcome;
 pub use codex_state::ThreadTransitionClaimOutcome;
 pub use codex_state::ThreadTransitionCommitOutcome;
 pub use codex_state::ThreadTransitionEndpointEvidence;
@@ -123,3 +129,7 @@ pub use types::ThreadSortKey;
 pub use types::TimelinePage;
 pub use types::TurnPage;
 pub use types::UpdateThreadMetadataParams;
+
+#[cfg(test)]
+#[path = "account_rotation_tests.rs"]
+mod account_rotation_tests;

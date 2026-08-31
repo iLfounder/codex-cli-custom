@@ -5,16 +5,27 @@ use super::bedrock_auth::ensure_user_model_provider_can_be_bedrock;
 use super::*;
 use crate::account_registry::AccountRegistry;
 use crate::account_registry::BrowserLoginOwner;
+use crate::account_registry::default_logout_uses_host_managed_provider;
 use crate::account_registry::live_registration::ERROR_BROWSER_LOGIN_BUSY;
+use crate::account_registry::live_registration::ERROR_LOGIN_BUSY;
+use crate::account_registry::live_registration::ERROR_LOGIN_CANCELED;
+use crate::account_registry::live_registration::ERROR_LOGIN_FAILED;
+use crate::account_registry::live_registration::PreparedDefaultLogin;
 use crate::account_registry::live_registration::structured_invalid_request;
 use crate::auth_mode::auth_mode_to_api;
 use crate::external_auth::ExternalAuthBridge;
 use crate::session_runtime::SessionRuntimeEngine;
 use chrono::DateTime;
+use codex_app_server_protocol::AccountSlotRateLimitsReadParams;
+use codex_app_server_protocol::AccountSlotRateLimitsReadResponse;
 use codex_app_server_protocol::DesktopOnboardingEntrypoint;
 use codex_login::LoginOnboardingEntrypoint;
 use codex_login::login_with_bedrock_access_keys;
 use codex_model_provider::is_supported_amazon_bedrock_region;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use tokio::sync::Notify;
+use tokio::sync::Semaphore;
 
 mod bedrock_setup;
 mod rate_limit_resets;
@@ -27,6 +38,8 @@ const ACCOUNT_TOKEN_USAGE_FETCH_TIMEOUT: Duration = Duration::from_secs(/*secs*/
 const THREAD_USAGE_FETCH_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 60);
 const ACCOUNT_WORKSPACE_MESSAGES_FETCH_TIMEOUT: Duration =
     Duration::from_millis(/*millis*/ 1000);
+const DEFAULT_LOGIN_STOP_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 3);
+const ERROR_DEFAULT_ACCOUNT_ACTIVE_TURN: &str = "accountSlotActiveTurn";
 // Login overrides are intentionally available only in debug builds.
 #[cfg(debug_assertions)]
 const LOGIN_ISSUER_OVERRIDE_ENV_VAR: &str = "CODEX_APP_SERVER_LOGIN_ISSUER";
@@ -37,10 +50,14 @@ enum ActiveLogin {
     Browser {
         shutdown_handle: ShutdownHandle,
         login_id: Uuid,
+        prepared: PreparedDefaultLogin,
+        completion: Arc<DefaultLoginCompletion>,
     },
     DeviceCode {
         cancel: CancellationToken,
         login_id: Uuid,
+        prepared: PreparedDefaultLogin,
+        completion: Arc<DefaultLoginCompletion>,
     },
 }
 
@@ -60,6 +77,41 @@ impl ActiveLogin {
             } => shutdown_handle.shutdown(),
             ActiveLogin::DeviceCode { cancel, .. } => cancel.cancel(),
         }
+    }
+
+    fn prepared(&self) -> &PreparedDefaultLogin {
+        match self {
+            ActiveLogin::Browser { prepared, .. } | ActiveLogin::DeviceCode { prepared, .. } => {
+                prepared
+            }
+        }
+    }
+
+    fn completion(&self) -> Arc<DefaultLoginCompletion> {
+        match self {
+            ActiveLogin::Browser { completion, .. }
+            | ActiveLogin::DeviceCode { completion, .. } => Arc::clone(completion),
+        }
+    }
+}
+
+#[derive(Default)]
+struct DefaultLoginCompletion {
+    completed: AtomicBool,
+    notify: Notify,
+}
+
+impl DefaultLoginCompletion {
+    async fn wait(&self) {
+        let notified = self.notify.notified();
+        if !self.completed.load(Ordering::Acquire) {
+            notified.await;
+        }
+    }
+
+    fn complete(&self) {
+        self.completed.store(true, Ordering::Release);
+        self.notify.notify_waiters();
     }
 }
 
@@ -98,6 +150,7 @@ pub(crate) struct AccountRequestProcessor {
     config: Arc<Config>,
     config_manager: ConfigManager,
     active_login: Arc<Mutex<Option<ActiveLogin>>>,
+    default_login_start_lock: Arc<Semaphore>,
     slot_logins: Arc<slot_login::SlotLoginCoordinator>,
     session_runtime: Arc<SessionRuntimeEngine>,
 }
@@ -120,6 +173,7 @@ impl AccountRequestProcessor {
             config,
             config_manager,
             active_login: Arc::new(Mutex::new(None)),
+            default_login_start_lock: Arc::new(Semaphore::new(/*permits*/ 1)),
             slot_logins: Arc::new(slot_login::SlotLoginCoordinator::default()),
             session_runtime,
         }
@@ -130,6 +184,37 @@ impl AccountRequestProcessor {
         params: AccountSlotListParams,
     ) -> Result<AccountSlotListResponse, JSONRPCErrorError> {
         self.account_registry.list(params).await
+    }
+
+    pub(crate) async fn read_account_slot_rate_limits(
+        &self,
+        params: AccountSlotRateLimitsReadParams,
+    ) -> Result<AccountSlotRateLimitsReadResponse, JSONRPCErrorError> {
+        let (key, auth_manager) = self
+            .account_registry
+            .slot_quota_subject(&params.account_slot_id)
+            .await?;
+        let response_key = key.clone();
+        let snapshot = self
+            .account_registry
+            .fetch_slot_quota(key, auth_manager)
+            .await
+            .map_err(|error| match error {
+                crate::account_registry::quota::QuotaFetchError::Unsupported => {
+                    invalid_request("account slot rate limits are unsupported")
+                }
+                crate::account_registry::quota::QuotaFetchError::Transient(message) => {
+                    internal_error(message)
+                }
+            })?;
+        Ok(AccountSlotRateLimitsReadResponse {
+            account_slot_id: response_key.account_slot_id,
+            attempt_generation: response_key.attempt_generation,
+            captured_at: snapshot.captured_at,
+            stale_at: snapshot.captured_at.saturating_add(60),
+            rate_limits: snapshot.rate_limits,
+            rate_limits_by_limit_id: snapshot.rate_limits_by_limit_id,
+        })
     }
 
     pub(crate) async fn login_account(
@@ -144,6 +229,11 @@ impl AccountRequestProcessor {
         &self,
         request_id: ConnectionRequestId,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let _start = self
+            .default_login_start_lock
+            .acquire()
+            .await
+            .map_err(|_| internal_error("default account login coordinator is unavailable"))?;
         self.logout_v2(request_id).await.map(|()| None)
     }
 
@@ -346,8 +436,38 @@ impl AccountRequestProcessor {
         request_id: ConnectionRequestId,
         params: LoginAccountParams,
     ) -> Result<(), JSONRPCErrorError> {
+        if self
+            .session_runtime
+            .account_slot_has_active_turn("default")
+            .await?
+        {
+            return Err(structured_invalid_request(
+                ERROR_DEFAULT_ACCOUNT_ACTIVE_TURN,
+                "default account is in use by an active turn",
+            ));
+        }
         if self.auth_manager.is_workload_identity_selected() {
             return Err(self.configured_auth_owned_by_host_error());
+        }
+        let _start = self
+            .default_login_start_lock
+            .acquire()
+            .await
+            .map_err(|_| internal_error("default account login coordinator is unavailable"))?;
+        if self.active_login.lock().await.is_some()
+            && !matches!(&params, LoginAccountParams::ChatgptAuthTokens { .. })
+        {
+            return Err(structured_invalid_request(
+                ERROR_LOGIN_BUSY,
+                "a default account login is still active",
+            ));
+        }
+        let rotation_affected = self
+            .account_registry
+            .reset_automatic_rotation_memberships("default")
+            .await?;
+        for thread_id in rotation_affected {
+            self.session_runtime.publish_thread(thread_id).await;
         }
         match params {
             LoginAccountParams::ApiKey { api_key } => {
@@ -658,6 +778,15 @@ impl AccountRequestProcessor {
         }
     }
 
+    fn default_login_commit_hook(prepared: &PreparedDefaultLogin) -> LoginCredentialCommitHook {
+        let begin = prepared.clone();
+        let finish = prepared.clone();
+        LoginCredentialCommitHook::new(
+            move || begin.try_begin_credential_commit(),
+            move |success| finish.finish_credential_commit(success),
+        )
+    }
+
     async fn login_chatgpt_v2(
         &self,
         request_id: ConnectionRequestId,
@@ -683,34 +812,92 @@ impl AccountRequestProcessor {
         self.account_registry
             .try_begin_browser_login(browser_owner.clone())
             .await?;
-        let server = match run_login_server_fail_if_busy(opts) {
-            Ok(server) => server,
-            Err(err) => {
+        let completion = Arc::new(DefaultLoginCompletion::default());
+
+        let (server, prepared, notification) = {
+            let mut guard = self.active_login.lock().await;
+            if guard.is_some() {
                 self.account_registry
                     .finish_browser_login(&browser_owner)
                     .await;
-                if err.kind() == std::io::ErrorKind::AddrInUse {
-                    return Err(structured_invalid_request(
-                        ERROR_BROWSER_LOGIN_BUSY,
-                        "browser login callback is unavailable",
-                    ));
+                return Err(structured_invalid_request(
+                    ERROR_LOGIN_BUSY,
+                    "a default account login is still active",
+                ));
+            }
+            let (prepared, _) = match self
+                .account_registry
+                .prepare_default_login(login_id.to_string())
+                .await
+            {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    self.account_registry
+                        .finish_browser_login(&browser_owner)
+                        .await;
+                    return Err(error);
                 }
-                return Err(internal_error("failed to start login server"));
-            }
-        };
-        let shutdown_handle = server.cancel_handle();
-
-        // Replace active login if present.
-        {
-            let mut guard = self.active_login.lock().await;
-            if let Some(existing) = guard.take() {
-                drop(existing);
-            }
+            };
+            let server = match run_login_server_fail_if_busy_with_commit_hook(
+                opts,
+                Self::default_login_commit_hook(&prepared),
+            ) {
+                Ok(server) => server,
+                Err(err) => {
+                    let _ = prepared.try_claim_failure();
+                    let _ = self
+                        .account_registry
+                        .finish_default_login(&prepared, false, Some(ERROR_LOGIN_FAILED))
+                        .await;
+                    self.account_registry
+                        .finish_browser_login(&browser_owner)
+                        .await;
+                    if err.kind() == std::io::ErrorKind::AddrInUse {
+                        return Err(structured_invalid_request(
+                            ERROR_BROWSER_LOGIN_BUSY,
+                            "browser login callback is unavailable",
+                        ));
+                    }
+                    return Err(internal_error("failed to start login server"));
+                }
+            };
+            let shutdown_handle = server.cancel_handle();
             *guard = Some(ActiveLogin::Browser {
                 shutdown_handle: shutdown_handle.clone(),
                 login_id,
+                prepared: prepared.clone(),
+                completion: Arc::clone(&completion),
             });
-        }
+            let notification = match self
+                .account_registry
+                .mark_login_cancelable(
+                    "default",
+                    prepared.attempt_generation,
+                    &prepared.operation_id,
+                )
+                .await
+            {
+                Ok(notification) => notification,
+                Err(error) => {
+                    let _ = prepared.try_claim_failure();
+                    shutdown_handle.shutdown();
+                    drop(guard.take());
+                    let _ = self
+                        .account_registry
+                        .finish_default_login(&prepared, false, Some(ERROR_LOGIN_FAILED))
+                        .await;
+                    self.account_registry
+                        .finish_browser_login(&browser_owner)
+                        .await;
+                    return Err(error);
+                }
+            };
+            (server, prepared, notification)
+        };
+        let shutdown_handle = server.cancel_handle();
+        self.outgoing
+            .send_server_notification(ServerNotification::AccountSlotChanged(notification))
+            .await;
 
         let outgoing_clone = self.outgoing.clone();
         let config_manager = self.config_manager.clone();
@@ -718,35 +905,54 @@ impl AccountRequestProcessor {
         let config = Arc::clone(&self.config);
         let active_login = self.active_login.clone();
         let account_registry = Arc::clone(&self.account_registry);
+        let login_completion = Arc::clone(&completion);
         let auth_url = server.auth_url.clone();
         tokio::spawn(async move {
-            let (success, error_msg, onboarding_entrypoint) = match tokio::time::timeout(
-                LOGIN_CHATGPT_TIMEOUT,
-                server.block_until_done_with_callback_result(),
-            )
-            .await
-            {
-                Ok(Ok(result)) => (
-                    true,
-                    None,
-                    result
-                        .onboarding_entrypoint
-                        .map(|LoginOnboardingEntrypoint::LifeSciences| {
-                            DesktopOnboardingEntrypoint::LifeSciences
-                        }),
-                ),
-                Ok(Err(err)) => (false, Some(format!("Login server error: {err}")), None),
-                Err(_elapsed) => {
-                    shutdown_handle.shutdown();
-                    (false, Some("Login timed out".to_string()), None)
-                }
-            };
+            let (transport_success, mut error_msg, onboarding_entrypoint) =
+                match tokio::time::timeout(
+                    LOGIN_CHATGPT_TIMEOUT,
+                    server.block_until_done_with_callback_result(),
+                )
+                .await
+                {
+                    Ok(Ok(result)) => (
+                        true,
+                        None,
+                        result.onboarding_entrypoint.map(
+                            |LoginOnboardingEntrypoint::LifeSciences| {
+                                DesktopOnboardingEntrypoint::LifeSciences
+                            },
+                        ),
+                    ),
+                    Ok(Err(err)) => (false, Some(format!("Login server error: {err}")), None),
+                    Err(_elapsed) => {
+                        shutdown_handle.shutdown();
+                        (false, Some("Login timed out".to_string()), None)
+                    }
+                };
+            let success = transport_success || prepared.succeeded();
+            if success {
+                error_msg = None;
+            }
+            if !success && prepared.cancel_requested() {
+                error_msg = Some("Login was canceled before completion".to_string());
+            }
 
+            let owns_terminal = if success {
+                prepared.succeeded()
+            } else if prepared.try_claim_failure() {
+                true
+            } else {
+                prepared.failed() && !prepared.cancel_requested()
+            };
             Self::send_chatgpt_login_completion_notifications(
                 &outgoing_clone,
                 config_manager,
                 thread_manager,
                 config,
+                Arc::clone(&account_registry),
+                prepared,
+                owns_terminal,
                 AccountLoginCompletedNotification {
                     login_id: Some(login_id.to_string()),
                     success,
@@ -764,6 +970,7 @@ impl AccountRequestProcessor {
                 }
             }
             account_registry.finish_browser_login(&browser_owner).await;
+            login_completion.complete();
         });
 
         Ok(LoginAccountResponse::Chatgpt {
@@ -791,17 +998,52 @@ impl AccountRequestProcessor {
             .map_err(Self::login_chatgpt_device_code_start_error)?;
         let login_id = Uuid::new_v4();
         let cancel = CancellationToken::new();
+        let completion = Arc::new(DefaultLoginCompletion::default());
 
-        {
+        let (prepared, notification) = {
             let mut guard = self.active_login.lock().await;
-            if let Some(existing) = guard.take() {
-                drop(existing);
+            if guard.is_some() {
+                return Err(structured_invalid_request(
+                    ERROR_LOGIN_BUSY,
+                    "a default account login is still active",
+                ));
             }
+            let (prepared, _) = self
+                .account_registry
+                .prepare_default_login(login_id.to_string())
+                .await?;
             *guard = Some(ActiveLogin::DeviceCode {
                 cancel: cancel.clone(),
                 login_id,
+                prepared: prepared.clone(),
+                completion: Arc::clone(&completion),
             });
-        }
+            let notification = match self
+                .account_registry
+                .mark_login_cancelable(
+                    "default",
+                    prepared.attempt_generation,
+                    &prepared.operation_id,
+                )
+                .await
+            {
+                Ok(notification) => notification,
+                Err(error) => {
+                    let _ = prepared.try_claim_failure();
+                    cancel.cancel();
+                    drop(guard.take());
+                    let _ = self
+                        .account_registry
+                        .finish_default_login(&prepared, false, Some(ERROR_LOGIN_FAILED))
+                        .await;
+                    return Err(error);
+                }
+            };
+            (prepared, notification)
+        };
+        self.outgoing
+            .send_server_notification(ServerNotification::AccountSlotChanged(notification))
+            .await;
 
         let verification_url = device_code.verification_url.clone();
         let user_code = device_code.user_code.clone();
@@ -811,24 +1053,47 @@ impl AccountRequestProcessor {
         let thread_manager = Arc::clone(&self.thread_manager);
         let config = Arc::clone(&self.config);
         let active_login = self.active_login.clone();
+        let account_registry = Arc::clone(&self.account_registry);
+        let login_completion = Arc::clone(&completion);
         tokio::spawn(async move {
-            let (success, error_msg) = tokio::select! {
+            let (success, mut error_msg) = tokio::select! {
                 _ = cancel.cancelled() => {
                     (false, Some("Login was not completed".to_string()))
                 }
-                r = complete_device_code_login(opts, device_code) => {
+                r = complete_device_code_login_with_commit_hook(
+                    opts,
+                    device_code,
+                    Self::default_login_commit_hook(&prepared),
+                ) => {
                     match r {
                         Ok(()) => (true, None),
                         Err(err) => (false, Some(err.to_string())),
                     }
                 }
             };
+            let success = success || prepared.succeeded();
+            if success {
+                error_msg = None;
+            }
+            if !success && prepared.cancel_requested() {
+                error_msg = Some("Login was canceled before completion".to_string());
+            }
 
+            let owns_terminal = if success {
+                prepared.succeeded()
+            } else if prepared.try_claim_failure() {
+                true
+            } else {
+                prepared.failed() && !prepared.cancel_requested()
+            };
             Self::send_chatgpt_login_completion_notifications(
                 &outgoing_clone,
                 config_manager,
                 thread_manager,
                 config,
+                account_registry,
+                prepared,
+                owns_terminal,
                 AccountLoginCompletedNotification {
                     login_id: Some(login_id.to_string()),
                     success,
@@ -842,6 +1107,7 @@ impl AccountRequestProcessor {
             if guard.as_ref().map(ActiveLogin::login_id) == Some(login_id) {
                 *guard = None;
             }
+            login_completion.complete();
         });
 
         Ok(LoginAccountResponse::ChatgptDeviceCode {
@@ -854,16 +1120,22 @@ impl AccountRequestProcessor {
     async fn cancel_login_chatgpt_common(
         &self,
         login_id: Uuid,
-    ) -> std::result::Result<(), CancelLoginError> {
-        let mut guard = self.active_login.lock().await;
-        if guard.as_ref().map(ActiveLogin::login_id) == Some(login_id) {
-            if let Some(active) = guard.take() {
-                drop(active);
-            }
-            Ok(())
-        } else {
-            Err(CancelLoginError::NotFound)
+    ) -> std::result::Result<(PreparedDefaultLogin, Arc<DefaultLoginCompletion>), CancelLoginError>
+    {
+        let guard = self.active_login.lock().await;
+        let Some(active) = guard.as_ref() else {
+            return Err(CancelLoginError::NotFound);
+        };
+        if active.login_id() != login_id {
+            return Err(CancelLoginError::NotFound);
         }
+        let prepared = active.prepared().clone();
+        if !prepared.try_claim_failure() {
+            return Err(CancelLoginError::NotFound);
+        }
+        prepared.request_cancel();
+        active.cancel();
+        Ok((prepared, active.completion()))
     }
 
     async fn cancel_login_response(
@@ -874,10 +1146,58 @@ impl AccountRequestProcessor {
         let uuid = Uuid::parse_str(&login_id)
             .map_err(|_| invalid_request(format!("invalid login id: {login_id}")))?;
         let status = match self.cancel_login_chatgpt_common(uuid).await {
-            Ok(()) => CancelLoginAccountStatus::Canceled,
+            Ok((prepared, completion)) => {
+                if let Some(notification) = self
+                    .account_registry
+                    .finish_default_login(&prepared, false, Some(ERROR_LOGIN_CANCELED))
+                    .await?
+                {
+                    self.outgoing
+                        .send_server_notification(ServerNotification::AccountSlotChanged(
+                            notification,
+                        ))
+                        .await;
+                }
+                let _ = tokio::time::timeout(DEFAULT_LOGIN_STOP_TIMEOUT, completion.wait()).await;
+                CancelLoginAccountStatus::Canceled
+            }
             Err(CancelLoginError::NotFound) => CancelLoginAccountStatus::NotFound,
         };
         Ok(CancelLoginAccountResponse { status })
+    }
+
+    async fn stop_active_default_login(&self) -> Result<(), JSONRPCErrorError> {
+        let guard = self.active_login.lock().await;
+        let Some(active) = guard.as_ref() else {
+            return Ok(());
+        };
+        let prepared = active.prepared().clone();
+        let completion = active.completion();
+        let claimed_failure = prepared.try_claim_failure();
+        if claimed_failure {
+            prepared.request_cancel();
+            active.cancel();
+        }
+        drop(guard);
+        if claimed_failure
+            && let Some(notification) = self
+                .account_registry
+                .finish_default_login(&prepared, false, Some(ERROR_LOGIN_CANCELED))
+                .await?
+        {
+            self.outgoing
+                .send_server_notification(ServerNotification::AccountSlotChanged(notification))
+                .await;
+        }
+        tokio::time::timeout(DEFAULT_LOGIN_STOP_TIMEOUT, completion.wait())
+            .await
+            .map_err(|_| {
+                structured_invalid_request(
+                    ERROR_LOGIN_BUSY,
+                    "the previous default account login is still stopping",
+                )
+            })?;
+        Ok(())
     }
 
     async fn login_chatgpt_auth_tokens(
@@ -905,6 +1225,7 @@ impl AccountRequestProcessor {
         chatgpt_account_id: String,
         chatgpt_plan_type: Option<String>,
     ) -> Result<LoginAccountResponse, JSONRPCErrorError> {
+        self.stop_active_default_login().await?;
         if !self
             .auth_manager
             .is_login_method_allowed(ForcedLoginMethod::Chatgpt)
@@ -912,14 +1233,6 @@ impl AccountRequestProcessor {
             return Err(invalid_request(
                 "External ChatGPT auth is disabled. Use API key login instead.",
             ));
-        }
-
-        // Cancel any active login attempt to avoid persisting managed auth state.
-        {
-            let mut guard = self.active_login.lock().await;
-            if let Some(active) = guard.take() {
-                drop(active);
-            }
         }
 
         if let Some(expected_workspaces) = self.auth_manager.effective_chatgpt_workspaces()
@@ -980,6 +1293,23 @@ impl AccountRequestProcessor {
                 self.current_account_updated_notification(),
             ))
             .await;
+        self.publish_default_projection().await;
+    }
+
+    async fn publish_default_projection(&self) {
+        match self.account_registry.refresh_default_projection().await {
+            Ok(notification) => {
+                self.outgoing
+                    .send_server_notification(ServerNotification::AccountSlotChanged(notification))
+                    .await;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "failed to publish default account slot projection: {}",
+                    error.message
+                );
+            }
+        }
     }
 
     async fn send_chatgpt_login_completion_notifications(
@@ -987,14 +1317,18 @@ impl AccountRequestProcessor {
         config_manager: ConfigManager,
         thread_manager: Arc<ThreadManager>,
         config: Arc<Config>,
-        payload_v2: AccountLoginCompletedNotification,
+        account_registry: Arc<AccountRegistry>,
+        prepared: PreparedDefaultLogin,
+        owns_terminal: bool,
+        mut payload_v2: AccountLoginCompletedNotification,
     ) {
+        if payload_v2.success && !owns_terminal {
+            payload_v2.success = false;
+            payload_v2.error = Some("Login was canceled before completion".to_string());
+        }
         let success = payload_v2.success;
-        outgoing
-            .send_server_notification(ServerNotification::AccountLoginCompleted(payload_v2))
-            .await;
-
-        if success {
+        let mut account_updated = None;
+        if success && owns_terminal {
             let auth_manager = thread_manager.auth_manager();
             auth_manager.reload().await;
             config_manager.replace_cloud_config_bundle_loader(
@@ -1020,24 +1354,70 @@ impl AccountRequestProcessor {
                     .map(auth_mode_to_api),
                 plan_type: auth.as_ref().and_then(CodexAuth::account_plan_type),
             };
+            account_updated = Some(payload_v2);
+        }
+        let mut slot_changed = None;
+        if owns_terminal {
+            let terminal_error_code = if prepared.cancel_requested() {
+                ERROR_LOGIN_CANCELED
+            } else {
+                ERROR_LOGIN_FAILED
+            };
+            match account_registry
+                .finish_default_login(
+                    &prepared,
+                    success,
+                    (!success).then_some(terminal_error_code),
+                )
+                .await
+            {
+                Ok(Some(notification)) => slot_changed = Some(notification),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        login_id = %prepared.operation_id,
+                        attempt_generation = prepared.attempt_generation,
+                        "failed to publish terminal default account login projection: {}",
+                        error.message
+                    );
+                }
+            }
+        }
+        outgoing
+            .send_server_notification(ServerNotification::AccountLoginCompleted(payload_v2))
+            .await;
+        if let Some(payload_v2) = account_updated {
             outgoing
                 .send_server_notification(ServerNotification::AccountUpdated(payload_v2))
+                .await;
+        }
+        if let Some(notification) = slot_changed {
+            outgoing
+                .send_server_notification(ServerNotification::AccountSlotChanged(notification))
                 .await;
         }
     }
 
     async fn logout_common(&self) -> std::result::Result<Option<AuthMode>, JSONRPCErrorError> {
+        if self
+            .session_runtime
+            .account_slot_has_active_turn("default")
+            .await?
+        {
+            return Err(structured_invalid_request(
+                ERROR_DEFAULT_ACCOUNT_ACTIVE_TURN,
+                "default account is in use by an active turn",
+            ));
+        }
+        self.stop_active_default_login().await?;
         if self.auth_manager.is_workload_identity_selected() {
             return Err(self.configured_auth_owned_by_host_error());
         }
         let config = self.load_latest_config().await;
-
-        // Cancel any active login attempt.
-        {
-            let mut guard = self.active_login.lock().await;
-            if let Some(active) = guard.take() {
-                drop(active);
-            }
+        if default_logout_uses_host_managed_provider(&config, &self.auth_manager) {
+            return Err(invalid_request(
+                "cannot log out while Amazon Bedrock is using AWS-managed credentials; manage those credentials through AWS or switch model providers before logging out Codex authentication",
+            ));
         }
 
         match self.auth_manager.logout_with_revoke().await {
@@ -1088,6 +1468,7 @@ impl AccountRequestProcessor {
             self.outgoing
                 .send_server_notification(ServerNotification::AccountUpdated(payload))
                 .await;
+            self.publish_default_projection().await;
         }
         Ok(())
     }

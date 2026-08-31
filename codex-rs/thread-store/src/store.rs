@@ -5,6 +5,8 @@ use std::any::Any;
 use std::future::Future;
 use std::pin::Pin;
 
+use crate::AbortThreadTransition;
+use crate::AccountBindingCommitIntent;
 use crate::AppendThreadItemsParams;
 use crate::ArchiveThreadParams;
 use crate::ArchiveThreadsParams;
@@ -45,12 +47,15 @@ use crate::StoredThread;
 use crate::StoredThreadHistory;
 use crate::StoredThreadSection;
 use crate::StoredThreadSectionsPage;
+use crate::ThreadAccountRotationPolicy;
+use crate::ThreadAccountRotationPolicyUpdate;
 use crate::ThreadMetadataPatch;
 use crate::ThreadOccurrenceSearchPage;
 use crate::ThreadPage;
 use crate::ThreadSearchPage;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
+use crate::ThreadTransitionAbortOutcome;
 use crate::ThreadTransitionClaimOutcome;
 use crate::ThreadTransitionCommitOutcome;
 use crate::ThreadTransitionIntent;
@@ -65,6 +70,9 @@ use crate::WriterControlCapability;
 
 /// Future returned by [`ThreadStore`] operations.
 pub type ThreadStoreFuture<'a, T> = Pin<Box<dyn Future<Output = ThreadStoreResult<T>> + Send + 'a>>;
+
+/// A slot runtime version and its complete durable binding set.
+pub type ExecutionAccountSlotRuntimeState = (u64, Vec<(ThreadId, ExecutionAccountBinding)>);
 
 /// Why thread persistence is being requested.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -193,13 +201,76 @@ pub trait ThreadStore: Any + Send + Sync {
 
     fn compare_and_swap_execution_account_binding(
         &self,
+        thread_id: ThreadId,
+        expected: ExecutionAccountBinding,
+        next_slot_id: String,
+    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
+        self.compare_and_swap_execution_account_binding_with_intent(
+            thread_id,
+            expected,
+            next_slot_id,
+            AccountBindingCommitIntent::PinFixed,
+        )
+    }
+
+    fn compare_and_swap_execution_account_binding_with_intent(
+        &self,
         _thread_id: ThreadId,
         _expected: ExecutionAccountBinding,
         _next_slot_id: String,
+        _intent: AccountBindingCommitIntent,
     ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
         Box::pin(async {
             Err(ThreadStoreError::Unsupported {
-                operation: "compare_and_swap_execution_account_binding",
+                operation: "compare_and_swap_execution_account_binding_with_intent",
+            })
+        })
+    }
+
+    fn thread_account_rotation_policy(
+        &self,
+        _thread_id: ThreadId,
+    ) -> ThreadStoreFuture<'_, ThreadAccountRotationPolicy> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "thread_account_rotation_policy",
+            })
+        })
+    }
+
+    fn compare_and_swap_thread_account_rotation_policy(
+        &self,
+        _thread_id: ThreadId,
+        _expected_revision: u64,
+        _update: ThreadAccountRotationPolicyUpdate,
+    ) -> ThreadStoreFuture<'_, Option<ThreadAccountRotationPolicy>> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "compare_and_swap_thread_account_rotation_policy",
+            })
+        })
+    }
+
+    fn compare_and_swap_thread_account_rotation_cursor(
+        &self,
+        _thread_id: ThreadId,
+        _expected_revision: u64,
+        _accepted_account_slot_id: String,
+    ) -> ThreadStoreFuture<'_, Option<ThreadAccountRotationPolicy>> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "compare_and_swap_thread_account_rotation_cursor",
+            })
+        })
+    }
+
+    fn remove_account_slot_from_automatic_rotation_policies(
+        &self,
+        _account_slot_id: String,
+    ) -> ThreadStoreFuture<'_, Vec<(ThreadId, ThreadAccountRotationPolicy)>> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "remove_account_slot_from_automatic_rotation_policies",
             })
         })
     }
@@ -210,7 +281,7 @@ pub trait ThreadStore: Any + Send + Sync {
     fn execution_account_slot_runtime_state(
         &self,
         _slot_id: String,
-    ) -> ThreadStoreFuture<'_, (u64, Vec<(ThreadId, ExecutionAccountBinding)>)> {
+    ) -> ThreadStoreFuture<'_, ExecutionAccountSlotRuntimeState> {
         Box::pin(async {
             Err(ThreadStoreError::Unsupported {
                 operation: "execution_account_slot_runtime_state",
@@ -226,7 +297,7 @@ pub trait ThreadStore: Any + Send + Sync {
         _slot_id: String,
         _expected_runtime_version: u64,
         _expected_bindings: Vec<(ThreadId, ExecutionAccountBinding)>,
-    ) -> ThreadStoreFuture<'_, Option<(u64, Vec<(ThreadId, ExecutionAccountBinding)>)>> {
+    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountSlotRuntimeState>> {
         Box::pin(async {
             Err(ThreadStoreError::Unsupported {
                 operation: "compare_and_swap_execution_account_slot_runtime",
@@ -256,6 +327,17 @@ pub trait ThreadStore: Any + Send + Sync {
         Box::pin(async {
             Err(ThreadStoreError::Unsupported {
                 operation: "mark_thread_transition_prepared",
+            })
+        })
+    }
+
+    fn abort_thread_transition(
+        &self,
+        _request: AbortThreadTransition,
+    ) -> ThreadStoreFuture<'_, ThreadTransitionAbortOutcome> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "abort_thread_transition",
             })
         })
     }

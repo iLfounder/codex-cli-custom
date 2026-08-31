@@ -107,6 +107,22 @@ pub struct MarkThreadTransitionPrepared {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AbortThreadTransition {
+    pub transition_id: String,
+    pub expected_request_fingerprint: String,
+    pub expected_origin_instance_epoch: String,
+    pub expected_initiator_client_incarnation: String,
+    pub expected_previous_thread_id: ThreadId,
+    pub expected_current_thread_id: ThreadId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ThreadTransitionAbortOutcome {
+    Aborted,
+    AlreadyAbsent,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommitThreadTransition {
     pub transition_id: String,
     pub expected_previous_thread_id: ThreadId,

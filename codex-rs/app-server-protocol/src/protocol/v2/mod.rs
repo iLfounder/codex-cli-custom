@@ -1,6 +1,7 @@
 mod shared;
 
 mod account;
+mod account_rotation;
 mod apps;
 mod attestation;
 mod bedrock;
@@ -37,6 +38,7 @@ mod turn;
 mod windows_sandbox;
 
 pub use account::*;
+pub use account_rotation::*;
 pub use apps::*;
 pub use attestation::*;
 pub use bedrock::*;

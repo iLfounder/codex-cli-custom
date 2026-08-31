@@ -68,4 +68,25 @@ async fn local_transition_uses_state_authority_and_requires_it() {
             .expect("durable read should succeed"),
         Some(ThreadTransitionRecord::Preparing(_))
     ));
+    assert_eq!(
+        store
+            .abort_thread_transition(AbortThreadTransition {
+                transition_id: "transition-1".to_string(),
+                expected_request_fingerprint: "fingerprint-1".to_string(),
+                expected_origin_instance_epoch: "epoch-1".to_string(),
+                expected_initiator_client_incarnation: "client-1".to_string(),
+                expected_previous_thread_id: previous,
+                expected_current_thread_id: current,
+            })
+            .await
+            .expect("durable abort should succeed"),
+        ThreadTransitionAbortOutcome::Aborted
+    );
+    assert_eq!(
+        store
+            .thread_transition_by_id("transition-1".to_string())
+            .await
+            .expect("durable read should succeed"),
+        None
+    );
 }

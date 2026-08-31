@@ -82,6 +82,7 @@
       ]
     },
     "revision": {
+      "default": 0,
       "format": "int64",
       "type": "integer"
     },
@@ -96,7 +97,6 @@
     }
   },
   "required": [
-    "revision",
     "threadId"
   ],
   "title": "ThreadGoalClearedNotification",

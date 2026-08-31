@@ -53,6 +53,7 @@ use tokio::sync::OwnedRwLockReadGuard;
 use tokio::sync::OwnedRwLockWriteGuard;
 use tokio::sync::RwLock;
 
+use crate::AbortThreadTransition;
 use crate::AppendThreadItemsParams;
 use crate::ArchiveThreadParams;
 use crate::ArchiveThreadsParams;
@@ -108,6 +109,7 @@ use crate::ThreadStoreFuture;
 use crate::ThreadStoreResult;
 use crate::TimelinePage;
 use crate::ThreadStoreRuntimeSnapshot;
+use crate::ThreadTransitionAbortOutcome;
 use crate::ThreadTransitionClaimOutcome;
 use crate::ThreadTransitionCommitOutcome;
 use crate::ThreadTransitionIntent;
@@ -690,21 +692,134 @@ impl ThreadStore for LocalThreadStore {
         expected: ExecutionAccountBinding,
         next_slot_id: String,
     ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
+        self.compare_and_swap_execution_account_binding_with_intent(
+            thread_id,
+            expected,
+            next_slot_id,
+            crate::AccountBindingCommitIntent::PinFixed,
+        )
+    }
+
+    fn compare_and_swap_execution_account_binding_with_intent(
+        &self,
+        thread_id: ThreadId,
+        expected: ExecutionAccountBinding,
+        next_slot_id: String,
+        intent: crate::AccountBindingCommitIntent,
+    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
         Box::pin(async move {
             let Some(state_db) = self.state_db.as_ref() else {
                 return Err(ThreadStoreError::Unsupported {
-                    operation: "compare_and_swap_execution_account_binding",
+                    operation: "compare_and_swap_execution_account_binding_with_intent",
                 });
             };
             state_db
-                .compare_and_swap_execution_account_binding(
+                .compare_and_swap_execution_account_binding_with_intent(
                     thread_id,
                     &expected,
                     next_slot_id.as_str(),
+                    intent,
                 )
                 .await
                 .map_err(|err| ThreadStoreError::Internal {
                     message: format!("failed to compare and swap execution account binding: {err}"),
+                })
+        })
+    }
+
+    fn thread_account_rotation_policy(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreFuture<'_, crate::ThreadAccountRotationPolicy> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Ok(crate::ThreadAccountRotationPolicy::virtual_fixed(
+                    &ExecutionAccountBinding {
+                        slot_id: "default".to_string(),
+                        generation: 1,
+                    },
+                ));
+            };
+            state_db
+                .thread_account_rotation_policy(thread_id)
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!("failed to read thread account rotation policy: {err}"),
+                })
+        })
+    }
+
+    fn compare_and_swap_thread_account_rotation_policy(
+        &self,
+        thread_id: ThreadId,
+        expected_revision: u64,
+        update: crate::ThreadAccountRotationPolicyUpdate,
+    ) -> ThreadStoreFuture<'_, Option<crate::ThreadAccountRotationPolicy>> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "compare_and_swap_thread_account_rotation_policy",
+                });
+            };
+            state_db
+                .compare_and_swap_thread_account_rotation_policy(
+                    thread_id,
+                    expected_revision,
+                    &update,
+                )
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!(
+                        "failed to compare and swap thread account rotation policy: {err}"
+                    ),
+                })
+        })
+    }
+
+    fn compare_and_swap_thread_account_rotation_cursor(
+        &self,
+        thread_id: ThreadId,
+        expected_revision: u64,
+        accepted_account_slot_id: String,
+    ) -> ThreadStoreFuture<'_, Option<crate::ThreadAccountRotationPolicy>> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "compare_and_swap_thread_account_rotation_cursor",
+                });
+            };
+            state_db
+                .compare_and_swap_thread_account_rotation_cursor(
+                    thread_id,
+                    expected_revision,
+                    accepted_account_slot_id.as_str(),
+                )
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!(
+                        "failed to compare and swap thread account rotation cursor: {err}"
+                    ),
+                })
+        })
+    }
+
+    fn remove_account_slot_from_automatic_rotation_policies(
+        &self,
+        account_slot_id: String,
+    ) -> ThreadStoreFuture<'_, Vec<(ThreadId, crate::ThreadAccountRotationPolicy)>> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "remove_account_slot_from_automatic_rotation_policies",
+                });
+            };
+            state_db
+                .remove_account_slot_from_automatic_rotation_policies(&account_slot_id)
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!(
+                        "failed to remove account slot from automatic rotation policies: {err}"
+                    ),
                 })
         })
     }
@@ -803,6 +918,32 @@ impl ThreadStore for LocalThreadStore {
             };
             state_db
                 .mark_thread_transition_prepared(&request)
+                .await
+                .map_err(|error| {
+                    match error.downcast_ref::<codex_state::ThreadTransitionConflict>() {
+                        Some(conflict) => ThreadStoreError::Conflict {
+                            message: conflict.reason().to_string(),
+                        },
+                        None => ThreadStoreError::Internal {
+                            message: format!("thread transition storage failed: {error}"),
+                        },
+                    }
+                })
+        })
+    }
+
+    fn abort_thread_transition(
+        &self,
+        request: AbortThreadTransition,
+    ) -> ThreadStoreFuture<'_, ThreadTransitionAbortOutcome> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "abort_thread_transition",
+                });
+            };
+            state_db
+                .abort_thread_transition(&request)
                 .await
                 .map_err(|error| {
                     match error.downcast_ref::<codex_state::ThreadTransitionConflict>() {
@@ -2398,7 +2539,12 @@ mod tests {
             })
             .await
             .expect_err("active-only read should reject archived live thread");
-        assert!(matches!(err, ThreadStoreError::InvalidRequest { .. }));
+        assert!(matches!(
+            err,
+            ThreadStoreError::ThreadNotFound {
+                thread_id: missing_thread_id
+            } if missing_thread_id == thread_id
+        ));
 
         let err = store
             .load_history(LoadThreadHistoryParams {
@@ -2407,7 +2553,10 @@ mod tests {
             })
             .await
             .expect_err("active-only history should reject archived live thread");
-        assert!(matches!(err, ThreadStoreError::InvalidRequest { .. }));
+        assert!(
+            matches!(err, ThreadStoreError::InvalidRequest { .. }),
+            "unexpected active-only history error: {err:?}"
+        );
         assert!(err.to_string().contains("archived"));
 
         let history = store

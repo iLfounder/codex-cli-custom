@@ -40,6 +40,8 @@ use codex_app_server_protocol::AccountSlotLogoutResponse;
 use codex_app_server_protocol::AccountSlotSnapshot;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::AuthMode;
+use codex_app_server_protocol::CancelLoginAccountParams;
+use codex_app_server_protocol::CancelLoginAccountResponse;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ConfigBatchWriteParams;
 use codex_app_server_protocol::ConfigRequirementsReadResponse;
@@ -53,6 +55,8 @@ use codex_app_server_protocol::GetAccountParams;
 use codex_app_server_protocol::GetAccountRateLimitsResponse;
 use codex_app_server_protocol::GetAccountResponse;
 use codex_app_server_protocol::JSONRPCErrorError;
+use codex_app_server_protocol::LoginAccountParams;
+use codex_app_server_protocol::LoginAccountResponse;
 use codex_app_server_protocol::LogoutAccountResponse;
 use codex_app_server_protocol::MemoryResetResponse;
 use codex_app_server_protocol::Model as ApiModel;
@@ -77,6 +81,10 @@ use codex_app_server_protocol::SessionSource;
 use codex_app_server_protocol::SkillsListParams;
 use codex_app_server_protocol::SkillsListResponse;
 use codex_app_server_protocol::Thread;
+use codex_app_server_protocol::ThreadAccountRotationReadParams;
+use codex_app_server_protocol::ThreadAccountRotationReadResponse;
+use codex_app_server_protocol::ThreadAccountRotationUpdateParams;
+use codex_app_server_protocol::ThreadAccountRotationUpdateResponse;
 use codex_app_server_protocol::ThreadAccountSwitchParams;
 use codex_app_server_protocol::ThreadAccountSwitchResponse;
 use codex_app_server_protocol::ThreadApproveGuardianDeniedActionParams;
@@ -187,6 +195,7 @@ use uuid::Uuid;
 const JSONRPC_INVALID_REQUEST: i64 = -32600;
 const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 const JSONRPC_INVALID_PARAMS: i64 = -32602;
+const JSONRPC_INTERNAL_ERROR: i64 = -32603;
 pub(crate) const EXTERNAL_AGENT_CONFIG_IMPORT_IN_PROGRESS_MESSAGE: &str = "A previous external agent import is still running. Wait for it to finish before importing again.";
 const THREAD_SETTINGS_UPDATE_METHOD: &str = "thread/settings/update";
 const ACCOUNT_SLOT_PAGE_LIMIT: u32 = 100;
@@ -245,6 +254,13 @@ fn transition_commit_response_matches(
         && receipt.origin_instance_epoch == preparation.origin_instance_epoch
         && receipt.initiator_client_incarnation == preparation.initiator_client_incarnation
         && receipt.status == ThreadTransitionStatus::Committed
+}
+
+fn transition_commit_error_is_ambiguous(error: &TypedRequestError) -> bool {
+    match error {
+        TypedRequestError::Transport { .. } | TypedRequestError::Deserialize { .. } => true,
+        TypedRequestError::Server { source, .. } => source.code == JSONRPC_INTERNAL_ERROR,
+    }
 }
 
 pub(crate) fn is_history_pagination_unsupported(source: &JSONRPCErrorError) -> bool {
@@ -922,6 +938,11 @@ impl AppServerSession {
         if self.history_support == ThreadHistorySupport::LegacyOnly {
             params.history_mode = None;
         }
+        // Keep the active transport (disabled, direct dynamic tools, or the
+        // approval-gated MCP bridge) consistent with ordinary thread starts.
+        // The native fallback below can then retry without unsupported dynamic
+        // tool fields on older remote servers.
+        self.thread_tool_transport().configure(&mut params);
         let request_handle = self.request_handle();
         let (response, history_support) =
             request_thread_start_with_history_fallback(&request_handle, request_id, params)
@@ -1652,7 +1673,7 @@ impl AppServerSession {
                     .pending_thread_transition
                     .as_ref()
                     .is_some_and(|pending| pending.commit_outcome_ambiguous);
-                if was_ambiguous || !matches!(error, TypedRequestError::Server { .. }) {
+                if was_ambiguous || transition_commit_error_is_ambiguous(&error) {
                     self.mark_thread_transition_commit_ambiguous(preparation);
                 } else {
                     self.pending_thread_transition = None;
@@ -1948,6 +1969,11 @@ pub(crate) async fn list_account_slots(
         expected_capability = Some(response.multi_account.clone());
         data.extend(response.data);
         let Some(next_cursor) = response.next_cursor else {
+            data.sort_by(|left, right| {
+                left.account_number
+                    .cmp(&right.account_number)
+                    .then_with(|| left.account_slot_id.cmp(&right.account_slot_id))
+            });
             return Ok(AccountSlotsSnapshot {
                 data,
                 registry_revision: response.registry_revision,
@@ -1969,6 +1995,44 @@ pub(crate) async fn start_account_slot_login(
         .request_typed(ClientRequest::AccountSlotLoginStart {
             request_id: RequestId::String(format!("tui-account-login-{}", Uuid::new_v4())),
             params,
+        })
+        .await
+        .map_err(Into::into)
+}
+
+pub(crate) async fn start_account_login(
+    request_handle: AppServerRequestHandle,
+    params: LoginAccountParams,
+) -> Result<LoginAccountResponse> {
+    request_handle
+        .request_typed(ClientRequest::LoginAccount {
+            request_id: RequestId::String(format!("tui-default-account-login-{}", Uuid::new_v4())),
+            params,
+        })
+        .await
+        .map_err(Into::into)
+}
+
+pub(crate) async fn cancel_account_login(
+    request_handle: AppServerRequestHandle,
+    params: CancelLoginAccountParams,
+) -> Result<CancelLoginAccountResponse> {
+    request_handle
+        .request_typed(ClientRequest::CancelLoginAccount {
+            request_id: RequestId::String(format!("tui-account-login-cancel-{}", Uuid::new_v4())),
+            params,
+        })
+        .await
+        .map_err(Into::into)
+}
+
+pub(crate) async fn logout_default_account(
+    request_handle: AppServerRequestHandle,
+) -> Result<LogoutAccountResponse> {
+    request_handle
+        .request_typed(ClientRequest::LogoutAccount {
+            request_id: RequestId::String(format!("tui-default-account-logout-{}", Uuid::new_v4())),
+            params: None,
         })
         .await
         .map_err(Into::into)
@@ -2042,6 +2106,37 @@ pub(crate) async fn switch_thread_account(
     request_handle
         .request_typed(ClientRequest::ThreadAccountSwitch {
             request_id: RequestId::String(format!("tui-account-switch-{}", Uuid::new_v4())),
+            params,
+        })
+        .await
+        .map_err(Into::into)
+}
+
+pub(crate) async fn read_thread_account_rotation(
+    request_handle: AppServerRequestHandle,
+    thread_id: ThreadId,
+) -> Result<ThreadAccountRotationReadResponse> {
+    request_handle
+        .request_typed(ClientRequest::ThreadAccountRotationRead {
+            request_id: RequestId::String(format!("tui-account-rotation-read-{}", Uuid::new_v4())),
+            params: ThreadAccountRotationReadParams {
+                thread_id: thread_id.to_string(),
+            },
+        })
+        .await
+        .map_err(Into::into)
+}
+
+pub(crate) async fn update_thread_account_rotation(
+    request_handle: AppServerRequestHandle,
+    params: ThreadAccountRotationUpdateParams,
+) -> Result<ThreadAccountRotationUpdateResponse> {
+    request_handle
+        .request_typed(ClientRequest::ThreadAccountRotationUpdate {
+            request_id: RequestId::String(format!(
+                "tui-account-rotation-update-{}",
+                Uuid::new_v4()
+            )),
             params,
         })
         .await
@@ -3028,6 +3123,25 @@ mod tests {
                 expected,
                 "{message}"
             );
+        }
+    }
+
+    #[test]
+    fn thread_transition_commit_server_error_classification_preserves_internal_error() {
+        for (code, expected) in [
+            (JSONRPC_INTERNAL_ERROR, true),
+            (JSONRPC_INVALID_PARAMS, false),
+        ] {
+            let error = TypedRequestError::Server {
+                method: "thread/transition/commit".to_string(),
+                source: JSONRPCErrorError {
+                    code,
+                    data: None,
+                    message: "fixture error".to_string(),
+                },
+            };
+
+            assert_eq!(transition_commit_error_is_ambiguous(&error), expected);
         }
     }
 

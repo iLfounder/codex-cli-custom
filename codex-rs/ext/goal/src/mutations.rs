@@ -101,6 +101,7 @@ impl GoalService {
         thread_id: ThreadId,
         expected_revision: i64,
         objective: &str,
+        status: ThreadGoalStatus,
         token_budget: Option<i64>,
         max_goal_token_budget: Option<i64>,
     ) -> Result<GoalSetOutcome, GoalServiceError> {
@@ -166,7 +167,7 @@ impl GoalService {
                         thread_id,
                         &codex_state::GoalVersion::from(&promoted),
                         objective,
-                        codex_state::ThreadGoalStatus::Active,
+                        state_status_from_protocol(status),
                         token_budget,
                     )
                     .await
@@ -183,7 +184,7 @@ impl GoalService {
                         thread_id,
                         expected_revision,
                         objective,
-                        codex_state::ThreadGoalStatus::Active,
+                        state_status_from_protocol(status),
                         token_budget,
                     )
                     .await

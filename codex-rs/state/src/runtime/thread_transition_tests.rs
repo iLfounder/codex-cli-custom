@@ -213,3 +213,102 @@ async fn only_one_prepared_edge_can_commit_for_an_outgoing_authority() {
         "outgoing_transition_conflict"
     );
 }
+
+#[tokio::test]
+async fn exact_abort_removes_only_matching_non_committed_transitions() {
+    let (runtime, _sqlite, _cleanup) = runtime().await;
+    let previous = thread_id(20);
+    let current = thread_id(21);
+    let intent = intent("transition-abort", previous);
+    runtime
+        .claim_thread_transition(&intent, current, "epoch-1", "client-1", &writer(3))
+        .await
+        .expect("claim should succeed");
+    let abort = AbortThreadTransition {
+        transition_id: intent.transition_id.clone(),
+        expected_request_fingerprint: intent.request_fingerprint.clone(),
+        expected_origin_instance_epoch: "epoch-1".to_string(),
+        expected_initiator_client_incarnation: "client-1".to_string(),
+        expected_previous_thread_id: previous,
+        expected_current_thread_id: current,
+    };
+    let mut mismatch = abort.clone();
+    mismatch.expected_current_thread_id = thread_id(99);
+    let error = runtime
+        .abort_thread_transition(&mismatch)
+        .await
+        .expect_err("mismatched abort must fail closed");
+    assert_eq!(
+        error
+            .downcast_ref::<ThreadTransitionConflict>()
+            .expect("typed conflict")
+            .reason(),
+        "transition_abort_mismatch"
+    );
+    assert!(matches!(
+        runtime
+            .thread_transition_by_id(&intent.transition_id)
+            .await
+            .expect("read should succeed"),
+        Some(ThreadTransitionRecord::Preparing(_))
+    ));
+    assert_eq!(
+        runtime
+            .abort_thread_transition(&abort)
+            .await
+            .expect("exact abort should succeed"),
+        ThreadTransitionAbortOutcome::Aborted
+    );
+    assert_eq!(
+        runtime
+            .abort_thread_transition(&abort)
+            .await
+            .expect("abort retry should observe absence"),
+        ThreadTransitionAbortOutcome::AlreadyAbsent
+    );
+
+    runtime
+        .claim_thread_transition(&intent, current, "epoch-1", "client-1", &writer(3))
+        .await
+        .expect("claim after abort should recover");
+    runtime
+        .mark_thread_transition_prepared(&MarkThreadTransitionPrepared {
+            transition_id: intent.transition_id.clone(),
+            expected_request_fingerprint: intent.request_fingerprint.clone(),
+            expected_origin_instance_epoch: "epoch-1".to_string(),
+            expected_initiator_client_incarnation: "client-1".to_string(),
+            current_writer: writer(1),
+        })
+        .await
+        .expect("prepare should succeed");
+    runtime
+        .commit_thread_transition(&CommitThreadTransition {
+            transition_id: intent.transition_id.clone(),
+            expected_previous_thread_id: previous,
+            expected_current_thread_id: current,
+            expected_origin_instance_epoch: "epoch-1".to_string(),
+            expected_initiator_client_incarnation: "client-1".to_string(),
+            previous_committed_state_revision: 8,
+            current_committed_state_revision: 2,
+        })
+        .await
+        .expect("commit should succeed");
+    let error = runtime
+        .abort_thread_transition(&abort)
+        .await
+        .expect_err("committed transition must be immutable");
+    assert_eq!(
+        error
+            .downcast_ref::<ThreadTransitionConflict>()
+            .expect("typed conflict")
+            .reason(),
+        "transition_already_committed"
+    );
+    assert!(matches!(
+        runtime
+            .thread_transition_by_id(&intent.transition_id)
+            .await
+            .expect("read should succeed"),
+        Some(ThreadTransitionRecord::Committed(_))
+    ));
+}

@@ -44,6 +44,7 @@ use crate::ThreadStoreResult;
 mod canonicalizer;
 mod legacy_event;
 mod line_parser;
+mod ordinal_repair;
 mod publish;
 mod rollback;
 mod rollback_plan;
@@ -161,6 +162,20 @@ pub struct RolloutMigrationOutcome {
     pub failure_reason: Option<RolloutMigrationFailureReason>,
     pub bytes_processed: u64,
     pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub history_mode: Option<ThreadHistoryMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_identity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_invalid_ordinal: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_ordinal: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub affected_suffix_records: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mutation_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup_path: Option<PathBuf>,
 }
 
 /// The complete result of scanning active rollout files.
@@ -1348,6 +1363,13 @@ fn migration_outcome(
             failure_reason: None,
             bytes_processed,
             message: None,
+            history_mode: None,
+            file_identity: None,
+            first_invalid_ordinal: None,
+            expected_ordinal: None,
+            affected_suffix_records: None,
+            mutation_count: None,
+            backup_path: None,
         },
         Err(failure) => RolloutMigrationOutcome {
             thread_id: Some(thread_id),
@@ -1356,6 +1378,13 @@ fn migration_outcome(
             failure_reason: Some(failure.reason),
             bytes_processed,
             message: Some(failure.error.to_string()),
+            history_mode: None,
+            file_identity: None,
+            first_invalid_ordinal: None,
+            expected_ordinal: None,
+            affected_suffix_records: None,
+            mutation_count: None,
+            backup_path: None,
         },
     }
 }
@@ -1373,6 +1402,13 @@ fn skipped_busy_outcome(
         failure_reason: None,
         bytes_processed,
         message: Some(message),
+        history_mode: None,
+        file_identity: None,
+        first_invalid_ordinal: None,
+        expected_ordinal: None,
+        affected_suffix_records: None,
+        mutation_count: None,
+        backup_path: None,
     }
 }
 

@@ -346,7 +346,7 @@ pub(super) async fn start_app_server_for_session_command(
             cli.bypass_hook_trust,
         );
     let default_daemon = if explicit_remote_endpoint.is_none() && reuse_implicit_local_daemon {
-        super::maybe_probe_default_daemon_socket(codex_home.as_path()).await
+        super::default_daemon_socket_if_present(codex_home.as_path())?
     } else {
         None
     };

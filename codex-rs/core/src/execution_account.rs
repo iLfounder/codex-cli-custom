@@ -7,6 +7,7 @@ use codex_core_plugins::PluginsManager;
 use codex_login::AuthManager;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_otel::SessionTelemetry;
+use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::protocol::ExecutionAccountBinding;
@@ -24,6 +25,100 @@ pub struct ExecutionAccountContext {
 pub struct ExecutionAccountServices {
     pub plugins_manager: Arc<PluginsManager>,
     pub mcp_manager: Arc<crate::mcp::McpManager>,
+}
+
+/// Inputs used to choose the execution account for one newly admitted user turn.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TurnExecutionAccountSelection {
+    pub thread_id: ThreadId,
+    pub current_binding: ExecutionAccountBinding,
+}
+
+/// Account choice made for one newly admitted user turn.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TurnExecutionAccountDecision {
+    /// Keep the thread's currently published execution account.
+    Keep,
+    /// Select the slot under the returned policy revision.
+    ///
+    /// This remains distinct from [`Self::Keep`] when `target_slot_id` is the current slot: turn
+    /// admission must retain `policy_revision`, while skipping an unnecessary runtime switch.
+    Select {
+        target_slot_id: String,
+        policy_revision: u64,
+    },
+}
+
+/// Future returned by [`TurnExecutionAccountSelector`] without async-trait machinery.
+pub type TurnExecutionAccountSelectorFuture<'a> =
+    Pin<Box<dyn Future<Output = CodexResult<TurnExecutionAccountDecision>> + Send + 'a>>;
+
+/// Selects the execution account for an actual new user turn.
+///
+/// Implementations only choose a slot. Core remains responsible for resolving that slot,
+/// preparing its runtime, and committing the durable thread binding.
+pub trait TurnExecutionAccountSelector: Send + Sync {
+    fn select(
+        &self,
+        selection: TurnExecutionAccountSelection,
+    ) -> TurnExecutionAccountSelectorFuture<'_>;
+}
+
+pub(crate) struct PreparedTurnExecutionAccountTransition {
+    resolved: ResolvedExecutionAccountTransition,
+    services: ExecutionAccountServices,
+}
+
+impl PreparedTurnExecutionAccountTransition {
+    pub(crate) fn new(
+        resolved: ResolvedExecutionAccountTransition,
+        services: ExecutionAccountServices,
+    ) -> Self {
+        Self { resolved, services }
+    }
+
+    pub(crate) fn execution_account(&self) -> &Arc<ExecutionAccountContext> {
+        self.resolved.execution_account()
+    }
+
+    pub(crate) fn services(&self) -> &ExecutionAccountServices {
+        &self.services
+    }
+}
+
+pub(crate) type TurnExecutionAccountTransitionResolverFuture<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    PreparedTurnExecutionAccountTransition,
+                    ExecutionAccountSwitchError,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
+
+/// Resolves one selected slot into the exact runtime and services needed by Core admission.
+///
+/// Implementations must keep any readiness lease alive in the returned prepared transition until
+/// Core finishes the durable binding CAS and runtime publication.
+pub(crate) trait TurnExecutionAccountTransitionResolver: Send + Sync {
+    fn resolve(
+        &self,
+        current_binding: ExecutionAccountBinding,
+        target_slot_id: String,
+    ) -> TurnExecutionAccountTransitionResolverFuture<'_>;
+}
+
+pub(crate) struct DefaultTurnExecutionAccountSelector;
+
+impl TurnExecutionAccountSelector for DefaultTurnExecutionAccountSelector {
+    fn select(
+        &self,
+        _selection: TurnExecutionAccountSelection,
+    ) -> TurnExecutionAccountSelectorFuture<'_> {
+        Box::pin(async { Ok(TurnExecutionAccountDecision::Keep) })
+    }
 }
 
 /// Fully prepared account-sensitive runtime published atomically for future turns.
@@ -159,3 +254,7 @@ impl ExecutionAccountResolver for DefaultExecutionAccountResolver {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "execution_account_tests.rs"]
+mod tests;

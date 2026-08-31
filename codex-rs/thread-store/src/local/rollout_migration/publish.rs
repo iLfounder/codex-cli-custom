@@ -72,6 +72,40 @@ pub(super) fn staged_rollout_path(rollout_path: &Path) -> ThreadStoreResult<Path
     staged_path(rollout_path, "paginated")
 }
 
+pub(super) fn ordinal_repair_staged_path(rollout_path: &Path) -> ThreadStoreResult<PathBuf> {
+    staged_path(rollout_path, "ordinal-repair")
+}
+
+pub(super) fn ordinal_repair_projection_path(
+    rollout_path: &Path,
+    thread_id: ThreadId,
+) -> ThreadStoreResult<PathBuf> {
+    let parent = rollout_path
+        .parent()
+        .ok_or_else(|| migration_error("rollout path has no parent directory"))?;
+    Ok(parent.join(format!(".{thread_id}.ordinal-repair-projection.tmp")))
+}
+
+pub(super) fn ordinal_repair_backup_path(
+    codex_home: &Path,
+    thread_id: ThreadId,
+    rollout_path: &Path,
+) -> ThreadStoreResult<PathBuf> {
+    let extension = rollout_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("rollout-"))
+        .ok_or_else(|| migration_error("rollout path has no valid filename"))?;
+    let nonce = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(migration_error)?
+        .as_nanos();
+    Ok(codex_home
+        .join(MIGRATION_JOURNAL_DIRECTORY)
+        .join("backups")
+        .join(format!("{thread_id}-{nonce}-{extension}.backup")))
+}
+
 pub(super) fn decompressed_staged_rollout_path(rollout_path: &Path) -> ThreadStoreResult<PathBuf> {
     staged_path(rollout_path, "decompressed")
 }

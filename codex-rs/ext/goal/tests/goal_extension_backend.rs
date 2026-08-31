@@ -63,6 +63,7 @@ async fn installed_goal_tools_create_goal_and_fill_empty_preview() -> anyhow::Re
         "create_goal",
         "call-create-goal",
         json!({
+            "expected_revision": 0,
             "objective": "ship goal extension backend",
             "token_budget": 123,
         }),
@@ -74,6 +75,8 @@ async fn installed_goal_tools_create_goal_and_fill_empty_preview() -> anyhow::Re
         json!({
             "goal": {
                 "threadId": thread_id,
+                "goalId": result["goal"]["goalId"],
+                "revision": 1,
                 "objective": "ship goal extension backend",
                 "status": "active",
                 "tokenBudget": 123,
@@ -82,6 +85,8 @@ async fn installed_goal_tools_create_goal_and_fill_empty_preview() -> anyhow::Re
                 "createdAt": result["goal"]["createdAt"],
                 "updatedAt": result["goal"]["updatedAt"],
             },
+            "goalId": result["goalId"],
+            "revision": 1,
             "remainingTokens": 123,
             "completionBudgetReport": serde_json::Value::Null,
         })
@@ -115,7 +120,11 @@ async fn installed_goal_tools_apply_maximum_token_budget() -> anyhow::Result<()>
         .handle(tool_call(
             "create_goal",
             "call-oversized-goal",
-            json!({ "objective": "oversized goal", "token_budget": 101 }),
+            json!({
+                "expected_revision": 0,
+                "objective": "oversized goal",
+                "token_budget": 101,
+            }),
         ))
         .await;
     let error = match result {
@@ -137,7 +146,7 @@ async fn installed_goal_tools_apply_maximum_token_budget() -> anyhow::Result<()>
     let invocation = tool_call(
         "create_goal",
         "call-default-goal-budget",
-        json!({ "objective": "default goal budget" }),
+        json!({ "expected_revision": 0, "objective": "default goal budget" }),
     );
     let output = create_tool.handle(invocation.clone()).await?;
     assert_eq!(
@@ -191,14 +200,24 @@ async fn installed_goal_tools_only_replace_complete_goal() -> anyhow::Result<()>
     let first = tool_call(
         "create_goal",
         "call-create-goal-1",
-        json!({ "objective": "first goal" }),
+        json!({ "expected_revision": 0, "objective": "first goal" }),
     );
-    create_tool.handle(first).await?;
+    let first_output = create_tool.handle(first.clone()).await?;
+    let first_result = first_output.code_mode_result(&first.payload);
+    let first_goal_id = first_result["goalId"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("created goal ID should be returned"))?;
+    let first_revision = first_result["revision"]
+        .as_i64()
+        .ok_or_else(|| anyhow::anyhow!("created goal revision should be returned"))?;
 
     let second = tool_call(
         "create_goal",
         "call-create-goal-2",
-        json!({ "objective": "second goal" }),
+        json!({
+            "expected_revision": first_revision,
+            "objective": "second goal",
+        }),
     );
     let err = match create_tool.handle(second).await {
         Ok(_) => panic!("duplicate create should fail"),
@@ -214,18 +233,28 @@ async fn installed_goal_tools_only_replace_complete_goal() -> anyhow::Result<()>
     );
 
     let update_tool = tool_by_name(&tools, "update_goal");
-    update_tool
-        .handle(tool_call(
-            "update_goal",
-            "call-complete-goal",
-            json!({ "status": "complete" }),
-        ))
-        .await?;
+    let complete = tool_call(
+        "update_goal",
+        "call-complete-goal",
+        json!({
+            "expected_goal_id": first_goal_id,
+            "expected_revision": first_revision,
+            "status": "complete",
+        }),
+    );
+    let complete_output = update_tool.handle(complete.clone()).await?;
+    let complete_result = complete_output.code_mode_result(&complete.payload);
+    let complete_revision = complete_result["revision"]
+        .as_i64()
+        .ok_or_else(|| anyhow::anyhow!("completed goal revision should be returned"))?;
 
     let invocation = tool_call(
         "create_goal",
         "call-create-goal-3",
-        json!({ "objective": "replacement goal" }),
+        json!({
+            "expected_revision": complete_revision,
+            "objective": "replacement goal",
+        }),
     );
     let output = create_tool.handle(invocation.clone()).await?;
     let result = output.code_mode_result(&invocation.payload);
@@ -269,7 +298,10 @@ async fn create_goal_resets_baseline_before_turn_stop_accounting() -> anyhow::Re
         .handle(tool_call(
             "create_goal",
             "call-create-goal",
-            json!({ "objective": "ship goal extension backend" }),
+            json!({
+                "expected_revision": 0,
+                "objective": "ship goal extension backend",
+            }),
         ))
         .await?;
 
@@ -309,7 +341,10 @@ async fn tool_finish_accounts_active_goal_progress_and_emits_event() -> anyhow::
         .handle(tool_call(
             "create_goal",
             "call-create-goal",
-            json!({ "objective": "ship goal extension backend" }),
+            json!({
+                "expected_revision": 0,
+                "objective": "ship goal extension backend",
+            }),
         ))
         .await?;
     harness.sink.clear();
@@ -369,7 +404,10 @@ async fn parallel_tool_finish_accounts_active_goal_progress_once() -> anyhow::Re
         .handle(tool_call(
             "create_goal",
             "call-create-goal",
-            json!({ "objective": "ship goal extension backend" }),
+            json!({
+                "expected_revision": 0,
+                "objective": "ship goal extension backend",
+            }),
         ))
         .await?;
     harness.sink.clear();
@@ -604,6 +642,7 @@ async fn budget_limited_goal_keeps_accruing_until_turn_stop() -> anyhow::Result<
             "create_goal",
             "call-create-goal",
             json!({
+                "expected_revision": 0,
                 "objective": "ship goal extension backend",
                 "token_budget": 25,
             }),
@@ -680,6 +719,7 @@ async fn budget_limited_goal_keeps_accounting_after_later_tool_finish() -> anyho
             "create_goal",
             "call-create-goal",
             json!({
+                "expected_revision": 0,
                 "objective": "ship goal extension backend",
                 "token_budget": 25,
             }),
@@ -737,7 +777,10 @@ async fn turn_error_usage_limit_accounts_progress_and_clears_accounting() -> any
         .handle(tool_call(
             "create_goal",
             "call-create-goal",
-            json!({ "objective": "ship goal extension backend" }),
+            json!({
+                "expected_revision": 0,
+                "objective": "ship goal extension backend",
+            }),
         ))
         .await?;
     harness.sink.clear();
@@ -818,7 +861,10 @@ async fn turn_error_blocks_goal() -> anyhow::Result<()> {
         .handle(tool_call(
             "create_goal",
             "call-create-goal",
-            json!({ "objective": "ship goal extension backend" }),
+            json!({
+                "expected_revision": 0,
+                "objective": "ship goal extension backend",
+            }),
         ))
         .await?;
 
@@ -911,6 +957,7 @@ async fn usage_limit_budget_limited_goal_accounts_remaining_progress() -> anyhow
             "create_goal",
             "call-create-goal",
             json!({
+                "expected_revision": 0,
                 "objective": "ship goal extension backend",
                 "token_budget": 25,
             }),
@@ -988,7 +1035,10 @@ async fn usage_limit_plan_turn_does_not_stop_goal() -> anyhow::Result<()> {
         .handle(tool_call(
             "create_goal",
             "call-create-goal",
-            json!({ "objective": "ship goal extension backend" }),
+            json!({
+                "expected_revision": 0,
+                "objective": "ship goal extension backend",
+            }),
         ))
         .await?;
 
@@ -1026,7 +1076,10 @@ async fn usage_limit_stale_turn_does_not_stop_current_goal() -> anyhow::Result<(
         .handle(tool_call(
             "create_goal",
             "call-create-goal",
-            json!({ "objective": "ship goal extension backend" }),
+            json!({
+                "expected_revision": 0,
+                "objective": "ship goal extension backend",
+            }),
         ))
         .await?;
     harness.stop_turn("turn-1").await;
@@ -1059,13 +1112,22 @@ async fn update_goal_can_block_and_accounts_final_progress() -> anyhow::Result<(
 
     let tools = harness.tools();
     let create_tool = tool_by_name(&tools, "create_goal");
-    create_tool
-        .handle(tool_call(
-            "create_goal",
-            "call-create-goal",
-            json!({ "objective": "ship goal extension backend" }),
-        ))
-        .await?;
+    let create = tool_call(
+        "create_goal",
+        "call-create-goal",
+        json!({
+            "expected_revision": 0,
+            "objective": "ship goal extension backend",
+        }),
+    );
+    let create_output = create_tool.handle(create.clone()).await?;
+    let create_result = create_output.code_mode_result(&create.payload);
+    let goal_id = create_result["goalId"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("created goal ID should be returned"))?;
+    let revision = create_result["revision"]
+        .as_i64()
+        .ok_or_else(|| anyhow::anyhow!("created goal revision should be returned"))?;
     harness.sink.clear();
 
     harness
@@ -1081,7 +1143,11 @@ async fn update_goal_can_block_and_accounts_final_progress() -> anyhow::Result<(
     let invocation = tool_call(
         "update_goal",
         "call-update-goal",
-        json!({ "status": "blocked" }),
+        json!({
+            "expected_goal_id": goal_id,
+            "expected_revision": revision,
+            "status": "blocked",
+        }),
     );
     let output = update_tool.handle(invocation.clone()).await?;
     let result = output.code_mode_result(&invocation.payload);
@@ -1091,6 +1157,8 @@ async fn update_goal_can_block_and_accounts_final_progress() -> anyhow::Result<(
         json!({
             "goal": {
                 "threadId": thread_id,
+                "goalId": result["goal"]["goalId"],
+                "revision": result["revision"],
                 "objective": "ship goal extension backend",
                 "status": "blocked",
                 "tokensUsed": 23,
@@ -1098,6 +1166,8 @@ async fn update_goal_can_block_and_accounts_final_progress() -> anyhow::Result<(
                 "createdAt": result["goal"]["createdAt"],
                 "updatedAt": result["goal"]["updatedAt"],
             },
+            "goalId": result["goalId"],
+            "revision": result["revision"],
             "remainingTokens": serde_json::Value::Null,
             "completionBudgetReport": serde_json::Value::Null,
         })
@@ -1114,7 +1184,7 @@ async fn update_goal_can_block_and_accounts_final_progress() -> anyhow::Result<(
     assert_eq!(
         vec![
             CapturedGoalEvent {
-                event_id: "call-update-goal".to_string(),
+                event_id: "turn-1:external-goal-mutation".to_string(),
                 turn_id: Some("turn-1".to_string()),
                 status: ThreadGoalStatus::Active,
                 tokens_used: 23,
@@ -1145,7 +1215,10 @@ async fn external_goal_mutation_start_accounts_active_goal_progress() -> anyhow:
         .handle(tool_call(
             "create_goal",
             "call-create-goal",
-            json!({ "objective": "ship goal extension backend" }),
+            json!({
+                "expected_revision": 0,
+                "objective": "ship goal extension backend",
+            }),
         ))
         .await?;
     harness.sink.clear();
@@ -1206,7 +1279,7 @@ async fn goal_service_external_set_active_preserves_concurrent_usage() -> anyhow
         .handle(tool_call(
             "create_goal",
             "call-create-goal",
-            json!({ "objective": "old objective" }),
+            json!({ "expected_revision": 0, "objective": "old objective" }),
         ))
         .await?;
     let child = harness.spawn_child(ThreadId::new()).await?;
@@ -1303,6 +1376,7 @@ async fn stale_set_runtime_effects_do_not_replace_current_accounting_version() -
             thread_id,
             initial_revision,
             "initial objective",
+            ThreadGoalStatus::Active,
             /*token_budget*/ None,
             /*max_goal_token_budget*/ None,
         )
@@ -1389,6 +1463,7 @@ async fn stale_clear_runtime_effects_do_not_clear_replacement_accounting() -> an
             thread_id,
             initial_revision,
             "old objective",
+            ThreadGoalStatus::Active,
             /*token_budget*/ None,
             /*max_goal_token_budget*/ None,
         )
@@ -1412,6 +1487,7 @@ async fn stale_clear_runtime_effects_do_not_clear_replacement_accounting() -> an
             thread_id,
             cleared.revision,
             "replacement objective",
+            ThreadGoalStatus::Active,
             /*token_budget*/ None,
             /*max_goal_token_budget*/ None,
         )
@@ -1463,7 +1539,10 @@ async fn thread_stop_unregisters_goal_runtime_from_service() -> anyhow::Result<(
         .handle(tool_call(
             "create_goal",
             "call-create-goal",
-            json!({ "objective": "ship goal extension backend" }),
+            json!({
+                "expected_revision": 0,
+                "objective": "ship goal extension backend",
+            }),
         ))
         .await?;
     harness.sink.clear();

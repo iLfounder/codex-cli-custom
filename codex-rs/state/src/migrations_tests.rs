@@ -10,6 +10,7 @@ use super::CUSTOM_SCHEMA_V1;
 use super::CUSTOM_SCHEMA_V2;
 use super::CUSTOM_SCHEMA_V3;
 use super::CUSTOM_SCHEMA_V4;
+use super::CUSTOM_SCHEMA_V5;
 use super::LegacyMigrationCutover;
 use super::STATE_MIGRATOR;
 use super::THREAD_HISTORY_MIGRATOR;
@@ -120,13 +121,19 @@ async fn custom_schema_bootstrap_with_account_slot_runtime_versions_serializes_c
                 "thread_transitions".to_string(),
                 CUSTOM_SCHEMA_V4.definition.to_string(),
             ),
+            (
+                5,
+                "thread_account_rotation_policies".to_string(),
+                CUSTOM_SCHEMA_V5.definition.to_string(),
+            ),
         ]
     );
     let custom_tables = sqlx::query_scalar::<_, String>(
         "SELECT name FROM sqlite_master WHERE type = 'table' \
          AND name IN ('writer_authority_store', 'thread_writer_generations', \
          'thread_execution_account_bindings', 'thread_turn_execution_accounts', \
-         'account_slot_runtime_versions', 'thread_transitions') ORDER BY name",
+         'account_slot_runtime_versions', 'thread_transitions', \
+         'thread_account_rotation_policies') ORDER BY name",
     )
     .fetch_all(&pool)
     .await
@@ -135,6 +142,7 @@ async fn custom_schema_bootstrap_with_account_slot_runtime_versions_serializes_c
         custom_tables,
         vec![
             "account_slot_runtime_versions".to_string(),
+            "thread_account_rotation_policies".to_string(),
             "thread_execution_account_bindings".to_string(),
             "thread_transitions".to_string(),
             "thread_turn_execution_accounts".to_string(),

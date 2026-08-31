@@ -66,6 +66,36 @@ impl App {
                 request_generation,
                 result,
             } => self.handle_account_picker_loaded(thread_id, request_generation, result),
+            AppEvent::AccountStateRefreshed {
+                thread_id,
+                request_generation,
+                result,
+            } => self.handle_account_state_refreshed(
+                app_server,
+                thread_id,
+                request_generation,
+                result,
+            ),
+            AppEvent::OpenAccountDetail { slot_id } => self.show_account_detail(slot_id),
+            AppEvent::OpenAccountRotation => self.open_account_rotation_editor(app_server),
+            AppEvent::AccountRotationLoaded {
+                thread_id,
+                request_generation,
+                result,
+            } => self.handle_account_rotation_loaded(thread_id, request_generation, result),
+            AppEvent::EditAccountRotation { edit } => {
+                self.edit_account_rotation(app_server, edit)
+            }
+            AppEvent::AccountRotationUpdated {
+                thread_id,
+                expected_rotation_revision,
+                result,
+            } => self.handle_account_rotation_updated(
+                app_server,
+                thread_id,
+                expected_rotation_revision,
+                result,
+            ),
             AppEvent::OpenAccountLoginMethods { slot_id } => {
                 self.show_account_login_methods(slot_id)
             }
@@ -92,6 +122,19 @@ impl App {
                 app_server,
                 thread_id,
                 instance_epoch,
+                result,
+            ),
+            AppEvent::CancelAccountLogin { slot_id, login_id } => {
+                self.cancel_account_login(app_server, slot_id, login_id)
+            }
+            AppEvent::AccountLoginCanceled {
+                slot_id,
+                login_id,
+                result,
+            } => self.handle_account_login_canceled(
+                app_server,
+                &slot_id,
+                &login_id,
                 result,
             ),
             AppEvent::AccountSwitchFinished {
@@ -2316,7 +2359,12 @@ impl App {
                 request_generation,
                 result,
             } => {
-                self.handle_plugin_commands_loaded(thread_id, request_generation, result);
+                self.handle_plugin_commands_loaded(
+                    app_server,
+                    thread_id,
+                    request_generation,
+                    result,
+                );
             }
             AppEvent::InvokePluginCommand { command_id } => {
                 self.invoke_plugin_command(app_server, command_id);
@@ -3223,6 +3271,8 @@ impl App {
     }
 
     fn refresh_plugin_mentions_after_config_write(&mut self) {
+        self.invalidate_plugin_command_catalog();
+        self.app_event_tx.send(AppEvent::RefreshPluginCommands);
         self.chat_widget.refresh_plugin_mentions();
         self.chat_widget.submit_op(AppCommand::reload_user_config());
         self.chat_widget

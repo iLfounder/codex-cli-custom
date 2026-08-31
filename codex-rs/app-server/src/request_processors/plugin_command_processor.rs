@@ -332,14 +332,15 @@ impl PluginCommandRequestProcessor {
                 } else {
                     None
                 };
-                commands.push(resolved_command(
+                let command = resolved_command(
                     &plugin.config_name,
                     namespace,
                     contribution,
                     available,
                     deny_reason,
                     account.clone(),
-                ));
+                )?;
+                commands.push(command);
             }
         }
         commands.sort_by(|left, right| {
@@ -418,7 +419,7 @@ fn resolved_command(
     available: bool,
     deny_reason: Option<String>,
     account: SessionRuntimeAccountRef,
-) -> ResolvedCommand {
+) -> Result<ResolvedCommand, JSONRPCErrorError> {
     let mut hasher = Sha256::new();
     let identity = serde_json::to_value((
         plugin_id,
@@ -427,11 +428,15 @@ fn resolved_command(
         &contribution.name,
         &contribution.target,
     ))
-    .expect("plugin command identity must serialize");
-    hasher.update(
-        serde_json::to_vec(&canonicalize_json(identity))
-            .expect("plugin command identity must encode"),
-    );
+    .map_err(|error| {
+        internal_error(format!(
+            "failed to serialize plugin command identity: {error}"
+        ))
+    })?;
+    let identity = serde_json::to_vec(&canonicalize_json(identity)).map_err(|error| {
+        internal_error(format!("failed to encode plugin command identity: {error}"))
+    })?;
+    hasher.update(identity);
     let digest = hasher.finalize();
     let id = format!("pc_{}", encode_hex(&digest[..16]));
     let target = match &contribution.target {
@@ -449,7 +454,7 @@ fn resolved_command(
         },
         PluginCommandTarget::Executable { .. } => ApiCommandTarget::Executable,
     };
-    ResolvedCommand {
+    Ok(ResolvedCommand {
         api: PluginCommand {
             id,
             plugin_id: plugin_id.to_string(),
@@ -462,7 +467,7 @@ fn resolved_command(
         },
         target: contribution.target,
         execution_account: account,
-    }
+    })
 }
 
 fn assign_resolution_names(commands: &mut [ResolvedCommand]) {

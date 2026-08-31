@@ -287,6 +287,7 @@ impl GoalToolExecutor {
                 self.thread_id,
                 request.expected_revision,
                 request.objective.as_str(),
+                ThreadGoalStatus::Active,
                 request.token_budget,
                 self.max_goal_token_budget,
             )

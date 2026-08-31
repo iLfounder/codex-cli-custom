@@ -80,6 +80,7 @@ pub(crate) struct TurnRequestProcessor {
     agent_runner: AgentRunner,
     thread_manager: Arc<ThreadManager>,
     thread_store: Arc<dyn ThreadStore>,
+    session_runtime: Arc<crate::session_runtime::SessionRuntimeEngine>,
     outgoing: Arc<OutgoingMessageSender>,
     analytics_events_client: AnalyticsEventsClient,
     arg0_paths: Arg0DispatchPaths,
@@ -149,6 +150,7 @@ impl TurnRequestProcessor {
     pub(crate) fn new(
         thread_manager: Arc<ThreadManager>,
         thread_store: Arc<dyn ThreadStore>,
+        session_runtime: Arc<crate::session_runtime::SessionRuntimeEngine>,
         outgoing: Arc<OutgoingMessageSender>,
         analytics_events_client: AnalyticsEventsClient,
         arg0_paths: Arg0DispatchPaths,
@@ -166,6 +168,7 @@ impl TurnRequestProcessor {
             agent_runner,
             thread_manager,
             thread_store,
+            session_runtime,
             outgoing,
             analytics_events_client,
             arg0_paths,
@@ -570,15 +573,6 @@ impl TurnRequestProcessor {
             );
             return Err(error);
         }
-        Self::set_app_server_client_info(
-            thread.as_ref(),
-            app_server_client_name,
-            app_server_client_version,
-        )
-        .await
-        .inspect_err(|error| {
-            self.track_error_response(&request_id, error, /*error_type*/ None);
-        })?;
         let runtime_workspace_roots = params
             .runtime_workspace_roots
             .map(resolve_runtime_workspace_roots);
@@ -640,11 +634,47 @@ impl TurnRequestProcessor {
                 },
             )
             .await?;
+        match super::thread_lifecycle::ensure_conversation_listener_for_thread(
+            self.listener_task_context(),
+            thread_id,
+            Arc::clone(&thread),
+            request_id.connection_id,
+            /*raw_events_enabled*/ false,
+        )
+        .await
+        {
+            Ok(EnsureConversationListenerResult::Attached) => {}
+            Ok(EnsureConversationListenerResult::ConnectionClosed) => {
+                let error = invalid_request(format!(
+                    "connection closed before turn could start on thread {thread_id}"
+                ));
+                self.track_error_response(&request_id, &error, /*error_type*/ None);
+                return Err(error);
+            }
+            Ok(EnsureConversationListenerResult::TransitionInProgress) => {
+                let error = invalid_request("thread transition in progress");
+                self.track_error_response(&request_id, &error, /*error_type*/ None);
+                return Err(error);
+            }
+            Err(error) => {
+                self.track_error_response(&request_id, &error, /*error_type*/ None);
+                return Err(error);
+            }
+        }
         let _transition_admission_permit = self
             .thread_state_manager
             .acquire_thread_mutation_permit(thread_id)
             .await
             .map_err(|reason| invalid_request(reason.replace('_', " ")))?;
+        Self::set_app_server_client_info(
+            thread.as_ref(),
+            app_server_client_name,
+            app_server_client_version,
+        )
+        .await
+        .inspect_err(|error| {
+            self.track_error_response(&request_id, error, /*error_type*/ None);
+        })?;
 
         let request = with_expected_execution_account(
             TurnInputRequest::new(input)
@@ -1026,12 +1056,15 @@ impl TurnRequestProcessor {
         request_id: &ConnectionRequestId,
         params: TurnSteerParams,
     ) -> Result<TurnSteerResponse, JSONRPCErrorError> {
-        let (_, thread) = self
-            .load_thread(&params.thread_id)
-            .await
-            .inspect_err(|error| {
-                self.track_error_response(request_id, error, /*error_type*/ None);
-            })?;
+        if params.expected_turn_id.is_empty() {
+            return Err(invalid_request("expectedTurnId must not be empty"));
+        }
+        let (thread_id, thread) =
+            self.load_thread(&params.thread_id)
+                .await
+                .inspect_err(|error| {
+                    self.track_error_response(request_id, error, /*error_type*/ None);
+                })?;
         self.ensure_direct_input_allowed(request_id, thread.as_ref())
             .await?;
         let _transition_admission_permit = self
@@ -1040,9 +1073,6 @@ impl TurnRequestProcessor {
             .await
             .map_err(|reason| invalid_request(reason.replace('_', " ")))?;
 
-        if params.expected_turn_id.is_empty() {
-            return Err(invalid_request("expectedTurnId must not be empty"));
-        }
         self.outgoing
             .record_request_turn_id(request_id, &params.expected_turn_id)
             .await;
@@ -1183,6 +1213,9 @@ impl TurnRequestProcessor {
             Ok(EnsureConversationListenerResult::Attached) => {}
             Ok(EnsureConversationListenerResult::ConnectionClosed) => {
                 return Ok(None);
+            }
+            Ok(EnsureConversationListenerResult::TransitionInProgress) => {
+                return Err(invalid_request("thread transition in progress"));
             }
             Err(error) => return Err(error),
         }
@@ -1666,6 +1699,7 @@ impl TurnRequestProcessor {
         ListenerTaskContext {
             thread_manager: Arc::clone(&self.thread_manager),
             thread_store: Arc::clone(&self.thread_store),
+            session_runtime: Arc::clone(&self.session_runtime),
             thread_state_manager: self.thread_state_manager.clone(),
             outgoing: Arc::clone(&self.outgoing),
             pending_thread_unloads: Arc::clone(&self.pending_thread_unloads),

@@ -2,6 +2,7 @@
 
 use super::App;
 use super::ThreadBufferedEvent;
+use super::account_validation::AccountSlotUpdateDisposition;
 use super::app_server_event_targets::ServerNotificationThreadTarget;
 use super::app_server_event_targets::server_notification_thread_target;
 use super::app_server_event_targets::server_request_thread_id;
@@ -65,9 +66,12 @@ impl App {
                     skipped,
                     "app-server event consumer lagged; dropping ignored events"
                 );
+                self.invalidate_plugin_command_catalog();
+                self.refresh_plugin_commands(app_server_client);
                 self.refresh_mcp_startup_expected_servers_from_config();
                 self.chat_widget.finish_mcp_startup_after_lag();
                 self.refresh_agents_overview_threads(app_server_client);
+                self.refresh_account_state(app_server_client);
             }
             AppServerEvent::ServerNotification(notification) => {
                 self.handle_server_notification_event(app_server_client, *notification)
@@ -146,11 +150,26 @@ impl App {
                 return;
             }
             ServerNotification::SessionRuntimeChanged(update) => {
+                let selected_slot_id = self.selected_account_slot_id();
+                let account_epoch_changed = self
+                    .account_runtime
+                    .as_ref()
+                    .is_some_and(|(epoch, _)| epoch != &update.instance_epoch);
                 let previous_rate_limit_subject = self.current_rate_limit_request_subject();
+                let previous_plugin_command_subject = self.current_plugin_command_catalog_subject();
+                self.observe_plugin_command_runtime(
+                    update.instance_epoch.clone(),
+                    &update.snapshot,
+                );
                 self.handle_account_runtime_changed(
                     update.instance_epoch.clone(),
                     update.snapshot.clone(),
                 );
+                if account_epoch_changed {
+                    self.refresh_account_state(app_server_client);
+                } else {
+                    self.replace_open_account_views(selected_slot_id.as_deref());
+                }
                 let current_rate_limit_subject = self.current_rate_limit_request_subject();
                 if previous_rate_limit_subject
                     .as_ref()
@@ -158,17 +177,24 @@ impl App {
                 {
                     self.invalidate_rate_limit_subject();
                 }
-                if update.snapshot.account.switch_state
-                    == codex_app_server_protocol::SessionRuntimeAccountSwitchState::Stable
-                    && ThreadId::from_string(&update.snapshot.thread_id).is_ok_and(|thread_id| {
-                        self.current_displayed_thread_id() == Some(thread_id)
-                    })
-                {
-                    self.refresh_plugin_commands(app_server_client);
+                let current_plugin_command_subject = self.current_plugin_command_catalog_subject();
+                if previous_plugin_command_subject != current_plugin_command_subject {
+                    self.invalidate_plugin_command_catalog();
+                    if current_plugin_command_subject.is_some() {
+                        self.refresh_plugin_commands(app_server_client);
+                    }
                 }
             }
             ServerNotification::AccountSlotChanged(update) => {
-                self.handle_account_slot_changed(update.registry_revision, update.slot.clone());
+                if self.handle_account_slot_changed(update.registry_revision, update.slot.clone())
+                    == AccountSlotUpdateDisposition::Gap
+                {
+                    self.refresh_account_state(app_server_client);
+                }
+                return;
+            }
+            ServerNotification::AccountLoginCompleted(_) => {
+                self.refresh_account_state(app_server_client);
                 return;
             }
             ServerNotification::ThreadClosed(update)
@@ -178,9 +204,6 @@ impl App {
             }
             ServerNotification::ItemCompleted(update) => {
                 self.handle_dynamic_thread_control_completed(update);
-            }
-            ServerNotification::TurnCompleted(update) => {
-                self.handle_dynamic_thread_control_turn_completed(update);
             }
             ServerNotification::ThreadPresentationAppended(update) => {
                 if let Ok(thread_id) = ThreadId::from_string(&update.thread_id)
@@ -322,6 +345,7 @@ impl App {
                         .is_some_and(AuthMode::has_chatgpt_account),
                     has_codex_backend_auth,
                 );
+                self.refresh_account_state(app_server_client);
                 return;
             }
             ServerNotification::ExternalAgentConfigImportCompleted(notification) => {
@@ -333,6 +357,8 @@ impl App {
                         "failed to refresh config after external agent config import"
                     );
                 }
+                self.invalidate_plugin_command_catalog();
+                self.app_event_tx.send(AppEvent::RefreshPluginCommands);
                 let cwd = self.chat_widget.config_ref().cwd.to_path_buf();
                 self.chat_widget.refresh_plugin_mentions();
                 self.chat_widget.submit_op(AppCommand::reload_user_config());

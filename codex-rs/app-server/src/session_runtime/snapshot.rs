@@ -3,6 +3,7 @@ use std::collections::HashSet;
 
 use codex_app_server_protocol::GitInfo;
 use codex_app_server_protocol::JSONRPCErrorError;
+use codex_app_server_protocol::SESSION_RUNTIME_ACCOUNT_ROTATION_CAPABILITY;
 use codex_app_server_protocol::SessionRuntimeAccountBinding;
 use codex_app_server_protocol::SessionRuntimeAccountRef;
 use codex_app_server_protocol::SessionRuntimeAccountSwitchState;
@@ -284,8 +285,12 @@ impl SessionRuntimeEngine {
             subscriptions.unload_at,
         );
         let writer = writer_snapshot(&store_runtime);
-        let mut account =
-            account_snapshot(current_binding, active_binding, account_capability.as_ref());
+        let mut account = account_snapshot(
+            current_binding,
+            active_binding,
+            account_capability.as_ref(),
+            self.account_rotation_snapshot(thread_id).await,
+        );
         let target_slot_id = match overlay {
             Some(overlay) => overlay.switching_accounts.get(&thread_id).cloned(),
             None => self
@@ -335,6 +340,12 @@ impl SessionRuntimeEngine {
                 name: TRANSITION_CAPABILITY.to_string(),
                 available,
                 deny_reason,
+            },
+            SessionRuntimeCapability {
+                name: SESSION_RUNTIME_ACCOUNT_ROTATION_CAPABILITY.to_string(),
+                available,
+                deny_reason: (!available)
+                    .then(|| "persistent account rotation store is unavailable".to_string()),
             },
         ]
     }
@@ -583,6 +594,7 @@ fn account_snapshot(
     current: Result<Option<ExecutionAccountBinding>, ThreadStoreError>,
     active_turn: Option<ExecutionAccountBinding>,
     capability: Option<&codex_app_server_protocol::AccountSlotCapability>,
+    rotation: Option<codex_app_server_protocol::ThreadAccountRotationSnapshot>,
 ) -> SessionRuntimeAccountBinding {
     let (current, binding_error) = match current {
         Ok(current) => (current.map(account_ref), None),
@@ -604,6 +616,7 @@ fn account_snapshot(
         },
         current,
         active_turn: active_turn.map(account_ref),
+        rotation,
         switch_target_slot_id: None,
         deny_reason,
     }
