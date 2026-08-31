@@ -1,4 +1,4 @@
-name: Canonical control P024 macOS arm64 artifact smoke
+name: Canonical control P025 macOS arm64 artifact smoke
 
 on:
   workflow_dispatch:
@@ -16,7 +16,7 @@ on:
         required: true
         type: string
       patched_tree:
-        description: Exact P001-P024 source tree recorded by the artifact
+        description: Exact P001-P025 source tree recorded by the artifact
         required: true
         type: string
       artifact_digest:
@@ -144,7 +144,7 @@ jobs:
           import selectors
           import subprocess
 
-          invocation_id = "p024-artifact-smoke"
+          invocation_id = "p025-artifact-smoke"
           env = {
               "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
               "HOME": os.environ["SMOKE_HOME"],
@@ -570,7 +570,7 @@ jobs:
       - name: Upload installation-ready release candidate
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: canonical-control-p024-${{ steps.artifact.outputs.patched_tree }}-smoke-${{ github.run_id }}
+          name: canonical-control-p025-${{ steps.artifact.outputs.patched_tree }}-smoke-${{ github.run_id }}
           path: ${{ runner.temp }}/canonical-control-dist/
           if-no-files-found: error
           retention-days: 14
