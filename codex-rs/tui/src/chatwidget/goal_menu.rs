@@ -14,6 +14,8 @@ impl ChatWidget {
         let tx = self.app_event_tx.clone();
         let status = edited_goal_status(goal.status);
         let token_budget = goal.token_budget;
+        let expected_goal_id = goal.goal_id.clone();
+        let expected_revision = goal.revision;
         let view = CustomPromptView::new(
             "Edit goal".to_string(),
             "Type a goal objective and press Enter".to_string(),
@@ -27,6 +29,8 @@ impl ChatWidget {
                         ..Default::default()
                     },
                     mode: crate::app_event::ThreadGoalSetMode::UpdateExisting {
+                        expected_goal_id: expected_goal_id.clone(),
+                        expected_revision,
                         status,
                         token_budget,
                     },
@@ -71,11 +75,16 @@ impl ChatWidget {
         });
     }
 
-    pub(crate) fn on_thread_goal_cleared(&mut self, thread_id: &str) {
+    pub(crate) fn on_thread_goal_cleared(
+        &mut self,
+        notification: codex_app_server_protocol::ThreadGoalClearedNotification,
+    ) {
         if self
             .thread_id
-            .is_some_and(|active_thread_id| active_thread_id.to_string() == thread_id)
+            .is_some_and(|active_thread_id| active_thread_id.to_string() == notification.thread_id)
+            && notification.revision >= self.current_goal_revision
         {
+            self.current_goal_revision = notification.revision;
             self.current_goal_status = None;
             self.update_collaboration_mode_indicator();
         }

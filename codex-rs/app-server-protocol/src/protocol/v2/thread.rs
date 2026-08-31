@@ -60,6 +60,11 @@ pub enum ThreadStartSource {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ThreadStartParams {
+    /// Optional authoritative clear/new transition intent. Omission preserves
+    /// stock thread creation semantics.
+    #[experimental("thread/start.transition")]
+    #[ts(optional = nullable)]
+    pub transition: Option<ThreadTransitionIntent>,
     #[ts(optional = nullable)]
     pub model: Option<String>,
     #[ts(optional = nullable)]
@@ -209,6 +214,11 @@ pub struct ThreadStartResponse {
     #[experimental("thread/start.multiAgentMode")]
     #[serde(default)]
     pub multi_agent_mode: MultiAgentMode,
+    /// Prepared continuity edge. This is not terminal until
+    /// `thread/transition/commit` succeeds.
+    #[experimental("thread/start.transition")]
+    #[serde(default)]
+    pub transition: Option<ThreadTransitionPreparation>,
 }
 
 impl ThreadStartResponse {
@@ -395,6 +405,15 @@ pub struct ThreadResumeParams {
     pub developer_instructions: Option<String>,
     #[ts(optional = nullable)]
     pub personality: Option<Personality>,
+    /// Optional dynamic tools for the resumed thread. A non-empty value
+    /// replaces dynamic tools restored from rollout metadata.
+    #[experimental("thread/resume.dynamicTools")]
+    #[serde(
+        default,
+        deserialize_with = "codex_protocol::dynamic_tools::deserialize_dynamic_tool_specs"
+    )]
+    #[ts(optional = nullable)]
+    pub dynamic_tools: Option<Vec<DynamicToolSpec>>,
     /// When true, return only thread metadata and live-resume state without
     /// populating `thread.turns`. This is useful when the client plans to call
     /// `thread/turns/list` immediately after resuming. Full-history hydration
@@ -783,6 +802,13 @@ v2_enum_from_core! {
 #[ts(export_to = "v2/")]
 pub struct ThreadGoal {
     pub thread_id: String,
+    /// Missing values decode as the legacy sentinel for stock-server compatibility.
+    #[serde(default)]
+    pub goal_id: String,
+    /// Missing values decode as the legacy sentinel for stock-server compatibility.
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub revision: i64,
     pub objective: String,
     pub status: ThreadGoalStatus,
     #[ts(type = "number | null")]
@@ -801,6 +827,8 @@ impl From<codex_protocol::protocol::ThreadGoal> for ThreadGoal {
     fn from(value: codex_protocol::protocol::ThreadGoal) -> Self {
         Self {
             thread_id: value.thread_id.to_string(),
+            goal_id: value.goal_id,
+            revision: value.revision,
             objective: value.objective,
             status: value.status.into(),
             token_budget: value.token_budget,
@@ -817,6 +845,10 @@ impl From<codex_protocol::protocol::ThreadGoal> for ThreadGoal {
 #[ts(export_to = "v2/")]
 pub struct ThreadGoalSetParams {
     pub thread_id: String,
+    #[ts(optional = nullable)]
+    pub expected_goal_id: Option<String>,
+    #[ts(optional = nullable, type = "number")]
+    pub expected_revision: Option<i64>,
     #[ts(optional = nullable)]
     pub objective: Option<String>,
     #[ts(optional = nullable)]
@@ -850,6 +882,10 @@ pub struct ThreadGoalGetParams {
 #[ts(export_to = "v2/")]
 pub struct ThreadGoalGetResponse {
     pub goal: Option<ThreadGoal>,
+    /// Missing values decode as the legacy sentinel for stock-server compatibility.
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub revision: i64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -857,6 +893,10 @@ pub struct ThreadGoalGetResponse {
 #[ts(export_to = "v2/")]
 pub struct ThreadGoalClearParams {
     pub thread_id: String,
+    #[ts(optional = nullable)]
+    pub expected_goal_id: Option<String>,
+    #[ts(optional = nullable, type = "number")]
+    pub expected_revision: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -864,6 +904,150 @@ pub struct ThreadGoalClearParams {
 #[ts(export_to = "v2/")]
 pub struct ThreadGoalClearResponse {
     pub cleared: bool,
+    #[serde(default)]
+    #[ts(optional)]
+    pub previous_goal: Option<ThreadGoal>,
+    /// Missing values decode as the legacy sentinel for stock-server compatibility.
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub revision: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadGoalCreateParams {
+    pub thread_id: String,
+    #[ts(type = "number")]
+    pub expected_revision: i64,
+    pub objective: String,
+    #[ts(optional = nullable, type = "number")]
+    pub token_budget: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadGoalCreateResponse {
+    pub goal: ThreadGoal,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadGoalReplaceParams {
+    pub thread_id: String,
+    pub expected_goal_id: String,
+    #[ts(type = "number")]
+    pub expected_revision: i64,
+    pub objective: String,
+    #[ts(optional = nullable, type = "number")]
+    pub token_budget: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadGoalReplaceResponse {
+    pub previous_goal: ThreadGoal,
+    pub goal: ThreadGoal,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum ThreadTransitionReason {
+    Clear,
+    New,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum ThreadTransitionStatus {
+    Prepared,
+    Committed,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadWriterEvidence {
+    pub store_id: String,
+    #[ts(type = "number")]
+    pub writer_generation: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadTransitionIntent {
+    pub transition_id: String,
+    pub reason: ThreadTransitionReason,
+    pub previous_thread_id: String,
+    pub expected_instance_epoch: String,
+    #[ts(type = "number")]
+    pub expected_state_revision: u64,
+    pub expected_writer: ThreadWriterEvidence,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadTransitionPreparation {
+    pub transition_id: String,
+    pub reason: ThreadTransitionReason,
+    pub previous_thread_id: String,
+    pub current_thread_id: String,
+    pub origin_instance_epoch: String,
+    pub initiator_client_incarnation: String,
+    pub previous_writer: ThreadWriterEvidence,
+    pub current_writer: ThreadWriterEvidence,
+    pub status: ThreadTransitionStatus,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadTransitionEndpointEvidence {
+    pub thread_id: String,
+    #[ts(type = "number")]
+    pub state_revision: u64,
+    pub writer: ThreadWriterEvidence,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadTransitionReceipt {
+    pub transition_id: String,
+    pub reason: ThreadTransitionReason,
+    pub previous: ThreadTransitionEndpointEvidence,
+    pub current: ThreadTransitionEndpointEvidence,
+    pub origin_instance_epoch: String,
+    pub initiator_client_incarnation: String,
+    #[ts(type = "number")]
+    pub transition_revision: u64,
+    #[ts(type = "number")]
+    pub committed_at: i64,
+    pub status: ThreadTransitionStatus,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadTransitionCommitParams {
+    pub transition_id: String,
+    pub previous_thread_id: String,
+    pub current_thread_id: String,
+    pub expected_instance_epoch: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadTransitionCommitResponse {
+    pub transition: ThreadTransitionReceipt,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
@@ -1995,6 +2179,20 @@ pub struct ThreadGoalUpdatedNotification {
 #[ts(export_to = "v2/")]
 pub struct ThreadGoalClearedNotification {
     pub thread_id: String,
+    pub turn_id: Option<String>,
+    pub previous_goal: Option<ThreadGoal>,
+    #[ts(type = "number")]
+    pub revision: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadTransitionedNotification {
+    pub instance_epoch: String,
+    #[ts(type = "number")]
+    pub sequence: u64,
+    pub transition: ThreadTransitionReceipt,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

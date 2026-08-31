@@ -2,15 +2,47 @@ use super::*;
 use codex_app_server_protocol::AccountSlotAction;
 use codex_app_server_protocol::AccountSlotActionAvailability;
 use codex_app_server_protocol::AccountSlotLogoutParams;
+use codex_config::types::AuthCredentialsStoreMode;
 use codex_core::config::ConfigBuilder;
+use codex_login::AuthKeyringBackendKind;
 use codex_login::CodexAuth;
+use codex_login::login_with_api_key;
+use codex_login::logout;
 use pretty_assertions::assert_eq;
 use tempfile::tempdir;
 
 const SECOND_SLOT_ID: &str = "11111111111141118111111111111111";
 const THIRD_SLOT_ID: &str = "22222222222242228222222222222222";
 
+fn persist_api_key_auth(auth_home: &Path) {
+    login_with_api_key(
+        auth_home,
+        "slot-key",
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )
+    .expect("persist slot auth");
+}
+
 async fn registry_for_home(process_home: &Path) -> AccountRegistry {
+    registry_for_home_and_store(
+        process_home,
+        Arc::new(codex_thread_store::InMemoryThreadStore::default()),
+    )
+    .await
+}
+
+async fn registry_for_home_and_store(
+    process_home: &Path,
+    thread_store: Arc<dyn codex_thread_store::ThreadStore>,
+) -> AccountRegistry {
+    login_with_api_key(
+        process_home,
+        "dummy",
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )
+    .expect("persist default auth");
     let config = Arc::new(
         ConfigBuilder::default()
             .codex_home(process_home.to_path_buf())
@@ -23,7 +55,7 @@ async fn registry_for_home(process_home: &Path) -> AccountRegistry {
         process_home.to_path_buf(),
     );
     let models_manager = codex_core::build_models_manager(config.as_ref(), auth_manager.clone());
-    AccountRegistry::new(config, auth_manager, models_manager)
+    AccountRegistry::new(config, auth_manager, models_manager, thread_store)
 }
 
 fn manifest(process_home: &Path, revision: u64) -> AccountSlotsManifest {
@@ -169,7 +201,11 @@ async fn stale_completion_cannot_overwrite_finished_attempt() {
     let process_home = tempdir().expect("temp process home");
     let registry = registry_for_home(process_home.path()).await;
     let prepared = registry
-        .prepare_slot_login(/*requested_slot_id*/ None, "operation-1".to_string())
+        .prepare_slot_login(
+            /*requested_slot_id*/ None,
+            "operation-1".to_string(),
+            /*candidate_runtime_version*/ 1,
+        )
         .await
         .expect("prepare slot");
 
@@ -194,6 +230,50 @@ async fn stale_completion_cannot_overwrite_finished_attempt() {
         .expect("slot snapshot");
     assert_eq!(snapshot.status, AccountSlotStatus::Failed);
     assert_eq!(snapshot.error_code.as_deref(), Some("refreshUnavailable"));
+}
+
+#[tokio::test]
+async fn successful_terminal_claim_blocks_cancel_and_overlapping_attempt() {
+    let process_home = tempdir().expect("temp process home");
+    let registry = registry_for_home(process_home.path()).await;
+    let prepared = registry
+        .prepare_slot_login(
+            /*requested_slot_id*/ None,
+            "operation-1".to_string(),
+            /*candidate_runtime_version*/ 1,
+        )
+        .await
+        .expect("prepare slot");
+
+    assert!(prepared.try_claim_success());
+    assert!(!prepared.clone().try_claim_failure());
+    let overlapping = match registry
+        .prepare_slot_login(
+            Some(prepared.account_slot_id.clone()),
+            "operation-2".to_string(),
+            /*candidate_runtime_version*/ 1,
+        )
+        .await
+    {
+        Ok(_) => panic!("active terminal owner must block candidate reuse"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        overlapping.data,
+        Some(serde_json::json!({"reason":"accountSlotLoginBusy"}))
+    );
+
+    registry
+        .finish_slot_login(&prepared, ManifestSlotStatus::Ready, None)
+        .await
+        .expect("publish ready slot")
+        .expect("active attempt must publish");
+    assert!(!prepared.try_claim_failure());
+    let snapshot = registry
+        .slot_snapshot(&prepared.account_slot_id)
+        .await
+        .expect("slot snapshot");
+    assert_eq!(snapshot.status, AccountSlotStatus::Ready);
 }
 
 #[tokio::test]
@@ -229,23 +309,136 @@ async fn browser_login_owner_requires_exact_release() {
 }
 
 #[tokio::test]
-async fn reconcile_repairs_ready_slot_without_auth() {
+async fn reconcile_reloads_added_and_removed_auth_once() {
     let process_home = tempdir().expect("temp process home");
-    let mut slots = manifest(process_home.path(), 1);
-    slots.slots[1].status = ManifestSlotStatus::Ready;
+    let slots = manifest(process_home.path(), 1);
+    let secondary_home = slots.slots[1].auth_home.clone();
     slots
         .persist(&process_home.path().join(MANIFEST_FILE))
         .expect("persist manifest");
     let registry = registry_for_home(process_home.path()).await;
 
-    registry.reconcile().await.expect("reconcile");
-
-    let snapshot = registry
+    let initial = registry
         .slot_snapshot(SECOND_SLOT_ID)
         .await
-        .expect("slot snapshot");
-    assert_eq!(snapshot.status, AccountSlotStatus::Failed);
-    assert_eq!(snapshot.error_code.as_deref(), Some("authUnavailable"));
+        .expect("initial slot snapshot");
+    let auth_manager = registry
+        .state
+        .read()
+        .expect("registry state")
+        .slots
+        .iter()
+        .find(|slot| slot.manifest.account_slot_id == SECOND_SLOT_ID)
+        .and_then(|slot| slot.runtime.get())
+        .map(|runtime| Arc::clone(&runtime.auth_manager))
+        .expect("initialized slot auth manager");
+    let auth_changes = auth_manager.auth_change_receiver();
+    assert_eq!(
+        (
+            initial.status,
+            initial.registry_revision,
+            *auth_changes.borrow()
+        ),
+        (AccountSlotStatus::LoginRequired, 1, 0)
+    );
+
+    login_with_api_key(
+        &secondary_home,
+        "slot-key",
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )
+    .expect("persist secondary auth");
+    registry
+        .state
+        .write()
+        .expect("registry state")
+        .slots
+        .iter_mut()
+        .find(|slot| slot.manifest.account_slot_id == SECOND_SLOT_ID)
+        .expect("secondary slot")
+        .active_login_operation_id = Some("active-login".to_string());
+    registry.reconcile().await.expect("busy reconcile");
+    let busy = registry
+        .slot_snapshot(SECOND_SLOT_ID)
+        .await
+        .expect("busy slot snapshot");
+    assert_eq!(
+        (
+            busy.status,
+            busy.registry_revision,
+            busy.active_login_operation_id.as_deref(),
+            *auth_changes.borrow(),
+        ),
+        (
+            AccountSlotStatus::LoginRequired,
+            initial.registry_revision,
+            Some("active-login"),
+            0,
+        )
+    );
+    registry
+        .state
+        .write()
+        .expect("registry state")
+        .slots
+        .iter_mut()
+        .find(|slot| slot.manifest.account_slot_id == SECOND_SLOT_ID)
+        .expect("secondary slot")
+        .active_login_operation_id = None;
+
+    registry.reconcile().await.expect("reconcile");
+    let ready = registry
+        .slot_snapshot(SECOND_SLOT_ID)
+        .await
+        .expect("ready slot snapshot");
+    assert_eq!(
+        (
+            ready.status,
+            ready.registry_revision,
+            *auth_changes.borrow()
+        ),
+        (AccountSlotStatus::Ready, 2, 1)
+    );
+
+    registry.reconcile().await.expect("stable ready reconcile");
+    let unchanged_ready = registry
+        .slot_snapshot(SECOND_SLOT_ID)
+        .await
+        .expect("unchanged ready slot snapshot");
+    assert_eq!(unchanged_ready, ready);
+    assert_eq!(*auth_changes.borrow(), 1);
+
+    assert!(
+        logout(
+            &secondary_home,
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::default(),
+        )
+        .expect("remove secondary auth")
+    );
+    registry.reconcile().await.expect("missing auth reconcile");
+    let failed = registry
+        .slot_snapshot(SECOND_SLOT_ID)
+        .await
+        .expect("failed slot snapshot");
+    assert_eq!(
+        (
+            failed.status,
+            failed.error_code.as_deref(),
+            failed.registry_revision,
+            *auth_changes.borrow(),
+        ),
+        (AccountSlotStatus::Failed, Some("authUnavailable"), 3, 2)
+    );
+
+    registry.reconcile().await.expect("stable failed reconcile");
+    let unchanged_failed = registry
+        .slot_snapshot(SECOND_SLOT_ID)
+        .await
+        .expect("unchanged failed slot snapshot");
+    assert_eq!(unchanged_failed, failed);
+    assert_eq!(*auth_changes.borrow(), 2);
 }
 
 #[tokio::test]
@@ -253,6 +446,7 @@ async fn secondary_logout_revokes_exact_ready_slot_and_bumps_generation() {
     let process_home = tempdir().expect("temp process home");
     let mut slots = manifest(process_home.path(), 7);
     slots.slots[1].status = ManifestSlotStatus::Ready;
+    persist_api_key_auth(&slots.slots[1].auth_home);
     slots
         .persist(&process_home.path().join(MANIFEST_FILE))
         .expect("persist manifest");
@@ -263,6 +457,7 @@ async fn secondary_logout_revokes_exact_ready_slot_and_bumps_generation() {
     );
     let slot_models = codex_core::build_models_manager(registry.config.as_ref(), slot_auth.clone());
     let runtime = Arc::new(AccountRuntimeBundle {
+        runtime_version: AtomicU64::new(0),
         auth_manager: slot_auth,
         models_manager: slot_models,
     });
@@ -288,8 +483,8 @@ async fn secondary_logout_revokes_exact_ready_slot_and_bumps_generation() {
             .find(|action| action.action == AccountSlotAction::SwitchTo),
         Some(&AccountSlotActionAvailability {
             action: AccountSlotAction::SwitchTo,
-            allowed: false,
-            deny_reason: Some(DENY_SWITCH_NOT_AVAILABLE.to_string()),
+            allowed: true,
+            deny_reason: None,
         })
     );
 
@@ -325,7 +520,11 @@ async fn secondary_logout_rejects_default_stale_and_active_login() {
             .is_err()
     );
     let prepared = registry
-        .prepare_slot_login(/*requested_slot_id*/ None, "operation-1".to_string())
+        .prepare_slot_login(
+            /*requested_slot_id*/ None,
+            "operation-1".to_string(),
+            /*candidate_runtime_version*/ 1,
+        )
         .await
         .expect("prepare slot");
     let snapshot = registry
@@ -368,6 +567,7 @@ async fn logout_reservation_is_exact_and_allows_other_slot_mutation() {
     let process_home = tempdir().expect("temp process home");
     let mut slots = manifest(process_home.path(), 7);
     slots.slots[1].status = ManifestSlotStatus::Ready;
+    persist_api_key_auth(&slots.slots[1].auth_home);
     slots.slots.push(AccountSlotManifest {
         account_slot_id: THIRD_SLOT_ID.to_string(),
         label: "Third account".to_string(),
@@ -408,20 +608,18 @@ async fn logout_reservation_is_exact_and_allows_other_slot_mutation() {
         .clear_logout_reservation(&first)
         .await
         .expect("clear first reservation");
+    drop(first);
     let second = registry
         .reserve_secondary_logout(params())
         .await
         .expect("reserve second logout");
-    registry
-        .clear_logout_reservation(&first)
-        .await
-        .expect("stale clear is harmless");
     assert!(registry.reserve_secondary_logout(params()).await.is_err());
 
     registry
         .prepare_slot_login(
             Some(THIRD_SLOT_ID.to_string()),
             "other-slot-login".to_string(),
+            /*candidate_runtime_version*/ 1,
         )
         .await
         .expect("other slot mutation proceeds");
@@ -448,6 +646,7 @@ async fn logout_reservation_blocks_only_the_target_slot_resolver() {
     let process_home = tempdir().expect("temp process home");
     let mut slots = manifest(process_home.path(), 7);
     slots.slots[1].status = ManifestSlotStatus::Ready;
+    persist_api_key_auth(&slots.slots[1].auth_home);
     slots
         .persist(&process_home.path().join(MANIFEST_FILE))
         .expect("persist manifest");
@@ -458,6 +657,7 @@ async fn logout_reservation_blocks_only_the_target_slot_resolver() {
     );
     let slot_models = codex_core::build_models_manager(registry.config.as_ref(), slot_auth.clone());
     let runtime = Arc::new(AccountRuntimeBundle {
+        runtime_version: AtomicU64::new(0),
         auth_manager: slot_auth,
         models_manager: slot_models,
     });
@@ -511,6 +711,7 @@ async fn transition_resolution_holds_target_readiness_lease() {
     let process_home = tempdir().expect("temp process home");
     let mut slots = manifest(process_home.path(), 7);
     slots.slots[1].status = ManifestSlotStatus::Ready;
+    persist_api_key_auth(&slots.slots[1].auth_home);
     slots
         .persist(&process_home.path().join(MANIFEST_FILE))
         .expect("persist manifest");
@@ -521,6 +722,7 @@ async fn transition_resolution_holds_target_readiness_lease() {
     );
     let slot_models = codex_core::build_models_manager(registry.config.as_ref(), slot_auth.clone());
     let runtime = Arc::new(AccountRuntimeBundle {
+        runtime_version: AtomicU64::new(0),
         auth_manager: slot_auth,
         models_manager: slot_models,
     });
@@ -546,4 +748,58 @@ async fn transition_resolution_holds_target_readiness_lease() {
     assert!(Arc::clone(&binding_transition).try_lock_owned().is_err());
     drop(transition);
     assert!(binding_transition.try_lock_owned().is_ok());
+}
+
+#[tokio::test]
+async fn restart_resolves_runtime_home_from_durable_slot_version() {
+    let process_home = tempdir().expect("temp process home");
+    let mut slots = manifest(process_home.path(), 7);
+    slots.slots[1].status = ManifestSlotStatus::Failed;
+    slots
+        .persist(&process_home.path().join(MANIFEST_FILE))
+        .expect("persist recovery projection");
+    let thread_store: Arc<dyn codex_thread_store::ThreadStore> =
+        Arc::new(codex_thread_store::InMemoryThreadStore::default());
+    assert_eq!(
+        thread_store
+            .compare_and_swap_execution_account_slot_runtime(
+                SECOND_SLOT_ID.to_string(),
+                /*expected_runtime_version*/ 0,
+                Vec::new(),
+            )
+            .await
+            .expect("commit runtime version"),
+        Some((1, Vec::new()))
+    );
+    persist_api_key_auth(
+        &process_home
+            .path()
+            .join(PRIVATE_HOMES_DIR)
+            .join(SECOND_SLOT_ID)
+            .join("runtime-1"),
+    );
+    let registry = registry_for_home_and_store(process_home.path(), thread_store).await;
+
+    registry
+        .reconcile()
+        .await
+        .expect("reconcile durable runtime");
+
+    let state = registry.state.read().expect("registry state");
+    let slot = state
+        .slots
+        .iter()
+        .find(|slot| slot.manifest.account_slot_id == SECOND_SLOT_ID)
+        .expect("secondary slot");
+    assert_eq!(
+        (&slot.manifest.auth_home, slot.manifest.status),
+        (
+            &process_home
+                .path()
+                .join(PRIVATE_HOMES_DIR)
+                .join(SECOND_SLOT_ID)
+                .join("runtime-1"),
+            ManifestSlotStatus::Ready,
+        )
+    );
 }

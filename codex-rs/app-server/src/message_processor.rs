@@ -39,6 +39,7 @@ use crate::request_processors::MarketplaceRequestProcessor;
 use crate::request_processors::McpEventStreamReady;
 use crate::request_processors::McpEventStreams;
 use crate::request_processors::McpRequestProcessor;
+use crate::request_processors::PluginCommandRequestProcessor;
 use crate::request_processors::PluginRequestProcessor;
 use crate::request_processors::ProcessExecRequestProcessor;
 use crate::request_processors::ProjectRequestProcessor;
@@ -155,6 +156,7 @@ pub(crate) struct MessageProcessor {
     marketplace_processor: MarketplaceRequestProcessor,
     mcp_processor: McpRequestProcessor,
     plugin_processor: PluginRequestProcessor,
+    plugin_command_processor: PluginCommandRequestProcessor,
     project_processor: ProjectRequestProcessor,
     remote_control_processor: RemoteControlRequestProcessor,
     search_processor: SearchRequestProcessor,
@@ -320,6 +322,7 @@ impl MessageProcessor {
             Arc::clone(&config),
             Arc::clone(&auth_manager),
             Arc::clone(&default_models_manager),
+            Arc::clone(&thread_store),
         ));
         let startup_account_registry = Arc::clone(&account_registry);
         tokio::spawn(async move {
@@ -514,6 +517,13 @@ impl MessageProcessor {
             state_db.clone(),
             Arc::clone(&goal_service),
         );
+        let plugin_command_processor = PluginCommandRequestProcessor::new(
+            Arc::clone(&thread_manager),
+            config_manager.clone(),
+            outgoing.clone(),
+            thread_state_manager.clone(),
+            thread_goal_processor.clone(),
+        );
         let thread_queue_processor = ThreadQueueRequestProcessor::new(
             Arc::clone(&thread_manager),
             Arc::clone(&thread_store),
@@ -538,6 +548,7 @@ impl MessageProcessor {
             thread_watch_manager.clone(),
             Arc::clone(&thread_list_state_permit),
             thread_goal_processor.clone(),
+            Arc::clone(&session_runtime),
             state_db.clone(),
             log_db,
             Arc::clone(&skills_watcher),
@@ -546,6 +557,7 @@ impl MessageProcessor {
         );
         let turn_processor = TurnRequestProcessor::new(
             Arc::clone(&thread_manager),
+            Arc::clone(&thread_store),
             outgoing.clone(),
             analytics_events_client.clone(),
             arg0_paths.clone(),
@@ -622,6 +634,7 @@ impl MessageProcessor {
             marketplace_processor,
             mcp_processor,
             plugin_processor,
+            plugin_command_processor,
             project_processor,
             remote_control_processor,
             search_processor,
@@ -1285,6 +1298,26 @@ impl MessageProcessor {
                     .thread_goal_clear(request_id.clone(), params)
                     .await
             }
+            ClientRequest::ThreadGoalCreate { params, .. } => {
+                self.thread_goal_processor
+                    .thread_goal_create(request_id.clone(), params)
+                    .await
+            }
+            ClientRequest::ThreadGoalReplace { params, .. } => {
+                self.thread_goal_processor
+                    .thread_goal_replace(request_id.clone(), params)
+                    .await
+            }
+            ClientRequest::ThreadTransitionCommit { params, .. } => {
+                self.thread_processor
+                    .thread_transition_commit(request_id.clone(), params)
+                    .await
+            }
+            ClientRequest::ThreadPresentationAppend { params, .. } => {
+                self.plugin_command_processor
+                    .append_presentation(params)
+                    .await
+            }
             ClientRequest::ThreadQueueAdd { params, .. } => self
                 .thread_queue_processor
                 .add(params)
@@ -1459,6 +1492,12 @@ impl MessageProcessor {
             }
             ClientRequest::PluginList { params, .. } => {
                 self.plugin_processor.plugin_list(params).await
+            }
+            ClientRequest::PluginCommandList { params, .. } => {
+                self.plugin_command_processor.list(params).await
+            }
+            ClientRequest::PluginCommandInvoke { params, .. } => {
+                self.plugin_command_processor.invoke(params).await
             }
             ClientRequest::PluginSearch { params, .. } => {
                 self.plugin_processor.plugin_search(params).await
@@ -1669,8 +1708,8 @@ impl MessageProcessor {
             ClientRequest::GetAuthStatus { params, .. } => {
                 self.account_processor.get_auth_status(params).await
             }
-            ClientRequest::GetAccountRateLimits { .. } => {
-                self.account_processor.get_account_rate_limits().await
+            ClientRequest::GetAccountRateLimits { params, .. } => {
+                self.account_processor.get_account_rate_limits(params).await
             }
             ClientRequest::ConsumeAccountRateLimitResetCredit { params, .. } => {
                 self.account_processor

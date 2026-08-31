@@ -21,8 +21,6 @@ use codex_app_server_protocol::ThreadGoalStatus;
 #[cfg(target_os = "windows")]
 use codex_config::types::WindowsSandboxModeToml;
 
-const SHUTDOWN_FIRST_EXIT_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 2);
-
 impl App {
     pub(super) async fn handle_event(
         &mut self,
@@ -62,6 +60,62 @@ impl App {
         }
 
         match event {
+            AppEvent::OpenAccountPicker => self.open_account_picker(app_server),
+            AppEvent::AccountPickerLoaded {
+                thread_id,
+                request_generation,
+                result,
+            } => self.handle_account_picker_loaded(thread_id, request_generation, result),
+            AppEvent::OpenAccountLoginMethods { slot_id } => {
+                self.show_account_login_methods(slot_id)
+            }
+            AppEvent::PrepareAccountControl { intent } => {
+                self.prepare_account_control(app_server, intent)
+            }
+            AppEvent::AccountControlPrepared {
+                thread_id,
+                request_generation,
+                intent,
+                result,
+            } => self.handle_account_control_prepared(
+                app_server,
+                thread_id,
+                request_generation,
+                intent,
+                result,
+            ),
+            AppEvent::AccountSlotLoginStarted {
+                thread_id,
+                instance_epoch,
+                result,
+            } => self.handle_account_slot_login_started(
+                app_server,
+                thread_id,
+                instance_epoch,
+                result,
+            ),
+            AppEvent::AccountSwitchFinished {
+                operation_id,
+                result,
+            } => self.handle_account_switch_finished(app_server, &operation_id, result),
+            AppEvent::AccountSlotLogoutFinished { slot_id, result } => {
+                self.handle_account_slot_logout_finished(app_server, &slot_id, result)
+            }
+            AppEvent::ShutdownRuntimeLoaded {
+                thread_id,
+                intent,
+                result,
+            } => self.handle_shutdown_runtime_loaded(app_server, thread_id, intent, result),
+            AppEvent::ShutdownRelinquishFinished {
+                operation_id,
+                result,
+            } => self.handle_shutdown_relinquish_finished(&operation_id, result),
+            AppEvent::LogoutAfterRelease => match app_server.logout_account().await {
+                Ok(()) => return Ok(AppRunControl::Exit(ExitReason::UserRequested)),
+                Err(error) => self
+                    .chat_widget
+                    .add_error_message(format!("Logout failed after session release: {error}")),
+            },
             AppEvent::SkillsListLoaded { ref cwd, .. }
             | AppEvent::PluginMentionsLoaded { ref cwd, .. }
                 if cwds_differ(cwd, self.config.cwd.as_path()) => {}
@@ -682,6 +736,7 @@ impl App {
                                 /*objective*/ None,
                                 Some(codex_app_server_protocol::ThreadGoalStatus::Paused),
                                 /*token_budget*/ None,
+                                /*expected_goal*/ None,
                             )
                             .await
                     {
@@ -705,19 +760,13 @@ impl App {
                     }
                 }
             },
-            AppEvent::Logout => match app_server.logout_account().await {
-                Ok(()) => {
-                    self.show_shutdown_feedback(tui)?;
-                    return Ok(self
-                        .handle_exit_mode(app_server, ExitMode::ShutdownFirst)
-                        .await);
-                }
-                Err(err) => {
-                    tracing::error!("failed to logout: {err}");
-                    self.chat_widget
-                        .add_error_message(format!("Logout failed: {err}"));
-                }
-            },
+            AppEvent::Logout => {
+                self.show_shutdown_feedback(tui)?;
+                self.begin_release_aware_shutdown(
+                    app_server,
+                    super::runtime_controls::ShutdownIntent::LogoutDefault,
+                );
+            }
             AppEvent::FatalExitRequest(message) => {
                 return Ok(AppRunControl::Exit(ExitReason::Fatal(message)));
             }
@@ -1267,9 +1316,40 @@ impl App {
             AppEvent::RateLimitsLoaded {
                 request_id,
                 origin,
+                subject,
                 hard_stop_generation,
                 result,
             } => {
+                let result = result.and_then(|response| {
+                    let Some(subject) = subject else {
+                        return Err("rate-limit response had no thread subject".to_string());
+                    };
+                    let response_thread_matches = response
+                        .thread_id
+                        .as_deref()
+                        .is_some_and(|thread_id| thread_id == subject.thread_id.to_string());
+                    let Some(response_account) = response.execution_account.as_ref() else {
+                        return Err("rate-limit response had no account provenance".to_string());
+                    };
+                    let requested_account_matches = subject
+                        .execution_account
+                        .as_ref()
+                        .is_none_or(|account| account == response_account);
+                    let current_subject_matches = self
+                        .current_rate_limit_request_subject()
+                        .is_some_and(|current| {
+                            current.thread_id == subject.thread_id
+                                && current.execution_account.as_ref() == Some(response_account)
+                        });
+                    if response_thread_matches
+                        && requested_account_matches
+                        && current_subject_matches
+                    {
+                        Ok(response)
+                    } else {
+                        Err("rate-limit response subject is stale".to_string())
+                    }
+                });
                 let accepted = match self.rate_limit_refresh_state.finish(
                     request_id,
                     hard_stop_generation,
@@ -1406,7 +1486,7 @@ impl App {
                 {
                     self.chat_widget.finish_rate_limit_recovery();
                 }
-            },
+            }
             AppEvent::OpenTokenActivity => {
                 self.chat_widget
                     .add_token_activity_output(crate::chatwidget::TokenActivityView::Daily);
@@ -2226,6 +2306,36 @@ impl App {
                     plugins = None;
                 }
                 self.chat_widget.on_plugin_mentions_loaded(plugins);
+                self.refresh_plugin_commands(app_server);
+            }
+            AppEvent::RefreshPluginCommands => {
+                self.refresh_plugin_commands(app_server);
+            }
+            AppEvent::PluginCommandsLoaded {
+                thread_id,
+                request_generation,
+                result,
+            } => {
+                self.handle_plugin_commands_loaded(thread_id, request_generation, result);
+            }
+            AppEvent::InvokePluginCommand { command_id } => {
+                self.invoke_plugin_command(app_server, command_id);
+            }
+            AppEvent::PluginCommandInvoked {
+                thread_id,
+                request_generation,
+                command_name,
+                result,
+            } => {
+                self.handle_plugin_command_invoked(
+                    thread_id,
+                    request_generation,
+                    command_name,
+                    result,
+                );
+            }
+            AppEvent::UpsertThreadPresentation { thread_id, item } => {
+                self.upsert_thread_presentation(tui, thread_id, item);
             }
             AppEvent::PersistPersonalitySelection { personality } => {
                 match crate::config_update::write_config_batch(
@@ -3194,7 +3304,16 @@ impl App {
             }
         }
         match mode {
-            ExitMode::ShutdownFirst | ExitMode::ShutdownAfterInterrupt => {
+            // Normal quits use the release-aware account/runtime fence. The
+            // post-interrupt path retains the native bounded shutdown handshake.
+            ExitMode::ShutdownFirst => {
+                self.begin_release_aware_shutdown(
+                    app_server,
+                    super::runtime_controls::ShutdownIntent::Exit,
+                );
+                AppRunControl::Continue
+            }
+            ExitMode::ShutdownAfterInterrupt => {
                 // Mark the thread we are explicitly shutting down for exit so
                 // its shutdown completion does not trigger agent failover.
                 self.pending_shutdown_exit_thread_id =
@@ -3216,14 +3335,11 @@ impl App {
                     }
                 }
                 self.pending_shutdown_exit_thread_id = None;
-                AppRunControl::Exit(if mode == ExitMode::ShutdownAfterInterrupt {
-                    ExitReason::TurnInterrupted
-                } else {
-                    ExitReason::UserRequested
-                })
+                AppRunControl::Exit(ExitReason::TurnInterrupted)
             }
             ExitMode::Immediate => {
-                self.pending_shutdown_exit_thread_id = None;
+                self.pending_shutdown = None;
+                self.shutdown_force_exit_armed = false;
                 AppRunControl::Exit(ExitReason::UserRequested)
             }
         }

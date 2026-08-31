@@ -21,6 +21,8 @@ use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadResumeParams;
+use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnStartParams;
@@ -56,7 +58,10 @@ const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[tokio::test]
 async fn thread_start_normalizes_legacy_dynamic_tools_into_model_request() -> Result<()> {
-    let responses = vec![create_final_assistant_message_sse_response("Done")?];
+    let responses = vec![
+        create_final_assistant_message_sse_response("Persisted")?,
+        create_final_assistant_message_sse_response("Done")?,
+    ];
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
 
     let codex_home = TempDir::new()?;
@@ -170,6 +175,110 @@ async fn thread_start_normalizes_legacy_dynamic_tools_into_model_request() -> Re
         })
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_resume_overrides_toolless_rollout_and_rejects_loaded_mismatch() -> Result<()> {
+    let responses = vec![create_final_assistant_message_sse_response("Done")?];
+    let server = create_mock_responses_server_sequence_unchecked(responses).await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+
+    let thread_id = {
+        let mut mcp = TestAppServer::builder()
+            .with_codex_home(codex_home.path())
+            .build_initialized()
+            .await?;
+        let ThreadStartResponse { thread, .. } =
+            mcp.start_thread(ThreadStartParams::default()).await?;
+        timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.start_turn_and_wait_for_completion(TurnStartParams {
+                thread_id: thread.id.clone(),
+                input: vec![V2UserInput::Text {
+                    text: "Persist this tool-less thread".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                ..Default::default()
+            }),
+        )
+        .await??;
+        thread.id
+    };
+
+    let dynamic_tool = DynamicToolSpec::Function(DynamicToolFunctionSpec {
+        name: "threadClear".to_string(),
+        description: "Clear the current thread".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false,
+        }),
+        defer_loading: false,
+    });
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+
+    for _ in 0..2 {
+        let resume_id = mcp
+            .send_thread_resume_request(ThreadResumeParams {
+                thread_id: thread_id.clone(),
+                dynamic_tools: Some(vec![dynamic_tool.clone()]),
+                ..Default::default()
+            })
+            .await?;
+        let _: ThreadResumeResponse =
+            timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
+    }
+
+    let mismatched_tool = DynamicToolSpec::Function(DynamicToolFunctionSpec {
+        name: "threadNew".to_string(),
+        description: "Start a new thread".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false,
+        }),
+        defer_loading: false,
+    });
+    let mismatch_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: thread_id.clone(),
+            dynamic_tools: Some(vec![mismatched_tool]),
+            ..Default::default()
+        })
+        .await?;
+    let error = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(mismatch_id)),
+    )
+    .await??;
+    assert_eq!(error.error.code, -32600);
+    assert!(error.error.message.contains("different dynamic tools"));
+
+    let turn_id = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id,
+            input: vec![V2UserInput::Text {
+                text: "Use the resumed tools".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let _: TurnStartResponse = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(turn_id)).await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    let bodies = responses_bodies(&server).await?;
+    assert!(find_tool(&bodies[1], "threadClear").is_some());
+    assert!(find_tool(&bodies[1], "threadNew").is_none());
     Ok(())
 }
 

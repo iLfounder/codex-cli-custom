@@ -6,6 +6,7 @@ use codex_app_server_protocol::FileChangeApprovalDecision;
 use codex_app_server_protocol::McpServerElicitationAction;
 use codex_app_server_protocol::RequestId as AppServerRequestId;
 use codex_app_server_protocol::ReviewTarget;
+use codex_app_server_protocol::SessionRuntimeAccountRef;
 use codex_app_server_protocol::ToolRequestUserInputResponse;
 use codex_app_server_protocol::UserInput;
 use codex_config::types::ApprovalsReviewer;
@@ -31,6 +32,7 @@ pub(crate) enum AppCommand {
     },
     UserTurn {
         items: Vec<UserInput>,
+        expected_execution_account: Option<SessionRuntimeAccountRef>,
         cwd: PathBuf,
         approval_policy: AskForApproval,
         approvals_reviewer: Option<ApprovalsReviewer>,
@@ -114,6 +116,7 @@ impl AppCommand {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn user_turn(
         items: Vec<UserInput>,
+        expected_execution_account: Option<SessionRuntimeAccountRef>,
         cwd: PathBuf,
         approval_policy: AskForApproval,
         active_permission_profile: Option<ActivePermissionProfile>,
@@ -127,6 +130,7 @@ impl AppCommand {
     ) -> Self {
         Self::UserTurn {
             items,
+            expected_execution_account,
             cwd,
             approval_policy,
             approvals_reviewer: None,

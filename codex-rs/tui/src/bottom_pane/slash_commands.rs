@@ -18,9 +18,20 @@ pub(crate) struct ServiceTierCommand {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PluginSlashCommand {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) available: bool,
+    pub(crate) deny_reason: Option<String>,
+    pub(crate) canonical: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SlashCommandItem {
     Builtin(SlashCommand),
     ServiceTier(ServiceTierCommand),
+    Plugin(PluginSlashCommand),
 }
 
 impl SlashCommandItem {
@@ -28,6 +39,7 @@ impl SlashCommandItem {
         match self {
             Self::Builtin(cmd) => cmd.command(),
             Self::ServiceTier(command) => &command.name,
+            Self::Plugin(command) => &command.name,
         }
     }
 
@@ -35,6 +47,7 @@ impl SlashCommandItem {
         match self {
             Self::Builtin(cmd) => cmd.supports_inline_args(),
             Self::ServiceTier(_) => false,
+            Self::Plugin(_) => false,
         }
     }
 
@@ -42,6 +55,7 @@ impl SlashCommandItem {
         match self {
             Self::Builtin(cmd) => cmd.available_in_side_conversation(),
             Self::ServiceTier(_) => false,
+            Self::Plugin(_) => false,
         }
     }
 
@@ -49,6 +63,14 @@ impl SlashCommandItem {
         match self {
             Self::Builtin(cmd) => cmd.available_during_task(),
             Self::ServiceTier(_) => true,
+            Self::Plugin(command) => command.available,
+        }
+    }
+
+    pub(crate) fn unavailable_reason(&self) -> Option<&str> {
+        match self {
+            Self::Plugin(command) if !command.available => command.deny_reason.as_deref(),
+            Self::Builtin(_) | Self::ServiceTier(_) | Self::Plugin(_) => None,
         }
     }
 }
@@ -84,6 +106,7 @@ pub(crate) fn builtins_for_input(flags: BuiltinCommandFlags) -> Vec<(&'static st
 pub(crate) fn commands_for_input(
     flags: BuiltinCommandFlags,
     service_tier_commands: &[ServiceTierCommand],
+    plugin_commands: &[PluginSlashCommand],
 ) -> Vec<SlashCommandItem> {
     let mut commands = Vec::new();
     let tiers_enabled = flags.service_tier_commands_enabled;
@@ -98,6 +121,13 @@ pub(crate) fn commands_for_input(
             );
         }
     }
+    commands.extend(plugin_commands.iter().filter_map(|command| {
+        let collides_with_tier = !command.canonical
+            && service_tier_commands
+                .iter()
+                .any(|tier| tier.name == command.name);
+        (!collides_with_tier).then(|| SlashCommandItem::Plugin(command.clone()))
+    }));
     commands
         .into_iter()
         .filter(|cmd| !flags.side_conversation_active || cmd.available_in_side_conversation())
@@ -125,17 +155,22 @@ pub(crate) fn find_builtin_command(name: &str, flags: BuiltinCommandFlags) -> Op
     .then_some(cmd)
 }
 
+pub(crate) fn is_builtin_command_name(name: &str) -> bool {
+    SlashCommand::from_str(name).is_ok()
+}
+
 pub(crate) fn find_slash_command(
     name: &str,
     flags: BuiltinCommandFlags,
     service_tier_commands: &[ServiceTierCommand],
+    plugin_commands: &[PluginSlashCommand],
 ) -> Option<SlashCommandItem> {
     if let Some(cmd) = find_builtin_command(name, flags) {
         return Some(SlashCommandItem::Builtin(cmd));
     }
 
     let tiers_enabled = flags.service_tier_commands_enabled;
-    tiers_enabled
+    let service_tier = tiers_enabled
         .then(|| {
             service_tier_commands
                 .iter()
@@ -143,15 +178,27 @@ pub(crate) fn find_slash_command(
                 .cloned()
                 .map(SlashCommandItem::ServiceTier)
         })
-        .flatten()
+        .flatten();
+    if service_tier.is_some() {
+        return service_tier;
+    }
+    if flags.side_conversation_active {
+        return None;
+    }
+    plugin_commands
+        .iter()
+        .find(|command| command.name == name)
+        .cloned()
+        .map(SlashCommandItem::Plugin)
 }
 
 pub(crate) fn has_slash_command_prefix(
     name: &str,
     flags: BuiltinCommandFlags,
     service_tier_commands: &[ServiceTierCommand],
+    plugin_commands: &[PluginSlashCommand],
 ) -> bool {
-    commands_for_input(flags, service_tier_commands)
+    commands_for_input(flags, service_tier_commands, plugin_commands)
         .into_iter()
         .any(|command| fuzzy_match(command.command(), name).is_some())
 }
@@ -224,7 +271,7 @@ mod tests {
             description: "fastest inference".to_string(),
         }];
 
-        assert_eq!(find_slash_command("fast", flags, &commands), None);
+        assert_eq!(find_slash_command("fast", flags, &commands, &[]), None);
     }
 
     #[test]
@@ -242,7 +289,7 @@ mod tests {
             },
         ];
 
-        let items = commands_for_input(all_enabled_flags(), &commands);
+        let items = commands_for_input(all_enabled_flags(), &commands, &[]);
         let model_idx = items
             .iter()
             .position(|item| matches!(item, SlashCommandItem::Builtin(SlashCommand::Model)))
@@ -343,7 +390,7 @@ mod tests {
         };
 
         assert_eq!(
-            find_slash_command("fast", flags, from_ref(&command)),
+            find_slash_command("fast", flags, from_ref(&command), &[]),
             Some(SlashCommandItem::ServiceTier(command))
         );
     }

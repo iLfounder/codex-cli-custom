@@ -23,6 +23,8 @@ use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_thread_store::PersistContext;
+use sha2::Digest;
+use sha2::Sha256;
 
 pub(super) const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
 pub(super) const THREAD_LIST_MAX_LIMIT: usize = 100;
@@ -31,6 +33,21 @@ const THREAD_ROLLBACK_DEPRECATION_SUMMARY: &str =
     "thread/rollback is deprecated and will be removed soon";
 const PAGINATED_FULL_HISTORY_DEPRECATION_SUMMARY: &str = "Full-history hydration is deprecated for paginated threads; use `excludeTurns: true`, then page with `thread/turns/list` and `thread/items/list`.";
 const PAGINATED_THREAD_READ_DEPRECATION_SUMMARY: &str = "Full-history hydration is deprecated for paginated threads; omit `includeTurns` or set it to `false`, then page with `thread/turns/list` and `thread/items/list`.";
+
+struct PreparedThreadTransitionStart {
+    intent: codex_app_server_protocol::ThreadTransitionIntent,
+    previous_thread_id: ThreadId,
+    current_thread_id: ThreadId,
+    request_fingerprint: String,
+    initiator_client_incarnation: String,
+    disposition: ThreadTransitionStartDisposition,
+}
+
+enum ThreadTransitionStartDisposition {
+    Start,
+    ExistingPrepared(codex_thread_store::ThreadTransitionPreparation),
+    ExistingCommitted(codex_thread_store::ThreadTransitionReceipt),
+}
 
 async fn stage_pending_project_metadata(
     thread_manager: &ThreadManager,
@@ -59,6 +76,33 @@ async fn stage_pending_project_metadata(
             error => internal_error(format!("failed to stage {operation} metadata: {error}")),
         })?;
     Ok(Some(thread_id))
+}
+
+async fn stage_pending_project_metadata_for_reserved_thread(
+    thread_store: &dyn ThreadStore,
+    project_id: Option<&str>,
+    thread_id: ThreadId,
+    operation: &'static str,
+) -> Result<(), JSONRPCErrorError> {
+    let Some(project_id) = project_id else {
+        return Ok(());
+    };
+    thread_store
+        .stage_pending_thread_metadata(
+            thread_id,
+            StoreThreadMetadataPatch {
+                project_id: Some(Some(project_id.to_string())),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|error| match error {
+            ThreadStoreError::Unsupported { .. } => {
+                method_not_found(format!("{operation} is unavailable without sqlite state"))
+            }
+            ThreadStoreError::InvalidRequest { message } => invalid_request(message),
+            error => internal_error(format!("failed to stage {operation} metadata: {error}")),
+        })
 }
 
 async fn remove_pending_project_metadata(
@@ -194,6 +238,18 @@ fn collect_resume_override_mismatches(
         mismatch_details.push(format!(
             "personality requested={requested_personality:?} active={:?}",
             config_snapshot.personality
+        ));
+    }
+    if let Some(requested_dynamic_tools) = request
+        .dynamic_tools
+        .as_ref()
+        .filter(|tools| !tools.is_empty())
+        && requested_dynamic_tools != &config_snapshot.dynamic_tools
+    {
+        mismatch_details.push(format!(
+            "dynamic_tools requested_count={} active_count={}",
+            requested_dynamic_tools.len(),
+            config_snapshot.dynamic_tools.len()
         ));
     }
 
@@ -441,6 +497,7 @@ pub(crate) struct ThreadRequestProcessor {
     pub(super) thread_watch_manager: ThreadWatchManager,
     pub(super) thread_list_state_permit: Arc<Semaphore>,
     pub(super) thread_goal_processor: ThreadGoalRequestProcessor,
+    pub(super) session_runtime: Arc<crate::session_runtime::SessionRuntimeEngine>,
     pub(super) state_db: Option<StateDbHandle>,
     pub(super) log_db: Option<LogDbLayer>,
     pub(super) background_tasks: TaskTracker,
@@ -475,6 +532,7 @@ impl ThreadRequestProcessor {
         thread_watch_manager: ThreadWatchManager,
         thread_list_state_permit: Arc<Semaphore>,
         thread_goal_processor: ThreadGoalRequestProcessor,
+        session_runtime: Arc<crate::session_runtime::SessionRuntimeEngine>,
         state_db: Option<StateDbHandle>,
         log_db: Option<LogDbLayer>,
         skills_watcher: Arc<SkillsWatcher>,
@@ -494,6 +552,7 @@ impl ThreadRequestProcessor {
             thread_watch_manager,
             thread_list_state_permit,
             thread_goal_processor,
+            session_runtime,
             state_db,
             log_db,
             background_tasks: TaskTracker::new(),
@@ -522,6 +581,200 @@ impl ThreadRequestProcessor {
         )
         .await
         .map(|()| None)
+    }
+
+    pub(crate) async fn thread_transition_commit(
+        &self,
+        request_id: ConnectionRequestId,
+        params: ThreadTransitionCommitParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        if params.expected_instance_epoch != self.session_runtime.instance_epoch() {
+            return Err(thread_transition_invalid_request("stale_instance_epoch"));
+        }
+        let previous_thread_id = ThreadId::from_string(&params.previous_thread_id)
+            .map_err(|_| thread_transition_invalid_request("transition_thread_mismatch"))?;
+        let current_thread_id = ThreadId::from_string(&params.current_thread_id)
+            .map_err(|_| thread_transition_invalid_request("transition_thread_mismatch"))?;
+        let record = self
+            .thread_store
+            .thread_transition_by_id(params.transition_id.clone())
+            .await
+            .map_err(thread_transition_store_error)?
+            .ok_or_else(|| thread_transition_invalid_request("transition_not_prepared"))?;
+        let preparation = match record {
+            codex_thread_store::ThreadTransitionRecord::Prepared(preparation) => preparation,
+            codex_thread_store::ThreadTransitionRecord::Preparing(_) => {
+                return Err(thread_transition_invalid_request("transition_not_prepared"));
+            }
+            codex_thread_store::ThreadTransitionRecord::Committed(receipt) => {
+                if receipt.previous.thread_id != previous_thread_id
+                    || receipt.current.thread_id != current_thread_id
+                {
+                    return Err(thread_transition_invalid_request(
+                        "transition_thread_mismatch",
+                    ));
+                }
+                let transition = crate::session_runtime::continuity::api_receipt(receipt);
+                self.outgoing
+                    .send_response(request_id, ThreadTransitionCommitResponse { transition })
+                    .await;
+                return Ok(None);
+            }
+        };
+        let reservation = self
+            .thread_state_manager
+            .thread_transition_reservation(previous_thread_id)
+            .await
+            .ok_or_else(|| thread_transition_invalid_request("transition_not_prepared"))?;
+        if reservation.transition_id != params.transition_id
+            || reservation.current_thread_id != Some(current_thread_id)
+        {
+            return Err(thread_transition_invalid_request(
+                "transition_thread_mismatch",
+            ));
+        }
+        if reservation.initiator_connection_id != request_id.connection_id {
+            return Err(thread_transition_invalid_request(
+                "transition_initiator_mismatch",
+            ));
+        }
+        if let Some(reason) = reservation.invalid_reason {
+            self.thread_state_manager
+                .release_thread_transition(previous_thread_id, &params.transition_id)
+                .await;
+            return Err(thread_transition_invalid_request(reason));
+        }
+        if reservation.phase
+            != crate::thread_state::ThreadTransitionReservationPhase::InitiatorUnsubscribed
+        {
+            return Err(thread_transition_invalid_request(
+                "caller_still_subscribed_to_previous",
+            ));
+        }
+        let (subscribed_to_previous, _) = self
+            .thread_state_manager
+            .caller_subscription(previous_thread_id, request_id.connection_id)
+            .await;
+        let (subscribed_to_current, _) = self
+            .thread_state_manager
+            .caller_subscription(current_thread_id, request_id.connection_id)
+            .await;
+        if subscribed_to_previous || !subscribed_to_current {
+            return Err(thread_transition_invalid_request("caller_not_subscribed"));
+        }
+        let _current_mutation_permit = match self
+            .thread_state_manager
+            .acquire_thread_mutation_permit(current_thread_id)
+            .await
+        {
+            Ok(permit) => permit,
+            Err(reason) => {
+                self.thread_state_manager
+                    .release_thread_transition(previous_thread_id, &params.transition_id)
+                    .await;
+                return Err(thread_transition_invalid_request(reason));
+            }
+        };
+        let previous = self
+            .session_runtime
+            .list(SessionRuntimeListParams {
+                cursor: None,
+                limit: Some(1),
+                thread_id: Some(previous_thread_id.to_string()),
+            })
+            .await?
+            .data
+            .into_iter()
+            .next()
+            .ok_or_else(|| thread_transition_invalid_request("transition_thread_mismatch"))?;
+        let current = self
+            .session_runtime
+            .list(SessionRuntimeListParams {
+                cursor: None,
+                limit: Some(1),
+                thread_id: Some(current_thread_id.to_string()),
+            })
+            .await?
+            .data
+            .into_iter()
+            .next()
+            .ok_or_else(|| thread_transition_invalid_request("transition_thread_mismatch"))?;
+        let previous_writer = transition_writer_from_runtime_snapshot(&previous)?;
+        let current_writer = transition_writer_from_runtime_snapshot(&current)?;
+        if previous_writer.store_id != preparation.preparing.previous_writer.store_id
+            || previous_writer.writer_generation
+                != preparation.preparing.previous_writer.writer_generation
+            || current_writer.store_id != preparation.current_writer.store_id
+            || current_writer.writer_generation != preparation.current_writer.writer_generation
+        {
+            self.thread_state_manager
+                .release_thread_transition(previous_thread_id, &params.transition_id)
+                .await;
+            return Err(thread_transition_invalid_request("stale_writer_fence"));
+        }
+        if previous.state_revision
+            != preparation
+                .preparing
+                .previous_precondition_state_revision
+                .saturating_add(1)
+        {
+            self.thread_state_manager
+                .release_thread_transition(previous_thread_id, &params.transition_id)
+                .await;
+            return Err(thread_transition_invalid_request("stale_state_revision"));
+        }
+        let outcome = match self
+            .thread_store
+            .commit_thread_transition(codex_thread_store::CommitThreadTransition {
+                transition_id: params.transition_id.clone(),
+                expected_previous_thread_id: previous_thread_id,
+                expected_current_thread_id: current_thread_id,
+                expected_origin_instance_epoch: params.expected_instance_epoch,
+                expected_initiator_client_incarnation: reservation.initiator_client_incarnation,
+                previous_committed_state_revision: previous.state_revision,
+                current_committed_state_revision: current.state_revision,
+            })
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error @ ThreadStoreError::Internal { .. }) => {
+                return Err(thread_transition_store_error(error));
+            }
+            Err(error) => {
+                self.thread_state_manager
+                    .release_thread_transition(previous_thread_id, &params.transition_id)
+                    .await;
+                return Err(thread_transition_store_error(error));
+            }
+        };
+        let (receipt, publish_terminal) = match outcome {
+            codex_thread_store::ThreadTransitionCommitOutcome::Committed(receipt) => {
+                (receipt, true)
+            }
+            codex_thread_store::ThreadTransitionCommitOutcome::ExistingCommitted(receipt) => {
+                (receipt, false)
+            }
+        };
+        let transition = crate::session_runtime::continuity::api_receipt(receipt);
+        self.outgoing
+            .send_response(
+                request_id,
+                ThreadTransitionCommitResponse {
+                    transition: transition.clone(),
+                },
+            )
+            .await;
+        if publish_terminal {
+            self.session_runtime
+                .publish_thread(previous_thread_id)
+                .await;
+            self.session_runtime.publish_thread(current_thread_id).await;
+            self.session_runtime.publish_transition(transition).await;
+        }
+        self.thread_state_manager
+            .release_thread_transition(previous_thread_id, &params.transition_id)
+            .await;
+        Ok(None)
     }
 
     pub(crate) async fn thread_unsubscribe(
@@ -1063,6 +1316,7 @@ impl ThreadRequestProcessor {
     fn listener_task_context(&self) -> ListenerTaskContext {
         ListenerTaskContext {
             thread_manager: Arc::clone(&self.thread_manager),
+            thread_store: Arc::clone(&self.thread_store),
             thread_state_manager: self.thread_state_manager.clone(),
             outgoing: Arc::clone(&self.outgoing),
             pending_thread_unloads: Arc::clone(&self.pending_thread_unloads),
@@ -1105,6 +1359,180 @@ impl ThreadRequestProcessor {
         .await
     }
 
+    async fn prepare_thread_transition_start(
+        &self,
+        connection_id: ConnectionId,
+        intent: &codex_app_server_protocol::ThreadTransitionIntent,
+        session_start_source: Option<codex_app_server_protocol::ThreadStartSource>,
+        ephemeral: Option<bool>,
+    ) -> Result<PreparedThreadTransitionStart, JSONRPCErrorError> {
+        if ephemeral == Some(true) {
+            return Err(thread_transition_invalid_request("ephemeral_transition"));
+        }
+        let expected_source = match intent.reason {
+            codex_app_server_protocol::ThreadTransitionReason::Clear => {
+                codex_app_server_protocol::ThreadStartSource::Clear
+            }
+            codex_app_server_protocol::ThreadTransitionReason::New => {
+                codex_app_server_protocol::ThreadStartSource::Startup
+            }
+        };
+        if session_start_source.unwrap_or(codex_app_server_protocol::ThreadStartSource::Startup)
+            != expected_source
+        {
+            return Err(thread_transition_invalid_request(
+                "transition_source_conflict",
+            ));
+        }
+        uuid::Uuid::parse_str(&intent.transition_id)
+            .map_err(|_| thread_transition_invalid_request("transition_id_conflict"))?;
+        let previous_thread_id = ThreadId::from_string(&intent.previous_thread_id)
+            .map_err(|_| thread_transition_invalid_request("transition_thread_mismatch"))?;
+        if intent.expected_instance_epoch != self.session_runtime.instance_epoch() {
+            return Err(thread_transition_invalid_request("stale_instance_epoch"));
+        }
+        let fingerprint_input = serde_json::to_string(intent).map_err(|error| {
+            internal_error(format!("failed to fingerprint transition: {error}"))
+        })?;
+        let request_fingerprint = format!("{:x}", Sha256::digest(fingerprint_input.as_bytes()));
+        if let Some(codex_thread_store::ThreadTransitionRecord::Committed(receipt)) = self
+            .thread_store
+            .thread_transition_by_id(intent.transition_id.clone())
+            .await
+            .map_err(thread_transition_store_error)?
+        {
+            let expected_reason = match intent.reason {
+                codex_app_server_protocol::ThreadTransitionReason::Clear => {
+                    codex_thread_store::ThreadTransitionReason::Clear
+                }
+                codex_app_server_protocol::ThreadTransitionReason::New => {
+                    codex_thread_store::ThreadTransitionReason::New
+                }
+            };
+            if receipt.reason != expected_reason
+                || receipt.previous.thread_id != previous_thread_id
+                || receipt.origin_instance_epoch != intent.expected_instance_epoch
+                || receipt.previous.state_revision
+                    != intent.expected_state_revision.saturating_add(1)
+                || receipt.previous.writer.store_id != intent.expected_writer.store_id
+                || receipt.previous.writer.writer_generation
+                    != intent.expected_writer.writer_generation
+            {
+                return Err(thread_transition_invalid_request("transition_id_conflict"));
+            }
+            return Ok(PreparedThreadTransitionStart {
+                intent: intent.clone(),
+                previous_thread_id,
+                current_thread_id: receipt.current.thread_id,
+                request_fingerprint,
+                initiator_client_incarnation: receipt.initiator_client_incarnation.clone(),
+                disposition: ThreadTransitionStartDisposition::ExistingCommitted(receipt),
+            });
+        }
+        let initiator_client_incarnation = self
+            .thread_state_manager
+            .reserve_thread_transition(
+                previous_thread_id,
+                connection_id,
+                intent.transition_id.clone(),
+            )
+            .await
+            .map_err(thread_transition_invalid_request)?;
+        let prepared = async {
+            let runtime = self
+                .session_runtime
+                .list(SessionRuntimeListParams {
+                    cursor: None,
+                    limit: Some(1),
+                    thread_id: Some(previous_thread_id.to_string()),
+                })
+                .await?;
+            let snapshot =
+                runtime.data.into_iter().next().ok_or_else(|| {
+                    thread_transition_invalid_request("transition_thread_mismatch")
+                })?;
+            if snapshot.state_revision != intent.expected_state_revision {
+                return Err(thread_transition_invalid_request("stale_state_revision"));
+            }
+            if snapshot.lifecycle.state != SessionRuntimeLifecycleState::Idle
+                || snapshot.lifecycle.active_turn_id.is_some()
+                || !snapshot.lifecycle.waiting_on.is_empty()
+            {
+                return Err(thread_transition_invalid_request("thread_not_idle"));
+            }
+            let writer = transition_writer_from_runtime_snapshot(&snapshot)?;
+            if writer.store_id != intent.expected_writer.store_id
+                || writer.writer_generation != intent.expected_writer.writer_generation
+            {
+                return Err(thread_transition_invalid_request("stale_writer_fence"));
+            }
+            let current_thread_id = self.thread_manager.reserve_thread_id();
+            let state_intent = codex_thread_store::ThreadTransitionIntent {
+                transition_id: intent.transition_id.clone(),
+                request_fingerprint: request_fingerprint.clone(),
+                reason: match intent.reason {
+                    codex_app_server_protocol::ThreadTransitionReason::Clear => {
+                        codex_thread_store::ThreadTransitionReason::Clear
+                    }
+                    codex_app_server_protocol::ThreadTransitionReason::New => {
+                        codex_thread_store::ThreadTransitionReason::New
+                    }
+                },
+                previous_thread_id,
+                previous_precondition_state_revision: intent.expected_state_revision,
+            };
+            let outcome = self
+                .thread_store
+                .claim_thread_transition(
+                    state_intent,
+                    current_thread_id,
+                    intent.expected_instance_epoch.clone(),
+                    initiator_client_incarnation.clone(),
+                    codex_thread_store::ThreadWriterEvidence {
+                        store_id: writer.store_id,
+                        writer_generation: writer.writer_generation,
+                    },
+                )
+                .await
+                .map_err(thread_transition_store_error)?;
+            let (current_thread_id, disposition) = match outcome {
+                codex_thread_store::ThreadTransitionClaimOutcome::NewPreparing(preparing) => (
+                    preparing.current_thread_id,
+                    ThreadTransitionStartDisposition::Start,
+                ),
+                codex_thread_store::ThreadTransitionClaimOutcome::ExistingPreparing(preparing) => (
+                    preparing.current_thread_id,
+                    ThreadTransitionStartDisposition::Start,
+                ),
+                codex_thread_store::ThreadTransitionClaimOutcome::ExistingPrepared(preparation) => {
+                    (
+                        preparation.preparing.current_thread_id,
+                        ThreadTransitionStartDisposition::ExistingPrepared(preparation),
+                    )
+                }
+                codex_thread_store::ThreadTransitionClaimOutcome::ExistingCommitted(receipt) => (
+                    receipt.current.thread_id,
+                    ThreadTransitionStartDisposition::ExistingCommitted(receipt),
+                ),
+            };
+            Ok(PreparedThreadTransitionStart {
+                intent: intent.clone(),
+                previous_thread_id,
+                current_thread_id,
+                request_fingerprint,
+                initiator_client_incarnation,
+                disposition,
+            })
+        }
+        .await;
+        if prepared.is_err() {
+            self.thread_state_manager
+                .release_thread_transition(previous_thread_id, &intent.transition_id)
+                .await;
+        }
+        prepared
+    }
+
     async fn thread_start_inner(
         &self,
         request_id: ConnectionRequestId,
@@ -1115,6 +1543,7 @@ impl ThreadRequestProcessor {
         request_context: RequestContext,
     ) -> Result<(), JSONRPCErrorError> {
         let ThreadStartParams {
+            transition,
             model,
             model_provider,
             allow_provider_model_fallback,
@@ -1192,8 +1621,21 @@ impl ThreadRequestProcessor {
             personality,
         );
         typesafe_overrides.ephemeral = ephemeral;
+        let prepared_transition = match transition {
+            Some(intent) => Some(
+                self.prepare_thread_transition_start(
+                    request_id.connection_id,
+                    &intent,
+                    session_start_source,
+                    ephemeral,
+                )
+                .await?,
+            ),
+            None => None,
+        };
         let listener_task_context = ListenerTaskContext {
             thread_manager: Arc::clone(&self.thread_manager),
+            thread_store: Arc::clone(&self.thread_store),
             thread_state_manager: self.thread_state_manager.clone(),
             outgoing: Arc::clone(&self.outgoing),
             pending_thread_unloads: Arc::clone(&self.pending_thread_unloads),
@@ -1210,6 +1652,19 @@ impl ThreadRequestProcessor {
         let initial_config_warnings = Arc::clone(&self.initial_config_warnings);
         let outgoing = Arc::clone(&listener_task_context.outgoing);
         let error_request_id = request_id.clone();
+        let transition_cleanup = prepared_transition.as_ref().and_then(|transition| {
+            matches!(
+                transition.disposition,
+                ThreadTransitionStartDisposition::Start
+            )
+            .then(|| {
+                (
+                    transition.previous_thread_id,
+                    transition.intent.transition_id.clone(),
+                )
+            })
+        });
+        let transition_state_manager = self.thread_state_manager.clone();
         let thread_start_task = async move {
             if let Err(error) = Self::thread_start_task(
                 listener_task_context,
@@ -1233,14 +1688,110 @@ impl ThreadRequestProcessor {
                 experimental_raw_events,
                 request_trace,
                 initial_config_warnings,
+                prepared_transition,
             )
             .await
             {
+                if let Some((previous_thread_id, transition_id)) = transition_cleanup {
+                    transition_state_manager
+                        .release_thread_transition(previous_thread_id, &transition_id)
+                        .await;
+                }
                 outgoing.send_error(error_request_id, error).await;
             }
         };
         self.background_tasks
             .spawn(thread_start_task.instrument(request_context.span()));
+        Ok(())
+    }
+
+    async fn reply_existing_thread_transition_start(
+        listener_task_context: &ListenerTaskContext,
+        thread_store: &dyn ThreadStore,
+        request_id: &ConnectionRequestId,
+        thread_id: ThreadId,
+        transition: codex_app_server_protocol::ThreadTransitionPreparation,
+        experimental_raw_events: bool,
+    ) -> Result<(), JSONRPCErrorError> {
+        let thread = listener_task_context
+            .thread_manager
+            .get_thread(thread_id)
+            .await
+            .map_err(|_| {
+                thread_transition_invalid_request("transition_current_thread_not_loaded")
+            })?;
+        let listener_attach_result = super::thread_lifecycle::ensure_conversation_listener(
+            listener_task_context.clone(),
+            thread_id,
+            request_id.connection_id,
+            experimental_raw_events,
+        )
+        .await?;
+        if !matches!(
+            listener_attach_result,
+            EnsureConversationListenerResult::Attached
+        ) {
+            return Err(thread_transition_invalid_request(
+                "transition_initiator_disconnected",
+            ));
+        }
+
+        let instruction_sources = thread.legacy_instruction_sources().await;
+        let config_snapshot = thread.config_snapshot().await;
+        let session_configured = thread.session_configured();
+        let mut api_thread = build_thread_from_snapshot(
+            thread_id,
+            session_configured.session_id.to_string(),
+            thread.multi_agent_version(),
+            &config_snapshot,
+            session_configured.rollout_path,
+        );
+        api_thread.project_id = thread_store
+            .read_thread(StoreReadThreadParams {
+                thread_id,
+                include_archived: true,
+                include_history: false,
+            })
+            .await
+            .ok()
+            .and_then(|stored| stored.project_id);
+        listener_task_context
+            .thread_watch_manager
+            .upsert_thread_silently(&api_thread.id)
+            .await;
+        api_thread.status = resolve_thread_status(
+            listener_task_context
+                .thread_watch_manager
+                .loaded_status_for_thread(&api_thread.id)
+                .await,
+            /*has_in_progress_turn*/ false,
+        );
+
+        let sandbox = config_snapshot.sandbox_policy().into();
+        let cwd = config_snapshot.cwd().clone();
+        let active_permission_profile =
+            thread_response_active_permission_profile(config_snapshot.active_permission_profile);
+        let thread_originator = config_snapshot.originator.clone();
+        let response = ThreadStartResponse {
+            thread: api_thread,
+            model: config_snapshot.model,
+            model_provider: config_snapshot.model_provider_id,
+            service_tier: config_snapshot.service_tier,
+            cwd,
+            runtime_workspace_roots: config_snapshot.workspace_roots,
+            instruction_sources,
+            approval_policy: config_snapshot.approval_policy.into(),
+            approvals_reviewer: config_snapshot.approvals_reviewer.into(),
+            sandbox,
+            active_permission_profile,
+            reasoning_effort: config_snapshot.reasoning_effort,
+            multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
+            transition: Some(transition),
+        };
+        listener_task_context
+            .outgoing
+            .send_response_with_thread_originator(request_id.clone(), response, thread_originator)
+            .await;
         Ok(())
     }
 
@@ -1312,8 +1863,66 @@ impl ThreadRequestProcessor {
         experimental_raw_events: bool,
         request_trace: Option<W3cTraceContext>,
         initial_config_warnings: Arc<Vec<ConfigWarningNotification>>,
+        prepared_transition: Option<PreparedThreadTransitionStart>,
     ) -> Result<(), JSONRPCErrorError> {
         let thread_start_started_at = std::time::Instant::now();
+        if let Some(prepared_transition) = prepared_transition.as_ref() {
+            match &prepared_transition.disposition {
+                ThreadTransitionStartDisposition::Start => {}
+                ThreadTransitionStartDisposition::ExistingPrepared(preparation) => {
+                    let result = async {
+                        listener_task_context
+                            .thread_state_manager
+                            .mark_thread_transition_prepared(
+                                prepared_transition.previous_thread_id,
+                                &prepared_transition.intent.transition_id,
+                                prepared_transition.current_thread_id,
+                            )
+                            .await
+                            .map_err(thread_transition_invalid_request)?;
+                        Self::reply_existing_thread_transition_start(
+                            &listener_task_context,
+                            thread_store.as_ref(),
+                            &request_id,
+                            prepared_transition.current_thread_id,
+                            api_transition_preparation(preparation.clone()),
+                            experimental_raw_events,
+                        )
+                        .await
+                    }
+                    .await;
+                    if result.is_err() {
+                        listener_task_context
+                            .thread_state_manager
+                            .release_thread_transition(
+                                prepared_transition.previous_thread_id,
+                                &prepared_transition.intent.transition_id,
+                            )
+                            .await;
+                    }
+                    return result;
+                }
+                ThreadTransitionStartDisposition::ExistingCommitted(receipt) => {
+                    let result = Self::reply_existing_thread_transition_start(
+                        &listener_task_context,
+                        thread_store.as_ref(),
+                        &request_id,
+                        prepared_transition.current_thread_id,
+                        api_transition_preparation_from_receipt(receipt.clone()),
+                        experimental_raw_events,
+                    )
+                    .await;
+                    listener_task_context
+                        .thread_state_manager
+                        .release_thread_transition(
+                            prepared_transition.previous_thread_id,
+                            &prepared_transition.intent.transition_id,
+                        )
+                        .await;
+                    return result;
+                }
+            }
+        }
         let requested_cwd = typesafe_overrides.cwd.clone();
         let mut config = config_manager
             .load_with_overrides(config_overrides.clone(), typesafe_overrides.clone())
@@ -1426,7 +2035,16 @@ impl ThreadRequestProcessor {
             thread_extension_init.insert(selected_capability_roots);
         }
         let mut start_options = StartThreadOptions::new(config);
-        let reserved_thread_id = if start_options.config.ephemeral {
+        let reserved_thread_id = if let Some(prepared_transition) = prepared_transition.as_ref() {
+            stage_pending_project_metadata_for_reserved_thread(
+                thread_store.as_ref(),
+                project_id.as_deref(),
+                prepared_transition.current_thread_id,
+                "thread/start",
+            )
+            .await?;
+            Some(prepared_transition.current_thread_id)
+        } else if start_options.config.ephemeral {
             None
         } else {
             stage_pending_project_metadata(
@@ -1515,19 +2133,34 @@ impl ThreadRequestProcessor {
         thread.project_id = project_id.clone();
 
         // Auto-attach a thread listener when starting a thread.
-        log_listener_attach_result(
-            super::thread_lifecycle::ensure_conversation_listener(
-                listener_task_context.clone(),
-                thread_id,
-                request_id.connection_id,
-                experimental_raw_events,
+        let listener_attach_result = super::thread_lifecycle::ensure_conversation_listener(
+            listener_task_context.clone(),
+            thread_id,
+            request_id.connection_id,
+            experimental_raw_events,
+        )
+        .instrument(tracing::info_span!(
+            "app_server.thread_start.attach_listener",
+            otel.name = "app_server.thread_start.attach_listener",
+            thread_start.experimental_raw_events = experimental_raw_events,
+        ))
+        .await;
+        if prepared_transition.is_some()
+            && !matches!(
+                listener_attach_result,
+                Ok(EnsureConversationListenerResult::Attached)
             )
-            .instrument(tracing::info_span!(
-                "app_server.thread_start.attach_listener",
-                otel.name = "app_server.thread_start.attach_listener",
-                thread_start.experimental_raw_events = experimental_raw_events,
-            ))
-            .await,
+        {
+            return Err(match listener_attach_result {
+                Ok(EnsureConversationListenerResult::ConnectionClosed) => {
+                    thread_transition_invalid_request("transition_initiator_disconnected")
+                }
+                Err(error) => error,
+                Ok(EnsureConversationListenerResult::Attached) => unreachable!(),
+            });
+        }
+        log_listener_attach_result(
+            listener_attach_result,
             thread_id,
             request_id.connection_id,
             "thread",
@@ -1560,6 +2193,43 @@ impl ThreadRequestProcessor {
             thread_response_active_permission_profile(config_snapshot.active_permission_profile);
         let thread_originator = config_snapshot.originator.clone();
 
+        let transition = if let Some(prepared_transition) = prepared_transition {
+            let current_writer = transition_writer_from_store_snapshot(
+                &thread_store
+                    .runtime_snapshot(thread_id)
+                    .await
+                    .map_err(thread_transition_store_error)?,
+            )?;
+            let preparation = thread_store
+                .mark_thread_transition_prepared(codex_thread_store::MarkThreadTransitionPrepared {
+                    transition_id: prepared_transition.intent.transition_id.clone(),
+                    expected_request_fingerprint: prepared_transition.request_fingerprint,
+                    expected_origin_instance_epoch: prepared_transition
+                        .intent
+                        .expected_instance_epoch
+                        .clone(),
+                    expected_initiator_client_incarnation: prepared_transition
+                        .initiator_client_incarnation,
+                    current_writer: codex_thread_store::ThreadWriterEvidence {
+                        store_id: current_writer.store_id.clone(),
+                        writer_generation: current_writer.writer_generation,
+                    },
+                })
+                .await
+                .map_err(thread_transition_store_error)?;
+            listener_task_context
+                .thread_state_manager
+                .mark_thread_transition_prepared(
+                    prepared_transition.previous_thread_id,
+                    &prepared_transition.intent.transition_id,
+                    thread_id,
+                )
+                .await
+                .map_err(thread_transition_invalid_request)?;
+            Some(api_transition_preparation(preparation))
+        } else {
+            None
+        };
         let response = ThreadStartResponse {
             thread: thread.clone(),
             model: config_snapshot.model,
@@ -1574,6 +2244,7 @@ impl ThreadRequestProcessor {
             active_permission_profile,
             reasoning_effort: config_snapshot.reasoning_effort,
             multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
+            transition,
         };
         let notif = thread_started_notification(thread);
         listener_task_context
@@ -1700,6 +2371,18 @@ impl ThreadRequestProcessor {
         }
 
         archive_thread_ids[1..].reverse();
+        let mut _transition_admission_permits = Vec::new();
+        for &thread_id_to_archive in &archive_thread_ids {
+            match self
+                .thread_state_manager
+                .acquire_thread_mutation_permit(thread_id_to_archive)
+                .await
+            {
+                Ok(permit) => _transition_admission_permits.push(permit),
+                Err("transition_thread_unavailable") => {}
+                Err(reason) => return Err(thread_transition_invalid_request(reason)),
+            }
+        }
         // Collaboration may resume an archived descendant without unarchiving it.
         self.prepare_thread_for_archive(thread_id).await;
         for &descendant_thread_id in subtree_thread_ids.iter().skip(1).rev() {
@@ -2220,6 +2903,7 @@ impl ThreadRequestProcessor {
                 config,
                 thread_history,
                 execution_account,
+                Vec::new(),
                 self.request_trace_context(request_id).await,
                 client_mcp_extensions,
             )
@@ -3607,6 +4291,14 @@ impl ThreadRequestProcessor {
                 .await;
             return Ok(());
         }
+        if let Some(dynamic_tools) = params.dynamic_tools.as_ref()
+            && let Err(error) = validate_dynamic_tools(dynamic_tools)
+        {
+            self.outgoing
+                .send_error(request_id, invalid_request(error))
+                .await;
+            return Ok(());
+        }
         let redact_resume_payloads =
             should_redact_thread_resume_payloads(app_server_client_name.as_deref());
 
@@ -3652,6 +4344,7 @@ impl ThreadRequestProcessor {
             base_instructions,
             developer_instructions,
             personality,
+            dynamic_tools,
             exclude_turns,
             initial_turns_page,
         } = params;
@@ -3828,6 +4521,7 @@ impl ThreadRequestProcessor {
         }
 
         let response_history = thread_history.clone();
+        let dynamic_tools = dynamic_tools.unwrap_or_default();
 
         match self
             .thread_manager
@@ -3835,6 +4529,7 @@ impl ThreadRequestProcessor {
                 config,
                 thread_history,
                 self.auth_manager.clone(),
+                dynamic_tools,
                 self.request_trace_context(&request_id).await,
                 client_mcp_extensions,
             )
@@ -4168,6 +4863,10 @@ impl ThreadRequestProcessor {
                 )));
             }
             let config_snapshot = existing_thread.config_snapshot().await;
+            let dynamic_tools_mismatch = params
+                .dynamic_tools
+                .as_ref()
+                .is_some_and(|tools| !tools.is_empty() && tools != &config_snapshot.dynamic_tools);
             let mismatch_details = collect_resume_override_mismatches(params, &config_snapshot);
             if !mismatch_details.is_empty() {
                 let has_subscribers = !self
@@ -4208,6 +4907,12 @@ impl ThreadRequestProcessor {
                             warn!("thread {existing_thread_id} shutdown timed out");
                         }
                     }
+                }
+
+                if dynamic_tools_mismatch {
+                    return Err(invalid_request(format!(
+                        "cannot resume loaded thread {existing_thread_id} with different dynamic tools while it is active, subscribed, or could not be shut down"
+                    )));
                 }
 
                 // Preserve rejoin semantics when another client can still observe
@@ -5872,6 +6577,121 @@ fn thread_store_mutation_error(operation: &str, err: ThreadStoreError) -> JSONRP
             operation: unsupported_operation,
         } => unsupported_thread_store_operation(unsupported_operation),
         err => internal_error(format!("failed to {operation} session: {err}")),
+    }
+}
+
+fn transition_writer_from_runtime_snapshot(
+    snapshot: &SessionRuntimeSnapshot,
+) -> Result<codex_app_server_protocol::ThreadWriterEvidence, JSONRPCErrorError> {
+    if snapshot.writer.state != SessionRuntimeWriterState::OwnedHere {
+        return Err(thread_transition_invalid_request("stale_writer_fence"));
+    }
+    Ok(codex_app_server_protocol::ThreadWriterEvidence {
+        store_id: snapshot
+            .writer
+            .store_id
+            .clone()
+            .ok_or_else(|| thread_transition_invalid_request("stale_writer_fence"))?,
+        writer_generation: snapshot
+            .writer
+            .writer_generation
+            .ok_or_else(|| thread_transition_invalid_request("stale_writer_fence"))?,
+    })
+}
+
+fn transition_writer_from_store_snapshot(
+    snapshot: &codex_thread_store::ThreadStoreRuntimeSnapshot,
+) -> Result<codex_app_server_protocol::ThreadWriterEvidence, JSONRPCErrorError> {
+    if snapshot.writer_ownership != codex_thread_store::RuntimeWriterOwnership::OwnedHere {
+        return Err(thread_transition_invalid_request("stale_writer_fence"));
+    }
+    Ok(codex_app_server_protocol::ThreadWriterEvidence {
+        store_id: snapshot
+            .writer_store_id
+            .clone()
+            .ok_or_else(|| thread_transition_invalid_request("stale_writer_fence"))?,
+        writer_generation: snapshot
+            .writer_generation
+            .ok_or_else(|| thread_transition_invalid_request("stale_writer_fence"))?,
+    })
+}
+
+fn api_transition_preparation(
+    value: codex_thread_store::ThreadTransitionPreparation,
+) -> codex_app_server_protocol::ThreadTransitionPreparation {
+    codex_app_server_protocol::ThreadTransitionPreparation {
+        transition_id: value.preparing.transition_id,
+        reason: match value.preparing.reason {
+            codex_thread_store::ThreadTransitionReason::Clear => {
+                codex_app_server_protocol::ThreadTransitionReason::Clear
+            }
+            codex_thread_store::ThreadTransitionReason::New => {
+                codex_app_server_protocol::ThreadTransitionReason::New
+            }
+        },
+        previous_thread_id: value.preparing.previous_thread_id.to_string(),
+        current_thread_id: value.preparing.current_thread_id.to_string(),
+        origin_instance_epoch: value.preparing.origin_instance_epoch,
+        initiator_client_incarnation: value.preparing.initiator_client_incarnation,
+        previous_writer: codex_app_server_protocol::ThreadWriterEvidence {
+            store_id: value.preparing.previous_writer.store_id,
+            writer_generation: value.preparing.previous_writer.writer_generation,
+        },
+        current_writer: codex_app_server_protocol::ThreadWriterEvidence {
+            store_id: value.current_writer.store_id,
+            writer_generation: value.current_writer.writer_generation,
+        },
+        status: codex_app_server_protocol::ThreadTransitionStatus::Prepared,
+    }
+}
+
+fn api_transition_preparation_from_receipt(
+    value: codex_thread_store::ThreadTransitionReceipt,
+) -> codex_app_server_protocol::ThreadTransitionPreparation {
+    codex_app_server_protocol::ThreadTransitionPreparation {
+        transition_id: value.transition_id,
+        reason: match value.reason {
+            codex_thread_store::ThreadTransitionReason::Clear => {
+                codex_app_server_protocol::ThreadTransitionReason::Clear
+            }
+            codex_thread_store::ThreadTransitionReason::New => {
+                codex_app_server_protocol::ThreadTransitionReason::New
+            }
+        },
+        previous_thread_id: value.previous.thread_id.to_string(),
+        current_thread_id: value.current.thread_id.to_string(),
+        origin_instance_epoch: value.origin_instance_epoch,
+        initiator_client_incarnation: value.initiator_client_incarnation,
+        previous_writer: codex_app_server_protocol::ThreadWriterEvidence {
+            store_id: value.previous.writer.store_id,
+            writer_generation: value.previous.writer.writer_generation,
+        },
+        current_writer: codex_app_server_protocol::ThreadWriterEvidence {
+            store_id: value.current.writer.store_id,
+            writer_generation: value.current.writer.writer_generation,
+        },
+        status: codex_app_server_protocol::ThreadTransitionStatus::Committed,
+    }
+}
+
+fn thread_transition_store_error(error: ThreadStoreError) -> JSONRPCErrorError {
+    match error {
+        ThreadStoreError::Conflict { message } | ThreadStoreError::InvalidRequest { message } => {
+            thread_transition_invalid_request(message)
+        }
+        ThreadStoreError::Unsupported { operation } => method_not_found(format!(
+            "thread transition store does not support {operation}"
+        )),
+        error => internal_error(format!("thread transition store failed: {error}")),
+    }
+}
+
+pub(super) fn thread_transition_invalid_request(reason: impl Into<String>) -> JSONRPCErrorError {
+    let reason = reason.into();
+    JSONRPCErrorError {
+        code: crate::error_code::INVALID_REQUEST_ERROR_CODE,
+        message: reason.replace('_', " "),
+        data: Some(serde_json::json!({ "reason": reason })),
     }
 }
 

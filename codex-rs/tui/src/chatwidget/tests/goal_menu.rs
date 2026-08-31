@@ -130,6 +130,7 @@ async fn goal_edit_prompt_submits_preserved_status_and_budget() {
                 crate::app_event::ThreadGoalSetMode::UpdateExisting {
                     status,
                     token_budget,
+                    ..
                 },
         }) => {
             assert_eq!(event_thread_id, thread_id);
@@ -170,6 +171,7 @@ async fn goal_edit_prompt_preserves_resumable_stopped_statuses() {
                     crate::app_event::ThreadGoalSetMode::UpdateExisting {
                         status,
                         token_budget,
+                        ..
                     },
                 ..
             }) => {
@@ -208,6 +210,7 @@ async fn goal_edit_prompt_resets_terminal_status_to_active() {
                     crate::app_event::ThreadGoalSetMode::UpdateExisting {
                         status,
                         token_budget,
+                        ..
                     },
                 ..
             }) => {
@@ -260,6 +263,8 @@ fn test_goal(
 ) -> AppThreadGoal {
     AppThreadGoal {
         thread_id: thread_id.to_string(),
+        goal_id: "goal-test".to_string(),
+        revision: 1,
         objective: "Keep improving the bare goal command until it feels calm and useful."
             .to_string(),
         status,

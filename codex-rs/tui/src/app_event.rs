@@ -13,6 +13,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use crate::inline_visualization::InlineVisualizationContext;
+use codex_app_server_protocol::AccountSlotLoginStartResponse;
+use codex_app_server_protocol::AccountSlotLogoutResponse;
 use codex_app_server_protocol::AddCreditsNudgeCreditType;
 use codex_app_server_protocol::AddCreditsNudgeEmailStatus;
 use codex_app_server_protocol::ConsumeAccountRateLimitResetCreditResponse;
@@ -24,6 +26,8 @@ use codex_app_server_protocol::MarketplaceRemoveResponse;
 use codex_app_server_protocol::MarketplaceUpgradeResponse;
 use codex_app_server_protocol::McpServerStatus;
 use codex_app_server_protocol::McpServerStatusDetail;
+use codex_app_server_protocol::PluginCommand;
+use codex_app_server_protocol::PluginCommandInvokeResponse;
 use codex_app_server_protocol::PluginInstallResponse;
 use codex_app_server_protocol::PluginListResponse;
 use codex_app_server_protocol::PluginMarketplaceEntry;
@@ -31,10 +35,13 @@ use codex_app_server_protocol::PluginReadParams;
 use codex_app_server_protocol::PluginReadResponse;
 use codex_app_server_protocol::PluginUninstallResponse;
 use codex_app_server_protocol::RequestId as AppServerRequestId;
+use codex_app_server_protocol::SessionRuntimeAccountRef;
+use codex_app_server_protocol::SessionRuntimeOperation;
 use codex_app_server_protocol::SkillsListResponse;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadGoalStatus;
 use codex_app_server_protocol::ThreadItemsListResponse;
+use codex_app_server_protocol::ThreadPresentation;
 use codex_connectors::AppInfo;
 use codex_file_search::FileMatch;
 use codex_message_history::HistoryBatchCursor;
@@ -46,6 +53,10 @@ use codex_utils_approval_presets::ApprovalPreset;
 use strum_macros::IntoStaticStr;
 use uuid::Uuid;
 
+use crate::app::account_picker::AccountControlIntent;
+use crate::app::account_picker::AccountPickerSnapshot;
+use crate::app::runtime_controls::ShutdownIntent;
+use crate::app::runtime_controls::ShutdownLookup;
 use crate::app_command::AppCommand;
 use crate::app_server_session::AppServerStartedThread;
 use crate::bottom_pane::ApprovalRequest;
@@ -65,11 +76,21 @@ use codex_protocol::models::ActivePermissionProfile;
 
 use crate::history_cell::HistoryCell;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ThreadGoalSetMode {
     ConfirmIfExists,
+    Create {
+        expected_revision: i64,
+    },
+    #[cfg_attr(not(test), allow(dead_code))]
     ReplaceExisting,
+    ReplaceExistingExact {
+        expected_goal_id: String,
+        expected_revision: i64,
+    },
     UpdateExisting {
+        expected_goal_id: String,
+        expected_revision: i64,
         status: ThreadGoalStatus,
         token_budget: Option<i64>,
     },
@@ -178,6 +199,12 @@ pub(crate) enum RateLimitRefreshOrigin {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RateLimitRequestSubject {
+    pub(crate) thread_id: ThreadId,
+    pub(crate) execution_account: Option<SessionRuntimeAccountRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum KeymapEditIntent {
     ReplaceAll,
     AddAlternate,
@@ -222,6 +249,47 @@ pub(crate) struct AgentsOverviewThreadRefresh {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, IntoStaticStr)]
 pub(crate) enum AppEvent {
+    OpenAccountPicker,
+    AccountPickerLoaded {
+        thread_id: ThreadId,
+        request_generation: u64,
+        result: Result<AccountPickerSnapshot, String>,
+    },
+    OpenAccountLoginMethods {
+        slot_id: Option<String>,
+    },
+    PrepareAccountControl {
+        intent: AccountControlIntent,
+    },
+    AccountControlPrepared {
+        thread_id: ThreadId,
+        request_generation: u64,
+        intent: AccountControlIntent,
+        result: Result<AccountPickerSnapshot, String>,
+    },
+    AccountSlotLoginStarted {
+        thread_id: ThreadId,
+        instance_epoch: String,
+        result: Result<AccountSlotLoginStartResponse, String>,
+    },
+    AccountSwitchFinished {
+        operation_id: String,
+        result: Result<SessionRuntimeOperation, String>,
+    },
+    AccountSlotLogoutFinished {
+        slot_id: String,
+        result: Result<AccountSlotLogoutResponse, String>,
+    },
+    ShutdownRuntimeLoaded {
+        thread_id: ThreadId,
+        intent: ShutdownIntent,
+        result: Result<ShutdownLookup, String>,
+    },
+    ShutdownRelinquishFinished {
+        operation_id: String,
+        result: Result<SessionRuntimeOperation, String>,
+    },
+    LogoutAfterRelease,
     /// Open the daemon-wide overview of recent and locally retained root sessions.
     OpenAgentsOverview,
     /// Update the daemon-wide overview after a background thread listing finishes.
@@ -534,6 +602,7 @@ pub(crate) enum AppEvent {
     RateLimitsLoaded {
         request_id: u64,
         origin: RateLimitRefreshOrigin,
+        subject: Option<RateLimitRequestSubject>,
         hard_stop_generation: u64,
         result: Result<GetAccountRateLimitsResponse, String>,
     },
@@ -884,6 +953,31 @@ pub(crate) enum AppEvent {
     PluginMentionsLoaded {
         cwd: PathBuf,
         plugins: Option<Vec<PluginCapabilitySummary>>,
+    },
+
+    /// Refresh the exact displayed thread's plugin command catalog.
+    RefreshPluginCommands,
+
+    PluginCommandsLoaded {
+        thread_id: ThreadId,
+        request_generation: u64,
+        result: Result<Vec<PluginCommand>, String>,
+    },
+
+    InvokePluginCommand {
+        command_id: String,
+    },
+
+    PluginCommandInvoked {
+        thread_id: ThreadId,
+        request_generation: u64,
+        command_name: String,
+        result: Result<PluginCommandInvokeResponse, String>,
+    },
+
+    UpsertThreadPresentation {
+        thread_id: ThreadId,
+        item: ThreadPresentation,
     },
 
     /// Advance the post-install plugin app-auth flow.

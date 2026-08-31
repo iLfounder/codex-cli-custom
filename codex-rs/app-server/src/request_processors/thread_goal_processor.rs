@@ -2,6 +2,7 @@ use super::thread_input::DIRECT_INPUT_TO_MULTI_AGENT_V2_SUBAGENT_ERROR;
 use super::thread_input::can_accept_direct_input;
 use super::thread_input::ensure_direct_input_allowed;
 use super::*;
+use codex_goal_extension::ExpectedGoalVersion;
 use codex_goal_extension::GoalObjectiveUpdate;
 use codex_goal_extension::GoalService;
 use codex_goal_extension::GoalServiceError;
@@ -28,6 +29,11 @@ pub(crate) struct ThreadGoalRequestProcessor {
     goal_service: Arc<GoalService>,
 }
 
+enum GoalResponseDelivery {
+    AppServer(ConnectionRequestId),
+    Caller,
+}
+
 impl ThreadGoalRequestProcessor {
     pub(crate) fn new(
         thread_manager: Arc<ThreadManager>,
@@ -52,9 +58,9 @@ impl ThreadGoalRequestProcessor {
         request_id: ConnectionRequestId,
         params: ThreadGoalSetParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        self.thread_goal_set_inner(request_id, params)
-            .await
-            .map(|()| None)
+        self.thread_goal_set_inner(params, GoalResponseDelivery::AppServer(request_id))
+            .await?;
+        Ok(None)
     }
 
     pub(crate) async fn thread_goal_get(
@@ -71,9 +77,50 @@ impl ThreadGoalRequestProcessor {
         request_id: ConnectionRequestId,
         params: ThreadGoalClearParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        self.thread_goal_clear_inner(request_id, params)
+        self.thread_goal_clear_inner(params, GoalResponseDelivery::AppServer(request_id))
+            .await?;
+        Ok(None)
+    }
+
+    pub(crate) async fn thread_goal_create(
+        &self,
+        request_id: ConnectionRequestId,
+        params: ThreadGoalCreateParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.thread_goal_create_inner(request_id, params).await?;
+        Ok(None)
+    }
+
+    pub(crate) async fn thread_goal_replace(
+        &self,
+        request_id: ConnectionRequestId,
+        params: ThreadGoalReplaceParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.thread_goal_replace_inner(request_id, params).await?;
+        Ok(None)
+    }
+
+    pub(crate) async fn plugin_goal_get(
+        &self,
+        params: ThreadGoalGetParams,
+    ) -> Result<ThreadGoalGetResponse, JSONRPCErrorError> {
+        self.thread_goal_get_inner(params).await
+    }
+
+    pub(crate) async fn plugin_goal_set(
+        &self,
+        params: ThreadGoalSetParams,
+    ) -> Result<ThreadGoalSetResponse, JSONRPCErrorError> {
+        self.thread_goal_set_inner(params, GoalResponseDelivery::Caller)
             .await
-            .map(|()| None)
+    }
+
+    pub(crate) async fn plugin_goal_clear(
+        &self,
+        params: ThreadGoalClearParams,
+    ) -> Result<ThreadGoalClearResponse, JSONRPCErrorError> {
+        self.thread_goal_clear_inner(params, GoalResponseDelivery::Caller)
+            .await
     }
 
     pub(crate) async fn emit_resume_goal_snapshot(&self, thread_id: ThreadId) {
@@ -122,9 +169,9 @@ impl ThreadGoalRequestProcessor {
 
     async fn thread_goal_set_inner(
         &self,
-        request_id: ConnectionRequestId,
         params: ThreadGoalSetParams,
-    ) -> Result<(), JSONRPCErrorError> {
+        delivery: GoalResponseDelivery,
+    ) -> Result<ThreadGoalSetResponse, JSONRPCErrorError> {
         if !self.config.features.enabled(Feature::Goals) {
             return Err(invalid_request("goals feature is disabled"));
         }
@@ -145,28 +192,69 @@ impl ThreadGoalRequestProcessor {
             let thread_state = thread_state.lock().await;
             thread_state.listener_command_tx()
         };
-        let status = params.status.map(ThreadGoalStatus::to_core);
-        let objective = params.objective.as_deref();
-
-        let outcome = self
-            .goal_service
-            .set_thread_goal(
-                &state_db,
-                GoalSetRequest {
-                    thread_id,
-                    objective: objective
-                        .map(GoalObjectiveUpdate::Set)
-                        .unwrap_or(GoalObjectiveUpdate::Keep),
-                    status,
-                    token_budget: match params.token_budget {
-                        Some(token_budget) => GoalTokenBudgetUpdate::Set(token_budget),
-                        None => GoalTokenBudgetUpdate::Keep,
-                    },
-                    max_goal_token_budget,
-                },
-            )
-            .await
-            .map_err(goal_service_error)?;
+        let expected = paired_expected_goal_version(
+            params.expected_goal_id.as_deref(),
+            params.expected_revision,
+        )?;
+        let request = GoalSetRequest {
+            thread_id,
+            objective: params
+                .objective
+                .as_deref()
+                .map(GoalObjectiveUpdate::Set)
+                .unwrap_or(GoalObjectiveUpdate::Keep),
+            status: params.status.map(ThreadGoalStatus::to_core),
+            token_budget: match params.token_budget {
+                Some(token_budget) => GoalTokenBudgetUpdate::Set(token_budget),
+                None => GoalTokenBudgetUpdate::Keep,
+            },
+            max_goal_token_budget,
+        };
+        let outcome = match expected {
+            Some(expected) => {
+                self.goal_service
+                    .set_thread_goal_exact(&state_db, request, &expected)
+                    .await
+            }
+            None => {
+                let snapshot = self
+                    .goal_service
+                    .get_thread_goal_state(&state_db, thread_id)
+                    .await
+                    .map_err(goal_service_error)?;
+                if let Some(goal_id) = snapshot.goal_id {
+                    self.goal_service
+                        .set_thread_goal_exact(
+                            &state_db,
+                            request,
+                            &ExpectedGoalVersion {
+                                goal_id,
+                                revision: snapshot.revision,
+                            },
+                        )
+                        .await
+                } else if let GoalObjectiveUpdate::Set(objective) = request.objective {
+                    self.goal_service
+                        .create_thread_goal_exact(
+                            &state_db,
+                            thread_id,
+                            snapshot.revision,
+                            objective,
+                            match request.token_budget {
+                                GoalTokenBudgetUpdate::Keep => None,
+                                GoalTokenBudgetUpdate::Set(budget) => budget,
+                            },
+                            max_goal_token_budget,
+                        )
+                        .await
+                } else {
+                    Err(GoalServiceError::InvalidRequest(format!(
+                        "cannot update goal for thread {thread_id}: no goal exists"
+                    )))
+                }
+            }
+        }
+        .map_err(goal_service_error)?;
         let goal = ThreadGoal::from(outcome.goal.clone());
 
         let persist_result = match self.thread_manager.get_thread(thread_id).await {
@@ -209,16 +297,16 @@ impl ThreadGoalRequestProcessor {
             warn!("failed to persist goal update for live thread {thread_id}: {err}");
         }
 
-        self.outgoing
-            .send_response(
-                request_id.clone(),
-                ThreadGoalSetResponse { goal: goal.clone() },
-            )
-            .await;
+        let response = ThreadGoalSetResponse { goal: goal.clone() };
+        if let GoalResponseDelivery::AppServer(request_id) = delivery {
+            self.outgoing
+                .send_response(request_id, response.clone())
+                .await;
+        }
         self.emit_thread_goal_updated_ordered(thread_id, goal, listener_command_tx)
             .await;
         outcome.apply_runtime_effects(&self.goal_service).await;
-        Ok(())
+        Ok(response)
     }
 
     async fn thread_goal_get_inner(
@@ -233,20 +321,22 @@ impl ThreadGoalRequestProcessor {
         let state_db = self
             .state_db_for_materialized_thread(thread_id, GoalAccess::Read)
             .await?;
-        let goal = self
+        let outcome = self
             .goal_service
-            .get_thread_goal(&state_db, thread_id)
+            .get_thread_goal_state(&state_db, thread_id)
             .await
-            .map_err(goal_service_error)?
-            .map(ThreadGoal::from);
-        Ok(ThreadGoalGetResponse { goal })
+            .map_err(goal_service_error)?;
+        Ok(ThreadGoalGetResponse {
+            goal: outcome.goal.map(ThreadGoal::from),
+            revision: outcome.revision,
+        })
     }
 
     async fn thread_goal_clear_inner(
         &self,
-        request_id: ConnectionRequestId,
         params: ThreadGoalClearParams,
-    ) -> Result<(), JSONRPCErrorError> {
+        delivery: GoalResponseDelivery,
+    ) -> Result<ThreadGoalClearResponse, JSONRPCErrorError> {
         if !self.config.features.enabled(Feature::Goals) {
             return Err(invalid_request("goals feature is disabled"));
         }
@@ -263,20 +353,173 @@ impl ThreadGoalRequestProcessor {
             let thread_state = thread_state.lock().await;
             thread_state.listener_command_tx()
         };
-        let cleared = self
-            .goal_service
-            .clear_thread_goal(&state_db, thread_id)
-            .await
-            .map_err(goal_service_error)?;
-
-        self.outgoing
-            .send_response(request_id, ThreadGoalClearResponse { cleared })
-            .await;
-        if cleared {
-            self.emit_thread_goal_cleared_ordered(thread_id, listener_command_tx)
+        let expected = paired_expected_goal_version(
+            params.expected_goal_id.as_deref(),
+            params.expected_revision,
+        )?;
+        let snapshot = match expected {
+            Some(expected) => Some(expected),
+            None => {
+                let snapshot = self
+                    .goal_service
+                    .get_thread_goal_state(&state_db, thread_id)
+                    .await
+                    .map_err(goal_service_error)?;
+                snapshot.goal_id.map(|goal_id| ExpectedGoalVersion {
+                    goal_id,
+                    revision: snapshot.revision,
+                })
+            }
+        };
+        let outcome = match snapshot {
+            Some(expected) => Some(
+                self.goal_service
+                    .clear_thread_goal_exact(&state_db, thread_id, &expected)
+                    .await
+                    .map_err(goal_service_error)?,
+            ),
+            None => None,
+        };
+        let response = ThreadGoalClearResponse {
+            cleared: outcome.is_some(),
+            previous_goal: outcome
+                .as_ref()
+                .map(|outcome| ThreadGoal::from(outcome.previous_goal.clone())),
+            revision: match outcome.as_ref() {
+                Some(outcome) => outcome.revision,
+                None => {
+                    self.goal_service
+                        .get_thread_goal_state(&state_db, thread_id)
+                        .await
+                        .map_err(goal_service_error)?
+                        .revision
+                }
+            },
+        };
+        if let GoalResponseDelivery::AppServer(request_id) = delivery {
+            self.outgoing
+                .send_response(request_id, response.clone())
                 .await;
         }
-        Ok(())
+        if let Some(outcome) = outcome {
+            self.emit_thread_goal_cleared_ordered(
+                thread_id,
+                ThreadGoal::from(outcome.previous_goal),
+                outcome.revision,
+                listener_command_tx,
+            )
+            .await;
+        }
+        Ok(response)
+    }
+
+    async fn thread_goal_create_inner(
+        &self,
+        request_id: ConnectionRequestId,
+        params: ThreadGoalCreateParams,
+    ) -> Result<ThreadGoalCreateResponse, JSONRPCErrorError> {
+        if !self.config.features.enabled(Feature::Goals) {
+            return Err(invalid_request("goals feature is disabled"));
+        }
+        let thread_id = parse_thread_id_for_request(&params.thread_id)?;
+        let state_db = self.state_db_for_materialized_thread(thread_id).await?;
+        self.reconcile_thread_goal_rollout(thread_id, &state_db)
+            .await?;
+        let max_goal_token_budget = self.max_goal_token_budget(thread_id).await;
+        let listener_command_tx = self.goal_listener_command_tx(thread_id).await;
+        let outcome = self
+            .goal_service
+            .create_thread_goal_exact(
+                &state_db,
+                thread_id,
+                params.expected_revision,
+                &params.objective,
+                params.token_budget,
+                max_goal_token_budget,
+            )
+            .await
+            .map_err(goal_service_error)?;
+        self.persist_goal_update(thread_id, &outcome).await;
+        let goal = ThreadGoal::from(outcome.goal.clone());
+        let response = ThreadGoalCreateResponse { goal: goal.clone() };
+        self.outgoing
+            .send_response(request_id, response.clone())
+            .await;
+        self.emit_thread_goal_updated_ordered(thread_id, goal, listener_command_tx)
+            .await;
+        outcome.apply_runtime_effects(&self.goal_service).await;
+        Ok(response)
+    }
+
+    async fn thread_goal_replace_inner(
+        &self,
+        request_id: ConnectionRequestId,
+        params: ThreadGoalReplaceParams,
+    ) -> Result<ThreadGoalReplaceResponse, JSONRPCErrorError> {
+        if !self.config.features.enabled(Feature::Goals) {
+            return Err(invalid_request("goals feature is disabled"));
+        }
+        let thread_id = parse_thread_id_for_request(&params.thread_id)?;
+        let state_db = self.state_db_for_materialized_thread(thread_id).await?;
+        self.reconcile_thread_goal_rollout(thread_id, &state_db)
+            .await?;
+        let listener_command_tx = self.goal_listener_command_tx(thread_id).await;
+        let outcome = self
+            .goal_service
+            .replace_thread_goal_exact(
+                &state_db,
+                thread_id,
+                &ExpectedGoalVersion {
+                    goal_id: params.expected_goal_id,
+                    revision: params.expected_revision,
+                },
+                &params.objective,
+                params.token_budget,
+                self.max_goal_token_budget(thread_id).await,
+            )
+            .await
+            .map_err(goal_service_error)?;
+        let previous_goal = ThreadGoal::from(outcome.previous_goal);
+        let goal = ThreadGoal::from(outcome.goal);
+        let response = ThreadGoalReplaceResponse {
+            previous_goal,
+            goal: goal.clone(),
+        };
+        self.outgoing
+            .send_response(request_id, response.clone())
+            .await;
+        self.emit_thread_goal_updated_ordered(thread_id, goal, listener_command_tx)
+            .await;
+        Ok(response)
+    }
+
+    async fn max_goal_token_budget(&self, thread_id: ThreadId) -> Option<i64> {
+        match self.thread_manager.get_thread(thread_id).await {
+            Ok(thread) => thread.config().await.max_goal_token_budget,
+            Err(_) => self.config.max_goal_token_budget,
+        }
+    }
+
+    async fn goal_listener_command_tx(
+        &self,
+        thread_id: ThreadId,
+    ) -> Option<tokio::sync::mpsc::UnboundedSender<ThreadListenerCommand>> {
+        let thread_state = self.thread_state_manager.thread_state(thread_id).await;
+        thread_state.lock().await.listener_command_tx()
+    }
+
+    async fn persist_goal_update(
+        &self,
+        thread_id: ThreadId,
+        outcome: &codex_goal_extension::GoalSetOutcome,
+    ) {
+        if let Ok(thread) = self.thread_manager.get_thread(thread_id).await
+            && let Err(err) = thread
+                .append_rollout_items(&[outcome.thread_goal_updated_item()])
+                .await
+        {
+            warn!("failed to persist goal update for live thread {thread_id}: {err}");
+        }
     }
 
     async fn state_db_for_materialized_thread(
@@ -460,10 +703,16 @@ impl ThreadGoalRequestProcessor {
     async fn emit_thread_goal_cleared_ordered(
         &self,
         thread_id: ThreadId,
+        previous_goal: ThreadGoal,
+        revision: i64,
         listener_command_tx: Option<tokio::sync::mpsc::UnboundedSender<ThreadListenerCommand>>,
     ) {
         if let Some(listener_command_tx) = listener_command_tx {
-            let command = crate::thread_state::ThreadListenerCommand::EmitThreadGoalCleared;
+            let command = crate::thread_state::ThreadListenerCommand::EmitThreadGoalCleared {
+                turn_id: None,
+                previous_goal: Some(previous_goal.clone()),
+                revision,
+            };
             if listener_command_tx.send(command).is_ok() {
                 return;
             }
@@ -475,6 +724,9 @@ impl ThreadGoalRequestProcessor {
             .send_server_notification(ServerNotification::ThreadGoalCleared(
                 ThreadGoalClearedNotification {
                     thread_id: thread_id.to_string(),
+                    turn_id: None,
+                    previous_goal: Some(previous_goal),
+                    revision,
                 },
             ))
             .await;
@@ -496,6 +748,8 @@ fn thread_settings_applied_item(
 pub(super) fn api_thread_goal_from_state(goal: codex_state::ThreadGoal) -> ThreadGoal {
     ThreadGoal {
         thread_id: goal.thread_id.to_string(),
+        goal_id: goal.goal_id,
+        revision: goal.revision,
         objective: goal.objective,
         status: api_thread_goal_status_from_state(goal.status),
         token_budget: goal.token_budget,
@@ -520,7 +774,35 @@ fn api_thread_goal_status_from_state(status: codex_state::ThreadGoalStatus) -> T
 fn goal_service_error(err: GoalServiceError) -> JSONRPCErrorError {
     match err {
         GoalServiceError::InvalidRequest(message) => invalid_request(message),
+        GoalServiceError::RevisionConflict {
+            current_goal_id,
+            current_revision,
+        } => JSONRPCErrorError {
+            code: crate::error_code::INVALID_REQUEST_ERROR_CODE,
+            message: "goal revision conflict".to_string(),
+            data: Some(serde_json::json!({
+                "reason": "goal_revision_conflict",
+                "currentGoalId": current_goal_id,
+                "currentRevision": current_revision,
+            })),
+        },
         GoalServiceError::Internal(message) => internal_error(message),
+    }
+}
+
+fn paired_expected_goal_version(
+    goal_id: Option<&str>,
+    revision: Option<i64>,
+) -> Result<Option<ExpectedGoalVersion>, JSONRPCErrorError> {
+    match (goal_id, revision) {
+        (None, None) => Ok(None),
+        (Some(goal_id), Some(revision)) if !goal_id.is_empty() => Ok(Some(ExpectedGoalVersion {
+            goal_id: goal_id.to_string(),
+            revision,
+        })),
+        _ => Err(invalid_request(
+            "expectedGoalId and expectedRevision must be provided together",
+        )),
     }
 }
 

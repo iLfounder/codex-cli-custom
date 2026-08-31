@@ -3187,6 +3187,7 @@ async fn turn_start_explicit_local_environment_updates_legacy_cwd_between_turns(
             params: TurnStartParams {
                 environments: None,
                 thread_id: thread.id.clone(),
+                expected_execution_account: None,
                 client_user_message_id: None,
                 input: vec![V2UserInput::Text {
                     text: "first turn".to_string(),
@@ -3239,6 +3240,7 @@ async fn turn_start_explicit_local_environment_updates_legacy_cwd_between_turns(
                     runtime_workspace_roots: None,
                 }]),
                 thread_id: thread.id.clone(),
+                expected_execution_account: None,
                 client_user_message_id: None,
                 input: vec![V2UserInput::Text {
                     text: "second turn".to_string(),
@@ -4461,6 +4463,7 @@ async fn direct_input_to_multi_agent_v2_subagent_is_rejected(
     let direct_steer_req = mcp
         .send_turn_steer_request(TurnSteerParams {
             thread_id: child_thread_id.clone(),
+            expected_execution_account: None,
             client_user_message_id: None,
             input: vec![V2UserInput::Text {
                 text: "direct app-server steer".to_string(),

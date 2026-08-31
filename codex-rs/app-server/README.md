@@ -192,11 +192,19 @@ Example with notification opt-out:
 - `thread/settings/update` — experimental; queue a partial update to a loaded thread’s next-turn settings without starting a turn or adding transcript items. Omitted fields leave settings unchanged; `serviceTier: null` clears the tier; deprecated `multiAgentMode` is ignored, while Ultra reasoning effort enables proactive multi-agent behavior; `sandboxPolicy` and `permissions` cannot be combined. Parent-owned Multi-Agent V2 subagents reject direct settings updates. Returns `{}` when the update is accepted and emits `thread/settings/updated` with the full effective settings only if they actually change. `turn/start` settings overrides emit the same notification when they change the stored settings.
 - `thread/memoryMode/set` — experimental; set a thread’s persisted memory eligibility to `"enabled"` or `"disabled"` for either a loaded thread or a stored rollout; returns `{}` on success.
 - `memory/reset` — experimental; clear the current `CODEX_HOME/memories` directory and reset persisted memory stage data in sqlite while preserving existing thread memory modes; returns `{}` on success.
-- `thread/goal/set` — create or update the single persisted goal for a materialized thread; returns the current goal and emits `thread/goal/updated`. Parent-owned Multi-Agent V2 subagents reject goal updates, including while unloaded.
-- `thread/goal/get` — fetch the current persisted goal for a materialized thread; returns `goal: null` when no goal exists. Available even for parent-owned Multi-Agent V2 subagents.
-- `thread/goal/clear` — clear the current persisted goal for a materialized thread; returns whether a goal was removed and emits `thread/goal/cleared` when state changes. Parent-owned Multi-Agent V2 subagents reject goal clearing, including while unloaded.
+- `thread/goal/set` — compatibility create/update surface for the single persisted goal. Supplying paired `expectedGoalId` and `expectedRevision` performs an exact CAS; omitting both preserves the legacy one-snapshot/one-CAS behavior. Parent-owned Multi-Agent V2 subagents reject goal mutations, including while unloaded.
+- `thread/goal/create` — experimental; create a goal only at the supplied empty-state `expectedRevision`; returns the versioned goal and emits `thread/goal/updated` after the response. Parent-owned Multi-Agent V2 subagents reject goal mutations, including while unloaded.
+- `thread/goal/replace` — experimental; atomically replace the identified current goal with a new active goal; requires `expectedGoalId` and `expectedRevision` and preserves omission of `tokenBudget`. Parent-owned Multi-Agent V2 subagents reject goal mutations, including while unloaded.
+- `thread/goal/get` — fetch the current persisted goal and authoritative revision; returns `goal: null` when no goal exists. Available even for parent-owned Multi-Agent V2 subagents.
+- `thread/goal/clear` — clear the current persisted goal. Paired expectations provide exact CAS; the response includes `previousGoal` and the resulting revision before `thread/goal/cleared` is emitted. Parent-owned Multi-Agent V2 subagents reject goal mutations, including while unloaded.
 - `thread/goal/updated` — notification emitted whenever a thread goal changes; includes the full current goal.
-- `thread/goal/cleared` — notification emitted whenever a thread goal is removed.
+- `thread/goal/cleared` — notification emitted whenever a thread goal is removed; includes `previousGoal`, `revision`, and nullable `turnId`.
+- `thread/transition/commit` — commit an experimental prepared clear/new transition after the initiating connection has attached the exact new thread and unsubscribed the previous thread. A successful response is terminal; `thread/transitioned` follows once for a newly committed transition.
+- `thread/transitioned` — app-global notification containing the committed old-to-new receipt. Consumers that detect an event gap must use the `sessionRuntime/list` continuity projection and fail closed when no matching committed receipt exists.
+- `pluginCommand/list` — list the enabled plugins' structured commands for one loaded thread. Commands use opaque ids, always expose a canonical `/namespace:name`, and expose a short `/name` only when it is unambiguous and does not collide with a built-in command.
+- `pluginCommand/invoke` — invoke one listed command by its opaque id. Prompt responses include the exact `executionAccount` captured with that command catalog; clients must preserve it as `expectedExecutionAccount` on the resulting `turn/start` or `turn/steer` request, and fail closed when an older server omits it. Declared MCP tool, goal, and packaged executable targets retain their respective thread, approval, sandbox, and size boundaries; clients cannot supply executable arguments, environment variables, or a working directory.
+- `thread/presentation/append` — deliver a bounded, ephemeral card, notice, or progress item to the thread's current subscribers. Presentation items are not added to model context, rollout history, or persistent storage.
+- `thread/presentation/appended` — notification sent only to current subscribers of the exact thread.
 - `thread/queue/add` — experimental; persist a user turn for automatic FIFO submission when the thread next becomes idle.
 - `thread/queue/list` — experimental; return one page of a thread's queued turns.
 - `thread/queue/update` — experimental; edit a queued turn while preserving its stable submission ID, client message ID, and position.
@@ -219,10 +227,10 @@ Example with notification opt-out:
 - `thread/backgroundTerminals/terminate` — terminate one running background terminal by app-server `processId` (experimental; requires `capabilities.experimentalApi`); returns whether a process was terminated.
 - `thread/rollback` — deprecated and will be removed soon. Drop the last N turns from the agent’s in-memory context and persist a rollback marker in the rollout so future resumes see the pruned history; returns the updated `thread` (with `turns` populated) on success. Paginated threads do not support rollback. Parent-owned Multi-Agent V2 subagents reject direct rollback requests.
 - `thread/revert` — replace a loaded paginated thread's durable history with the prefix strictly before `beforeTurnId` while preserving its thread id. The operation interrupts an active turn if needed, leaves older rollout files immutable, reloads the thread, returns updated thread metadata with empty `turns` plus pagination cursors, and emits `thread/reverted`. It does not revert local file changes. Parent-owned Multi-Agent V2 subagents reject direct revert requests.
-- `turn/start` — add user input or a named standalone function-call output to a thread and begin Codex generation; responds with the initial `turn` object and streams `turn/started`, `item/*`, and `turn/completed` notifications. For standalone outputs, provide `toolOutput` with an empty `input` array. Optional `turnTrigger` classifies who or what started a new turn and is sent as `turn_trigger` in Responses request metadata; it is ignored if the request steers an active turn. `clientUserMessageId` is optional; when supplied, the corresponding `userMessage` item echoes it as `clientId`. Experimental `runtimeWorkspaceRoots` supplies the default roots for newly resolved environment selections. Explicit `environments[].runtimeWorkspaceRoots` override that fallback with environment-native absolute paths. Prefer experimental `permissions` profile selection by id for permission overrides; the legacy `sandboxPolicy` field is still accepted but cannot be combined with `permissions`. For `collaborationMode`, `settings.developer_instructions: null` means "use built-in instructions for the selected mode". Deprecated experimental `multiAgentMode` is ignored; Ultra reasoning effort selects proactive behavior. Parent-owned Multi-Agent V2 subagents reject direct turns.
+- `turn/start` — add user input or a named standalone function-call output to a thread and begin Codex generation; responds with the initial `turn` object and streams `turn/started`, `item/*`, and `turn/completed` notifications. For standalone outputs, provide `toolOutput` with an empty `input` array. Optional `turnTrigger` classifies who or what started a new turn and is sent as `turn_trigger` in Responses request metadata; it is ignored if the request steers an active turn. `clientUserMessageId` is optional; when supplied, the corresponding `userMessage` item echoes it as `clientId`. Experimental `runtimeWorkspaceRoots` supplies the default roots for newly resolved environment selections. Explicit `environments[].runtimeWorkspaceRoots` override that fallback with environment-native absolute paths. Prefer experimental `permissions` profile selection by id for permission overrides; the legacy `sandboxPolicy` field is still accepted but cannot be combined with `permissions`. For `collaborationMode`, `settings.developer_instructions: null` means "use built-in instructions for the selected mode". Deprecated experimental `multiAgentMode` is ignored; Ultra reasoning effort selects proactive behavior. Parent-owned Multi-Agent V2 subagents reject direct turns. `expectedExecutionAccount` optionally fences submission to an exact account slot and execution generation; a mismatch is rejected before input or settings are applied.
 - `thread/inject_items` — append raw Responses API items to a loaded thread’s model-visible history without starting a turn; returns `{}` on success. Parent-owned Multi-Agent V2 subagents reject direct item injection.
 - `turn/settings/update` — experimental; publish a reviewer or model-settings patch to the exact live task identified by `threadId` and `turnId`, regardless of task kind. Model-settings updates require `step_model_switching`; reviewer-only updates do not. Returns `status: "applied"` or `status: "targetUnavailable"`, or a request error if rejected. Future-thread settings and already captured steps are unchanged. Parent-owned Multi-Agent V2 subagents reject direct settings updates.
-- `turn/steer` — add user input to an already in-flight regular turn without starting a new turn; returns the active `turnId` that accepted the input. `clientUserMessageId` is optional; when supplied, the corresponding `userMessage` item echoes it as `clientId`. Review and manual compaction turns reject `turn/steer`. Parent-owned Multi-Agent V2 subagents reject direct steering.
+- `turn/steer` — add user input to an already in-flight regular turn without starting a new turn; returns the active `turnId` that accepted the input. `clientUserMessageId` is optional; when supplied, the corresponding `userMessage` item echoes it as `clientId`. Review and manual compaction turns reject `turn/steer`. Parent-owned Multi-Agent V2 subagents reject direct steering. `expectedExecutionAccount` uses the same pre-input fence as `turn/start`.
 - `turn/interrupt` — request cancellation of an in-flight turn by `(thread_id, turn_id)`; success is an empty `{}` response and the turn finishes with `status: "interrupted"`. Also available for parent-owned Multi-Agent V2 subagents.
 - `thread/realtime/start` — start a thread-scoped realtime session (experimental); pass `outputModality: "text"` or `outputModality: "audio"` to choose model output, optionally pass `model` and `version` to override configured realtime selection for this session only, pass `includeStartupContext: false` to omit Codex's generated startup context, and optionally pass `initialItems` to seed V3 with complete role-bearing text messages at session creation. Pass `realtimeStartInstructions` and `realtimeEndInstructions` to control the developer instructions given to the backing Codex model when this session starts and ends. Version `"v1"` uses legacy Bidi `conversation.handoff.*`, `"v2"` uses the Realtime Voice API, and `"v3"` preserves V1 Codex Voice behavior while using Frameless Bidi `delegation.*`. For V3 automatic Codex text, `codexResponseHandoffMode` accepts `"thinking"` (the default; all output uses channel-less thinking appends), `"commentary"` (all output uses the commentary channel), or `"bemTags"` (the raw BEM envelope selects the API channel: BEM `analysis` and `commentary` use `commentary`, while BEM `final` and unparsable output use `speakable`). The BEM envelope remains in the appended text for the frontend model to interpret. V1 and V2 ignore this setting. For V3, pass `delegationAckFiller: false` to suppress the Realtime API's delegation acknowledgement filler or `true` to restore it; omitting the field preserves the Realtime API's default. V1 and V2 ignore `delegationAckFiller`. V3 handoffs do not prepend the legacy `"Agent Final Message"` label. Pass `clientManagedHandoffs: true` to disable automatic Codex response delivery so only the client's explicit append calls produce handoffs. Pass `codexResponsesAsItems: true` to send automatic Codex responses as realtime conversation items instead, and optionally pass `codexResponseItemPrefix` to prepend experiment instructions to those items. Returns `{}` and streams `thread/realtime/*` notifications. Omit `transport` for the websocket transport, or pass `{ "type": "webrtc", "sdp": "..." }` to create a Bidi WebRTC session from a browser-generated SDP offer; the remote answer SDP is emitted as `thread/realtime/sdp`. Conversation `version: "v2"` requests remain unsupported for WebRTC. Parent-owned Multi-Agent V2 subagents reject this request.
 - `thread/realtime/appendAudio` — append an input audio chunk to the active realtime session (experimental); returns `{}`. Parent-owned Multi-Agent V2 subagents reject this request.
@@ -354,11 +362,11 @@ snapshot and any base-user entry; a base-user entry is not required for cleanup.
 
 ### Session runtime and account control
 
-- `sessionRuntime/list` — page through sanitized full runtime snapshots, optionally filtered by one exact `threadId`. Every page carries the same `instanceEpoch` and `snapshotSequence`; its opaque `nextCursor` is also bound to that pair and a stable sort anchor. If the sequence changes between pages, the server returns a stale-cursor error and the client must restart from the first page.
+- `sessionRuntime/list` — page through sanitized full runtime snapshots, optionally filtered by one exact `threadId`. Every page carries the same `instanceEpoch` and `snapshotSequence`; its opaque `nextCursor` is also bound to that pair and a stable sort anchor. If the sequence changes between pages, the server returns a stale-cursor error and the client must restart from the first page. Capability `ananke_thread_transition_v1` announces the experimental clear/new continuity contract, and each snapshot's `continuity` projection exposes the latest committed incoming and outgoing transition for gap recovery.
 - `thread/account/switch` — request an idle next-turn account switch with an `operationId`, target slot, expected process epoch, state revision, and execution generation.
 - `thread/relinquish` — request a strict durable writer release with an `operationId`, expected process epoch, state revision, and writer generation.
 - `accountSlot/list` — page through sanitized account slots. Responses never include email addresses, tokens, credential homes, or credential paths. The opaque cursor is bound to `registryRevision` and a stable sort anchor; any intervening registry mutation makes it stale and requires a first-page restart.
-- `accountSlot/login/start` — create a server-managed private account slot when `slotId` is omitted, or retry the same failed/login-required slot when it is supplied. The response includes the sanitized slot, operation state, and an optional browser or device-code challenge.
+- `accountSlot/login/start` — create a server-managed private account slot when `slotId` is omitted, or sign in again to the supplied ready/failed/login-required slot. Every attempt uses the isolated `accounts/<slot>/runtime-<nextVersion>` credential home. SQLite's slot runtime version selects that home after restart; `account-slots.toml` is a retryable recovery projection, not runtime authority. Reauthentication succeeds only when all exact bound sessions are idle; it advances their execution generations atomically and publishes the replacement runtime to affected loaded sessions. A failed attempt leaves the prior credentials and runtime usable. The response includes the sanitized slot, operation state, and an optional browser or device-code challenge.
 - `accountSlot/changed` (notify) — emits the complete sanitized changed slot and its new `registryRevision`.
 
 The session-runtime control contract is operation-based. `thread/account/switch` and `thread/relinquish` return an operation whose status distinguishes acknowledgement (`accepted` or `running`) from terminal completion (`ready`, `released`, or `failed`). `sessionRuntime/operation/updated` publishes later operation states, while `sessionRuntime/changed` publishes a complete changed-thread snapshot with an `instanceEpoch` and monotonic `sequence`. Operation ids are idempotent only within the same process epoch and only when the normalized request fingerprint is identical; reusing an id with a different thread, action, or arguments is invalid.
@@ -441,7 +449,7 @@ Start a fresh thread when you need a new Codex conversation.
 
 Valid `personality` values are `"friendly"`, `"pragmatic"`, and `"none"`. When `"none"` is selected, the personality placeholder is replaced with an empty string.
 
-To continue a stored session, call `thread/resume` with the `thread.id` you previously recorded. The response shape matches `thread/start`. When the stored session includes persisted token usage, the server emits `thread/tokenUsage/updated` immediately after the response so clients can render restored usage before the next turn starts. You can also pass the same configuration overrides supported by `thread/start`, including `approvalsReviewer`. On cold resume, approval policy and the active permission-profile ID select a source in this order: request override, latest persisted thread setting, current configured default. The persisted profile ID is resolved through the same config and requirements path as a `permissions` override. Threads without an active profile ID use current config instead of restoring their concrete historical permissions.
+To continue a stored session, call `thread/resume` with the `thread.id` you previously recorded. The response shape matches `thread/start`. When the stored session includes persisted token usage, the server emits `thread/tokenUsage/updated` immediately after the response so clients can render restored usage before the next turn starts. You can also pass the same configuration overrides supported by `thread/start`, including `approvalsReviewer`. Experimental clients can pass `dynamicTools`; a non-empty list replaces tools restored from the rollout, including for legacy threads that did not persist them. On cold resume, approval policy and the active permission-profile ID select a source in this order: request override, latest persisted thread setting, current configured default. The persisted profile ID is resolved through the same config and requirements path as a `permissions` override. Threads without an active profile ID use current config instead of restoring their concrete historical permissions.
 
 Parent-owned Multi-Agent V2 children are an exception: `thread/resume` ignores configuration overrides and reattaches to the existing child. An unloaded child is reloaded through its actual, currently loaded parent using parent-derived configuration. If that owner-controlled reload cannot be performed, the request returns JSON-RPC error `-32600`; resume the parent first, or use `thread/read` or `thread/turns/list` to inspect the child's stored history without loading it. This policy follows the child's multi-agent runtime, including leaf workers whose models cannot delegate further.
 
@@ -892,6 +900,62 @@ Use `thread/goal/clear` to remove the current goal.
 { "method": "thread/goal/clear", "id": 30, "params": { "threadId": "thr_123" } }
 { "id": 30, "result": { "cleared": true } }
 { "method": "thread/goal/cleared", "params": { "threadId": "thr_123" } }
+```
+
+### Example: List and invoke plugin commands
+
+List commands against the exact loaded thread, then invoke the selected opaque `id`. Clients should display `canonicalName` as the stable spelling and use `shortName` only when it is present.
+
+```json
+{ "method": "pluginCommand/list", "id": 31, "params": {
+    "threadId": "thr_123",
+    "cursor": null,
+    "limit": 50
+} }
+{ "id": 31, "result": { "data": [{
+    "id": "opaque-command-id",
+    "pluginId": "example-plugin",
+    "canonicalName": "/example:inspect",
+    "shortName": "/inspect",
+    "description": "Inspect plugin status",
+    "target": { "type": "prompt" },
+    "available": true,
+    "denyReason": null
+}], "nextCursor": null } }
+
+{ "method": "pluginCommand/invoke", "id": 32, "params": {
+    "threadId": "thr_123",
+    "commandId": "opaque-command-id"
+} }
+{ "id": 32, "result": { "type": "prompt", "prompt": "Summarize plugin status." } }
+```
+
+### Example: Append ephemeral thread presentation
+
+Presentation delivery is subscriber-only and non-persistent. Reuse an item `id` when the client should update an existing card or progress row instead of adding another one.
+
+```json
+{ "method": "thread/presentation/append", "id": 33, "params": {
+    "threadId": "thr_123",
+    "item": {
+        "type": "progress",
+        "id": "relay-sync",
+        "label": "Relay sync",
+        "current": 3,
+        "total": 10
+    }
+} }
+{ "id": 33, "result": { "deliveredTo": 1 } }
+{ "method": "thread/presentation/appended", "params": {
+    "threadId": "thr_123",
+    "item": {
+        "type": "progress",
+        "id": "relay-sync",
+        "label": "Relay sync",
+        "current": 3,
+        "total": 10
+    }
+} }
 ```
 
 ### Example: Queue a follow-up user turn (experimental)
@@ -2078,7 +2142,7 @@ If the session approval policy uses `Granular` with `request_permissions: false`
 
 ### Dynamic tool calls (experimental)
 
-`dynamicTools` on `thread/start` and the corresponding `item/tool/call` request/response flow are experimental APIs. To enable them, set `initialize.params.capabilities.experimentalApi = true`.
+`dynamicTools` on `thread/start` and `thread/resume`, and the corresponding `item/tool/call` request/response flow, are experimental APIs. To enable them, set `initialize.params.capabilities.experimentalApi = true`.
 
 Each entry in `dynamicTools` is either a top-level function or a namespace containing function tools. Dynamic tool identifiers follow the same constraints as Responses tools:
 
@@ -2544,11 +2608,11 @@ Codex supports these authentication modes. The current mode is surfaced in `acco
 - `account/login/cancel` — cancel a pending managed ChatGPT login by `loginId`.
 - `account/logout` — sign out; triggers `account/updated` on success.
 - `account/updated` (notify) — emitted whenever auth mode changes (`authMode`: `apikey`, `bedrockApiKey`, `bedrockAccessKeys`, `chatgpt`, `personalAccessToken`, or `null`) and includes the current ChatGPT `planType` when available.
-- `account/rateLimits/read` — fetch ChatGPT rate limits, an optional effective monthly credit limit, whether spend control has been reached, and the earned rate-limit resets currently available, including expiry details when provided by the backend. Rate-limit updates arrive via `account/rateLimits/updated` (notify); reset-credit and backend-banner data are snapshot-only.
+- `account/rateLimits/read` — fetch ChatGPT rate limits, an optional effective monthly credit limit, whether spend control has been reached, and the earned rate-limit resets currently available, including expiry details when provided by the backend. Pass `threadId` to capture that thread's exact account runtime; the response echoes `threadId` and `executionAccount`. Omitting it preserves the legacy process-default read and returns null provenance. Rate-limit updates arrive via `account/rateLimits/updated` (notify); reset-credit and backend-banner data are snapshot-only.
 - `account/rateLimitResetCredit/consume` — consume one earned reset using a caller-provided idempotency key, optionally selecting a reset-credit ID returned by `account/rateLimits/read`.
 - `account/usage/read` — fetch ChatGPT account token-activity summary and daily buckets, or pass a valid thread UUID as `threadId` to read estimated credits, optional cost, and usage breakdowns for one thread using the app-server's active account. The optional `threadUsage` response field is absent on older servers and `null` when the billing route is unavailable.
 - `account/workspaceMessages/read` — fetch active workspace messages, including workspace notification headlines when available.
-- `account/rateLimits/updated` (notify) — emitted whenever a user's ChatGPT rate limits change. This is a sparse rolling update; merge available values into the most recent `account/rateLimits/read` response or refetch that snapshot.
+- `account/rateLimits/updated` (notify) — emitted whenever a persisted turn's ChatGPT rate limits change and its exact `threadId` and `executionAccount` provenance are available. This is a sparse rolling update; merge it only into a matching `account/rateLimits/read` response or refetch that snapshot.
   `spendControlReached` is `true` or `false` when the backend reports spend-control state; `null` means unavailable and must not clear a previously observed value in a sparse update.
 - `account/sendAddCreditsNudgeEmail` — ask ChatGPT to email the workspace owner about depleted credits or a reached usage limit.
 - `mcpServer/oauthLogin/completed` (notify) — emitted after a `mcpServer/oauth/login` flow finishes for a server; payload includes `{ name, threadId, success, error? }`.

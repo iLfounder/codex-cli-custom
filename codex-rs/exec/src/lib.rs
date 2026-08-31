@@ -2,6 +2,7 @@
 //   stdout is the final message (if any).
 // - In --json mode, stdout must be valid JSONL, one event per line.
 // For both modes, any other output must be written to stderr.
+#![recursion_limit = "256"]
 #![deny(clippy::print_stdout)]
 
 mod cli;
@@ -974,6 +975,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                     params: TurnStartParams {
                         thread_id: primary_thread_id_for_span.clone(),
                         turn_trigger: None,
+                        expected_execution_account: None,
                         client_user_message_id: None,
                         input: items.into_iter().map(Into::into).collect(),
                         tool_output: None,

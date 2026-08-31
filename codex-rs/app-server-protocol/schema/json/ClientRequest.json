@@ -901,15 +901,6 @@
       ],
       "type": "string"
     },
-    "CyberAccessProgram": {
-      "description": "Requested cyber treatment for a ChatGPT-authenticated Codex turn. Authorization and model-tier restrictions remain server-owned.",
-      "enum": [
-        "standard",
-        "daybreakBlue",
-        "daybreakRed"
-      ],
-      "type": "string"
-    },
     "DynamicToolNamespaceTool": {
       "oneOf": [
         {
@@ -1686,6 +1677,17 @@
       },
       "type": "object"
     },
+    "GetAccountRateLimitsParams": {
+      "properties": {
+        "threadId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "GetAccountTokenUsageParams": {
       "properties": {
         "threadId": {
@@ -2034,41 +2036,6 @@
             "type"
           ],
           "title": "AmazonBedrockLoginAccountParams",
-          "type": "object"
-        },
-        {
-          "description": "[UNSTABLE] Managed Amazon Bedrock AWS access key login is experimental.",
-          "properties": {
-            "accessKeyId": {
-              "type": "string"
-            },
-            "region": {
-              "type": "string"
-            },
-            "secretAccessKey": {
-              "type": "string"
-            },
-            "sessionToken": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "type": {
-              "enum": [
-                "amazonBedrockAccessKeys"
-              ],
-              "title": "AmazonBedrockAccessKeysLoginAccountParamsType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "accessKeyId",
-            "region",
-            "secretAccessKey",
-            "type"
-          ],
-          "title": "AmazonBedrockAccessKeysLoginAccountParams",
           "type": "object"
         }
       ]
@@ -2445,6 +2412,46 @@
         "pragmatic"
       ],
       "type": "string"
+    },
+    "PluginCommandInvokeParams": {
+      "properties": {
+        "commandId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "commandId",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "PluginCommandListParams": {
+      "properties": {
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "type": "object"
     },
     "PluginInstallParams": {
       "properties": {
@@ -3288,10 +3295,7 @@
         {
           "properties": {
             "call_id": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             },
             "id": {
               "type": [
@@ -3309,18 +3313,6 @@
                 }
               ]
             },
-            "name": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "namespace": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
             "output": {
               "$ref": "#/definitions/FunctionCallOutputBody"
             },
@@ -3333,6 +3325,7 @@
             }
           },
           "required": [
+            "call_id",
             "output",
             "type"
           ],
@@ -4081,6 +4074,23 @@
       ],
       "type": "object"
     },
+    "SessionRuntimeAccountRef": {
+      "properties": {
+        "accountSlotId": {
+          "type": "string"
+        },
+        "executionGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "accountSlotId",
+        "executionGeneration"
+      ],
+      "type": "object"
+    },
     "SessionRuntimeListParams": {
       "description": "Parameters for reading a revision-consistent page of session runtime snapshots.",
       "properties": {
@@ -4392,10 +4402,6 @@
         "ephemeral": {
           "type": "boolean"
         },
-        "excludeTurns": {
-          "description": "When true, return only thread metadata and live fork state without populating `thread.turns`. This is useful when the client plans to call `thread/turns/list` immediately after forking. Full-history hydration is deprecated for paginated threads; use this with `thread/turns/list` and `thread/items/list` instead.",
-          "type": "boolean"
-        },
         "lastTurnId": {
           "description": "Optional last turn id to fork through, inclusive.\n\nWhen specified, turns after `last_turn_id` are omitted from the fork. The referenced turn cannot be in progress.",
           "type": [
@@ -4454,6 +4460,19 @@
     },
     "ThreadGoalClearParams": {
       "properties": {
+        "expectedGoalId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expectedRevision": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "threadId": {
           "type": "string"
         }
@@ -4476,6 +4495,19 @@
     },
     "ThreadGoalSetParams": {
       "properties": {
+        "expectedGoalId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expectedRevision": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "objective": {
           "type": [
             "string",
@@ -4539,51 +4571,6 @@
       },
       "required": [
         "items",
-        "threadId"
-      ],
-      "type": "object"
-    },
-    "ThreadItemsListParams": {
-      "properties": {
-        "cursor": {
-          "description": "Opaque cursor to pass to the next call to continue after the last item.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "limit": {
-          "description": "Optional item page size.",
-          "format": "uint32",
-          "minimum": 0.0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "sortDirection": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/SortDirection"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Optional item pagination direction; defaults to ascending."
-        },
-        "threadId": {
-          "type": "string"
-        },
-        "turnId": {
-          "description": "Optional turn id to filter by. When omitted, returns items across the thread.",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
         "threadId"
       ],
       "type": "object"
@@ -4776,10 +4763,132 @@
       ],
       "type": "object"
     },
+    "ThreadPresentation": {
+      "oneOf": [
+        {
+          "properties": {
+            "body": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "card"
+              ],
+              "title": "CardThreadPresentationType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "body",
+            "id",
+            "title",
+            "type"
+          ],
+          "title": "CardThreadPresentation",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "level": {
+              "$ref": "#/definitions/ThreadPresentationNoticeLevel"
+            },
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "notice"
+              ],
+              "title": "NoticeThreadPresentationType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "level",
+            "message",
+            "type"
+          ],
+          "title": "NoticeThreadPresentation",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "current": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "id": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "total": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "progress"
+              ],
+              "title": "ProgressThreadPresentationType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "current",
+            "id",
+            "label",
+            "type"
+          ],
+          "title": "ProgressThreadPresentation",
+          "type": "object"
+        }
+      ]
+    },
+    "ThreadPresentationAppendParams": {
+      "properties": {
+        "item": {
+          "$ref": "#/definitions/ThreadPresentation"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "item",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "ThreadPresentationNoticeLevel": {
+      "enum": [
+        "info",
+        "success",
+        "warning",
+        "error"
+      ],
+      "type": "string"
+    },
     "ThreadReadParams": {
       "properties": {
         "includeTurns": {
-          "description": "When true, include turns and their items from rollout history. Full-history hydration is deprecated for paginated threads; prefer a metadata-only read and page with `thread/turns/list` and `thread/items/list`.",
+          "description": "When true, include turns and their items from rollout history.",
           "type": "boolean"
         },
         "threadId": {
@@ -4883,27 +4992,6 @@
             "type"
           ],
           "title": "WebrtcThreadRealtimeStartTransport",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "callId": {
-              "description": "Identifier of a realtime call already created and negotiated by the client.",
-              "type": "string"
-            },
-            "type": {
-              "enum": [
-                "existingCall"
-              ],
-              "title": "ExistingCallThreadRealtimeStartTransportType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "callId",
-            "type"
-          ],
-          "title": "ExistingCallThreadRealtimeStartTransport",
           "type": "object"
         }
       ]
@@ -5025,10 +5113,6 @@
             "null"
           ]
         },
-        "excludeTurns": {
-          "description": "When true, return only thread metadata and live-resume state without populating `thread.turns`. This is useful when the client plans to call `thread/turns/list` immediately after resuming. Full-history hydration is deprecated for paginated threads; use this with `thread/turns/list` and `thread/items/list` instead.",
-          "type": "boolean"
-        },
         "model": {
           "description": "Configuration overrides for the resumed thread, if any.",
           "type": [
@@ -5073,23 +5157,6 @@
         }
       },
       "required": [
-        "threadId"
-      ],
-      "type": "object"
-    },
-    "ThreadRevertParams": {
-      "description": "Replace a paginated thread's durable history with the prefix before one turn.\n\nThis only changes persisted conversation history. It does not revert local file changes.",
-      "properties": {
-        "beforeTurnId": {
-          "description": "Turn excluded from the replacement history, together with every later turn.",
-          "type": "string"
-        },
-        "threadId": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "beforeTurnId",
         "threadId"
       ],
       "type": "object"
@@ -5450,54 +5517,45 @@
       ],
       "type": "string"
     },
-    "ThreadTurnsListParams": {
+    "ThreadTransitionIntent": {
       "properties": {
-        "cursor": {
-          "description": "Opaque cursor to pass to the next call to continue after the last turn.",
-          "type": [
-            "string",
-            "null"
-          ]
+        "expectedInstanceEpoch": {
+          "type": "string"
         },
-        "itemsView": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/TurnItemsView"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "How much item detail to include for each returned turn; defaults to summary."
-        },
-        "limit": {
-          "description": "Optional turn page size.",
-          "format": "uint32",
+        "expectedStateRevision": {
+          "format": "uint64",
           "minimum": 0.0,
-          "type": [
-            "integer",
-            "null"
-          ]
+          "type": "integer"
         },
-        "sortDirection": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/SortDirection"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Optional turn pagination direction; defaults to descending."
+        "expectedWriter": {
+          "$ref": "#/definitions/ThreadWriterEvidence"
         },
-        "threadId": {
+        "previousThreadId": {
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/definitions/ThreadTransitionReason"
+        },
+        "transitionId": {
           "type": "string"
         }
       },
       "required": [
-        "threadId"
+        "expectedInstanceEpoch",
+        "expectedStateRevision",
+        "expectedWriter",
+        "previousThreadId",
+        "reason",
+        "transitionId"
       ],
       "type": "object"
+    },
+    "ThreadTransitionReason": {
+      "enum": [
+        "clear",
+        "new"
+      ],
+      "type": "string"
     },
     "ThreadUnarchiveParams": {
       "properties": {
@@ -5518,6 +5576,23 @@
       },
       "required": [
         "threadId"
+      ],
+      "type": "object"
+    },
+    "ThreadWriterEvidence": {
+      "properties": {
+        "storeId": {
+          "type": "string"
+        },
+        "writerGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "storeId",
+        "writerGeneration"
       ],
       "type": "object"
     },
@@ -5634,6 +5709,17 @@
           ],
           "description": "Override the reasoning effort for this turn and subsequent turns."
         },
+        "expectedExecutionAccount": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionRuntimeAccountRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Exact execution account expected by the client that produced this input."
+        },
         "input": {
           "items": {
             "$ref": "#/definitions/UserInput"
@@ -5679,13 +5765,6 @@
             "null"
           ]
         },
-        "serviceTierForTurn": {
-          "description": "Override the service tier only when this request starts a new turn. Use \"default\" for standard speed. Omitted or null inherits the thread's tier. Does not change the thread's tier or a turn being steered.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "summary": {
           "anyOf": [
             {
@@ -5699,23 +5778,6 @@
         },
         "threadId": {
           "type": "string"
-        },
-        "toolOutput": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/TurnToolOutput"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "turnTrigger": {
-          "description": "Optional source classification for the caller that starts this turn. Ignored when this request steers an already-active turn.",
-          "type": [
-            "string",
-            "null"
-          ]
         }
       },
       "required": [
@@ -5731,6 +5793,17 @@
             "string",
             "null"
           ]
+        },
+        "expectedExecutionAccount": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionRuntimeAccountRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Exact execution account expected by the client that produced this input."
         },
         "expectedTurnId": {
           "description": "Required active turn id precondition. The request fails when it does not match the currently active turn.",
@@ -5750,27 +5823,6 @@
         "expectedTurnId",
         "input",
         "threadId"
-      ],
-      "type": "object"
-    },
-    "TurnToolOutput": {
-      "properties": {
-        "name": {
-          "type": "string"
-        },
-        "namespace": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "output": {
-          "$ref": "#/definitions/FunctionCallOutputBody"
-        }
-      },
-      "required": [
-        "name",
-        "output"
       ],
       "type": "object"
     },
@@ -6475,30 +6527,6 @@
         },
         "method": {
           "enum": [
-            "thread/revert"
-          ],
-          "title": "Thread/revertRequestMethod",
-          "type": "string"
-        },
-        "params": {
-          "$ref": "#/definitions/ThreadRevertParams"
-        }
-      },
-      "required": [
-        "id",
-        "method",
-        "params"
-      ],
-      "title": "Thread/revertRequest",
-      "type": "object"
-    },
-    {
-      "properties": {
-        "id": {
-          "$ref": "#/definitions/RequestId"
-        },
-        "method": {
-          "enum": [
             "thread/list"
           ],
           "title": "Thread/listRequestMethod",
@@ -6682,54 +6710,6 @@
         "params"
       ],
       "title": "Thread/readRequest",
-      "type": "object"
-    },
-    {
-      "properties": {
-        "id": {
-          "$ref": "#/definitions/RequestId"
-        },
-        "method": {
-          "enum": [
-            "thread/turns/list"
-          ],
-          "title": "Thread/turns/listRequestMethod",
-          "type": "string"
-        },
-        "params": {
-          "$ref": "#/definitions/ThreadTurnsListParams"
-        }
-      },
-      "required": [
-        "id",
-        "method",
-        "params"
-      ],
-      "title": "Thread/turns/listRequest",
-      "type": "object"
-    },
-    {
-      "properties": {
-        "id": {
-          "$ref": "#/definitions/RequestId"
-        },
-        "method": {
-          "enum": [
-            "thread/items/list"
-          ],
-          "title": "Thread/items/listRequestMethod",
-          "type": "string"
-        },
-        "params": {
-          "$ref": "#/definitions/ThreadItemsListParams"
-        }
-      },
-      "required": [
-        "id",
-        "method",
-        "params"
-      ],
-      "title": "Thread/items/listRequest",
       "type": "object"
     },
     {
@@ -6923,6 +6903,54 @@
         "params"
       ],
       "title": "Plugin/listRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "pluginCommand/list"
+          ],
+          "title": "PluginCommand/listRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/PluginCommandListParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "PluginCommand/listRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "pluginCommand/invoke"
+          ],
+          "title": "PluginCommand/invokeRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/PluginCommandInvokeParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "PluginCommand/invokeRequest",
       "type": "object"
     },
     {
@@ -7532,6 +7560,30 @@
         },
         "method": {
           "enum": [
+            "thread/presentation/append"
+          ],
+          "title": "Thread/presentation/appendRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadPresentationAppendParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Thread/presentation/appendRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
             "turn/steer"
           ],
           "title": "Turn/steerRequestMethod",
@@ -8039,7 +8091,14 @@
           "type": "string"
         },
         "params": {
-          "type": "null"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GetAccountRateLimitsParams"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [

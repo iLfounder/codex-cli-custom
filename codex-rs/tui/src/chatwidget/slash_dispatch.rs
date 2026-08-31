@@ -325,6 +325,9 @@ impl ChatWidget {
             SlashCommand::Agents => {
                 self.app_event_tx.send(AppEvent::OpenAgentsOverview);
             }
+            SlashCommand::Account => {
+                self.app_event_tx.send(AppEvent::OpenAccountPicker);
+            }
             SlashCommand::MultiAgents => {
                 self.app_event_tx.send(AppEvent::OpenAgentPicker);
             }
@@ -1028,9 +1031,17 @@ impl ChatWidget {
         }
 
         let service_tier_commands = self.current_model_service_tier_commands();
-        let Some(command) =
-            find_slash_command(name, self.builtin_command_flags(), &service_tier_commands)
-        else {
+        let Some(command) = find_slash_command(
+            name,
+            self.builtin_command_flags(),
+            &service_tier_commands,
+            &[],
+        )
+        .or_else(|| {
+            self.bottom_pane
+                .plugin_command(name)
+                .map(SlashCommandItem::Plugin)
+        }) else {
             self.add_info_message(
                 format!(
                     r#"Unrecognized command '/{name}'. Type "/" for a list of supported commands."#
@@ -1048,6 +1059,12 @@ impl ChatWidget {
                 }
                 SlashCommandItem::ServiceTier(command) => {
                     self.handle_service_tier_command_dispatch(command);
+                    QueueDrain::Continue
+                }
+                SlashCommandItem::Plugin(command) => {
+                    self.app_event_tx.send(AppEvent::InvokePluginCommand {
+                        command_id: command.id,
+                    });
                     QueueDrain::Continue
                 }
             };
@@ -1176,6 +1193,7 @@ impl ChatWidget {
             | SlashCommand::Btw
             | SlashCommand::Keymap
             | SlashCommand::Agents
+            | SlashCommand::Account
             | SlashCommand::MultiAgents
             | SlashCommand::Permissions
             | SlashCommand::ElevateSandbox

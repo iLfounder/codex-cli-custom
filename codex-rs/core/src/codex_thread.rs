@@ -23,6 +23,7 @@ use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::WindowsSandboxLevel;
+use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::mcp::CallToolResult;
@@ -96,6 +97,7 @@ pub struct ThreadConfigSnapshot {
     pub reasoning_effort: Option<ReasoningEffort>,
     pub reasoning_summary: Option<ReasoningSummary>,
     pub personality: Option<Personality>,
+    pub dynamic_tools: Vec<DynamicToolSpec>,
     pub collaboration_mode: CollaborationMode,
     pub session_source: SessionSource,
     pub history_mode: ThreadHistoryMode,
@@ -259,6 +261,26 @@ impl CodexThread {
         self.session
             .switch_execution_account(expected, target, services)
             .await
+    }
+
+    pub(crate) async fn prepare_execution_account_replacement(
+        &self,
+        expected: codex_protocol::protocol::ExecutionAccountBinding,
+        target: Arc<crate::execution_account::ExecutionAccountContext>,
+        services: crate::execution_account::ExecutionAccountServices,
+    ) -> Result<
+        crate::session::session::PreparedExecutionAccountReplacement,
+        crate::execution_account::ExecutionAccountSwitchError,
+    > {
+        self.session
+            .prepare_execution_account_replacement(expected, target, services)
+            .await
+    }
+
+    pub(crate) async fn publish_execution_account_replacement(
+        replacement: crate::session::session::PreparedExecutionAccountReplacement,
+    ) {
+        crate::session::session::Session::publish_execution_account_replacement(replacement).await;
     }
 
     /// Returns extension-owned data attached to this thread runtime.
@@ -973,6 +995,38 @@ impl CodexThread {
                 /*requested_timeout*/ None, /*wait_for_server*/ true,
             )
             .await
+    }
+
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "plugin command admission and execution control share one transition fence"
+    )]
+    pub async fn execute_plugin_executable(
+        &self,
+        package_root: codex_utils_absolute_path::AbsolutePathBuf,
+        executable: codex_utils_absolute_path::AbsolutePathBuf,
+        argv: Vec<String>,
+    ) -> Result<crate::PluginExecutableOutput, String> {
+        let transition = self.session.execution_runtime_transition_lock.lock().await;
+        if self.session.execution_control_is_closing() {
+            return Err("thread runtime is closing".to_string());
+        }
+        if self.session.active_turn.lock().await.is_some() {
+            return Err("thread is busy".to_string());
+        }
+        let turn_context = self.session.new_default_turn().await;
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        self.session
+            .spawn_task(
+                turn_context,
+                Vec::new(),
+                crate::tasks::PluginExecutableTask::new(package_root, executable, argv, result_tx),
+            )
+            .await;
+        drop(transition);
+        result_rx
+            .await
+            .map_err(|_| "plugin executable task ended without a result".to_string())?
     }
 
     pub fn enabled(&self, feature: Feature) -> bool {

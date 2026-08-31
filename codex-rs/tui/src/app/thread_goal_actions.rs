@@ -137,7 +137,11 @@ impl App {
         mode: ThreadGoalSetMode,
     ) {
         let codex_home = app_server.codex_home_path(&self.config.codex_home);
-        let mode = if matches!(mode, ThreadGoalSetMode::ConfirmIfExists) {
+        let mode = if matches!(
+            mode,
+            ThreadGoalSetMode::ConfirmIfExists | ThreadGoalSetMode::ReplaceExisting
+        ) {
+            let confirm = matches!(mode, ThreadGoalSetMode::ConfirmIfExists);
             let result = app_server.thread_goal_get(thread_id).await;
             if self.current_displayed_thread_id() != Some(thread_id) {
                 return;
@@ -145,12 +149,22 @@ impl App {
 
             match result {
                 Ok(response) => match response.goal.as_ref() {
-                    Some(goal) if should_confirm_before_replacing_goal(goal) => {
-                        self.show_replace_thread_goal_confirmation(thread_id, draft);
+                    Some(goal) if confirm && should_confirm_before_replacing_goal(goal) => {
+                        self.show_replace_thread_goal_confirmation(
+                            thread_id,
+                            draft,
+                            goal.goal_id.clone(),
+                            goal.revision,
+                        );
                         return;
                     }
-                    Some(_) => ThreadGoalSetMode::ReplaceExisting,
-                    None => mode,
+                    Some(goal) => ThreadGoalSetMode::ReplaceExistingExact {
+                        expected_goal_id: goal.goal_id.clone(),
+                        expected_revision: goal.revision,
+                    },
+                    None => ThreadGoalSetMode::Create {
+                        expected_revision: response.revision,
+                    },
                 },
                 Err(err) => {
                     self.chat_widget
@@ -178,34 +192,59 @@ impl App {
             }
         };
 
-        let replacing_goal = matches!(mode, ThreadGoalSetMode::ReplaceExisting);
-        if replacing_goal {
-            let result = app_server.thread_goal_clear(thread_id).await;
-
-            if let Err(err) = result {
-                cleanup_materialized_goal_files(app_server, output_dir).await;
-                if self.current_displayed_thread_id() != Some(thread_id) {
-                    return;
-                }
-                self.chat_widget
-                    .add_error_message(thread_goal_error_message("replace", &err));
-                return;
-            }
-        }
-
-        let (status, token_budget) = match mode {
-            ThreadGoalSetMode::ConfirmIfExists | ThreadGoalSetMode::ReplaceExisting => {
-                (ThreadGoalStatus::Active, None)
-            }
+        let replacing_goal = matches!(mode, ThreadGoalSetMode::ReplaceExistingExact { .. });
+        let (status, token_budget) = match &mode {
+            ThreadGoalSetMode::ConfirmIfExists
+            | ThreadGoalSetMode::ReplaceExisting
+            | ThreadGoalSetMode::Create { .. }
+            | ThreadGoalSetMode::ReplaceExistingExact { .. } => (ThreadGoalStatus::Active, None),
             ThreadGoalSetMode::UpdateExisting {
                 status,
                 token_budget,
-            } => (status, Some(token_budget)),
+                ..
+            } => (*status, Some(*token_budget)),
         };
-
-        let result = app_server
-            .thread_goal_set(thread_id, Some(objective), Some(status), token_budget)
-            .await;
+        let result = match mode {
+            ThreadGoalSetMode::Create { expected_revision } => app_server
+                .thread_goal_create(
+                    thread_id,
+                    expected_revision,
+                    objective,
+                    /*token_budget*/ None,
+                )
+                .await
+                .map(|response| response.goal),
+            ThreadGoalSetMode::ReplaceExistingExact {
+                expected_goal_id,
+                expected_revision,
+            } => app_server
+                .thread_goal_replace(
+                    thread_id,
+                    expected_goal_id,
+                    expected_revision,
+                    objective,
+                    /*token_budget*/ None,
+                )
+                .await
+                .map(|response| response.goal),
+            ThreadGoalSetMode::UpdateExisting {
+                expected_goal_id,
+                expected_revision,
+                ..
+            } => app_server
+                .thread_goal_set(
+                    thread_id,
+                    Some(objective),
+                    Some(status),
+                    token_budget,
+                    Some((&expected_goal_id, expected_revision)),
+                )
+                .await
+                .map(|response| response.goal),
+            ThreadGoalSetMode::ConfirmIfExists | ThreadGoalSetMode::ReplaceExisting => {
+                unreachable!("goal lookup resolves set mode")
+            }
+        };
 
         match result {
             Ok(response) => {
@@ -213,8 +252,8 @@ impl App {
                     return;
                 }
                 self.chat_widget.add_info_message(
-                    format!("Goal {}", goal_status_label(response.goal.status)),
-                    Some(goal_usage_summary(&response.goal)),
+                    format!("Goal {}", goal_status_label(response.status)),
+                    Some(goal_usage_summary(&response)),
                 );
                 self.chat_widget.maybe_send_next_queued_input();
             }
@@ -236,14 +275,24 @@ impl App {
         thread_id: ThreadId,
         status: ThreadGoalStatus,
     ) {
-        let result = app_server
-            .thread_goal_set(
-                thread_id,
-                /*objective*/ None,
-                Some(status),
-                /*token_budget*/ None,
-            )
-            .await;
+        let snapshot = app_server.thread_goal_get(thread_id).await;
+        let result = match snapshot {
+            Ok(response) => match response.goal {
+                Some(goal) => {
+                    app_server
+                        .thread_goal_set(
+                            thread_id,
+                            /*objective*/ None,
+                            Some(status),
+                            /*token_budget*/ None,
+                            Some((&goal.goal_id, goal.revision)),
+                        )
+                        .await
+                }
+                None => return,
+            },
+            Err(err) => Err(err),
+        };
         if self.current_displayed_thread_id() != Some(thread_id) {
             return;
         }
@@ -264,7 +313,22 @@ impl App {
         app_server: &mut AppServerSession,
         thread_id: ThreadId,
     ) {
-        let result = app_server.thread_goal_clear(thread_id).await;
+        let snapshot = app_server.thread_goal_get(thread_id).await;
+        let result = match snapshot {
+            Ok(response) => match response.goal {
+                Some(goal) => {
+                    app_server
+                        .thread_goal_clear(thread_id, Some((&goal.goal_id, goal.revision)))
+                        .await
+                }
+                None => {
+                    app_server
+                        .thread_goal_clear(thread_id, /*expected_goal*/ None)
+                        .await
+                }
+            },
+            Err(err) => Err(err),
+        };
         if self.current_displayed_thread_id() != Some(thread_id) {
             return;
         }
@@ -291,6 +355,8 @@ impl App {
         &mut self,
         thread_id: ThreadId,
         draft: goal_files::GoalDraft,
+        expected_goal_id: String,
+        expected_revision: i64,
     ) {
         let objective = draft.objective.clone();
         let replace_draft = draft;
@@ -298,7 +364,10 @@ impl App {
             tx.send(AppEvent::SetThreadGoalDraft {
                 thread_id,
                 draft: replace_draft.clone(),
-                mode: ThreadGoalSetMode::ReplaceExisting,
+                mode: ThreadGoalSetMode::ReplaceExistingExact {
+                    expected_goal_id: expected_goal_id.clone(),
+                    expected_revision,
+                },
             });
         })];
         let items = vec![
@@ -456,6 +525,8 @@ mod tests {
     fn test_goal(status: ThreadGoalStatus) -> ThreadGoal {
         ThreadGoal {
             thread_id: ThreadId::new().to_string(),
+            goal_id: "goal-test".to_string(),
+            revision: 1,
             objective: "Finish the thing.".to_string(),
             status,
             token_budget: None,

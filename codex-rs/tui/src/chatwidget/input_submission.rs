@@ -107,13 +107,24 @@ impl ChatWidget {
         .1
     }
 
-    fn submit_user_message_with_history_and_shell_escape_policy(
+    pub(super) fn submit_user_message_with_history_and_shell_escape_policy(
         &mut self,
         user_message: UserMessage,
         history_record: UserMessageHistoryRecord,
         shell_escape_policy: ShellEscapePolicy,
     ) -> (bool, Option<AppCommand>) {
         if self.misalignment_policy_violation {
+            return (false, None);
+        }
+        if history_record.has_account_conflict() {
+            self.add_error_message(
+                "Plugin prompts captured under different execution accounts cannot be combined."
+                    .to_string(),
+            );
+            self.restore_user_message_to_composer(user_message_for_restore(
+                user_message,
+                &history_record,
+            ));
             return (false, None);
         }
         if self.input_queue.rate_limit_recovery_pending {
@@ -365,8 +376,10 @@ impl ChatWidget {
             .filter(|_| self.current_model_supports_personality());
         let service_tier = self.service_tier_update_for_core();
         let active_permission_profile = self.config.permissions.active_permission_profile();
+        let expected_execution_account = history_record.expected_account().cloned();
         let op = AppCommand::user_turn(
             items,
+            expected_execution_account,
             self.config.cwd.to_path_buf(),
             AskForApproval::from(self.config.permissions.approval_policy.value()),
             active_permission_profile,
@@ -432,9 +445,15 @@ impl ChatWidget {
             UserMessageHistoryRecord::Override(history) if !history.text.is_empty() => {
                 Some((&history.text, history.text_elements.as_slice()))
             }
-            UserMessageHistoryRecord::UserMessageText | UserMessageHistoryRecord::Override(_) => {
-                None
+            UserMessageHistoryRecord::PluginPrompt {
+                history: Some(history),
+                ..
+            } if !history.text.is_empty() => {
+                Some((&history.text, history.text_elements.as_slice()))
             }
+            UserMessageHistoryRecord::UserMessageText
+            | UserMessageHistoryRecord::Override(_)
+            | UserMessageHistoryRecord::PluginPrompt { .. } => None,
         };
         if let Some((text, elements)) = history {
             self.append_message_history_entry(encode_history_mentions_at_elements(

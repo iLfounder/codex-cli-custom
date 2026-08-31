@@ -660,6 +660,7 @@ impl App {
             }
             AppCommand::UserTurn {
                 items,
+                expected_execution_account,
                 cwd,
                 approval_policy,
                 approvals_reviewer,
@@ -672,13 +673,29 @@ impl App {
                 collaboration_mode,
                 personality,
             } => {
+                if app_server.has_ambiguous_thread_transition_from(thread_id) {
+                    let message = "Input is paused while the thread transition is being resolved. Retry /new to continue.";
+                    if self.chat_widget.enqueue_rejected_steer()
+                        || !self
+                            .chat_widget
+                            .handle_turn_start_rejection(message.to_string())
+                    {
+                        self.chat_widget.add_error_message(message.to_string());
+                    }
+                    return Ok(true);
+                }
                 let mut should_start_turn = true;
                 if let Some(turn_id) = self.active_turn_id_for_thread(thread_id).await {
                     let mut steer_turn_id = turn_id;
                     let mut retried_after_turn_mismatch = false;
                     loop {
                         match app_server
-                            .turn_steer(thread_id, steer_turn_id.clone(), items.to_vec())
+                            .turn_steer(
+                                thread_id,
+                                steer_turn_id.clone(),
+                                items.to_vec(),
+                                expected_execution_account.clone(),
+                            )
                             .await
                         {
                             Ok(_) => return Ok(true),
@@ -752,6 +769,7 @@ impl App {
                         .turn_start(
                             thread_id,
                             items.to_vec(),
+                            expected_execution_account.clone(),
                             cwd.clone(),
                             *approval_policy,
                             approvals_reviewer,
@@ -1376,6 +1394,7 @@ impl App {
         self.chat_widget
             .set_initial_user_message_submit_suppressed(/*suppressed*/ false);
         self.chat_widget.submit_initial_user_message_if_pending();
+        self.app_event_tx.send(AppEvent::RefreshPluginCommands);
         Ok(())
     }
 
@@ -1528,7 +1547,7 @@ impl App {
     /// thread has died and we should fail over to the primary thread.
     ///
     /// A user-requested shutdown (`ExitMode::ShutdownFirst`) sets
-    /// `pending_shutdown_exit_thread_id`; matching shutdown completions are ignored
+    /// `pending_shutdown`; matching shutdown completions are ignored
     /// here so Ctrl+C-like exits don't accidentally resurrect the main thread.
     ///
     /// Failover is only eligible when all of these are true:
@@ -1544,7 +1563,11 @@ impl App {
         }
         let active_thread_id = self.active_thread_id?;
         let primary_thread_id = self.primary_thread_id?;
-        if self.pending_shutdown_exit_thread_id == Some(active_thread_id) {
+        if self
+            .pending_shutdown
+            .as_ref()
+            .is_some_and(|pending| pending.thread_id == active_thread_id)
+        {
             return None;
         }
         (active_thread_id != primary_thread_id).then_some((active_thread_id, primary_thread_id))
@@ -1789,15 +1812,6 @@ impl App {
         app_server: &mut AppServerSession,
         event: ThreadBufferedEvent,
     ) -> Result<()> {
-        // Capture this before any potential thread switch: we only want to clear
-        // the exit marker when the currently active thread acknowledges shutdown.
-        let pending_shutdown_exit_completed = matches!(
-            &event,
-            ThreadBufferedEvent::Notification(notification)
-                if matches!(notification.as_ref(), ServerNotification::ThreadClosed(_))
-        ) && self.pending_shutdown_exit_thread_id
-            == self.active_thread_id;
-
         // Processing order matters:
         //
         // 1. handle unexpected non-primary shutdown failover first;

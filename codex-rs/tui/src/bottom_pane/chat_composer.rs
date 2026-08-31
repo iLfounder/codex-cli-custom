@@ -277,6 +277,7 @@ use super::prompt_args::parse_slash_name;
 use super::skill_popup::MentionItem;
 use super::skill_popup::SkillPopup;
 use super::slash_commands::BuiltinCommandFlags;
+use super::slash_commands::PluginSlashCommand;
 use super::slash_commands::ServiceTierCommand;
 use super::slash_commands::SlashCommandItem;
 use crate::bottom_pane::paste_burst::FlushResult;
@@ -385,6 +386,7 @@ pub enum InputResult {
     Command(SlashCommand),
     /// A bare model service-tier command parsed by the composer.
     ServiceTierCommand(ServiceTierCommand),
+    PluginCommand(PluginSlashCommand),
     /// An inline slash command and its trimmed argument text.
     ///
     /// The `TextElement` ranges are rebased into the argument string, while any pending local
@@ -422,6 +424,7 @@ fn parent_owned_command_is_allowed(command: SlashCommand, args: &str) -> bool {
                 | SlashCommand::Quit
                 | SlashCommand::Exit
                 | SlashCommand::Logout
+                | SlashCommand::Account
                 | SlashCommand::Copy
                 | SlashCommand::Raw
                 | SlashCommand::Diff
@@ -536,6 +539,7 @@ pub(crate) struct ChatComposer {
     token_activity_command_enabled: bool,
     service_tier_commands_enabled: bool,
     service_tier_commands: Vec<ServiceTierCommand>,
+    plugin_commands: Vec<PluginSlashCommand>,
     mentions_v2_enabled: bool,
     goal_command_enabled: bool,
     personality_command_enabled: bool,
@@ -592,6 +596,7 @@ impl ChatComposer {
             self.draft.is_bash_mode,
             self.builtin_command_flags(),
             &self.service_tier_commands,
+            &self.plugin_commands,
         )
     }
 
@@ -711,6 +716,7 @@ impl ChatComposer {
             token_activity_command_enabled: false,
             service_tier_commands_enabled: false,
             service_tier_commands: Vec::new(),
+            plugin_commands: Vec::new(),
             mentions_v2_enabled: false,
             goal_command_enabled: false,
             personality_command_enabled: false,
@@ -913,6 +919,18 @@ impl ChatComposer {
     pub fn set_service_tier_commands(&mut self, commands: Vec<ServiceTierCommand>) {
         self.service_tier_commands = commands;
         self.sync_popups();
+    }
+
+    pub(crate) fn set_plugin_commands(&mut self, commands: Vec<PluginSlashCommand>) {
+        self.plugin_commands = commands;
+        self.sync_popups();
+    }
+
+    pub(crate) fn plugin_command(&self, name: &str) -> Option<PluginSlashCommand> {
+        self.plugin_commands
+            .iter()
+            .find(|command| command.name == name)
+            .cloned()
     }
 
     pub fn set_goal_command_enabled(&mut self, enabled: bool) {
@@ -3166,6 +3184,7 @@ impl ChatComposer {
                 | InputResult::Queued { .. }
                 | InputResult::Command(_)
                 | InputResult::ServiceTierCommand(_)
+                | InputResult::PluginCommand(_)
                 | InputResult::CommandWithArgs(_, _, _)
         ) {
             self.vim_history = VimHistory::default();
@@ -3375,6 +3394,7 @@ impl ChatComposer {
         Some(match command {
             SlashCommandItem::Builtin(cmd) => InputResult::Command(cmd),
             SlashCommandItem::ServiceTier(command) => InputResult::ServiceTierCommand(command),
+            SlashCommandItem::Plugin(command) => InputResult::PluginCommand(command),
         })
     }
 
@@ -3434,6 +3454,13 @@ impl ChatComposer {
     }
 
     fn reject_slash_command_if_unavailable(&self, command: &SlashCommandItem) -> bool {
+        if let Some(reason) = command.unavailable_reason() {
+            let message = format!("'/{}' is unavailable: {reason}", command.command());
+            self.app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+                history_cell::new_error_event(message),
+            )));
+            return true;
+        }
         if !self.is_task_running || command.available_during_task() {
             return false;
         }
@@ -9475,6 +9502,9 @@ mod tests {
                 Some(CommandItem::ServiceTier(command)) => {
                     panic!("expected model command, got service tier {command:?}")
                 }
+                Some(CommandItem::Plugin(command)) => {
+                    panic!("expected model command, got plugin command {command:?}")
+                }
                 None => panic!("no selected command for '/mo'"),
             },
             _ => panic!("slash popup not active after typing '/mo'"),
@@ -9557,6 +9587,9 @@ mod tests {
                 Some(CommandItem::ServiceTier(command)) => {
                     panic!("expected resume command, got service tier {command:?}")
                 }
+                Some(CommandItem::Plugin(command)) => {
+                    panic!("expected resume command, got plugin command {command:?}")
+                }
                 None => panic!("no selected command for '/res'"),
             },
             _ => panic!("slash popup not active after typing '/res'"),
@@ -9610,6 +9643,9 @@ mod tests {
                 }
                 Some(CommandItem::ServiceTier(command)) => {
                     panic!("expected pets command, got service tier {command:?}")
+                }
+                Some(CommandItem::Plugin(command)) => {
+                    panic!("expected pets command, got plugin command {command:?}")
                 }
                 None => panic!("no selected command for '/pet'"),
             },
@@ -9665,6 +9701,9 @@ mod tests {
                 Some(CommandItem::ServiceTier(command)) => {
                     panic!("expected btw command, got service tier {command:?}")
                 }
+                Some(CommandItem::Plugin(command)) => {
+                    panic!("expected btw command, got plugin command {command:?}")
+                }
                 None => panic!("no selected command for '/bt'"),
             },
             _ => panic!("slash popup not active after typing '/bt'"),
@@ -9718,6 +9757,9 @@ mod tests {
                 }
                 Some(CommandItem::ServiceTier(command)) => {
                     panic!("expected side command, got service tier {command:?}")
+                }
+                Some(CommandItem::Plugin(command)) => {
+                    panic!("expected side command, got plugin command {command:?}")
                 }
                 None => panic!("no selected command for '/si'"),
             },
@@ -9816,6 +9858,9 @@ mod tests {
             }
             InputResult::ServiceTierCommand(command) => {
                 panic!("expected init command, got service tier {command:?}")
+            }
+            InputResult::PluginCommand(command) => {
+                panic!("expected init command, got plugin command {command:?}")
             }
             InputResult::Submitted { text, .. } => {
                 panic!("expected command dispatch, but composer submitted literal text: {text}")
@@ -10327,6 +10372,9 @@ mod tests {
             InputResult::ServiceTierCommand(command) => {
                 panic!("expected diff command, got service tier {command:?}")
             }
+            InputResult::PluginCommand(command) => {
+                panic!("expected diff command, got plugin command {command:?}")
+            }
             InputResult::Submitted { text, .. } => {
                 panic!("expected command dispatch after Tab completion, got literal submit: {text}")
             }
@@ -10526,6 +10574,9 @@ mod tests {
             }
             InputResult::ServiceTierCommand(command) => {
                 panic!("expected mention command, got service tier {command:?}")
+            }
+            InputResult::PluginCommand(command) => {
+                panic!("expected mention command, got plugin command {command:?}")
             }
             InputResult::Submitted { text, .. } => {
                 panic!("expected command dispatch, but composer submitted literal text: {text}")

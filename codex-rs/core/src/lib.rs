@@ -48,6 +48,12 @@ pub use codex_thread::GuardianAuthorizationVersion;
 pub use codex_thread::GuardianRootMessage;
 pub use codex_thread::GuardianRootSnapshot;
 pub use codex_thread::ThreadConfigSnapshot;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginExecutableOutput {
+    pub exit_code: Option<i32>,
+    pub output: String,
+    pub timed_out: bool,
+}
 pub use session::turn_context::TurnContext;
 mod agent;
 mod agent_communication;

@@ -93,6 +93,9 @@ impl App {
         app_server_client: &AppServerSession,
         notification: ServerNotification,
     ) {
+        // Keep native dynamic-tool status and hidden-helper routing ahead of account controls.
+        // These notifications are consumed by their owning temporary thread and must not leak
+        // into visible thread history or agent overview state.
         if let ServerNotification::ThreadStatusChanged(status) = &notification {
             let _ = self.dynamic_tool_status_updates.send(status.clone());
         }
@@ -122,6 +125,76 @@ impl App {
             return;
         }
 
+        // Account/runtime operations are handled before normal thread routing.  The operation
+        // handlers enforce instance-epoch and state-revision fencing, so stale notifications are
+        // ignored without mutating the active account UI.
+        match &notification {
+            ServerNotification::SessionRuntimeOperationUpdated(update)
+                if (self.handle_shutdown_operation(
+                    Some(&update.instance_epoch),
+                    &update.operation,
+                ) || self.handle_account_login_operation(
+                    app_server_client,
+                    &update.instance_epoch,
+                    &update.operation,
+                ) || self.handle_account_switch_operation(
+                    app_server_client,
+                    Some(&update.instance_epoch),
+                    &update.operation,
+                )) =>
+            {
+                return;
+            }
+            ServerNotification::SessionRuntimeChanged(update) => {
+                let previous_rate_limit_subject = self.current_rate_limit_request_subject();
+                self.handle_account_runtime_changed(
+                    update.instance_epoch.clone(),
+                    update.snapshot.clone(),
+                );
+                let current_rate_limit_subject = self.current_rate_limit_request_subject();
+                if previous_rate_limit_subject
+                    .as_ref()
+                    .is_some_and(|previous| current_rate_limit_subject.as_ref() != Some(previous))
+                {
+                    self.invalidate_rate_limit_subject();
+                }
+                if update.snapshot.account.switch_state
+                    == codex_app_server_protocol::SessionRuntimeAccountSwitchState::Stable
+                    && ThreadId::from_string(&update.snapshot.thread_id).is_ok_and(|thread_id| {
+                        self.current_displayed_thread_id() == Some(thread_id)
+                    })
+                {
+                    self.refresh_plugin_commands(app_server_client);
+                }
+            }
+            ServerNotification::AccountSlotChanged(update) => {
+                self.handle_account_slot_changed(update.registry_revision, update.slot.clone());
+                return;
+            }
+            ServerNotification::ThreadClosed(update)
+                if self.handle_pending_shutdown_thread_closed(&update.thread_id) =>
+            {
+                return;
+            }
+            ServerNotification::ItemCompleted(update) => {
+                self.handle_dynamic_thread_control_completed(update);
+            }
+            ServerNotification::TurnCompleted(update) => {
+                self.handle_dynamic_thread_control_turn_completed(update);
+            }
+            ServerNotification::ThreadPresentationAppended(update) => {
+                if let Ok(thread_id) = ThreadId::from_string(&update.thread_id)
+                    && self.current_displayed_thread_id() == Some(thread_id)
+                {
+                    self.app_event_tx.send(AppEvent::UpsertThreadPresentation {
+                        thread_id,
+                        item: update.item.clone(),
+                    });
+                }
+                return;
+            }
+            _ => {}
+        }
         if let ServerNotification::ThreadStarted(started) = &notification
             && let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id, ..
@@ -184,6 +257,21 @@ impl App {
                 self.refresh_mcp_startup_expected_servers_from_config();
             }
             ServerNotification::AccountRateLimitsUpdated(notification) => {
+                let notification_subject = notification
+                    .thread_id
+                    .as_deref()
+                    .and_then(|thread_id| ThreadId::from_string(thread_id).ok())
+                    .zip(notification.execution_account.as_ref());
+                let accepted = notification_subject.is_some_and(|(thread_id, account)| {
+                    self.current_rate_limit_request_subject()
+                        .is_some_and(|current| {
+                            current.thread_id == thread_id
+                                && current.execution_account.as_ref() == Some(account)
+                        })
+                });
+                if !accepted {
+                    return;
+                }
                 let workspace_hard_stop = matches!(
                     notification.rate_limits.rate_limit_reached_type,
                     Some(
@@ -445,6 +533,12 @@ impl App {
             {
                 tracing::warn!("{err}");
             }
+            return;
+        }
+        if self
+            .handle_dynamic_thread_control_request(app_server_client, &request)
+            .await
+        {
             return;
         }
         if thread_id.is_some()

@@ -673,6 +673,7 @@ mod thread_processor_behavior_tests {
             base_instructions: None,
             developer_instructions: None,
             personality: None,
+            dynamic_tools: None,
             exclude_turns: false,
             initial_turns_page: None,
         };
@@ -692,6 +693,7 @@ mod thread_processor_behavior_tests {
             reasoning_effort: None,
             reasoning_summary: None,
             personality: None,
+            dynamic_tools: Vec::new(),
             collaboration_mode: CollaborationMode {
                 mode: ModeKind::Default,
                 settings: Settings {
@@ -1360,6 +1362,168 @@ mod thread_processor_behavior_tests {
                 .is_none()
         );
         assert!(!manager.has_subscribers(thread_id).await);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn transition_initiator_disconnect_releases_mutation_fence() -> Result<()> {
+        let manager = ThreadStateManager::new();
+        let thread_id = ThreadId::new();
+        let connection = ConnectionId(1);
+        manager
+            .connection_initialized(connection, ConnectionCapabilities::default())
+            .await;
+        manager
+            .try_ensure_connection_subscribed(
+                thread_id, connection, /*experimental_raw_events*/ false,
+            )
+            .await
+            .expect("connection should be subscribed");
+
+        manager
+            .reserve_thread_transition(thread_id, connection, "transition-1".to_string())
+            .await
+            .expect("transition should reserve the thread");
+        assert!(
+            manager
+                .acquire_thread_mutation_permit(thread_id)
+                .await
+                .is_err()
+        );
+
+        manager.remove_connection(connection).await;
+        let permit = manager
+            .acquire_thread_mutation_permit(thread_id)
+            .await
+            .expect("disconnect should release the transition fence");
+        drop(permit);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn exact_transition_retry_can_release_the_original_mutation_fence() -> Result<()> {
+        let manager = ThreadStateManager::new();
+        let thread_id = ThreadId::new();
+        let connection = ConnectionId(1);
+        manager
+            .connection_initialized(connection, ConnectionCapabilities::default())
+            .await;
+        manager
+            .try_ensure_connection_subscribed(
+                thread_id, connection, /*experimental_raw_events*/ false,
+            )
+            .await
+            .expect("connection should be subscribed");
+
+        let first_incarnation = manager
+            .reserve_thread_transition(thread_id, connection, "transition-1".to_string())
+            .await
+            .expect("transition should reserve the thread");
+        let retry_incarnation = manager
+            .reserve_thread_transition(thread_id, connection, "transition-1".to_string())
+            .await
+            .expect("exact retry should reuse the transition reservation");
+        assert_eq!(retry_incarnation, first_incarnation);
+
+        manager
+            .release_thread_transition(thread_id, "transition-1")
+            .await;
+        let permit = manager
+            .acquire_thread_mutation_permit(thread_id)
+            .await
+            .expect("failed retry cleanup should release the original fence");
+        drop(permit);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn transition_commit_can_fence_current_thread_mutations() -> Result<()> {
+        let manager = ThreadStateManager::new();
+        let current_thread_id = ThreadId::new();
+        let connection = ConnectionId(1);
+        manager
+            .connection_initialized(connection, ConnectionCapabilities::default())
+            .await;
+        manager
+            .try_ensure_connection_subscribed(
+                current_thread_id,
+                connection,
+                /*experimental_raw_events*/ false,
+            )
+            .await
+            .expect("connection should be subscribed");
+
+        let commit_permit = manager
+            .acquire_thread_mutation_permit(current_thread_id)
+            .await
+            .expect("commit should fence the current thread");
+        assert!(
+            manager
+                .acquire_thread_mutation_permit(current_thread_id)
+                .await
+                .is_err()
+        );
+
+        drop(commit_permit);
+        let mutation_permit = manager
+            .acquire_thread_mutation_permit(current_thread_id)
+            .await
+            .expect("current thread mutations should resume after commit");
+        drop(mutation_permit);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn transition_initiator_can_restore_previous_subscription_after_commit_failure()
+    -> Result<()> {
+        let manager = ThreadStateManager::new();
+        let previous_thread_id = ThreadId::new();
+        let current_thread_id = ThreadId::new();
+        let connection = ConnectionId(1);
+        manager
+            .connection_initialized(connection, ConnectionCapabilities::default())
+            .await;
+        manager
+            .try_ensure_connection_subscribed(
+                previous_thread_id,
+                connection,
+                /*experimental_raw_events*/ false,
+            )
+            .await
+            .expect("connection should be subscribed");
+        manager
+            .reserve_thread_transition(previous_thread_id, connection, "transition-1".to_string())
+            .await
+            .expect("transition should reserve the thread");
+        manager
+            .mark_thread_transition_prepared(previous_thread_id, "transition-1", current_thread_id)
+            .await
+            .expect("transition should become prepared");
+        assert!(
+            manager
+                .unsubscribe_connection_from_thread(previous_thread_id, connection)
+                .await
+        );
+
+        manager
+            .try_ensure_connection_subscribed(
+                previous_thread_id,
+                connection,
+                /*experimental_raw_events*/ false,
+            )
+            .await
+            .expect("initiator should be able to restore the previous subscription");
+        assert!(
+            manager
+                .thread_transition_reservation(previous_thread_id)
+                .await
+                .is_none()
+        );
+        let permit = manager
+            .acquire_thread_mutation_permit(previous_thread_id)
+            .await
+            .expect("restoring the previous subscription should release the fence");
+        drop(permit);
         Ok(())
     }
 

@@ -379,6 +379,7 @@ use self::skills::find_app_mentions;
 use self::skills::find_skill_mentions_with_tool_mentions;
 use self::skills::is_app_mentionable;
 mod plugin_catalog;
+mod plugin_commands;
 mod plugins;
 use self::plugins::PluginInstallAuthFlowState;
 use self::plugins::PluginListFetchState;
@@ -783,6 +784,7 @@ pub(crate) struct ChatWidget {
     // Current thread-goal status shown in the status line when plan mode is inactive.
     current_goal_status_indicator: Option<GoalStatusIndicator>,
     current_goal_status: Option<GoalStatusState>,
+    current_goal_revision: i64,
     external_editor_state: ExternalEditorState,
     last_rendered_user_message_display: Option<UserMessageDisplay>,
     last_non_retry_error: Option<(String, String)>,
@@ -1390,6 +1392,11 @@ impl ChatWidget {
 
     pub(crate) fn show_shutdown_in_progress(&mut self) {
         self.bottom_pane.show_shutdown_in_progress();
+    }
+
+    pub(crate) fn restore_after_shutdown_failure(&mut self) {
+        self.bottom_pane
+            .set_composer_input_enabled(/*enabled*/ true, /*placeholder*/ None);
     }
 
     fn request_redraw(&mut self) {
