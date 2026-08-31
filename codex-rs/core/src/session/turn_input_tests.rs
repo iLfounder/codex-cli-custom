@@ -38,6 +38,7 @@ use core_test_support::test_codex::local_selections;
 use pretty_assertions::assert_eq;
 use test_case::test_case;
 use codex_thread_store::ThreadAccountRotationMode;
+use codex_thread_store::ThreadAccountRotationPolicyRevision;
 use codex_thread_store::ThreadAccountRotationPolicyUpdate;
 use codex_thread_store::ThreadStore;
 use std::sync::atomic::AtomicBool;
@@ -66,6 +67,11 @@ struct BlockingExecutionAccountSelector {
 
 struct RecordingExecutionAccountSelector {
     selected: async_channel::Sender<TurnExecutionAccountSelection>,
+}
+
+struct GatedExecutionAccountSelector {
+    selected: async_channel::Sender<TurnExecutionAccountSelection>,
+    proceed: async_channel::Receiver<()>,
 }
 
 impl TurnExecutionAccountSelector for BlockingExecutionAccountSelector {
@@ -122,6 +128,27 @@ impl TurnExecutionAccountSelector for RecordingExecutionAccountSelector {
     }
 }
 
+impl TurnExecutionAccountSelector for GatedExecutionAccountSelector {
+    fn select(
+        &self,
+        selection: TurnExecutionAccountSelection,
+    ) -> TurnExecutionAccountSelectorFuture<'_> {
+        Box::pin(async move {
+            self.selected
+                .send(selection.clone())
+                .await
+                .expect("selection observer remains open");
+            self.proceed
+                .recv()
+                .await
+                .expect("selection gate remains open");
+            Ok(TurnExecutionAccountDecision::Select {
+                target_slot_id: selection.current_binding.slot_id,
+            })
+        })
+    }
+}
+
 struct TestReadinessLease {
     dropped: Arc<AtomicBool>,
 }
@@ -165,7 +192,6 @@ async fn make_rotation_test_session() -> (
     Arc<Session>,
     Arc<codex_thread_store::InMemoryThreadStore>,
     ExecutionAccountBinding,
-    u64,
 ) {
     let (mut session, _turn_context) = make_session_and_context().await;
     let store = attach_in_memory_thread_store(&mut session).await;
@@ -175,8 +201,7 @@ async fn make_rotation_test_session() -> (
         .await
         .expect("initialize execution account binding");
     let policy = store
-        .compare_and_swap_thread_account_rotation_policy(
-            session.thread_id(),
+        .compare_and_swap_account_rotation_global_profile(
             /*expected_revision*/ 0,
             ThreadAccountRotationPolicyUpdate {
                 mode: ThreadAccountRotationMode::RoundRobin,
@@ -187,7 +212,8 @@ async fn make_rotation_test_session() -> (
         .await
         .expect("persist rotation policy")
         .expect("initial policy revision matches");
-    (Arc::new(session), store, binding, policy.revision)
+    assert_eq!(policy.revision, 1);
+    (Arc::new(session), store, binding)
 }
 
 fn root_turn_request() -> TurnInputRequest {
@@ -199,23 +225,13 @@ fn root_turn_request() -> TurnInputRequest {
 
 #[tokio::test]
 async fn same_target_selection_skips_resolution_and_commits_cursor_after_start() {
-    let (session, store, binding, policy_revision) = make_rotation_test_session().await;
-    store
-        .compare_and_swap_thread_account_rotation_cursor(
-            session.thread_id(),
-            policy_revision,
-            "target".to_string(),
-        )
-        .await
-        .expect("seed a distinguishable rotation cursor")
-        .expect("policy revision matches");
+    let (session, store, binding) = make_rotation_test_session().await;
     let calls = Arc::new(AtomicUsize::new(0));
     let lease_dropped = Arc::new(AtomicBool::new(false));
     let runtime = session.execution_account_runtime();
     session.set_turn_execution_account_selector(Arc::new(StaticExecutionAccountSelector {
         decision: TurnExecutionAccountDecision::Select {
             target_slot_id: binding.slot_id.clone(),
-            policy_revision,
         },
     }));
     session.set_turn_execution_account_transition_resolver(Arc::new(
@@ -257,7 +273,7 @@ async fn same_target_selection_skips_resolution_and_commits_cursor_after_start()
 async fn selector_receives_each_same_slot_threads_exact_credential_revision() {
     let mut captured = Vec::new();
     for (index, api_key) in ["sk-thread-one", "sk-thread-two"].into_iter().enumerate() {
-        let (session, _store, binding, _policy_revision) = make_rotation_test_session().await;
+        let (session, store, binding) = make_rotation_test_session().await;
         let auth_home = tempfile::tempdir().expect("auth home");
         codex_login::login_with_api_key(
             auth_home.path(),
@@ -292,6 +308,10 @@ async fn selector_receives_each_same_slot_threads_exact_credential_revision() {
             .switch_execution_account(binding, Arc::clone(&target), runtime.services.clone())
             .await
             .expect("publish exact thread credential runtime");
+        let account_rotation_policy = store
+            .thread_account_rotation_policy(session.thread_id())
+            .await
+            .expect("read captured account rotation policy");
         let (selected_tx, selected_rx) = async_channel::bounded(1);
         session.set_turn_execution_account_selector(Arc::new(RecordingExecutionAccountSelector {
             selected: selected_tx,
@@ -315,6 +335,7 @@ async fn selector_receives_each_same_slot_threads_exact_credential_revision() {
                 TurnExecutionAccountSelection {
                     thread_id: session.thread_id(),
                     current_binding: accepted,
+                    account_rotation_policy,
                     credential_revision: auth_manager.credential_revision(),
                 },
             )
@@ -332,7 +353,7 @@ async fn selector_receives_each_same_slot_threads_exact_credential_revision() {
 
 #[tokio::test]
 async fn same_slot_reprepare_prepares_once_and_advances_execution_generation() {
-    let (session, store, binding, policy_revision) = make_rotation_test_session().await;
+    let (session, store, binding) = make_rotation_test_session().await;
     let calls = Arc::new(AtomicUsize::new(0));
     let lease_dropped = Arc::new(AtomicBool::new(false));
     let current = session.execution_account();
@@ -346,7 +367,7 @@ async fn same_slot_reprepare_prepares_once_and_advances_execution_generation() {
         models_manager: Arc::clone(&current.models_manager),
     });
     session.set_turn_execution_account_selector(Arc::new(StaticExecutionAccountSelector {
-        decision: TurnExecutionAccountDecision::ReprepareCurrent { policy_revision },
+        decision: TurnExecutionAccountDecision::ReprepareCurrent,
     }));
     session.set_turn_execution_account_transition_resolver(Arc::new(
         RecordingExecutionAccountTransitionResolver {
@@ -402,80 +423,83 @@ async fn same_slot_reprepare_prepares_once_and_advances_execution_generation() {
 }
 
 #[tokio::test]
-async fn stale_same_slot_reprepare_is_rechecked_once_without_starting() {
-    let (session, store, binding, stale_policy_revision) = make_rotation_test_session().await;
-    let current_policy = store
-        .compare_and_swap_thread_account_rotation_policy(
-            session.thread_id(),
-            stale_policy_revision,
+async fn global_update_does_not_change_current_turn_snapshot_and_applies_next_turn() {
+    let (session, store, binding) = make_rotation_test_session().await;
+    let (selected_tx, selected_rx) = async_channel::bounded(1);
+    let (proceed_tx, proceed_rx) = async_channel::bounded(1);
+    session.set_turn_execution_account_selector(Arc::new(GatedExecutionAccountSelector {
+        selected: selected_tx,
+        proceed: proceed_rx,
+    }));
+    let first_turn = tokio::spawn({
+        let session = Arc::clone(&session);
+        async move {
+            handle(
+                &session,
+                root_turn_request(),
+                TurnInputMode::StartIfIdle,
+                "immutable-policy-turn".to_string(),
+            )
+            .await
+        }
+    });
+    let first_selection = selected_rx.recv().await.expect("capture first snapshot");
+    assert_eq!(
+        first_selection.account_rotation_policy.revision,
+        ThreadAccountRotationPolicyRevision::Inherit(1)
+    );
+    store
+        .compare_and_swap_account_rotation_global_profile(
+            /*expected_revision*/ 1,
             ThreadAccountRotationPolicyUpdate {
                 mode: ThreadAccountRotationMode::RoundRobin,
                 fixed_account_slot_id: None,
-                automatic_account_slot_ids: vec![binding.slot_id.clone()],
+                automatic_account_slot_ids: vec![binding.slot_id.clone(), "next".to_string()],
             },
         )
         .await
-        .expect("update rotation policy")
-        .expect("policy revision matches");
-    let calls = Arc::new(AtomicUsize::new(0));
-    let current = session.execution_account();
-    let runtime = session.execution_account_runtime();
-    session.set_turn_execution_account_selector(Arc::new(StaticExecutionAccountSelector {
-        decision: TurnExecutionAccountDecision::ReprepareCurrent {
-            policy_revision: stale_policy_revision,
-        },
-    }));
-    session.set_turn_execution_account_transition_resolver(Arc::new(
-        RecordingExecutionAccountTransitionResolver {
-            target: Arc::new(ExecutionAccountContext {
-                binding: ExecutionAccountBinding {
-                    slot_id: binding.slot_id.clone(),
-                    generation: binding.generation + 1,
-                },
-                auth_manager: Arc::clone(&current.auth_manager),
-                models_manager: Arc::clone(&current.models_manager),
-            }),
-            services: runtime.services.clone(),
-            calls: Arc::clone(&calls),
-            lease_dropped: Arc::new(AtomicBool::new(false)),
-        },
-    ));
+        .expect("update global profile")
+        .expect("global revision matches");
+    proceed_tx.send(()).await.expect("release first selection");
+    assert_eq!(
+        first_turn
+            .await
+            .expect("first submission task joins")
+            .expect("captured turn starts"),
+        TurnInputSubmission::Started {
+            turn_id: "immutable-policy-turn".to_string(),
+        }
+    );
+    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
 
-    let error = handle(
+    let (next_tx, next_rx) = async_channel::bounded(1);
+    session.set_turn_execution_account_selector(Arc::new(RecordingExecutionAccountSelector {
+        selected: next_tx,
+    }));
+    let submission = handle(
         &session,
         root_turn_request(),
         TurnInputMode::StartIfIdle,
-        "stale-same-slot-reprepare".to_string(),
+        "next-policy-turn".to_string(),
     )
     .await
-    .expect_err("stale policy cannot start");
-
-    let active_turn_is_none = session.active_turn.lock().await.is_none();
-    let unchanged_policy = store
-        .thread_account_rotation_policy(session.thread_id())
-        .await
-        .expect("read unchanged current policy");
+    .expect("next root turn starts");
+    let next_selection = next_rx.recv().await.expect("capture next snapshot");
     assert_eq!(
+        (submission, next_selection.account_rotation_policy.revision),
         (
-            error.to_string(),
-            calls.load(Ordering::Relaxed),
-            session.execution_account().binding.clone(),
-            active_turn_is_none,
-            unchanged_policy,
-        ),
-        (
-            ExecutionAccountSwitchError::StaleGeneration.to_string(),
-            2,
-            binding,
-            true,
-            current_policy,
+            TurnInputSubmission::Started {
+                turn_id: "next-policy-turn".to_string(),
+            },
+            ThreadAccountRotationPolicyRevision::Inherit(2),
         )
     );
+    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
 }
 
 #[tokio::test]
 async fn different_target_selection_preserves_rotation_and_holds_readiness_through_switch() {
-    let (session, store, binding, policy_revision) = make_rotation_test_session().await;
+    let (session, store, binding) = make_rotation_test_session().await;
     let calls = Arc::new(AtomicUsize::new(0));
     let lease_dropped = Arc::new(AtomicBool::new(false));
     let current = session.execution_account();
@@ -491,7 +515,6 @@ async fn different_target_selection_preserves_rotation_and_holds_readiness_throu
     session.set_turn_execution_account_selector(Arc::new(StaticExecutionAccountSelector {
         decision: TurnExecutionAccountDecision::Select {
             target_slot_id: "target".to_string(),
-            policy_revision,
         },
     }));
     session.set_turn_execution_account_transition_resolver(Arc::new(
@@ -542,7 +565,7 @@ async fn different_target_selection_preserves_rotation_and_holds_readiness_throu
 
 #[tokio::test]
 async fn pre_semantic_target_is_prepared_without_publishing_or_committing_cursor() {
-    let (session, store, binding, policy_revision) = make_rotation_test_session().await;
+    let (session, store, binding) = make_rotation_test_session().await;
     let initial_policy = store
         .thread_account_rotation_policy(session.thread_id())
         .await
@@ -561,7 +584,6 @@ async fn pre_semantic_target_is_prepared_without_publishing_or_committing_cursor
     session.set_turn_execution_account_selector(Arc::new(PreSemanticExecutionAccountSelector {
         decision: TurnExecutionAccountDecision::Select {
             target_slot_id: target.binding.slot_id.clone(),
-            policy_revision,
         },
     }));
     session.set_turn_execution_account_transition_resolver(Arc::new(
@@ -615,7 +637,7 @@ async fn pre_semantic_target_is_prepared_without_publishing_or_committing_cursor
 
 #[tokio::test]
 async fn cancelling_account_selection_releases_exact_idle_reservation_without_cursor_commit() {
-    let (session, store, binding, _policy_revision) = make_rotation_test_session().await;
+    let (session, store, binding) = make_rotation_test_session().await;
     let initial_policy = store
         .thread_account_rotation_policy(session.thread_id())
         .await

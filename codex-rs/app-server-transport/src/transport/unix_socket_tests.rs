@@ -3,12 +3,13 @@ use super::CHANNEL_CAPACITY;
 use super::TransportEvent;
 use super::acquire_app_server_startup_lock;
 use super::app_server_control_socket_path;
+use super::app_server_startup_lock_path;
 use super::start_control_socket_acceptor;
 use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::JSONRPCNotification;
-use codex_core::config::find_codex_home;
 use codex_uds::UnixStream;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_home_dir::find_codex_home;
 use futures::SinkExt;
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
@@ -29,6 +30,31 @@ fn listen_unix_socket_parses_as_unix_socket_transport() {
         Ok(AppServerTransport::UnixSocket {
             socket_path: default_control_socket_path()
         })
+    );
+}
+
+#[test]
+fn exported_control_paths_preserve_numbered_codex_home_isolation() {
+    let account_one = Path::new("/tmp/.codex/account1");
+    let account_ten = Path::new("/tmp/.codex/account10");
+    let account_one_socket =
+        app_server_control_socket_path(account_one).expect("account one control socket");
+    let account_ten_socket =
+        app_server_control_socket_path(account_ten).expect("account ten control socket");
+    let account_one_lock =
+        app_server_startup_lock_path(account_one).expect("account one startup lock");
+    let account_ten_lock =
+        app_server_startup_lock_path(account_ten).expect("account ten startup lock");
+
+    assert_ne!(account_one_socket, account_ten_socket);
+    assert_eq!(
+        account_one_socket.as_path(),
+        account_one.join("app-server-control/app-server-control.sock")
+    );
+    assert_ne!(account_one_lock, account_ten_lock);
+    assert_eq!(
+        account_ten_lock.as_path(),
+        account_ten.join("app-server-control/app-server-startup.lock")
     );
 }
 

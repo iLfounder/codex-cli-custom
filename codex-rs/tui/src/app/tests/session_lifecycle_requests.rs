@@ -2422,6 +2422,7 @@ async fn agents_overview_seeds_loaded_threads_when_recent_listing_is_unavailable
             endpoint: crate::RemoteAppServerEndpoint::UnixSocket {
                 socket_path: test_path_buf("/tmp/unused.sock").abs(),
             },
+            canonical_projection: None,
         };
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         app.app_event_tx = AppEventSender::new(tx);

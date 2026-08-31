@@ -25,6 +25,7 @@ use std::sync::atomic::AtomicBool;
 use crate::analytics_utils::analytics_events_client_from_config;
 use crate::config_manager::ConfigManager;
 use crate::connection_cleanup::ConnectionCleanupTasks;
+use crate::legacy_admission::LegacyAdmissionGate;
 use crate::message_processor::MessageProcessor;
 use crate::message_processor::MessageProcessorArgs;
 use crate::outgoing_message::ConnectionId;
@@ -116,6 +117,7 @@ mod fs_watch;
 mod fuzzy_file_search;
 mod image_url;
 pub mod in_process;
+mod legacy_admission;
 mod mcp_refresh;
 mod message_processor;
 mod models;
@@ -714,6 +716,7 @@ pub async fn run_main_with_transport_options(
         ));
     }
     let installation_id = resolve_installation_id(&config.codex_home).await?;
+    let legacy_admission = LegacyAdmissionGate::for_relay_legacy_process(&transport);
     let transport_shutdown_token = CancellationToken::new();
     let mut transport_accept_handles = Vec::<JoinHandle<()>>::new();
 
@@ -928,6 +931,7 @@ pub async fn run_main_with_transport_options(
             )
             .then_some(plugin_startup_config),
             account_failover_mode: codex_app_server_protocol::AccountFailoverMode::Disabled,
+            legacy_admission,
         }));
         let mut thread_created_rx = processor.thread_created_receiver();
         let mut running_turn_count_rx = processor.subscribe_running_assistant_turn_count();

@@ -507,6 +507,7 @@ async fn start_uninitialized(
                 remote_control_handle: None,
                 plugin_startup_tasks: Some(PluginStartupConfig::Current),
                 account_failover_mode,
+                legacy_admission: crate::legacy_admission::LegacyAdmissionGate::default(),
             }));
             let mut thread_created_rx = processor.thread_created_receiver();
             let session = Arc::new(ConnectionSessionState::new());

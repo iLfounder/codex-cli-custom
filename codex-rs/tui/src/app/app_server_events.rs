@@ -61,6 +61,7 @@ impl App {
         event: AppServerEvent,
     ) {
         match event {
+            AppServerEvent::Connected { .. } => {}
             AppServerEvent::Lagged { skipped } => {
                 tracing::warn!(
                     skipped,

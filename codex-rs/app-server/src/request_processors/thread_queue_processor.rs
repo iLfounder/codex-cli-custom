@@ -2,8 +2,10 @@ use std::sync::Arc;
 
 use crate::error_code::internal_error;
 use crate::error_code::invalid_request;
+use crate::legacy_admission::LegacyAdmissionPermit;
 use crate::outgoing_message::ConnectionRequestId;
 use crate::outgoing_message::OutgoingMessageSender;
+use crate::thread_state::ThreadStateManager;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::QueuedSubmission;
 use codex_app_server_protocol::ThreadQueueAddParams;
@@ -52,6 +54,7 @@ pub(crate) struct ThreadQueueRequestProcessor {
     thread_store: Arc<dyn ThreadStore>,
     outgoing: Arc<OutgoingMessageSender>,
     service: Option<Arc<QueuedItemService>>,
+    thread_state_manager: ThreadStateManager,
 }
 
 impl ThreadQueueRequestProcessor {
@@ -60,12 +63,14 @@ impl ThreadQueueRequestProcessor {
         thread_store: Arc<dyn ThreadStore>,
         outgoing: Arc<OutgoingMessageSender>,
         service: Option<Arc<QueuedItemService>>,
+        thread_state_manager: ThreadStateManager,
     ) -> Self {
         Self {
             thread_manager,
             thread_store,
             outgoing,
             service,
+            thread_state_manager,
         }
     }
 
@@ -182,8 +187,9 @@ impl ThreadQueueRequestProcessor {
         &self,
         request_id: &ConnectionRequestId,
         params: ThreadQueueStartParams,
+        legacy_admission_permit: LegacyAdmissionPermit,
     ) -> Result<ThreadQueueStartResponse, JSONRPCErrorError> {
-        let (_, loaded_thread, source) = self.require_thread(&params.thread_id).await?;
+        let (thread_id, loaded_thread, source) = self.require_thread(&params.thread_id).await?;
         ensure_direct_input_allowed(loaded_thread.as_deref(), &source)?;
         let thread = loaded_thread
             .ok_or_else(|| invalid_request("resume the thread before starting a queued message"))?;
@@ -214,6 +220,12 @@ impl ThreadQueueRequestProcessor {
         self.outgoing
             .record_request_turn_id(request_id, &turn_id)
             .await;
+        self.thread_state_manager
+            .thread_state(thread_id)
+            .await
+            .lock()
+            .await
+            .register_admitted_turn(turn_id.clone(), Some(legacy_admission_permit));
         Ok(ThreadQueueStartResponse {
             turn: Turn {
                 id: turn_id,

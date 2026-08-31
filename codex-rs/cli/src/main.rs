@@ -39,6 +39,7 @@ use codex_utils_cli::SharedCliOptions;
 use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::io::Write;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use supports_color::Stream;
@@ -50,6 +51,7 @@ mod cloud_config;
 mod desktop_app;
 mod doctor;
 mod exec_server_telemetry;
+mod managed_account_lifecycle;
 mod marketplace_cmd;
 mod mcp_cmd;
 mod migrate_rollouts;
@@ -387,6 +389,10 @@ struct SessionArchiveConfigOverrides {
     #[arg(long = "strict-config", default_value_t = false)]
     strict_config: bool,
 
+    /// Reject attempts to move an existing managed thread into an embedded server.
+    #[arg(long = "embedded", default_value_t = false)]
+    embedded: bool,
+
     #[clap(flatten)]
     config_overrides: CliConfigOverrides,
 }
@@ -722,6 +728,10 @@ enum AppServerDaemonSubcommand {
     /// [internal] Run the detached pid-backed standalone updater loop.
     #[clap(hide = true)]
     PidUpdateLoop,
+
+    /// [internal] Run the canonical app-server supervisor in the foreground.
+    #[clap(hide = true)]
+    Supervisor,
 }
 
 #[derive(Debug, Args)]
@@ -1054,6 +1064,17 @@ async fn cli_main(
         mut interactive,
         subcommand,
     } = MultitoolCli::parse();
+    if managed_account_lifecycle::run_if_managed(
+        &root_config_overrides,
+        &feature_toggles,
+        &remote,
+        &interactive,
+        &subcommand,
+    )
+    .await?
+    {
+        return Ok(());
+    }
     // Fold --enable/--disable into config overrides so they flow to all subcommands.
     let toggle_overrides = feature_toggles.to_overrides()?;
     root_config_overrides.raw_overrides.extend(toggle_overrides);
@@ -1340,13 +1361,39 @@ async fn cli_main(
                         let http_client_factory = updater_http_client_factory(config);
                         codex_app_server_daemon::run_pid_update_loop(http_client_factory).await?;
                     }
+                    AppServerDaemonSubcommand::Supervisor => {
+                        codex_app_server_daemon::run_supervisor().await?;
+                    }
                 },
                 Some(AppServerSubcommand::Proxy(proxy_cli)) => {
-                    let socket_path = match proxy_cli.socket_path {
-                        Some(socket_path) => socket_path,
-                        None => {
-                            let codex_home = find_codex_home()?;
-                            codex_app_server::app_server_control_socket_path(&codex_home)?
+                    let socket_path = if codex_tui::managed_account_hint_is_present()? {
+                        let codex_home = find_codex_home()?;
+                        let launch_disposition = codex_tui::classify_current_launch(
+                            codex_home.as_path(),
+                            codex_tui::LaunchOperation::PassiveLocal,
+                            codex_tui::RequestedLaunchMode::StandardLocal,
+                            if proxy_cli.socket_path.is_some()
+                                || !root_config_overrides.raw_overrides.is_empty()
+                            {
+                                codex_tui::LaunchInvocationOverrides::EmbeddedOnly
+                            } else {
+                                codex_tui::LaunchInvocationOverrides::None
+                            },
+                        )?;
+                        match proxy_cli.socket_path {
+                            Some(socket_path) => socket_path,
+                            None => default_app_server_proxy_socket_path(
+                                launch_disposition,
+                                codex_home.as_path(),
+                            )?,
+                        }
+                    } else {
+                        match proxy_cli.socket_path {
+                            Some(socket_path) => socket_path,
+                            None => {
+                                let codex_home = find_codex_home()?;
+                                codex_app_server::app_server_control_socket_path(&codex_home)?
+                            }
                         }
                     };
                     codex_stdio_to_uds::run(socket_path.as_path()).await?;
@@ -1819,6 +1866,17 @@ async fn cli_main(
     }
 
     Ok(())
+}
+
+fn default_app_server_proxy_socket_path(
+    launch_disposition: codex_tui::LaunchDisposition,
+    codex_home: &Path,
+) -> anyhow::Result<AbsolutePathBuf> {
+    if launch_disposition == codex_tui::LaunchDisposition::CanonicalLocal {
+        return codex_app_server_client::canonical_app_server_control_socket_path()
+            .map_err(anyhow::Error::from);
+    }
+    codex_app_server::app_server_control_socket_path(codex_home).map_err(anyhow::Error::from)
 }
 
 fn profile_v2_for_subcommand<'a>(
@@ -2493,6 +2551,7 @@ fn app_server_subcommand_name(subcommand: Option<&AppServerSubcommand>) -> &'sta
             AppServerDaemonSubcommand::Stop => "app-server daemon stop",
             AppServerDaemonSubcommand::Version => "app-server daemon version",
             AppServerDaemonSubcommand::PidUpdateLoop => "app-server daemon pid-update-loop",
+            AppServerDaemonSubcommand::Supervisor => "app-server daemon supervisor",
         },
         Some(AppServerSubcommand::Proxy(_)) => "app-server proxy",
         Some(AppServerSubcommand::GenerateTs(_)) => "app-server generate-ts",
@@ -2581,7 +2640,10 @@ async fn run_interactive_tui(
     }
 
     #[cfg(unix)]
-    if interactive.agents_overview && remote.is_none() {
+    if interactive.agents_overview
+        && remote.is_none()
+        && !codex_tui::managed_account_hint_is_present()?
+    {
         if !std::io::stdin().is_terminal() {
             return Ok(AppExitInfo::fatal("stdin is not a terminal"));
         }
@@ -2792,11 +2854,15 @@ fn finalize_session_archive_interactive(
     let SessionArchiveConfigOverrides {
         shared,
         strict_config,
+        embedded,
         config_overrides,
     } = archive_cli;
     interactive.shared.apply_subcommand_overrides(shared);
     if strict_config {
         interactive.strict_config = true;
+    }
+    if embedded {
+        interactive.embedded = true;
     }
     interactive
         .config_overrides
@@ -2813,6 +2879,7 @@ fn merge_interactive_cli_flags(interactive: &mut TuiCli, subcommand_cli: TuiCli)
     let TuiCli {
         shared,
         strict_config,
+        embedded,
         approval_policy,
         web_search,
         no_alt_screen,
@@ -2838,6 +2905,9 @@ fn merge_interactive_cli_flags(interactive: &mut TuiCli, subcommand_cli: TuiCli)
     interactive.no_alt_screen |= no_alt_screen;
     if strict_config {
         interactive.strict_config = true;
+    }
+    if embedded {
+        interactive.embedded = true;
     }
     if let Some(prompt) = prompt {
         // Normalize CRLF/CR to LF so CLI-provided text can't leak `\r` into TUI state.
@@ -3571,6 +3641,7 @@ mod tests {
                 "--remote",
                 "unix://archive.sock",
                 "--strict-config",
+                "--embedded",
                 "--dangerously-bypass-hook-trust",
                 "-m",
                 "gpt-5.1-test",
@@ -3592,6 +3663,7 @@ mod tests {
             Some(std::path::Path::new("/archive"))
         );
         assert!(interactive.strict_config);
+        assert!(interactive.embedded);
         assert!(interactive.bypass_hook_trust);
     }
 
@@ -4037,6 +4109,7 @@ mod tests {
                 "-C",
                 "/tmp",
                 "--strict-config",
+                "--embedded",
                 "-i",
                 "/tmp/a.png,/tmp/b.png",
             ]
@@ -4060,6 +4133,7 @@ mod tests {
         );
         assert!(interactive.web_search);
         assert!(interactive.strict_config);
+        assert!(interactive.embedded);
         let has_a = interactive
             .images
             .iter()
@@ -4711,6 +4785,13 @@ mod tests {
                 subcommand: AppServerDaemonSubcommand::Version
             }))
         ));
+        assert!(matches!(
+            app_server_from_args(["codex", "app-server", "daemon", "supervisor"].as_ref())
+                .subcommand,
+            Some(AppServerSubcommand::Daemon(AppServerDaemonCommand {
+                subcommand: AppServerDaemonSubcommand::Supervisor
+            }))
+        ));
     }
 
     #[test]
@@ -4727,6 +4808,28 @@ mod tests {
                     .expect("relative path should resolve")
             )
         );
+    }
+
+    #[test]
+    fn app_server_proxy_routes_canonical_and_unmanaged_defaults() -> anyhow::Result<()> {
+        let codex_home = AbsolutePathBuf::from_absolute_path("/tmp/proxy-account-home")?;
+        let actual = vec![
+            default_app_server_proxy_socket_path(
+                codex_tui::LaunchDisposition::CanonicalLocal,
+                codex_home.as_path(),
+            )?,
+            default_app_server_proxy_socket_path(
+                codex_tui::LaunchDisposition::UnmanagedUpstream,
+                codex_home.as_path(),
+            )?,
+        ];
+        let expected = vec![
+            codex_app_server_client::canonical_app_server_control_socket_path()?,
+            codex_app_server::app_server_control_socket_path(&codex_home)?,
+        ];
+
+        assert_eq!(actual, expected);
+        Ok(())
     }
 
     #[test]

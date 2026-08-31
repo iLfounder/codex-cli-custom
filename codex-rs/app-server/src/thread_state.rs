@@ -1,3 +1,4 @@
+use crate::legacy_admission::LegacyAdmissionPermit;
 use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::ConnectionRequestId;
 use codex_app_server_protocol::RequestId;
@@ -111,6 +112,7 @@ pub(crate) struct ThreadState {
     pub(crate) turn_summary: TurnSummary,
     pub(crate) last_terminal_turn_id: Option<String>,
     admitted_turn_id: Option<String>,
+    legacy_admission_turns: HashMap<String, LegacyAdmissionPermit>,
     /// Lets an internal runtime replacement wait until the old listener has processed Core's
     /// `ShutdownComplete` event before that listener is superseded.
     shutdown_drain_waiter: Option<oneshot::Sender<()>>,
@@ -247,11 +249,23 @@ impl ThreadState {
         self.current_turn_history.active_turn_snapshot()
     }
 
-    pub(crate) fn register_admitted_turn(&mut self, turn_id: String) {
+    pub(crate) fn register_admitted_turn(
+        &mut self,
+        turn_id: String,
+        legacy_admission_permit: Option<LegacyAdmissionPermit>,
+    ) {
         self.admitted_turn_id = None;
-        if self.last_terminal_turn_id.as_deref() == Some(turn_id.as_str())
-            || (self.current_turn_history.has_active_turn()
-                && self.current_turn_history.active_turn_id() == Some(turn_id.as_str()))
+        if self.last_terminal_turn_id.as_deref() == Some(turn_id.as_str()) {
+            return;
+        }
+        if let Some(permit) = legacy_admission_permit
+            && permit.is_counted()
+            && !self.legacy_admission_turns.contains_key(&turn_id)
+        {
+            self.legacy_admission_turns.insert(turn_id.clone(), permit);
+        }
+        if self.current_turn_history.has_active_turn()
+            && self.current_turn_history.active_turn_id() == Some(turn_id.as_str())
         {
             return;
         }
@@ -301,6 +315,7 @@ impl ThreadState {
         }
         if matches!(event, EventMsg::TurnAborted(_) | EventMsg::TurnComplete(_)) {
             self.last_terminal_turn_id = Some(event_turn_id.to_string());
+            self.legacy_admission_turns.remove(event_turn_id);
             if self.admitted_turn_id.as_deref() == Some(event_turn_id) {
                 self.admitted_turn_id = None;
             }

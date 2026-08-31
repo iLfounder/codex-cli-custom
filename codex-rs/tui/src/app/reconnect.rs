@@ -36,7 +36,7 @@ pub(super) async fn reconnect(
 ) -> Result<Reconnected> {
     let mode = target.thread_params_mode();
     let endpoint = match target {
-        AppServerTarget::Remote { endpoint } | AppServerTarget::LocalDaemon { endpoint } => {
+        AppServerTarget::Remote { endpoint } | AppServerTarget::LocalDaemon { endpoint, .. } => {
             endpoint
         }
         AppServerTarget::Embedded => {
@@ -164,6 +164,12 @@ impl App {
         if matches!(self.app_server_target, AppServerTarget::Embedded) {
             return false;
         }
+        if self.uses_supervised_app_server() && !self.reconnect_state.is_disconnected() {
+            self.reconnect_state.begin_disconnect(
+                self.current_displayed_thread_id(),
+                self.chat_widget.capture_thread_input_state(),
+            );
+        }
         if !self.reconnect.offline {
             self.reconnect.offline = true;
             self.reconnect.failed = false;
@@ -213,26 +219,42 @@ impl App {
             bootstrap,
             thread,
         } = connected;
+        session.inherit_task_tool_capabilities(app_server);
+        *app_server = session;
+        self.finish_reconnect_projection(tui, app_server, app_event_rx, bootstrap, thread)
+            .await
+    }
+
+    pub(super) async fn finish_reconnect_projection(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        app_event_rx: &mut mpsc::UnboundedReceiver<AppEvent>,
+        bootstrap: AppServerBootstrap,
+        thread: Option<AppServerStartedThread>,
+    ) -> Result<()> {
         let selected = self
             .chat_widget
             .selected_index_for_present_view(agents_overview::AGENTS_OVERVIEW_VIEW_ID)
             .and_then(|index| self.agents_overview.visible_thread_ids.get(index).copied());
-        let displayed = self.current_displayed_thread_id();
+        let previous_displayed = self.current_displayed_thread_id();
+        let displayed = thread
+            .as_ref()
+            .map(|started| started.session.thread_id)
+            .or(previous_displayed);
         let mut input = self.chat_widget.capture_thread_input_state();
         if let Some(input) = input.as_mut() {
             input.recovered_queue = true;
         }
         self.store_active_thread_receiver().await;
-        // Old request handles stay attached to the dead connection. Rotating the event channel
-        // prevents their late completions from submitting follow-up operations on the new one.
+        // Rotating the event channel prevents old async completions from submitting
+        // follow-up operations after either transport recovery path adopts its projection.
         let (tx, rx) = mpsc::unbounded_channel();
         self.app_event_tx = AppEventSender::new(tx);
         *app_event_rx = rx;
         self.agent_navigation.picker_refresh = None;
         self.last_subagent_backfill_attempt = None;
         self.rate_limit_refresh_state.invalidate_recovery();
-        session.inherit_task_tool_capabilities(app_server);
-        *app_server = session;
         self.chat_widget.remote_connection =
             crate::status::remote_connection::remote_connection_status_value(
                 &self.app_server_target,
@@ -285,6 +307,12 @@ impl App {
         }
         if let Some(mut started) = thread {
             let id = started.session.thread_id;
+            if previous_displayed.is_some()
+                && self.primary_thread_id == previous_displayed
+                && previous_displayed != Some(id)
+            {
+                self.primary_thread_id = Some(id);
+            }
             if let Some(channel) = self.thread_event_channels.get(&id)
                 && let Some(cached) = channel.store.lock().await.session.as_ref()
             {

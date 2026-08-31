@@ -66,6 +66,7 @@ pub(super) async fn make_test_app_with_channels() -> (
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         app_server_target: crate::AppServerTarget::Embedded,
         reconnect: Default::default(),
+        reconnect_state: Default::default(),
         pending_update_action: None,
         pending_shutdown: None,
         shutdown_lookup_in_flight: false,

@@ -94,6 +94,10 @@ const REMOTE_EXEC_SERVER_URL_ENV_VAR: &str = "CODEX_TEST_REMOTE_EXEC_SERVER_URL"
 static REMOTE_TEST_INSTANCE_COUNTER: AtomicU64 = AtomicU64::new(0);
 const SUBMIT_TURN_COMPLETE_TIMEOUT: Duration = Duration::from_secs(30);
 
+struct TestCodexHomeOwner {
+    _home: Arc<TempDir>,
+}
+
 pub struct RecordingUserInstructionsProvider {
     inner: Arc<dyn UserInstructionsProvider>,
     load_count: AtomicUsize,
@@ -824,6 +828,13 @@ impl TestCodexBuilder {
                 .await?
             }
         };
+
+        new_conversation
+            .thread
+            .thread_extension_data()
+            .insert(TestCodexHomeOwner {
+                _home: Arc::clone(&home),
+            });
 
         Ok(TestCodex {
             home,

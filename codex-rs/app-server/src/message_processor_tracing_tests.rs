@@ -282,6 +282,7 @@ async fn build_test_processor(
         remote_control_handle: None,
         plugin_startup_tasks: Some(PluginStartupConfig::Current),
         account_failover_mode: codex_app_server_protocol::AccountFailoverMode::Disabled,
+        legacy_admission: crate::legacy_admission::LegacyAdmissionGate::default(),
     }));
     (processor, outgoing_rx)
 }

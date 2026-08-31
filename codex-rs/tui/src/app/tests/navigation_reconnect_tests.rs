@@ -154,6 +154,7 @@ async fn reconnect_daemon_command_center_after_socket_replacement_without_a_conv
         };
         app.app_server_target = AppServerTarget::LocalDaemon {
             endpoint: endpoint.clone(),
+            canonical_projection: None,
         };
         let available = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let server_available = Arc::clone(&available);

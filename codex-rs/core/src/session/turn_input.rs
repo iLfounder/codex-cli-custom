@@ -94,7 +94,7 @@ struct RootExecutionAccountAdmission {
     reservation: IdleExecutionAccountReservation,
     initial_binding: ExecutionAccountBinding,
     accepted_binding: ExecutionAccountBinding,
-    policy_revision: Option<u64>,
+    selected_by_policy: bool,
     failover: Option<PreSemanticAccountFailover>,
 }
 
@@ -119,19 +119,6 @@ impl RootExecutionAccountAdmission {
                 "turn execution account admission changed before start".to_string(),
             ));
         }
-        if let Some(policy_revision) = self.policy_revision {
-            let policy = session
-                .services
-                .thread_store
-                .thread_account_rotation_policy(session.thread_id())
-                .await
-                .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?;
-            if policy.revision != policy_revision {
-                return Err(CodexErr::InvalidRequest(
-                    "turn execution account policy changed before start".to_string(),
-                ));
-            }
-        }
         Ok(())
     }
 
@@ -139,22 +126,22 @@ impl RootExecutionAccountAdmission {
         if self.failover.is_some() {
             return;
         }
-        let Some(policy_revision) = self.policy_revision else {
+        if !self.selected_by_policy {
             return;
-        };
+        }
         match session
             .services
             .thread_store
-            .compare_and_swap_thread_account_rotation_cursor(
+            .compare_and_swap_thread_account_rotation_cursor_for_binding(
                 session.thread_id(),
-                policy_revision,
+                self.accepted_binding.clone(),
                 self.accepted_binding.slot_id.clone(),
             )
             .await
         {
             Ok(Some(_)) => {}
             Ok(None) => {
-                tracing::warn!("execution account rotation cursor revision changed after start");
+                tracing::warn!("execution account binding changed after turn start");
             }
             Err(error) => {
                 tracing::warn!("failed to commit execution account rotation cursor: {error}");
@@ -187,44 +174,55 @@ fn prepare_root_execution_account_admission(
             .reserve_idle_execution_account_preparation()
             .await
             .map_err(execution_account_admission_error)?;
+        let cancellation = reservation.cancellation_token();
+        let account_rotation_policy = tokio::select! {
+            _ = cancellation.cancelled() => {
+                return Err(execution_account_admission_error(ExecutionAccountSwitchError::ThreadBusy));
+            }
+            policy = session.services.thread_store.thread_account_rotation_policy(session.thread_id()) => {
+                match policy {
+                    Ok(policy) => policy,
+                    Err(codex_thread_store::ThreadStoreError::Unsupported { .. }) => {
+                        codex_thread_store::ThreadAccountRotationPolicy::virtual_fixed(&initial_binding)
+                    }
+                    Err(error) => return Err(CodexErr::InvalidRequest(error.to_string())),
+                }
+            }
+        };
+        let selection = TurnExecutionAccountSelection {
+            thread_id: session.thread_id(),
+            current_binding: initial_binding.clone(),
+            account_rotation_policy,
+            credential_revision: session
+                .execution_account()
+                .auth_manager
+                .credential_revision(),
+        };
         let selector = session.turn_execution_account_selector();
         if selector.pre_semantic_failover_enabled() {
-            let cancellation = reservation.cancellation_token();
             let decision = tokio::select! {
                 _ = cancellation.cancelled() => {
                     return Err(execution_account_admission_error(ExecutionAccountSwitchError::ThreadBusy));
                 }
-                decision = selector.select(TurnExecutionAccountSelection {
-                    thread_id: session.thread_id(),
-                    current_binding: initial_binding.clone(),
-                    credential_revision: session
-                        .execution_account()
-                        .auth_manager
-                        .credential_revision(),
-                }) => decision?,
+                decision = selector.select(selection.clone()) => decision?,
             };
-            let failover = super::account_failover::prepare_initial(
-                session,
-                initial_binding.clone(),
-                decision,
-            )
-            .await?;
+            let failover =
+                super::account_failover::prepare_initial(session, selection, decision).await?;
             return Ok(RootExecutionAccountAdmission {
                 reservation,
                 accepted_binding: failover.accepted_binding(),
-                policy_revision: failover.policy_revision(),
+                selected_by_policy: failover.selected_by_policy(),
                 initial_binding,
                 failover: Some(failover),
             });
         }
-        let result =
-            select_root_execution_account(session, &reservation, initial_binding.clone()).await;
+        let result = select_root_execution_account(session, &reservation, selection).await;
         match result {
-            Ok((accepted_binding, policy_revision)) => Ok(RootExecutionAccountAdmission {
+            Ok((accepted_binding, selected_by_policy)) => Ok(RootExecutionAccountAdmission {
                 reservation,
                 initial_binding,
                 accepted_binding,
-                policy_revision,
+                selected_by_policy,
                 failover: None,
             }),
             Err(error) => {
@@ -240,55 +238,28 @@ fn prepare_root_execution_account_admission(
 async fn select_root_execution_account(
     session: &Arc<Session>,
     reservation: &IdleExecutionAccountReservation,
-    initial_binding: ExecutionAccountBinding,
-) -> CodexResult<(ExecutionAccountBinding, Option<u64>)> {
+    selection: TurnExecutionAccountSelection,
+) -> CodexResult<(ExecutionAccountBinding, bool)> {
     let cancellation = reservation.cancellation_token();
+    let initial_binding = selection.current_binding.clone();
     for attempt in 0..=1 {
         let selector = session.turn_execution_account_selector();
         let decision = tokio::select! {
             _ = cancellation.cancelled() => {
                 return Err(execution_account_admission_error(ExecutionAccountSwitchError::ThreadBusy));
             }
-            decision = selector.select(
-                TurnExecutionAccountSelection {
-                    thread_id: session.thread_id(),
-                    current_binding: initial_binding.clone(),
-                    credential_revision: session
-                        .execution_account()
-                        .auth_manager
-                        .credential_revision(),
-                }
-            ) => decision?,
+            decision = selector.select(selection.clone()) => decision?,
         };
-        let (target_slot_id, policy_revision, reprepare_current) = match decision {
-            TurnExecutionAccountDecision::Keep => return Ok((initial_binding, None)),
-            TurnExecutionAccountDecision::Select {
-                target_slot_id,
-                policy_revision,
-            } => (target_slot_id, policy_revision, false),
-            TurnExecutionAccountDecision::ReprepareCurrent { policy_revision } => {
-                (initial_binding.slot_id.clone(), policy_revision, true)
+        let (target_slot_id, reprepare_current) = match decision {
+            TurnExecutionAccountDecision::Keep => return Ok((initial_binding, false)),
+            TurnExecutionAccountDecision::Select { target_slot_id } => (target_slot_id, false),
+            TurnExecutionAccountDecision::ReprepareCurrent => {
+                (initial_binding.slot_id.clone(), true)
             }
         };
 
         if target_slot_id == initial_binding.slot_id && !reprepare_current {
-            let policy = tokio::select! {
-                _ = cancellation.cancelled() => {
-                    return Err(execution_account_admission_error(ExecutionAccountSwitchError::ThreadBusy));
-                }
-                policy = session.services.thread_store.thread_account_rotation_policy(
-                    session.thread_id()
-                ) => policy.map_err(|error| CodexErr::InvalidRequest(error.to_string()))?,
-            };
-            if policy.revision == policy_revision {
-                return Ok((initial_binding, Some(policy_revision)));
-            }
-            if attempt == 0 {
-                continue;
-            }
-            return Err(execution_account_admission_error(
-                ExecutionAccountSwitchError::StaleGeneration,
-            ));
+            return Ok((initial_binding, true));
         }
 
         let resolver = session
@@ -323,11 +294,10 @@ async fn select_root_execution_account(
                 Arc::clone(prepared.execution_account()),
                 prepared.services().clone(),
                 reservation.clone(),
-                policy_revision,
             )
             .await;
         match switched {
-            Ok(binding) => return Ok((binding, Some(policy_revision))),
+            Ok(binding) => return Ok((binding, true)),
             Err(ExecutionAccountSwitchError::StaleGeneration)
                 if attempt == 0 && session.execution_account().binding == initial_binding =>
             {

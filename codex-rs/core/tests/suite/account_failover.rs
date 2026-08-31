@@ -23,6 +23,7 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecutionAccountBinding;
 use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
+use codex_thread_store::ThreadAccountRotationPolicy;
 use core_test_support::responses;
 use core_test_support::responses::mount_response_sequence;
 use core_test_support::responses::start_mock_server;
@@ -107,7 +108,6 @@ impl TurnExecutionAccountSelector for FailOnceSelector {
         Box::pin(async {
             Ok(TurnExecutionAccountDecision::Select {
                 target_slot_id: SLOT_B.to_string(),
-                policy_revision: 1,
             })
         })
     }
@@ -296,6 +296,12 @@ async fn typed_no_effect_rejection_fails_over_within_one_root_turn() -> Result<(
                         slot_id: SLOT_A.to_string(),
                         generation: 1,
                     },
+                    account_rotation_policy: ThreadAccountRotationPolicy::virtual_fixed(
+                        &ExecutionAccountBinding {
+                            slot_id: SLOT_A.to_string(),
+                            generation: 1,
+                        },
+                    ),
                     credential_revision: initial_credential_revision,
                 },
                 rejected_slot_id: SLOT_A.to_string(),
@@ -313,7 +319,6 @@ async fn typed_no_effect_rejection_fails_over_within_one_root_turn() -> Result<(
                 generation: 1,
             },
             target_slot_id: SLOT_B.to_string(),
-            policy_revision: 1,
             binding_transition: SuccessfulAccountBindingTransition::AdvanceGeneration,
         }]
     );

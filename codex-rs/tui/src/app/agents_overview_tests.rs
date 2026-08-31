@@ -212,6 +212,7 @@ async fn shared_overview_seeds_once_and_retains_locally_resumed_history() -> Res
         endpoint: crate::RemoteAppServerEndpoint::UnixSocket {
             socket_path: test_path_buf("/tmp/unused.sock").abs(),
         },
+        canonical_projection: None,
     };
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
     app.app_event_tx = crate::app_event_sender::AppEventSender::new(event_tx);

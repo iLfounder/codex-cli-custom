@@ -6,6 +6,12 @@ use std::path::PathBuf;
 use serde::Serialize;
 
 pub(crate) use pid::PidBackend;
+#[cfg(unix)]
+pub(crate) use pid::ProcessStartIdentity;
+#[cfg(unix)]
+pub(crate) use pid::process_start_identity;
+#[cfg(unix)]
+pub(crate) use pid::process_start_identity_is_active;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]

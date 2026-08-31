@@ -518,6 +518,7 @@ See the Codex keymap documentation for supported actions and examples."
             environment_manager,
             app_server_target,
             reconnect: Default::default(),
+            reconnect_state: Default::default(),
             pending_update_action: None,
             pending_shutdown: None,
             shutdown_lookup_in_flight: false,
@@ -732,7 +733,17 @@ See the Codex keymap documentation for supported actions and examples."
             Ok(exit_reason)
         } else {
             loop {
-                if app.reconnect.offline && !app.reconnect.failed && reconnect.is_none() {
+                if app.reconnect.offline
+                    && let crate::dynamic_tools_mcp::ThreadToolTransport::Mcp(server) =
+                        app_server.thread_tool_transport()
+                {
+                    server.suspend();
+                }
+                if app.reconnect.offline
+                    && !app.reconnect.failed
+                    && !app.uses_supervised_app_server()
+                    && reconnect.is_none()
+                {
                     reconnect = Some(Box::pin(reconnect::reconnect(
                         app.app_server_target.clone(),
                         app.config.clone(),
@@ -834,9 +845,25 @@ See the Codex keymap documentation for supported actions and examples."
                             app.handle_exit_mode(&mut app_server, ExitMode::Immediate).await
                         }
                     }
-                    app_server_event = app_server.next_event(), if listen_for_app_server_events && !app.reconnect.offline
+                    app_server_event = app_server.next_event(), if listen_for_app_server_events
+                        && (!app.reconnect.offline || app.uses_supervised_app_server())
                         && (matches!(app.app_server_target, AppServerTarget::Embedded) || !has_pending_app_events) => {
                         match app_server_event {
+                            Some(codex_app_server_client::AppServerEvent::Connected { identity })
+                                if app.uses_supervised_app_server() =>
+                            {
+                                app.handle_supervised_connected(tui, &mut app_server, &mut app_event_rx, identity)
+                                    .await;
+                                if !app.reconnect.offline {
+                                    waiting_for_initial_session_configured = false;
+                                }
+                            }
+                            Some(codex_app_server_client::AppServerEvent::Disconnected { message })
+                                if app.uses_supervised_app_server() =>
+                            {
+                                app.handle_supervised_disconnect(message);
+                            }
+                            Some(_) if app.reconnect.offline => {}
                             Some(event) => app.handle_app_server_event(&app_server, event).await,
                             None => {
                                 listen_for_app_server_events = false;

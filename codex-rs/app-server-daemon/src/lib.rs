@@ -3,6 +3,10 @@ mod client;
 mod managed_install;
 mod remote_control_client;
 mod settings;
+#[cfg(unix)]
+mod supervisor;
+#[cfg(unix)]
+mod supervisor_control;
 mod update_loop;
 
 use std::path::Path;
@@ -236,6 +240,16 @@ pub async fn run_pid_update_loop(
 ) -> Result<()> {
     ensure_supported_platform()?;
     update_loop::run(http_client_factory).await
+}
+
+#[cfg(unix)]
+pub async fn run_supervisor() -> Result<()> {
+    supervisor::run().await
+}
+
+#[cfg(not(unix))]
+pub async fn run_supervisor() -> Result<()> {
+    ensure_supported_platform()
 }
 
 #[cfg(unix)]

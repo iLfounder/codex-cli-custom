@@ -6,11 +6,11 @@ use pretty_assertions::assert_eq;
 use super::AccountBindingCommitIntent;
 use super::SuccessfulAccountBindingTransition;
 use super::SuccessfulAccountRotationCommit;
-use super::ThreadAccountRotationMode;
 use super::ThreadAccountRotationPolicy;
 use super::ThreadAccountRotationPolicyUpdate;
 use crate::SqliteConfig;
 use crate::StateRuntime;
+use crate::ThreadAccountRotationMode;
 
 async fn runtime() -> (std::path::PathBuf, std::sync::Arc<StateRuntime>) {
     let sqlite_home = crate::runtime::test_support::unique_temp_dir();
@@ -33,73 +33,64 @@ fn automatic_update() -> ThreadAccountRotationPolicyUpdate {
 }
 
 #[tokio::test]
-async fn policy_uses_virtual_revision_zero_then_exact_revision_and_cursor_cas() {
+async fn cursor_commit_is_fenced_by_binding_and_independent_of_profile_revision() {
     let (sqlite_home, runtime) = runtime().await;
     let _cleanup = scopeguard::guard(sqlite_home, |sqlite_home| {
         let _ = std::fs::remove_dir_all(sqlite_home);
     });
     let thread_id = ThreadId::default();
-    let initial = ExecutionAccountBinding {
+    let binding = ExecutionAccountBinding {
         slot_id: "secondary".to_string(),
         generation: 3,
     };
     runtime
-        .initialize_execution_account_binding(thread_id, &initial)
+        .initialize_execution_account_binding(thread_id, &binding)
         .await
         .expect("initialize binding");
-
-    assert_eq!(
-        runtime
-            .thread_account_rotation_policy(thread_id)
-            .await
-            .expect("read virtual policy"),
-        ThreadAccountRotationPolicy::virtual_fixed(&initial)
-    );
-    let committed = runtime
+    runtime
         .compare_and_swap_thread_account_rotation_policy(thread_id, 0, &automatic_update())
         .await
-        .expect("create policy")
-        .expect("virtual revision should commit");
-    assert_eq!(
-        committed,
-        ThreadAccountRotationPolicy {
-            mode: ThreadAccountRotationMode::RoundRobin,
-            fixed_account_slot_id: Some("default".to_string()),
-            automatic_account_slot_ids: vec!["default".to_string(), "secondary".to_string()],
-            revision: 1,
-            last_committed_account_slot_id: Some("secondary".to_string()),
-        }
-    );
-    assert_eq!(
-        runtime
-            .compare_and_swap_thread_account_rotation_policy(thread_id, 0, &automatic_update())
-            .await
-            .expect("stale policy update"),
-        None
-    );
+        .expect("create override")
+        .expect("revision zero override");
+    runtime
+        .compare_and_swap_thread_account_rotation_policy(thread_id, 1, &automatic_update())
+        .await
+        .expect("update override")
+        .expect("revision one override");
 
-    let cursor = runtime
-        .compare_and_swap_thread_account_rotation_cursor(thread_id, 1, "default")
+    let committed = runtime
+        .compare_and_swap_thread_account_rotation_cursor_for_binding(
+            thread_id,
+            &binding,
+            "secondary",
+        )
         .await
         .expect("commit cursor")
-        .expect("matching policy revision");
-    assert_eq!(cursor.revision, 1);
+        .expect("matching binding");
+    assert_eq!(committed.revision, 2);
     assert_eq!(
-        cursor.last_committed_account_slot_id,
-        Some("default".to_string())
+        committed.last_committed_account_slot_id,
+        Some("secondary".to_string())
     );
     assert_eq!(
         runtime
-            .compare_and_swap_thread_account_rotation_cursor(thread_id, 0, "secondary")
+            .compare_and_swap_thread_account_rotation_cursor_for_binding(
+                thread_id,
+                &ExecutionAccountBinding {
+                    slot_id: binding.slot_id,
+                    generation: binding.generation - 1,
+                },
+                "secondary",
+            )
             .await
-            .expect("stale cursor update"),
+            .expect("reject stale binding"),
         None
     );
     runtime.close().await;
 }
 
 #[tokio::test]
-async fn binding_commit_intent_preserves_or_atomically_pins_rotation() {
+async fn binding_commit_intent_preserves_or_atomically_pins_override() {
     let (sqlite_home, runtime) = runtime().await;
     let _cleanup = scopeguard::guard(sqlite_home, |sqlite_home| {
         let _ = std::fs::remove_dir_all(sqlite_home);
@@ -116,8 +107,8 @@ async fn binding_commit_intent_preserves_or_atomically_pins_rotation() {
     let policy = runtime
         .compare_and_swap_thread_account_rotation_policy(thread_id, 0, &automatic_update())
         .await
-        .expect("create policy")
-        .expect("policy commit");
+        .expect("create override")
+        .expect("override commit");
 
     let automatic_binding = runtime
         .compare_and_swap_execution_account_binding_with_intent(
@@ -182,15 +173,14 @@ async fn successful_rotation_atomically_advances_binding_and_cursor() {
     runtime
         .compare_and_swap_thread_account_rotation_policy(thread_id, 0, &automatic_update())
         .await
-        .expect("create policy")
-        .expect("policy commit");
+        .expect("create override")
+        .expect("override commit");
 
     assert_eq!(
         runtime
             .compare_and_swap_successful_account_rotation(
                 thread_id,
                 &initial,
-                1,
                 "secondary",
                 SuccessfulAccountBindingTransition::AdvanceGeneration,
             )
@@ -214,104 +204,31 @@ async fn successful_rotation_atomically_advances_binding_and_cursor() {
 }
 
 #[tokio::test]
-async fn successful_rotation_keeps_generation_for_the_current_account() {
+async fn stale_binding_rolls_back_cursor_and_binding_transition() {
     let (sqlite_home, runtime) = runtime().await;
     let _cleanup = scopeguard::guard(sqlite_home, |sqlite_home| {
         let _ = std::fs::remove_dir_all(sqlite_home);
     });
     let thread_id = ThreadId::default();
-    let initial = ExecutionAccountBinding {
+    let current = ExecutionAccountBinding {
         slot_id: "default".to_string(),
         generation: 4,
     };
     runtime
-        .initialize_execution_account_binding(thread_id, &initial)
+        .initialize_execution_account_binding(thread_id, &current)
         .await
         .expect("initialize binding");
-    runtime
-        .compare_and_swap_thread_account_rotation_policy(thread_id, 0, &automatic_update())
-        .await
-        .expect("create policy")
-        .expect("policy commit");
 
-    let committed = runtime
-        .compare_and_swap_successful_account_rotation(
-            thread_id,
-            &initial,
-            1,
-            "default",
-            SuccessfulAccountBindingTransition::Keep,
-        )
-        .await
-        .expect("commit successful rotation")
-        .expect("matching state");
-    assert_eq!(committed.binding, initial);
-    assert_eq!(
-        committed.policy.last_committed_account_slot_id,
-        Some("default".to_string())
-    );
-    runtime.close().await;
-}
-
-#[tokio::test]
-async fn successful_rotation_stale_policy_rolls_back_binding() {
-    let (sqlite_home, runtime) = runtime().await;
-    let _cleanup = scopeguard::guard(sqlite_home, |sqlite_home| {
-        let _ = std::fs::remove_dir_all(sqlite_home);
-    });
-    let thread_id = ThreadId::default();
-    let initial = ExecutionAccountBinding {
-        slot_id: "default".to_string(),
-        generation: 4,
-    };
-    runtime
-        .initialize_execution_account_binding(thread_id, &initial)
-        .await
-        .expect("initialize binding");
-    let policy = runtime
-        .compare_and_swap_thread_account_rotation_policy(thread_id, 0, &automatic_update())
-        .await
-        .expect("create policy")
-        .expect("policy commit");
-
-    assert_eq!(
-        runtime
-            .compare_and_swap_successful_account_rotation(
-                thread_id,
-                &initial,
-                0,
-                "secondary",
-                SuccessfulAccountBindingTransition::AdvanceGeneration,
-            )
-            .await
-            .expect("reject stale policy"),
-        None
-    );
-    assert_eq!(
-        runtime
-            .execution_account_binding(thread_id)
-            .await
-            .expect("read binding"),
-        Some(initial)
-    );
-    assert_eq!(
-        runtime
-            .thread_account_rotation_policy(thread_id)
-            .await
-            .expect("read policy"),
-        policy
-    );
     assert_eq!(
         runtime
             .compare_and_swap_successful_account_rotation(
                 thread_id,
                 &ExecutionAccountBinding {
-                    slot_id: "secondary".to_string(),
-                    generation: 5,
+                    slot_id: "default".to_string(),
+                    generation: 3,
                 },
-                1,
                 "secondary",
-                SuccessfulAccountBindingTransition::Keep,
+                SuccessfulAccountBindingTransition::AdvanceGeneration,
             )
             .await
             .expect("reject stale binding"),
@@ -319,203 +236,65 @@ async fn successful_rotation_stale_policy_rolls_back_binding() {
     );
     assert_eq!(
         runtime
-            .thread_account_rotation_policy(thread_id)
+            .execution_account_binding(thread_id)
             .await
-            .expect("read policy after stale binding"),
-        policy
+            .expect("read binding"),
+        Some(current)
+    );
+    assert_eq!(
+        runtime
+            .thread_account_rotation_cursor(thread_id)
+            .await
+            .expect("read cursor"),
+        None
     );
     runtime.close().await;
 }
 
 #[tokio::test]
-async fn deleting_thread_removes_rotation_policy() {
+async fn deleting_thread_removes_v5_and_v6_rotation_rows() {
     let (sqlite_home, runtime) = runtime().await;
     let _cleanup = scopeguard::guard(sqlite_home, |sqlite_home| {
         let _ = std::fs::remove_dir_all(sqlite_home);
     });
     let thread_id = ThreadId::default();
+    let binding = ExecutionAccountBinding {
+        slot_id: "default".to_string(),
+        generation: 1,
+    };
+    runtime
+        .initialize_execution_account_binding(thread_id, &binding)
+        .await
+        .expect("initialize binding");
     runtime
         .compare_and_swap_thread_account_rotation_policy(thread_id, 0, &automatic_update())
         .await
-        .expect("create policy")
-        .expect("policy commit");
+        .expect("create override")
+        .expect("override commit");
+    runtime
+        .compare_and_swap_thread_account_rotation_cursor_for_binding(thread_id, &binding, "default")
+        .await
+        .expect("create cursor")
+        .expect("matching binding");
+
+    runtime
+        .delete_thread(thread_id)
+        .await
+        .expect("delete thread");
 
     assert_eq!(
-        runtime
-            .delete_thread(thread_id)
-            .await
-            .expect("delete thread state"),
+        sqlx::query_scalar::<_, i64>(
+            "SELECT (SELECT COUNT(*) FROM thread_account_rotation_policies WHERE thread_id = ?) \
+             + (SELECT COUNT(*) FROM thread_account_rotation_overrides WHERE thread_id = ?) \
+             + (SELECT COUNT(*) FROM thread_account_rotation_cursors WHERE thread_id = ?)",
+        )
+        .bind(thread_id.to_string())
+        .bind(thread_id.to_string())
+        .bind(thread_id.to_string())
+        .fetch_one(runtime.pool.as_ref())
+        .await
+        .expect("count remaining rotation rows"),
         0
-    );
-    assert_eq!(
-        runtime
-            .thread_account_rotation_policy(thread_id)
-            .await
-            .expect("read policy after delete"),
-        ThreadAccountRotationPolicy::virtual_fixed(&ExecutionAccountBinding {
-            slot_id: "default".to_string(),
-            generation: 1,
-        })
-    );
-    runtime.close().await;
-}
-
-#[tokio::test]
-async fn credential_invalidation_removes_membership_from_every_policy() {
-    let (sqlite_home, runtime) = runtime().await;
-    let _cleanup = scopeguard::guard(sqlite_home, |sqlite_home| {
-        let _ = std::fs::remove_dir_all(sqlite_home);
-    });
-    let target = "replacement";
-    let fixed_thread = ThreadId::new();
-    let emptied_thread = ThreadId::new();
-    let unaffected_thread = ThreadId::new();
-    for thread_id in [fixed_thread, emptied_thread, unaffected_thread] {
-        runtime
-            .initialize_execution_account_binding(
-                thread_id,
-                &ExecutionAccountBinding {
-                    slot_id: target.to_string(),
-                    generation: 4,
-                },
-            )
-            .await
-            .expect("initialize binding");
-    }
-    let fixed = ThreadAccountRotationPolicyUpdate {
-        mode: ThreadAccountRotationMode::Fixed,
-        fixed_account_slot_id: Some(target.to_string()),
-        automatic_account_slot_ids: vec![target.to_string(), "other".to_string()],
-    };
-    let emptied = ThreadAccountRotationPolicyUpdate {
-        mode: ThreadAccountRotationMode::RoundRobin,
-        fixed_account_slot_id: Some("other".to_string()),
-        automatic_account_slot_ids: vec![target.to_string()],
-    };
-    let unaffected = ThreadAccountRotationPolicyUpdate {
-        mode: ThreadAccountRotationMode::ExhaustThenNext,
-        fixed_account_slot_id: Some(target.to_string()),
-        automatic_account_slot_ids: vec!["other".to_string()],
-    };
-    for (thread_id, update) in [
-        (fixed_thread, &fixed),
-        (emptied_thread, &emptied),
-        (unaffected_thread, &unaffected),
-    ] {
-        runtime
-            .compare_and_swap_thread_account_rotation_policy(thread_id, 0, update)
-            .await
-            .expect("create policy")
-            .expect("policy commit");
-    }
-
-    let mut affected = runtime
-        .remove_account_slot_from_automatic_rotation_policies(target)
-        .await
-        .expect("remove automatic memberships");
-    affected.sort_by_key(|(thread_id, _)| thread_id.to_string());
-    let mut expected = vec![
-        (
-            fixed_thread,
-            ThreadAccountRotationPolicy {
-                mode: ThreadAccountRotationMode::Fixed,
-                fixed_account_slot_id: Some(target.to_string()),
-                automatic_account_slot_ids: vec!["other".to_string()],
-                revision: 2,
-                last_committed_account_slot_id: Some(target.to_string()),
-            },
-        ),
-        (
-            emptied_thread,
-            ThreadAccountRotationPolicy {
-                mode: ThreadAccountRotationMode::RoundRobin,
-                fixed_account_slot_id: Some("other".to_string()),
-                automatic_account_slot_ids: Vec::new(),
-                revision: 2,
-                last_committed_account_slot_id: Some(target.to_string()),
-            },
-        ),
-    ];
-    expected.sort_by_key(|(thread_id, _)| thread_id.to_string());
-    assert_eq!(affected, expected);
-    assert_eq!(
-        runtime
-            .thread_account_rotation_policy(unaffected_thread)
-            .await
-            .expect("read unaffected policy"),
-        ThreadAccountRotationPolicy {
-            mode: unaffected.mode,
-            fixed_account_slot_id: unaffected.fixed_account_slot_id,
-            automatic_account_slot_ids: unaffected.automatic_account_slot_ids,
-            revision: 1,
-            last_committed_account_slot_id: Some(target.to_string()),
-        }
-    );
-    assert!(
-        runtime
-            .compare_and_swap_thread_account_rotation_policy(
-                emptied_thread,
-                2,
-                &ThreadAccountRotationPolicyUpdate {
-                    mode: ThreadAccountRotationMode::RoundRobin,
-                    fixed_account_slot_id: None,
-                    automatic_account_slot_ids: Vec::new(),
-                },
-            )
-            .await
-            .is_err()
-    );
-    runtime.close().await;
-}
-
-#[tokio::test]
-async fn credential_invalidation_preflight_failure_has_zero_mutations() {
-    let (sqlite_home, runtime) = runtime().await;
-    let _cleanup = scopeguard::guard(sqlite_home, |sqlite_home| {
-        let _ = std::fs::remove_dir_all(sqlite_home);
-    });
-    let first_thread = ThreadId::new();
-    let overflowing_thread = ThreadId::new();
-    for thread_id in [first_thread, overflowing_thread] {
-        runtime
-            .compare_and_swap_thread_account_rotation_policy(thread_id, 0, &automatic_update())
-            .await
-            .expect("create policy")
-            .expect("policy commit");
-    }
-    sqlx::query("UPDATE thread_account_rotation_policies SET revision = ? WHERE thread_id = ?")
-        .bind(i64::MAX)
-        .bind(overflowing_thread.to_string())
-        .execute(runtime.pool.as_ref())
-        .await
-        .expect("seed overflowing revision");
-
-    assert!(
-        runtime
-            .remove_account_slot_from_automatic_rotation_policies("secondary")
-            .await
-            .is_err()
-    );
-    assert_eq!(
-        runtime
-            .thread_account_rotation_policy(first_thread)
-            .await
-            .expect("read unchanged policy"),
-        ThreadAccountRotationPolicy {
-            mode: ThreadAccountRotationMode::RoundRobin,
-            fixed_account_slot_id: Some("default".to_string()),
-            automatic_account_slot_ids: vec!["default".to_string(), "secondary".to_string()],
-            revision: 1,
-            last_committed_account_slot_id: Some("default".to_string()),
-        }
-    );
-    assert_eq!(
-        runtime
-            .thread_account_rotation_policy(overflowing_thread)
-            .await
-            .expect("read overflowing policy")
-            .automatic_account_slot_ids,
-        vec!["default".to_string(), "secondary".to_string()]
     );
     runtime.close().await;
 }

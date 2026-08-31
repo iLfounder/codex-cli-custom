@@ -1,5 +1,6 @@
 use codex_app_server_protocol::RateLimitWindow;
 use codex_thread_store::ThreadAccountRotationPolicy;
+use codex_thread_store::ThreadAccountRotationPolicyRevision;
 
 use super::*;
 
@@ -36,7 +37,7 @@ fn only_canonical_cn_policies_use_the_global_catalog() {
         mode: StoreRotationMode::Fixed,
         fixed_account_slot_id: Some(slot_id.to_string()),
         automatic_account_slot_ids: Vec::new(),
-        revision: 0,
+        revision: ThreadAccountRotationPolicyRevision::Inherit(0),
         last_committed_account_slot_id: Some(slot_id.to_string()),
     };
 
@@ -188,11 +189,9 @@ fn automatic_same_target_still_selects_for_cursor_commit() {
             ThreadAccountRotationMode::ExhaustThenNext,
             "slot-2".to_string(),
             "slot-2",
-            7,
         ),
         TurnExecutionAccountDecision::Select {
             target_slot_id: "slot-2".to_string(),
-            policy_revision: 7,
         }
     );
     assert_eq!(
@@ -200,7 +199,6 @@ fn automatic_same_target_still_selects_for_cursor_commit() {
             ThreadAccountRotationMode::Fixed,
             "slot-2".to_string(),
             "slot-2",
-            7,
         ),
         TurnExecutionAccountDecision::Keep
     );

@@ -1,0 +1,347 @@
+name: Canonical control macOS arm64 artifact smoke
+
+on:
+  push:
+    branches:
+      - ci/canonical-control-macos-arm64-smoke
+    paths:
+      - .github/workflows/canonical-control-macos-arm64-artifact-smoke.yml
+  workflow_dispatch:
+    inputs:
+      artifact_id:
+        description: Immutable build artifact ID
+        required: true
+        type: string
+      build_run_id:
+        description: Workflow run that produced the build artifact
+        required: true
+        type: string
+      source_sha:
+        description: Exact source SHA recorded by the build artifact
+        required: true
+        type: string
+      artifact_digest:
+        description: Expected GitHub artifact digest including sha256 prefix
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: canonical-control-macos-arm64-artifact-smoke
+  cancel-in-progress: false
+
+jobs:
+  artifact-smoke:
+    name: immutable artifact smoke / macOS arm64
+    runs-on: macos-15
+    timeout-minutes: 15
+
+    steps:
+      - name: Resolve immutable build artifact
+        id: artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_ARTIFACT_ID: ${{ inputs.artifact_id }}
+          INPUT_BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          INPUT_SOURCE_SHA: ${{ inputs.source_sha }}
+          INPUT_ARTIFACT_DIGEST: ${{ inputs.artifact_digest }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${INPUT_ARTIFACT_ID:-}" ]]; then
+            artifact=$(gh api \
+              "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${INPUT_ARTIFACT_ID}")
+            test "$(jq -r '.workflow_run.id' <<<"$artifact")" = "$INPUT_BUILD_RUN_ID"
+            test "$(jq -r '.digest' <<<"$artifact")" = "$INPUT_ARTIFACT_DIGEST"
+            source_sha="$INPUT_SOURCE_SHA"
+          else
+            artifact=$(gh api --paginate \
+              "/repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" \
+              --jq '[.artifacts[] | select(
+                (.expired | not) and
+                (.name | startswith("canonical-control-macos-arm64-build-"))
+              )] | sort_by(.created_at) | last')
+            test "$(jq -r '.id' <<<"$artifact")" != null
+            source_sha=$(jq -r '.name' <<<"$artifact")
+            source_sha=${source_sha#canonical-control-macos-arm64-build-}
+          fi
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
+          test "$(jq -r '.name' <<<"$artifact")" = \
+            "canonical-control-macos-arm64-build-$source_sha"
+          test "$(jq -r '.expired' <<<"$artifact")" = false
+          {
+            echo "artifact_id=$(jq -r '.id' <<<"$artifact")"
+            echo "build_run_id=$(jq -r '.workflow_run.id' <<<"$artifact")"
+            echo "artifact_digest=$(jq -r '.digest' <<<"$artifact")"
+            echo "source_sha=$source_sha"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Download preserved build artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.artifact.outputs.artifact_id }}
+          run-id: ${{ steps.artifact.outputs.build_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/canonical-control-dist
+
+      - name: Verify build provenance and package entrypoints
+        shell: bash
+        env:
+          DIST: ${{ runner.temp }}/canonical-control-dist
+          SOURCE_SHA: ${{ steps.artifact.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          test "$(sed -n 's/^source_commit=//p' "$DIST/BUILD-METADATA.txt")" = \
+            "$SOURCE_SHA"
+          test -f "$DIST/codex-package-aarch64-apple-darwin.tar.gz"
+          test -f "$DIST/codex-app-server-package-aarch64-apple-darwin.tar.gz"
+          # download-artifact restores loose files as 0644. The tarballs preserve
+          # their executable modes, while this standalone binary needs its mode
+          # restored explicitly after the immutable artifact digest is checked.
+          test -f "$DIST/codex-responses-api-proxy"
+          chmod 0755 "$DIST/codex-responses-api-proxy"
+          primary=$(mktemp -d /tmp/cv.XXXXXX)
+          app_server=$(mktemp -d /tmp/ca.XXXXXX)
+          tar -xzf "$DIST/codex-package-aarch64-apple-darwin.tar.gz" -C "$primary"
+          tar -xzf "$DIST/codex-app-server-package-aarch64-apple-darwin.tar.gz" \
+            -C "$app_server"
+          test -x "$primary/bin/codex"
+          test -x "$primary/bin/codex-code-mode-host"
+          test -x "$primary/codex-path/rg"
+          test -x "$app_server/bin/codex-app-server"
+          test -x "$app_server/bin/codex-code-mode-host"
+          test -x "$app_server/codex-path/rg"
+          test "$("$primary/bin/codex" --version)" = "codex-cli 0.149.0"
+          test "$("$app_server/bin/codex-app-server" --version)" = \
+            "codex-app-server 0.149.0"
+
+      - name: Smoke packaged supervisor in disposable runner home
+        shell: bash
+        env:
+          DIST: ${{ runner.temp }}/canonical-control-dist
+          SOURCE_SHA: ${{ steps.artifact.outputs.source_sha }}
+          BUILD_ARTIFACT_ID: ${{ steps.artifact.outputs.artifact_id }}
+          BUILD_ARTIFACT_DIGEST: ${{ steps.artifact.outputs.artifact_digest }}
+        run: |
+          set -euo pipefail
+          umask 077
+          control_root="$HOME/.codex/app-server-control"
+          test ! -e "$control_root"
+          smoke_root=$(mktemp -d /tmp/cs.XXXXXX)
+          codex_home="$smoke_root/codex-home"
+          sqlite_home="$smoke_root/sqlite"
+          managed_bin="$codex_home/packages/standalone/current/codex"
+          mkdir -p \
+            "$(dirname "$managed_bin")" \
+            "$sqlite_home" \
+            "$smoke_root/tmp" \
+            "$smoke_root/primary"
+          tar -xzf "$DIST/codex-package-aarch64-apple-darwin.tar.gz" \
+            -C "$smoke_root/primary"
+          ln -s "$smoke_root/primary/bin/codex" "$managed_bin"
+
+          supervisor_log="$smoke_root/supervisor.log"
+          env -i \
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+            HOME="$HOME" \
+            CODEX_HOME="$codex_home" \
+            CODEX_SQLITE_HOME="$sqlite_home" \
+            TMPDIR="$smoke_root/tmp" \
+            RUST_LOG=debug \
+            "$managed_bin" app-server daemon supervisor >"$supervisor_log" 2>&1 &
+          supervisor_pid=$!
+          cleanup() {
+            if kill -0 "$supervisor_pid" 2>/dev/null; then
+              kill -TERM "$supervisor_pid" 2>/dev/null || true
+              wait "$supervisor_pid" || true
+            fi
+          }
+          trap cleanup EXIT
+
+          supervisor_socket="$control_root/supervisor.sock"
+          snapshot_file="$control_root/supervisor-snapshot.json"
+          for _ in $(seq 1 300); do
+            if [[ -S "$supervisor_socket" ]] \
+              && [[ -f "$snapshot_file" ]] \
+              && jq -e '.appServer.status == "ready"' \
+                "$snapshot_file" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.1
+          done
+          if [[ ! -S "$supervisor_socket" ]] \
+            || ! jq -e '.appServer.status == "ready"' \
+              "$snapshot_file" >/dev/null 2>&1; then
+            cat "$supervisor_log"
+            exit 1
+          fi
+          test "$(stat -f %Lp "$supervisor_socket")" = 600
+          test "$(stat -f %Lp "$snapshot_file")" = 600
+
+          SUPERVISOR_SOCKET="$supervisor_socket" \
+          SOURCE_SHA="$SOURCE_SHA" \
+          BUILD_ARTIFACT_ID="$BUILD_ARTIFACT_ID" \
+          BUILD_ARTIFACT_DIGEST="$BUILD_ARTIFACT_DIGEST" \
+          SMOKE_HARNESS_SHA="$GITHUB_SHA" \
+          SMOKE_RESULT="$DIST/SMOKE-RESULT.json" \
+          python3 - <<'PY'
+          import json
+          import os
+          import socket
+
+          client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+          client.connect(os.environ["SUPERVISOR_SOCKET"])
+          stream = client.makefile("rwb", buffering=0)
+
+          def request(payload, request_id):
+              stream.write(json.dumps(payload, separators=(",", ":")).encode() + b"\n")
+              while True:
+                  line = stream.readline()
+                  assert line, "supervisor closed before response"
+                  message = json.loads(line)
+                  if message.get("id") == request_id:
+                      return message
+
+          first = request({"id": 1, "method": "snapshot/read"}, 1)["snapshot"]
+          identity = first["appServer"]["instance"]
+          restarted = request(
+              {"id": 2, "method": "appServer/restart", "expectedInstance": identity},
+              2,
+          )["snapshot"]
+          stale = request(
+              {"id": 3, "method": "appServer/restart", "expectedInstance": identity},
+              3,
+          )
+          assert restarted["appServer"]["status"] == "ready"
+          assert restarted["snapshotRevision"] > first["snapshotRevision"]
+          assert restarted["appServer"]["processGeneration"] > first["appServer"]["processGeneration"]
+          assert restarted["appServer"]["instance"]["generation"] > identity["generation"]
+          assert stale["error"]["code"] == "staleInstance"
+          encoded = json.dumps(restarted).lower()
+          for forbidden in ("credential", "token", "socketpath", "pid"):
+              assert forbidden not in encoded
+          with open(os.environ["SMOKE_RESULT"], "w", encoding="utf-8") as result:
+              json.dump(
+                  {
+                      "sourceCommit": os.environ["SOURCE_SHA"],
+                      "buildArtifactId": os.environ["BUILD_ARTIFACT_ID"],
+                      "buildArtifactDigest": os.environ["BUILD_ARTIFACT_DIGEST"],
+                      "smokeHarnessCommit": os.environ["SMOKE_HARNESS_SHA"],
+                      "supervisorReady": True,
+                      "exactRestart": True,
+                      "staleRestartRejected": True,
+                      "managedPackageEntrypoint": True,
+                      "sharedRuntimeTouched": False,
+                      "providerCalled": False,
+                  },
+                  result,
+                  indent=2,
+              )
+              result.write("\n")
+          client.close()
+          PY
+
+          kill -TERM "$supervisor_pid"
+          wait "$supervisor_pid"
+          trap - EXIT
+          test ! -S "$supervisor_socket"
+          test ! -S "$control_root/app-server-control.sock"
+
+      - name: Smoke managed proxy routing against isolated sockets
+        shell: bash
+        env:
+          DIST: ${{ runner.temp }}/canonical-control-dist
+        run: |
+          set -euo pipefail
+          umask 077
+          smoke_root=$(mktemp -d /tmp/cp.XXXXXX)
+          codex_home="$smoke_root/account1"
+          canonical_socket="$HOME/.codex/app-server-control/app-server-control.sock"
+          account_socket="$codex_home/app-server-control/app-server-control.sock"
+          catalog="$HOME/.config/codex-accounts.tsv"
+          test ! -e "$catalog"
+          mkdir -p "$HOME/.config" "$codex_home" "$smoke_root/primary"
+          printf '1\t%s\n' "$codex_home" > "$catalog"
+          chmod 0600 "$catalog"
+          tar -xzf "$DIST/codex-package-aarch64-apple-darwin.tar.gz" \
+            -C "$smoke_root/primary"
+
+          CANONICAL_SOCKET="$canonical_socket" \
+          ACCOUNT_SOCKET="$account_socket" \
+          ACCEPTED_PATH="$smoke_root/accepted-path" \
+          python3 - <<'PY' &
+          import os
+          import selectors
+          import socket
+
+          selector = selectors.DefaultSelector()
+          listeners = []
+          for name, path in (
+              ("canonical", os.environ["CANONICAL_SOCKET"]),
+              ("account", os.environ["ACCOUNT_SOCKET"]),
+          ):
+              os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+              listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+              listener.bind(path)
+              listener.listen(1)
+              selector.register(listener, selectors.EVENT_READ, name)
+              listeners.append(listener)
+          events = selector.select(timeout=10)
+          assert events, "proxy did not connect"
+          key, _ = events[0]
+          connection, _ = key.fileobj.accept()
+          with open(os.environ["ACCEPTED_PATH"], "w", encoding="utf-8") as result:
+              result.write(key.data + "\n")
+          connection.close()
+          for listener in listeners:
+              path = listener.getsockname()
+              listener.close()
+              os.unlink(path)
+          PY
+          listener_pid=$!
+          for _ in $(seq 1 100); do
+            [[ -S "$canonical_socket" && -S "$account_socket" ]] && break
+            sleep 0.05
+          done
+          test -S "$canonical_socket"
+          test -S "$account_socket"
+
+          env -i \
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+            HOME="$HOME" \
+            CODEX_HOME="$codex_home" \
+            CODEX_MANAGED_ACCOUNT_ID=C1 \
+            "$smoke_root/primary/bin/codex" app-server proxy </dev/null
+          wait "$listener_pid"
+          test "$(cat "$smoke_root/accepted-path")" = canonical
+          jq '.managedProxyCanonical = true' "$DIST/SMOKE-RESULT.json" \
+            > "$smoke_root/result.json"
+          mv "$smoke_root/result.json" "$DIST/SMOKE-RESULT.json"
+
+      - name: Finalize artifact-only smoke evidence
+        shell: bash
+        env:
+          DIST: ${{ runner.temp }}/canonical-control-dist
+        run: |
+          set -euo pipefail
+          (
+            cd "$DIST"
+            shasum -a 256 \
+              codex-package-aarch64-apple-darwin.tar.gz \
+              codex-app-server-package-aarch64-apple-darwin.tar.gz \
+              codex-responses-api-proxy \
+              BUILD-METADATA.txt LICENSE NOTICE SMOKE-RESULT.json > SHA256SUMS
+            shasum -a 256 -c SHA256SUMS
+          )
+
+      - name: Upload installation-ready release candidate
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: canonical-control-macos-arm64-${{ steps.artifact.outputs.source_sha }}-smoke-${{ github.run_id }}
+          path: ${{ runner.temp }}/canonical-control-dist/
+          if-no-files-found: error
+          retention-days: 14

@@ -1,9 +1,24 @@
+use std::fmt;
+use std::io;
+#[cfg(unix)]
+use std::io::BufRead;
+#[cfg(unix)]
+use std::io::BufReader;
+#[cfg(unix)]
+use std::io::Read;
+#[cfg(unix)]
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use codex_http_client::ClientRouteClass;
 use codex_http_client::HttpClient;
 use codex_http_client::HttpClientFactory;
+use codex_login::ExternalAuthFuture;
+use codex_login::auth::ReadOnlyAuthRefresh;
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -19,6 +34,8 @@ pub(crate) const FULL_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(75);
 const SSE_CHANNEL_CAPACITY: usize = 32;
+const MAX_CONTROL_RESPONSE_BYTES: usize = 4096;
+const CONTROL_SOCKET_RELATIVE_PATH: &str = ".tokenmanager/control/tokenmanager.sock";
 
 #[derive(Debug, Error)]
 pub(crate) enum CatalogError {
@@ -97,11 +114,23 @@ impl TokenManagerEvent {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct TokenManagerClient {
     client: HttpClient,
     snapshots_url: Url,
     events_url: Url,
+    control: Option<Arc<TokenManagerControl>>,
+}
+
+impl fmt::Debug for TokenManagerClient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TokenManagerClient")
+            .field("snapshots_url", &self.snapshots_url)
+            .field("events_url", &self.events_url)
+            .field("control_available", &self.control.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl TokenManagerClient {
@@ -141,7 +170,36 @@ impl TokenManagerClient {
             client,
             snapshots_url,
             events_url,
+            control: super::directory::GlobalAccountDirectory::user_home().map(|home| {
+                Arc::new(TokenManagerControl::new(
+                    home.join(CONTROL_SOCKET_RELATIVE_PATH),
+                ))
+            }),
         })
+    }
+
+    pub(crate) fn read_only_auth_refresh(
+        &self,
+        account_id: AccountId,
+    ) -> Result<Arc<dyn ReadOnlyAuthRefresh>, CatalogError> {
+        let control = self.control.clone().ok_or(CatalogError::Request)?;
+        Ok(Arc::new(TokenManagerAccountRefresh {
+            control,
+            account_id,
+        }))
+    }
+
+    // Consumed by the serial global lifecycle authority after this primitive lands.
+    #[allow(dead_code)]
+    pub(crate) async fn begin_lifecycle(
+        &self,
+        account_id: AccountId,
+    ) -> Result<TokenManagerLifecycle, CatalogError> {
+        let control = self.control.clone().ok_or(CatalogError::Request)?;
+        tokio::task::spawn_blocking(move || control.begin(account_id))
+            .await
+            .map_err(|_| CatalogError::Request)?
+            .map_err(|_| CatalogError::Request)
     }
 
     pub(crate) async fn fetch_full(&self) -> Result<Vec<RawSnapshot>, CatalogError> {
@@ -226,6 +284,227 @@ impl TokenManagerClient {
         });
         Ok(rx)
     }
+}
+
+struct TokenManagerAccountRefresh {
+    control: Arc<TokenManagerControl>,
+    account_id: AccountId,
+}
+
+impl ReadOnlyAuthRefresh for TokenManagerAccountRefresh {
+    fn force_refresh(&self) -> ExternalAuthFuture<'_, ()> {
+        let control = Arc::clone(&self.control);
+        let account_id = self.account_id;
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || control.force_refresh(account_id))
+                .await
+                .map_err(|_| io::Error::other("TokenManager control worker stopped"))?
+                .map_err(|error| {
+                    io::Error::new(error.kind(), "TokenManager control request failed")
+                })
+        })
+    }
+}
+
+struct TokenManagerControl {
+    socket_path: PathBuf,
+}
+
+impl TokenManagerControl {
+    fn new(socket_path: PathBuf) -> Self {
+        Self { socket_path }
+    }
+
+    #[cfg(unix)]
+    fn begin(&self, account_id: AccountId) -> io::Result<TokenManagerLifecycle> {
+        use std::os::unix::net::UnixStream;
+
+        let stream = UnixStream::connect(&self.socket_path)?;
+        stream.set_read_timeout(Some(REQUEST_TIMEOUT))?;
+        stream.set_write_timeout(Some(REQUEST_TIMEOUT))?;
+        let mut connection = BufReader::new(stream);
+        let account_id = account_id.to_string();
+        let begin = control_exchange(&mut connection, "lifecycle/begin", &account_id)?;
+        let generation = begin
+            .ok
+            .then_some(begin.generation)
+            .flatten()
+            .filter(|_| matches!(begin.state.as_deref(), Some("active" | "absent")))
+            .ok_or_else(invalid_control_response)?;
+        Ok(TokenManagerLifecycle {
+            connection: Some(connection),
+            account_id,
+            generation,
+        })
+    }
+
+    #[cfg(not(unix))]
+    fn begin(&self, _account_id: AccountId) -> io::Result<TokenManagerLifecycle> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "TokenManager control is unavailable on this platform",
+        ))
+    }
+
+    #[cfg(unix)]
+    fn force_refresh(&self, account_id: AccountId) -> io::Result<()> {
+        let mut lifecycle = self.begin(account_id)?;
+        let account_id = lifecycle.account_id.clone();
+        let generation = lifecycle.generation;
+        let connection = lifecycle.connection_mut()?;
+        let force = control_exchange(connection, "lifecycle/forceRefresh", &account_id);
+        let force_valid = force.as_ref().is_ok_and(|response| {
+            response.ok
+                && response.state.as_deref() == Some("refreshed")
+                && response.generation == Some(generation)
+        });
+        if !force_valid {
+            lifecycle.abort_sync();
+            return Err(force.err().unwrap_or_else(invalid_control_response));
+        }
+        lifecycle.commit_sync()
+    }
+
+    #[cfg(not(unix))]
+    fn force_refresh(&self, _account_id: AccountId) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "TokenManager control is unavailable on this platform",
+        ))
+    }
+}
+
+pub(crate) struct TokenManagerLifecycle {
+    #[cfg(unix)]
+    connection: Option<BufReader<std::os::unix::net::UnixStream>>,
+    #[cfg(not(unix))]
+    connection: Option<()>,
+    account_id: String,
+    generation: u64,
+}
+
+impl fmt::Debug for TokenManagerLifecycle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TokenManagerLifecycle")
+            .field("account_id", &self.account_id)
+            .field("generation", &self.generation)
+            .field("active", &self.connection.is_some())
+            .finish()
+    }
+}
+
+impl TokenManagerLifecycle {
+    #[cfg(unix)]
+    fn connection_mut(&mut self) -> io::Result<&mut BufReader<std::os::unix::net::UnixStream>> {
+        self.connection
+            .as_mut()
+            .ok_or_else(|| io::Error::other("TokenManager lifecycle is closed"))
+    }
+
+    #[cfg(unix)]
+    fn finish_sync(&mut self, method: &'static str, expected_state: &str) -> io::Result<()> {
+        let account_id = self.account_id.clone();
+        let response = control_exchange(self.connection_mut()?, method, &account_id);
+        let valid = response
+            .as_ref()
+            .is_ok_and(|response| response.ok && response.state.as_deref() == Some(expected_state));
+        self.connection.take();
+        if valid {
+            Ok(())
+        } else {
+            Err(response.err().unwrap_or_else(invalid_control_response))
+        }
+    }
+
+    #[cfg(unix)]
+    fn commit_sync(&mut self) -> io::Result<()> {
+        self.finish_sync("lifecycle/commit", "committed")
+    }
+
+    #[cfg(unix)]
+    fn abort_sync(&mut self) {
+        let _ = self.finish_sync("lifecycle/abort", "aborted");
+    }
+
+    // Consumed by the serial global lifecycle authority after this primitive lands.
+    #[allow(dead_code)]
+    pub(crate) async fn commit(mut self) -> Result<(), CatalogError> {
+        tokio::task::spawn_blocking(move || {
+            #[cfg(unix)]
+            {
+                self.commit_sync()
+            }
+            #[cfg(not(unix))]
+            {
+                Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "TokenManager control is unavailable on this platform",
+                ))
+            }
+        })
+        .await
+        .map_err(|_| CatalogError::Request)?
+        .map_err(|_| CatalogError::Request)
+    }
+
+    // Consumed by the serial global lifecycle authority after this primitive lands.
+    #[allow(dead_code)]
+    pub(crate) async fn abort(mut self) {
+        let _ = tokio::task::spawn_blocking(move || {
+            #[cfg(unix)]
+            self.abort_sync();
+            #[cfg(not(unix))]
+            self.connection.take();
+        })
+        .await;
+    }
+}
+
+#[cfg(unix)]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlRequest<'a> {
+    method: &'static str,
+    account_id: &'a str,
+}
+
+#[cfg(unix)]
+#[derive(Deserialize)]
+struct ControlResponse {
+    ok: bool,
+    state: Option<String>,
+    generation: Option<u64>,
+}
+
+#[cfg(unix)]
+fn control_exchange(
+    connection: &mut BufReader<std::os::unix::net::UnixStream>,
+    method: &'static str,
+    account_id: &str,
+) -> io::Result<ControlResponse> {
+    let writer = connection.get_mut();
+    serde_json::to_writer(&mut *writer, &ControlRequest { method, account_id })
+        .map_err(|_| invalid_control_response())?;
+    writer.write_all(b"\n")?;
+    writer.flush()?;
+
+    let mut line = Vec::new();
+    let read = connection
+        .by_ref()
+        .take((MAX_CONTROL_RESPONSE_BYTES + 1) as u64)
+        .read_until(b'\n', &mut line)?;
+    if read == 0 || line.len() > MAX_CONTROL_RESPONSE_BYTES || !line.ends_with(b"\n") {
+        return Err(invalid_control_response());
+    }
+    serde_json::from_slice(&line).map_err(|_| invalid_control_response())
+}
+
+fn invalid_control_response() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        "TokenManager control response is invalid",
+    )
 }
 
 pub(super) fn decode_sse_frame(frame: &[u8]) -> Result<Option<TokenManagerEvent>, CatalogError> {

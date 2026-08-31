@@ -4,6 +4,7 @@ use std::io::Result as IoResult;
 use std::path::Path;
 
 use super::TransportEvent;
+use crate::supervisor::publish_supervised_ready_identity_from_env;
 use crate::transport::websocket::run_websocket_connection;
 use codex_uds::UnixListener;
 use codex_uds::UnixStream;
@@ -30,6 +31,7 @@ pub async fn start_control_socket_acceptor(
     let listener = UnixListener::bind(socket_path.as_path()).await?;
     let socket_guard = ControlSocketFileGuard { socket_path };
     set_control_socket_permissions(socket_guard.socket_path.as_path()).await?;
+    let supervised_ready_guard = publish_supervised_ready_identity_from_env().await?;
     info!(
         socket_path = %socket_guard.socket_path.display(),
         "app-server control socket listening"
@@ -40,6 +42,7 @@ pub async fn start_control_socket_acceptor(
         transport_event_tx,
         shutdown_token,
         socket_guard,
+        supervised_ready_guard,
     )))
 }
 
@@ -48,8 +51,10 @@ async fn run_control_socket_acceptor(
     transport_event_tx: mpsc::Sender<TransportEvent>,
     shutdown_token: CancellationToken,
     socket_guard: ControlSocketFileGuard,
+    supervised_ready_guard: Option<crate::supervisor::SupervisedReadyFileGuard>,
 ) {
     let _socket_guard = socket_guard;
+    let _supervised_ready_guard = supervised_ready_guard;
     loop {
         let stream = tokio::select! {
             _ = shutdown_token.cancelled() => {

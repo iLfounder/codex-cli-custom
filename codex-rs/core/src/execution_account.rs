@@ -12,6 +12,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::protocol::ExecutionAccountBinding;
+use codex_thread_store::ThreadAccountRotationPolicy;
 
 /// Immutable resources and durable provenance used to execute a thread or turn.
 #[derive(Clone)]
@@ -33,6 +34,8 @@ pub struct ExecutionAccountServices {
 pub struct TurnExecutionAccountSelection {
     pub thread_id: ThreadId,
     pub current_binding: ExecutionAccountBinding,
+    /// Effective global or per-thread policy captured once at root-turn admission.
+    pub account_rotation_policy: ThreadAccountRotationPolicy,
     /// Opaque identity of the exact credential snapshot captured by this thread runtime.
     ///
     /// Selectors may compare it with host state but must not render or export it.
@@ -44,20 +47,14 @@ pub struct TurnExecutionAccountSelection {
 pub enum TurnExecutionAccountDecision {
     /// Keep the thread's currently published execution account.
     Keep,
-    /// Select the slot under the returned policy revision.
-    ///
-    /// This remains distinct from [`Self::Keep`] when `target_slot_id` is the current slot: turn
-    /// admission must retain `policy_revision`, while skipping an unnecessary runtime switch.
-    Select {
-        target_slot_id: String,
-        policy_revision: u64,
-    },
-    /// Rebuild the current slot runtime under the returned policy revision.
+    /// Select a slot under the immutable policy carried by the selection request.
+    Select { target_slot_id: String },
+    /// Rebuild the current slot runtime under the immutable captured policy.
     ///
     /// Hosts use this when the logical slot remains selected but its credentials or other
     /// host-owned runtime inputs changed. Core prepares a fresh runtime and advances the durable
     /// execution generation before starting the turn.
-    ReprepareCurrent { policy_revision: u64 },
+    ReprepareCurrent,
 }
 
 /// Future returned by [`TurnExecutionAccountSelector`] without async-trait machinery.
@@ -87,7 +84,6 @@ pub struct TurnExecutionAccountSuccessCommit {
     pub thread_id: ThreadId,
     pub expected_binding: ExecutionAccountBinding,
     pub target_slot_id: String,
-    pub policy_revision: u64,
     pub binding_transition: SuccessfulAccountBindingTransition,
 }
 

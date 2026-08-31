@@ -555,6 +555,7 @@ fn sample_turn_steer_request() -> ClientRequest {
         params: TurnSteerParams {
             thread_id: "thread-1".to_string(),
             expected_turn_id: "turn-1".to_string(),
+            expected_execution_account: None,
             client_user_message_id: None,
             input: Vec::new(),
             responsesapi_client_metadata: None,
@@ -635,6 +636,7 @@ fn sample_thread_start_response() -> ClientResponsePayload {
         active_permission_profile: None,
         reasoning_effort: None,
         multi_agent_mode: Default::default(),
+        transition: None,
     })
 }
 

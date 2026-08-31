@@ -33,12 +33,10 @@ use codex_login::AuthSourceKind;
 use codex_login::CodexAuth;
 use codex_model_provider::create_model_provider;
 use codex_models_manager::manager::SharedModelsManager;
-use codex_protocol::ThreadId;
 use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::error::CodexErr;
 use codex_protocol::protocol::ExecutionAccountBinding;
 use codex_thread_store::ThreadStore;
-use codex_thread_store::ThreadStoreError;
 use serde::Deserialize;
 use serde::Serialize;
 use sha2::Digest;
@@ -62,6 +60,41 @@ const DEFAULT_LIST_LIMIT: usize = 50;
 const MAX_LIST_LIMIT: usize = 100;
 const MAX_MANIFEST_SLOTS: usize = 1_000;
 const TOKEN_MANAGER_URL: &str = "http://127.0.0.1:3101/";
+#[cfg(debug_assertions)]
+const TEST_TOKEN_MANAGER_URL_ENV_VAR: &str = "CODEX_APP_SERVER_TEST_TOKEN_MANAGER_URL";
+
+#[cfg(debug_assertions)]
+fn resolve_token_manager_base_url(test_override: Option<&str>) -> Option<url::Url> {
+    let url = url::Url::parse(test_override.unwrap_or(TOKEN_MANAGER_URL)).ok()?;
+    let is_loopback_ip = matches!(url.host(), Some(url::Host::Ipv4(address)) if address.is_loopback())
+        || matches!(url.host(), Some(url::Host::Ipv6(address)) if address.is_loopback());
+    if url.scheme() != "http"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !is_loopback_ip
+    {
+        return None;
+    }
+    Some(url)
+}
+
+fn token_manager_base_url() -> Option<url::Url> {
+    #[cfg(debug_assertions)]
+    {
+        match std::env::var_os(TEST_TOKEN_MANAGER_URL_ENV_VAR) {
+            Some(test_override) => test_override
+                .to_str()
+                .and_then(|test_override| resolve_token_manager_base_url(Some(test_override))),
+            None => resolve_token_manager_base_url(/*test_override*/ None),
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    url::Url::parse(TOKEN_MANAGER_URL).ok()
+}
 
 const DENY_MANIFEST_INVALID: &str = "account_slot_manifest_invalid";
 const DENY_HOST_ACCESS_TOKEN: &str = "host_owned_codex_access_token";
@@ -369,6 +402,7 @@ pub(crate) struct AccountRegistry {
     global_directory_user_home: Option<PathBuf>,
     global_directory: RwLock<global::GlobalAccountDirectory>,
     global_runtimes: Mutex<HashMap<global::AccountId, Arc<global::GlobalAccountRuntime>>>,
+    global_active_logins: StdMutex<HashMap<global::AccountId, String>>,
     global_catalog_refresh: Semaphore,
     token_manager_client: Option<global::TokenManagerClient>,
 }
@@ -399,7 +433,7 @@ impl AccountRegistry {
             .map_or_else(global::GlobalAccountDirectory::default, |user_home| {
                 global::GlobalAccountDirectory::load_from(user_home, &config.codex_home)
             });
-        let token_manager_client = url::Url::parse(TOKEN_MANAGER_URL).ok().and_then(|url| {
+        let token_manager_client = token_manager_base_url().and_then(|url| {
             global::TokenManagerClient::new(config.http_client_factory(), url).ok()
         });
         let manifest_path = config.codex_home.join(MANIFEST_FILE);
@@ -467,6 +501,7 @@ impl AccountRegistry {
             global_directory_user_home,
             global_directory: RwLock::new(global_directory),
             global_runtimes: Mutex::new(HashMap::new()),
+            global_active_logins: StdMutex::new(HashMap::new()),
             global_catalog_refresh: Semaphore::new(/*permits*/ 1),
             token_manager_client,
         }
@@ -1002,27 +1037,12 @@ impl AccountRegistry {
         &self,
     ) -> Result<Vec<RotationSlotIdentity>, JSONRPCErrorError> {
         let global_directory = self.refresh_global_directory();
-        if global_directory.process_account_id.is_some() {
-            return Ok(global_directory
-                .homes
-                .keys()
-                .map(|account_id| RotationSlotIdentity {
-                    account_slot_id: account_id.to_string(),
-                    account_number: account_id.number(),
-                })
-                .collect());
-        }
-        self.reconcile().await?;
-        let state = self
-            .state
-            .read()
-            .map_err(|_| internal_error("account slot registry is unavailable"))?;
-        Ok(state
-            .slots
-            .iter()
-            .map(|slot| RotationSlotIdentity {
-                account_slot_id: slot.manifest.account_slot_id.clone(),
-                account_number: slot.account_number,
+        Ok(global_directory
+            .homes
+            .keys()
+            .map(|account_id| RotationSlotIdentity {
+                account_slot_id: account_id.to_string(),
+                account_number: account_id.number(),
             })
             .collect())
     }
@@ -1105,30 +1125,6 @@ impl AccountRegistry {
             .lock()
             .await
             .retain(|hint| hint.account_slot_id != account_slot_id);
-    }
-
-    pub(crate) async fn reset_automatic_rotation_memberships(
-        &self,
-        account_slot_id: &str,
-    ) -> Result<Vec<ThreadId>, JSONRPCErrorError> {
-        self.thread_store
-            .remove_account_slot_from_automatic_rotation_policies(account_slot_id.to_string())
-            .await
-            .or_else(|error| match error {
-                ThreadStoreError::Unsupported { .. } => Ok(Vec::new()),
-                error => Err(error),
-            })
-            .map(|updated| {
-                updated
-                    .into_iter()
-                    .map(|(thread_id, _)| thread_id)
-                    .collect()
-            })
-            .map_err(|error| {
-                internal_error(format!(
-                    "failed to reset account rotation memberships: {error}"
-                ))
-            })
     }
 }
 

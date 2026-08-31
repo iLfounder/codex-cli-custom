@@ -19,6 +19,7 @@ use codex_app_server_protocol::SessionRuntimeWriter;
 use codex_app_server_protocol::SessionRuntimeWriterState;
 use codex_app_server_protocol::ThreadAccountRotationMode;
 use codex_app_server_protocol::ThreadAccountRotationSnapshot;
+use codex_app_server_protocol::ThreadAccountRotationSource;
 use pretty_assertions::assert_eq;
 
 fn runtime_snapshot(thread_id: &str, state_revision: u64) -> SessionRuntimeSnapshot {
@@ -225,6 +226,8 @@ async fn rotation_is_exposed_only_with_the_matching_available_capability() {
         automatic_account_slot_ids: Vec::new(),
         revision: 1,
         last_committed_account_slot_id: None,
+        source: ThreadAccountRotationSource::LegacyFixed,
+        global_profile_revision: None,
     };
     let mut app = make_test_app().await;
     let mut hidden = picker_snapshot("epoch-a", 1, 1);

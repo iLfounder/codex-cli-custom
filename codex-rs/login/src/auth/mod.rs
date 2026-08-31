@@ -12,6 +12,7 @@ mod util;
 mod workload_identity;
 
 mod external_bearer;
+mod managed_lifecycle;
 mod manager;
 mod revoke;
 
@@ -22,6 +23,12 @@ pub use bedrock_api_key::BedrockApiKeyAuth;
 pub use bedrock_api_key::login_with_bedrock_api_key;
 pub use error::RefreshTokenFailedError;
 pub use error::RefreshTokenFailedReason;
+pub use managed_lifecycle::ManagedAuthPromotion;
+pub use managed_lifecycle::ManagedAuthRemoval;
+pub use managed_lifecycle::ManagedAuthStaging;
+pub use managed_lifecycle::ManagedAuthState;
+pub use managed_lifecycle::managed_auth_state;
+pub use managed_lifecycle::remove_managed_auth;
 pub use manager::*;
 pub use storage::CredentialRevision;
 pub use workload_identity::is_workload_identity_selected;

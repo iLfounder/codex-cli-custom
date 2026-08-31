@@ -299,6 +299,7 @@ fn sample_thread_start_response(
         active_permission_profile: None,
         reasoning_effort: None,
         multi_agent_mode: Default::default(),
+        transition: None,
     })
 }
 
@@ -514,6 +515,7 @@ fn sample_turn_steer_request(
         params: TurnSteerParams {
             thread_id: thread_id.to_string(),
             expected_turn_id: expected_turn_id.to_string(),
+            expected_execution_account: None,
             client_user_message_id: None,
             input: vec![
                 UserInput::Text {

@@ -14,7 +14,7 @@ pub(crate) fn remote_connection_status_value(
 ) -> Option<RemoteConnectionStatus> {
     let endpoint = match app_server_target {
         AppServerTarget::Embedded => return None,
-        AppServerTarget::LocalDaemon { endpoint } | AppServerTarget::Remote { endpoint } => {
+        AppServerTarget::LocalDaemon { endpoint, .. } | AppServerTarget::Remote { endpoint } => {
             endpoint
         }
     };
@@ -74,6 +74,7 @@ mod tests {
             endpoint: RemoteAppServerEndpoint::UnixSocket {
                 socket_path: socket_path.clone(),
             },
+            canonical_projection: None,
         };
         assert_eq!(
             remote_connection_status_value(&daemon_target, /*server_version*/ None),

@@ -1164,6 +1164,14 @@ ON CONFLICT(id) DO UPDATE SET
                 .bind(thread_id_string)
                 .execute(&mut *tx)
                 .await?;
+            sqlx::query("DELETE FROM thread_account_rotation_overrides WHERE thread_id = ?")
+                .bind(thread_id_string)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM thread_account_rotation_cursors WHERE thread_id = ?")
+                .bind(thread_id_string)
+                .execute(&mut *tx)
+                .await?;
         }
         for thread_id_string in &thread_id_strings {
             sqlx::query(

@@ -1,6 +1,21 @@
 use codex_utils_absolute_path::AbsolutePathBuf;
 use dirs::home_dir;
+use std::collections::BTreeMap;
+use std::collections::HashSet;
+use std::fmt;
+use std::fs::OpenOptions;
+use std::io::Read;
+use std::path::Component;
+use std::path::Path;
 use std::path::PathBuf;
+
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
+const ACCOUNT_REGISTRY_RELATIVE_PATH: &str = ".config/codex-accounts.tsv";
+const MAX_ACCOUNT_REGISTRY_BYTES: u64 = 64 * 1024;
 
 /// Returns the path to the Codex configuration directory, which can be
 /// specified by the `CODEX_HOME` environment variable. If not set, defaults to
@@ -15,6 +30,283 @@ pub fn find_codex_home() -> std::io::Result<AbsolutePathBuf> {
         .ok()
         .filter(|val| !val.is_empty());
     find_codex_home_from_env(codex_home_env.as_deref())
+}
+
+/// Returns the current OS user's home directory without consulting
+/// `CODEX_HOME`.
+///
+/// Owner-scoped services use this path for discovery state that must remain
+/// stable while numbered Codex accounts select different configuration homes.
+pub fn find_owner_home() -> std::io::Result<AbsolutePathBuf> {
+    let owner_home = home_dir().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Could not find owner home directory",
+        )
+    })?;
+    AbsolutePathBuf::from_absolute_path(owner_home)
+}
+
+/// Canonical logical identifier from the owner account catalog.
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ManagedAccountId(u32);
+
+impl ManagedAccountId {
+    pub fn parse(value: &str) -> Option<Self> {
+        let number = value.strip_prefix('C')?.parse::<u32>().ok()?;
+        (number > 0 && value == format!("C{number}")).then_some(Self(number))
+    }
+
+    pub const fn from_number(number: u32) -> Option<Self> {
+        if number > 0 { Some(Self(number)) } else { None }
+    }
+
+    pub const fn number(self) -> u32 {
+        self.0
+    }
+}
+
+impl fmt::Debug for ManagedAccountId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+impl fmt::Display for ManagedAccountId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "C{}", self.0)
+    }
+}
+
+/// Fail-closed reason for rejecting a managed account hint.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ManagedAccountHintError {
+    MalformedHint,
+    UnknownAccount,
+    UnresolvableCodexHome,
+    CodexHomeMismatch,
+}
+
+impl fmt::Display for ManagedAccountHintError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MalformedHint => f.write_str("managed account hint is malformed"),
+            Self::UnknownAccount => f.write_str("managed account is not registered"),
+            Self::UnresolvableCodexHome => f.write_str("managed CODEX_HOME cannot be resolved"),
+            Self::CodexHomeMismatch => {
+                f.write_str("managed account hint does not match CODEX_HOME")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ManagedAccountHintError {}
+
+/// Error loading the owner-only managed account catalog.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ManagedAccountCatalogError {
+    Unavailable,
+    UnsafeFile,
+    TooLarge,
+    InvalidEncoding,
+    InvalidEntry,
+    DuplicateEntry,
+}
+
+impl fmt::Display for ManagedAccountCatalogError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unavailable => f.write_str("managed account catalog is unavailable"),
+            Self::UnsafeFile => f.write_str("managed account catalog is not owner-only"),
+            Self::TooLarge => f.write_str("managed account catalog exceeds its size limit"),
+            Self::InvalidEncoding => f.write_str("managed account catalog is not valid UTF-8"),
+            Self::InvalidEntry => f.write_str("managed account catalog contains an invalid entry"),
+            Self::DuplicateEntry => {
+                f.write_str("managed account catalog contains a duplicate entry")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ManagedAccountCatalogError {}
+
+/// Owner-local mapping from logical managed account identifiers to canonical
+/// Codex homes.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ManagedAccountCatalog {
+    homes: BTreeMap<ManagedAccountId, PathBuf>,
+}
+
+impl ManagedAccountCatalog {
+    /// Loads `~/.config/codex-accounts.tsv` relative to an explicit owner home.
+    ///
+    /// The registry must be a regular, non-symlink owner-only file. Malformed
+    /// rows, unavailable homes, or duplicate identifiers/homes reject the whole
+    /// catalog. C1 must always be registered.
+    pub fn load_from_owner_home(owner_home: &Path) -> Result<Self, ManagedAccountCatalogError> {
+        let contents = read_account_registry(&owner_home.join(ACCOUNT_REGISTRY_RELATIVE_PATH))?;
+        let mut homes = BTreeMap::new();
+        let mut unique_homes = HashSet::new();
+        for line in contents.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut fields = line.split('\t');
+            let (Some(number), Some(home), None) = (fields.next(), fields.next(), fields.next())
+            else {
+                return Err(ManagedAccountCatalogError::InvalidEntry);
+            };
+            let number = parse_catalog_account_id(number)?;
+            let home = catalog_home(home)?;
+            if !unique_homes.insert(home.clone()) || homes.insert(number, home).is_some() {
+                return Err(ManagedAccountCatalogError::DuplicateEntry);
+            }
+        }
+        let default_account =
+            ManagedAccountId::from_number(1).ok_or(ManagedAccountCatalogError::InvalidEntry)?;
+        if !homes.contains_key(&default_account) {
+            return Err(ManagedAccountCatalogError::InvalidEntry);
+        }
+        Ok(Self { homes })
+    }
+
+    pub fn load() -> Result<Self, ManagedAccountCatalogError> {
+        let owner_home = find_owner_home().map_err(|_| ManagedAccountCatalogError::Unavailable)?;
+        Self::load_from_owner_home(owner_home.as_path())
+    }
+
+    pub fn entries(&self) -> impl Iterator<Item = (ManagedAccountId, &Path)> {
+        self.homes
+            .iter()
+            .map(|(account_id, home)| (*account_id, home.as_path()))
+    }
+
+    pub fn home(&self, account_id: ManagedAccountId) -> Option<&Path> {
+        self.homes.get(&account_id).map(PathBuf::as_path)
+    }
+
+    pub fn account_for_home(&self, codex_home: &Path) -> Option<ManagedAccountId> {
+        if !is_clean_absolute_path(codex_home) {
+            return None;
+        }
+        let codex_home = std::fs::canonicalize(codex_home).ok()?;
+        self.homes
+            .iter()
+            .find_map(|(account_id, home)| (home == &codex_home).then_some(*account_id))
+    }
+
+    /// Validates a present managed-account hint against the canonical
+    /// `CODEX_HOME` mapping. Hint absence is deliberately handled by callers as
+    /// the unmanaged upstream path.
+    pub fn match_hint(
+        &self,
+        hint: &str,
+        codex_home: &Path,
+    ) -> Result<ManagedAccountId, ManagedAccountHintError> {
+        let account_id =
+            ManagedAccountId::parse(hint).ok_or(ManagedAccountHintError::MalformedHint)?;
+        let expected_home = self
+            .home(account_id)
+            .ok_or(ManagedAccountHintError::UnknownAccount)?;
+        if !is_clean_absolute_path(codex_home) {
+            return Err(ManagedAccountHintError::UnresolvableCodexHome);
+        }
+        let codex_home = std::fs::canonicalize(codex_home)
+            .map_err(|_| ManagedAccountHintError::UnresolvableCodexHome)?;
+        if codex_home != expected_home {
+            return Err(ManagedAccountHintError::CodexHomeMismatch);
+        }
+        Ok(account_id)
+    }
+}
+
+fn parse_catalog_account_id(value: &str) -> Result<ManagedAccountId, ManagedAccountCatalogError> {
+    let number = value
+        .parse::<u32>()
+        .ok()
+        .and_then(ManagedAccountId::from_number)
+        .ok_or(ManagedAccountCatalogError::InvalidEntry)?;
+    (value == number.number().to_string())
+        .then_some(number)
+        .ok_or(ManagedAccountCatalogError::InvalidEntry)
+}
+
+fn catalog_home(value: &str) -> Result<PathBuf, ManagedAccountCatalogError> {
+    let home = PathBuf::from(value);
+    if !is_clean_absolute_path(&home) {
+        return Err(ManagedAccountCatalogError::InvalidEntry);
+    }
+    let metadata =
+        std::fs::symlink_metadata(&home).map_err(|_| ManagedAccountCatalogError::InvalidEntry)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(ManagedAccountCatalogError::InvalidEntry);
+    }
+    std::fs::canonicalize(home).map_err(|_| ManagedAccountCatalogError::InvalidEntry)
+}
+
+/// Returns whether a path is absolute and already in lexical-clean form.
+///
+/// Canonicalization intentionally remains separate: symlinked ancestors are
+/// accepted, while `~`, `.`/`..`, duplicate separators, and trailing separators
+/// are rejected before filesystem resolution so callers share one acceptance
+/// contract with the TokenManager catalog loader.
+fn is_clean_absolute_path(path: &Path) -> bool {
+    if !path.is_absolute() {
+        return false;
+    }
+
+    let mut rebuilt = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir | Component::ParentDir => return false,
+            Component::Prefix(prefix) => rebuilt.push(prefix.as_os_str()),
+            Component::RootDir | Component::Normal(_) => rebuilt.push(component.as_os_str()),
+        }
+    }
+    rebuilt == path
+}
+
+fn read_account_registry(path: &Path) -> Result<String, ManagedAccountCatalogError> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    options.custom_flags(0x0000_0100);
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    options.custom_flags(0x0002_0000);
+    let file = options
+        .open(path)
+        .map_err(|_| ManagedAccountCatalogError::Unavailable)?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| ManagedAccountCatalogError::Unavailable)?;
+    if !metadata.is_file() {
+        return Err(ManagedAccountCatalogError::UnsafeFile);
+    }
+    #[cfg(unix)]
+    if metadata.mode() & 0o777 != 0o600 || metadata.uid() != effective_uid() {
+        return Err(ManagedAccountCatalogError::UnsafeFile);
+    }
+    if metadata.len() > MAX_ACCOUNT_REGISTRY_BYTES {
+        return Err(ManagedAccountCatalogError::TooLarge);
+    }
+    let mut contents = String::new();
+    file.take(MAX_ACCOUNT_REGISTRY_BYTES + 1)
+        .read_to_string(&mut contents)
+        .map_err(|_| ManagedAccountCatalogError::InvalidEncoding)?;
+    if contents.len() as u64 > MAX_ACCOUNT_REGISTRY_BYTES {
+        return Err(ManagedAccountCatalogError::TooLarge);
+    }
+    Ok(contents)
+}
+
+#[cfg(unix)]
+fn effective_uid() -> u32 {
+    unsafe extern "C" {
+        fn geteuid() -> u32;
+    }
+    // SAFETY: `geteuid` takes no arguments and has no failure mode.
+    unsafe { geteuid() }
 }
 
 fn find_codex_home_from_env(codex_home_env: Option<&str>) -> std::io::Result<AbsolutePathBuf> {
@@ -132,3 +424,7 @@ mod tests {
         assert_eq!(resolved, expected);
     }
 }
+
+#[cfg(test)]
+#[path = "account_catalog_tests.rs"]
+mod account_catalog_tests;

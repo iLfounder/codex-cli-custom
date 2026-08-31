@@ -229,6 +229,11 @@ impl AccountRequestProcessor {
         request_id: ConnectionRequestId,
         params: LoginAccountParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        if self.account_registry.global_managed_mode()? {
+            return Err(invalid_request(
+                "managed accounts require accountSlot/login/start",
+            ));
+        }
         self.login_v2(request_id, params).await.map(|()| None)
     }
 
@@ -236,6 +241,11 @@ impl AccountRequestProcessor {
         &self,
         request_id: ConnectionRequestId,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        if self.account_registry.global_managed_mode()? {
+            return Err(invalid_request(
+                "managed accounts require accountSlot/logout",
+            ));
+        }
         let _start = self
             .default_login_start_lock
             .acquire()
@@ -468,13 +478,6 @@ impl AccountRequestProcessor {
                 ERROR_LOGIN_BUSY,
                 "a default account login is still active",
             ));
-        }
-        let rotation_affected = self
-            .account_registry
-            .reset_automatic_rotation_memberships("default")
-            .await?;
-        for thread_id in rotation_affected {
-            self.session_runtime.publish_thread(thread_id).await;
         }
         match params {
             LoginAccountParams::ApiKey { api_key } => {

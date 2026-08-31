@@ -69,6 +69,47 @@ Run `just fmt` (in the `codex-rs` directory) automatically after you have finish
 
 Before finalizing a large change to `codex-rs`, run `just fix -p <project>` (in `codex-rs` directory) to fix any linter issues in the code. Prefer scoping with `-p` to avoid slow workspace‑wide Clippy builds; only run `just fix` without `-p` if you changed shared crates. Do not re-run tests after running `fix` or `fmt`.
 
+## Expensive macOS build and smoke rules
+
+- Treat release build, focused validation, and packaged-binary smoke as three separate jobs. Do not
+  serialize them in one job or make a smoke retry rebuild Rust code.
+- Build and package the four release binaries once on the macOS runner, upload the immutable
+  artifact immediately, and end the build job. Record the source commit/tree, lockfile and build
+  inputs, profile, target, component checksums, artifact ID, and artifact digest.
+- Rebuild only when a binary or package input changed: Rust source, `Cargo.toml`, `Cargo.lock`, build
+  script, package builder, toolchain, target, or release-profile setting. A smoke script, workflow
+  wiring, evidence format, documentation, or `AGENTS.md`-only change must reuse the existing exact
+  artifact.
+- Run packaged-binary CI smoke in an artifact-only job or workflow. It must download a named
+  artifact by build run ID and artifact ID, verify its source SHA and digest, and run from short
+  isolated `/tmp` paths. It must not install Rust, check out source, invoke Cargo/nextest, or
+  build/link anything. A failed CI smoke reruns only this consumer and emits a small evidence
+  artifact containing both the build identity and smoke-harness commit.
+- Do not treat CI artifact smoke as final acceptance for local control-plane work. Multi-account
+  catalog and TokenManager behavior, a PM2-owned supervisor, multiple local TUI clients, canonical
+  owner UDS routing, and Relay externalization must be exercised on the target Mac with the same
+  preserved artifact. Keep that local E2E separate from compilation and preserve the installed
+  release and running legacy processes until their exact activation boundary is approved.
+- Keep focused Rust validation independent of packaging and parallel to it when both are needed.
+  Use the repository `ci-test` profile, not `--release`, unless the behavior specifically depends on
+  release optimization. Select exact compile targets such as `--lib` or `--bin codex`; a nextest
+  expression filters test execution but does not reduce the test binaries Cargo compiles and links.
+- Preserve the existing local target directory and compiler cache. Do not run clean, change target
+  directories, disable local incremental compilation, or rebuild under another profile without a
+  concrete invalidation reason. On an ephemeral hosted runner, use `sccache` where available but do
+  not mistake it for a preserved Cargo target tree or final-link cache; eliminate redundant jobs
+  instead of expecting cache to make them free.
+- Keep release packaging non-incremental when reproducibility requires it, but pay that cost only
+  once per exact build-input set. Do not use release-profile test harnesses as a second release
+  build.
+- Before starting or rerunning an expensive job, state which build input changed, why the existing
+  artifact is invalid, and which exact step requires compilation. If no build input changed, do not
+  rebuild.
+- When a Rust step is slow, distinguish compile/codegen/link time from test execution time and
+  compare it with the previous successful envelope. Do not cancel and restart a healthy compiler or
+  linker merely because it is quiet; preserve the completed artifact first and debug downstream
+  failures from that artifact.
+
 ## The `codex-core` crate
 
 Over time, the `codex-core` crate (defined in `codex-rs/core/`) has become bloated because it is the largest crate, so it is often easier to add something new to `codex-core` rather than refactor out the library code you need so your new code neither takes a dependency on, nor contributes to the size of, `codex-core`.

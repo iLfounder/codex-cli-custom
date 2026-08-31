@@ -19,6 +19,8 @@ use crate::extensions::thread_extensions;
 use crate::external_agent_migration::ExternalAgentConfigRequestProcessor;
 use crate::external_agent_migration::ExternalAgentConfigRequestProcessorArgs;
 use crate::fs_watch::FsWatchManager;
+use crate::legacy_admission::LegacyAdmissionGate;
+use crate::legacy_admission::LegacyAdmissionPermit;
 use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::ConnectionRequestId;
 use crate::outgoing_message::OutgoingMessageSender;
@@ -168,6 +170,15 @@ pub(crate) struct MessageProcessor {
     windows_sandbox_processor: WindowsSandboxRequestProcessor,
     request_serialization_queues: RequestSerializationQueues,
     session_runtime: Arc<crate::session_runtime::SessionRuntimeEngine>,
+    legacy_admission: LegacyAdmissionGate,
+}
+
+fn take_legacy_admission_permit(
+    permit: &mut Option<LegacyAdmissionPermit>,
+) -> Result<LegacyAdmissionPermit, JSONRPCErrorError> {
+    permit
+        .take()
+        .ok_or_else(|| internal_error("legacy admission permit was already consumed"))
 }
 
 #[derive(Debug)]
@@ -268,6 +279,7 @@ pub(crate) struct MessageProcessorArgs {
     /// `None` skips startup tasks; otherwise preserve the initial config-loading path.
     pub(crate) plugin_startup_tasks: Option<PluginStartupConfig>,
     pub(crate) account_failover_mode: AccountFailoverMode,
+    pub(crate) legacy_admission: LegacyAdmissionGate,
 }
 
 impl MessageProcessor {
@@ -293,6 +305,7 @@ impl MessageProcessor {
             remote_control_handle,
             plugin_startup_tasks,
             account_failover_mode,
+            legacy_admission,
         } = args;
         let thread_state_manager = ThreadStateManager::new();
         // The thread store is intentionally process-scoped. Config reloads can
@@ -545,6 +558,7 @@ impl MessageProcessor {
             Arc::clone(&thread_store),
             outgoing.clone(),
             queue_service,
+            thread_state_manager.clone(),
         );
         let project_processor = ProjectRequestProcessor::new(
             Arc::clone(&thread_store),
@@ -662,6 +676,7 @@ impl MessageProcessor {
             windows_sandbox_processor,
             request_serialization_queues,
             session_runtime,
+            legacy_admission,
         }
     }
 
@@ -909,6 +924,14 @@ impl MessageProcessor {
         connection_id: ConnectionId,
         response: JSONRPCResponse,
     ) {
+        if !self.legacy_admission.accepts_client_response() {
+            tracing::warn!(
+                ?connection_id,
+                response_id = ?response.id,
+                "ignoring client response while legacy admission is sealed"
+            );
+            return;
+        }
         let JSONRPCResponse { id, result, .. } = response;
         self.outgoing
             .notify_client_response(connection_id, id, result)
@@ -1000,6 +1023,7 @@ impl MessageProcessor {
             ),
             _ => None,
         };
+        let legacy_admission_permit = self.legacy_admission.admit(&codex_request)?;
         let serialization_scope = codex_request.serialization_scope();
         let error_request_id = connection_request_id.clone();
         let rpc_gate = Arc::clone(&session.rpc_gate);
@@ -1016,6 +1040,7 @@ impl MessageProcessor {
                         request_context,
                         session,
                         event_stream_ready,
+                        legacy_admission_permit,
                     )
                     .await;
                 if let Err(error) = result {
@@ -1045,6 +1070,7 @@ impl MessageProcessor {
         request_context: RequestContext,
         session: Arc<ConnectionSessionState>,
         event_stream_ready: Option<McpEventStreamReady>,
+        legacy_admission_permit: LegacyAdmissionPermit,
     ) -> Result<(), JSONRPCErrorError> {
         let connection_id = connection_request_id.connection_id;
         let app_server_client_name = session.app_server_client_name().map(str::to_string);
@@ -1054,6 +1080,8 @@ impl MessageProcessor {
             connection_id,
             request_id: codex_request.id().clone(),
         };
+
+        let mut legacy_admission_permit = Some(legacy_admission_permit);
         let result: Result<Option<ClientResponsePayload>, JSONRPCErrorError> = match codex_request {
             ClientRequest::Initialize { .. } => {
                 panic!("Initialize should be handled before initialized request dispatch");
@@ -1082,6 +1110,16 @@ impl MessageProcessor {
             ClientRequest::AccountSlotLogout { params, .. } => {
                 self.account_processor.logout_account_slot(params).await
             }
+            ClientRequest::AccountRotationRead { .. } => self
+                .session_runtime
+                .read_global_account_rotation()
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::AccountRotationUpdate { params, .. } => self
+                .session_runtime
+                .update_global_account_rotation(params)
+                .await
+                .map(|response| Some(response.into())),
             ClientRequest::ThreadAccountSwitch { params, .. } => self
                 .session_runtime
                 .switch_account(connection_id, params)
@@ -1096,6 +1134,24 @@ impl MessageProcessor {
                 .session_runtime
                 .update_account_rotation(params)
                 .await
+                .map(|response| Some(response.into())),
+            ClientRequest::ThreadAccountRotationReset { params, .. } => self
+                .session_runtime
+                .reset_account_rotation(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::LegacyAdmissionSeal { params, .. } => self
+                .legacy_admission
+                .seal(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::LegacyAdmissionStatus { params, .. } => self
+                .legacy_admission
+                .status(params)
+                .map(|response| Some(response.into())),
+            ClientRequest::LegacyAdmissionAbort { params, .. } => self
+                .legacy_admission
+                .abort(params)
                 .map(|response| Some(response.into())),
             ClientRequest::ThreadRelinquish { params, .. } => self
                 .session_runtime
@@ -1377,7 +1433,11 @@ impl MessageProcessor {
                 .map(|response| Some(response.into())),
             ClientRequest::ThreadQueueStart { params, .. } => self
                 .thread_queue_processor
-                .start(&request_id, params)
+                .start(
+                    &request_id,
+                    params,
+                    take_legacy_admission_permit(&mut legacy_admission_permit)?,
+                )
                 .await
                 .map(|response| Some(response.into())),
             ClientRequest::ThreadMetadataUpdate { params, .. } => {
@@ -1414,7 +1474,11 @@ impl MessageProcessor {
             }
             ClientRequest::ThreadCompactStart { params, .. } => {
                 self.thread_processor
-                    .thread_compact_start(&request_id, params)
+                    .thread_compact_start(
+                        &request_id,
+                        params,
+                        take_legacy_admission_permit(&mut legacy_admission_permit)?,
+                    )
                     .await
             }
             ClientRequest::ThreadBackgroundTerminalsClean { params, .. } => {
@@ -1493,7 +1557,11 @@ impl MessageProcessor {
             }
             ClientRequest::ThreadShellCommand { params, .. } => {
                 self.thread_processor
-                    .thread_shell_command(&request_id, params)
+                    .thread_shell_command(
+                        &request_id,
+                        params,
+                        take_legacy_admission_permit(&mut legacy_admission_permit)?,
+                    )
                     .await
             }
             ClientRequest::ThreadApproveGuardianDeniedAction { params, .. } => {
@@ -1613,6 +1681,7 @@ impl MessageProcessor {
                         params,
                         app_server_client_name.clone(),
                         client_version.clone(),
+                        take_legacy_admission_permit(&mut legacy_admission_permit)?,
                     )
                     .await
             }
@@ -1666,7 +1735,13 @@ impl MessageProcessor {
                 self.turn_processor.thread_realtime_list_voices().await
             }
             ClientRequest::ReviewStart { params, .. } => {
-                self.turn_processor.review_start(&request_id, params).await
+                self.turn_processor
+                    .review_start(
+                        &request_id,
+                        params,
+                        take_legacy_admission_permit(&mut legacy_admission_permit)?,
+                    )
+                    .await
             }
             ClientRequest::McpServerOauthLogin { params, .. } => {
                 self.mcp_processor.mcp_server_oauth_login(params).await

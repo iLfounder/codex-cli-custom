@@ -28,7 +28,7 @@ fn turn_aborted(turn_id: &str) -> EventMsg {
 fn admitted_turn_is_interruptible_until_matching_publication_or_terminal() {
     let mut state = ThreadState::default();
 
-    state.register_admitted_turn("turn-1".to_string());
+    state.register_admitted_turn("turn-1".to_string(), None);
     assert_eq!(state.interruptible_turn_id(), Some("turn-1"));
 
     state.track_current_turn_event("older-turn", &turn_started("older-turn"));
@@ -48,7 +48,7 @@ fn publication_before_registration_does_not_leave_a_provisional_turn() {
     let mut state = ThreadState::default();
     state.track_current_turn_event("turn-1", &turn_started("turn-1"));
 
-    state.register_admitted_turn("turn-1".to_string());
+    state.register_admitted_turn("turn-1".to_string(), None);
 
     assert_eq!(state.admitted_turn_id, None);
     assert_eq!(state.interruptible_turn_id(), Some("turn-1"));
@@ -60,7 +60,7 @@ fn terminal_before_registration_rejects_the_completed_turn() {
     state.track_current_turn_event("turn-1", &turn_started("turn-1"));
     state.track_current_turn_event("turn-1", &turn_aborted("turn-1"));
 
-    state.register_admitted_turn("turn-1".to_string());
+    state.register_admitted_turn("turn-1".to_string(), None);
 
     assert_eq!(state.admitted_turn_id, None);
     assert_eq!(state.interruptible_turn_id(), None);
@@ -69,7 +69,7 @@ fn terminal_before_registration_rejects_the_completed_turn() {
 #[test]
 fn listener_clear_discards_an_unpublished_admission() {
     let mut state = ThreadState::default();
-    state.register_admitted_turn("turn-1".to_string());
+    state.register_admitted_turn("turn-1".to_string(), None);
 
     state.clear_listener();
 

@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ThreadAccountRotationMode": {
+      "enum": [
+        "fixed",
+        "quotaAware",
+        "roundRobin",
+        "exhaustThenNext"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "automaticAccountSlotIds": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "expectedRotationRevision": {
+      "description": "Use revision zero to create the first global profile.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "fixedAccountSlotId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "mode": {
+      "$ref": "#/definitions/ThreadAccountRotationMode"
+    }
+  },
+  "required": [
+    "automaticAccountSlotIds",
+    "expectedRotationRevision",
+    "mode"
+  ],
+  "title": "AccountRotationUpdateParams",
+  "type": "object"
+}

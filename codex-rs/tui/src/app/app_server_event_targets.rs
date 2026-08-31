@@ -207,6 +207,7 @@ pub(super) fn server_notification_thread_target(
             notification.operation.thread_id.as_deref()
         }
         ServerNotification::ProjectChanged(_)
+        | ServerNotification::AccountRotationChanged(_)
         | ServerNotification::SkillsChanged(_)
         | ServerNotification::McpServerOauthLoginCompleted(_)
         | ServerNotification::AccountUpdated(_)

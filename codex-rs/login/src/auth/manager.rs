@@ -313,7 +313,16 @@ pub trait ExternalAuth: Send + Sync {
 
 pub type ExternalAuthFuture<'a, T> = Pin<Box<dyn Future<Output = std::io::Result<T>> + Send + 'a>>;
 
-fn permanent_external_auth_error(message: impl Into<String>) -> RefreshTokenError {
+/// Refresh authority for a read-only credential file.
+///
+/// Implementations own the credential write and must return only after the file is ready to be
+/// reloaded. The authority is bound to one account before it is installed on an [`AuthManager`].
+pub trait ReadOnlyAuthRefresh: Send + Sync {
+    /// Forces the bound authority to refresh its credential file.
+    fn force_refresh(&self) -> ExternalAuthFuture<'_, ()>;
+}
+
+fn permanent_auth_error(message: impl Into<String>) -> RefreshTokenError {
     RefreshTokenError::Permanent(RefreshTokenFailedError::new(
         RefreshTokenFailedReason::Other,
         message,
@@ -1993,6 +2002,7 @@ pub struct UnauthorizedRecovery {
     manager: Arc<AuthManager>,
     step: UnauthorizedRecoveryStep,
     expected_account_id: Option<String>,
+    expected_credential_revision: Option<CredentialRevision>,
     mode: UnauthorizedRecoveryMode,
 }
 
@@ -2011,6 +2021,7 @@ impl UnauthorizedRecovery {
     fn new(manager: Arc<AuthManager>) -> Self {
         let cached_auth = manager.auth_cached();
         let expected_account_id = cached_auth.as_ref().and_then(CodexAuth::get_account_id);
+        let expected_credential_revision = manager.credential_revision();
         let mode = if manager.has_external_auth() {
             UnauthorizedRecoveryMode::External
         } else if manager.management_mode == AuthManagementMode::ReadOnlyFile {
@@ -2028,6 +2039,7 @@ impl UnauthorizedRecovery {
             manager,
             step,
             expected_account_id,
+            expected_credential_revision,
             mode,
         }
     }
@@ -2118,6 +2130,18 @@ impl UnauthorizedRecovery {
 
         match self.step {
             UnauthorizedRecoveryStep::Reload => {
+                if self.mode == UnauthorizedRecoveryMode::ReadOnlyFile {
+                    self.step = UnauthorizedRecoveryStep::Done;
+                    self.manager
+                        .recover_read_only_unauthorized(
+                            self.expected_account_id.as_deref(),
+                            self.expected_credential_revision.as_ref(),
+                        )
+                        .await?;
+                    return Ok(UnauthorizedRecoveryStepResult {
+                        auth_state_changed: Some(true),
+                    });
+                }
                 match self
                     .manager
                     .reload_if_account_id_matches(self.expected_account_id.as_deref())
@@ -2136,15 +2160,6 @@ impl UnauthorizedRecovery {
                         });
                     }
                     ReloadOutcome::ReloadedNoChange => {
-                        if self.mode == UnauthorizedRecoveryMode::ReadOnlyFile {
-                            self.step = UnauthorizedRecoveryStep::Done;
-                            return Err(RefreshTokenError::Permanent(
-                                RefreshTokenFailedError::new(
-                                    RefreshTokenFailedReason::Other,
-                                    "read-only credential snapshot is unchanged".to_string(),
-                                ),
-                            ));
-                        }
                         self.step = UnauthorizedRecoveryStep::RefreshToken;
                         return Ok(UnauthorizedRecoveryStepResult {
                             auth_state_changed: Some(false),
@@ -2207,6 +2222,7 @@ pub struct AuthManager {
     agent_identity_lock: Semaphore,
     agent_identity_bootstrap_cooldown: Mutex<AgentIdentityBootstrapCooldown>,
     external_auth: RwLock<Option<Arc<dyn ExternalAuth>>>,
+    read_only_refresh: Option<Arc<dyn ReadOnlyAuthRefresh>>,
     workload_identity_selected: bool,
     auth_route_config: AuthRouteConfig,
 }
@@ -2264,6 +2280,7 @@ impl Debug for AuthManager {
             .field("chatgpt_base_url", &self.chatgpt_base_url)
             .field("auth_route_config", &self.auth_route_config)
             .field("has_external_auth", &self.has_external_auth())
+            .field("has_read_only_refresh", &self.read_only_refresh.is_some())
             .field(
                 "workload_identity_selected",
                 &self.workload_identity_selected,
@@ -2373,6 +2390,7 @@ impl AuthManager {
             agent_identity_lock: Semaphore::new(/*permits*/ 1),
             agent_identity_bootstrap_cooldown: Mutex::default(),
             external_auth: RwLock::new(None),
+            read_only_refresh: None,
             workload_identity_selected: false,
             auth_route_config,
         }
@@ -2411,6 +2429,7 @@ impl AuthManager {
             agent_identity_lock: Semaphore::new(/*permits*/ 1),
             agent_identity_bootstrap_cooldown: Mutex::default(),
             external_auth: RwLock::new(None),
+            read_only_refresh: None,
             workload_identity_selected: false,
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
         })
@@ -2443,6 +2462,7 @@ impl AuthManager {
             agent_identity_lock: Semaphore::new(/*permits*/ 1),
             agent_identity_bootstrap_cooldown: Mutex::default(),
             external_auth: RwLock::new(None),
+            read_only_refresh: None,
             workload_identity_selected: false,
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
         })
@@ -2483,6 +2503,7 @@ impl AuthManager {
             agent_identity_lock: Semaphore::new(/*permits*/ 1),
             agent_identity_bootstrap_cooldown: Mutex::default(),
             external_auth: RwLock::new(None),
+            read_only_refresh: None,
             workload_identity_selected: false,
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
         })
@@ -2513,6 +2534,7 @@ impl AuthManager {
             agent_identity_lock: Semaphore::new(/*permits*/ 1),
             agent_identity_bootstrap_cooldown: Mutex::default(),
             external_auth: RwLock::new(Some(Arc::new(BearerTokenRefresher::new(config)))),
+            read_only_refresh: None,
             workload_identity_selected: false,
             // External bearer auth refreshes by running the provider's command and never makes
             // auth-owned HTTP requests, so this route is intentionally inert.
@@ -2688,6 +2710,60 @@ impl AuthManager {
             ReloadOutcome::ReloadedChanged
         } else {
             ReloadOutcome::ReloadedNoChange
+        }
+    }
+
+    async fn recover_read_only_unauthorized(
+        &self,
+        expected_account_id: Option<&str>,
+        expected_revision: Option<&CredentialRevision>,
+    ) -> Result<(), RefreshTokenError> {
+        let _refresh_guard = self.refresh_lock.acquire().await.map_err(|_| {
+            RefreshTokenError::Permanent(RefreshTokenFailedError::new(
+                RefreshTokenFailedReason::Other,
+                REFRESH_TOKEN_UNKNOWN_MESSAGE.to_string(),
+            ))
+        })?;
+
+        if self
+            .auth_cached()
+            .as_ref()
+            .and_then(CodexAuth::get_account_id)
+            .as_deref()
+            != expected_account_id
+        {
+            return Err(permanent_auth_error(REFRESH_TOKEN_ACCOUNT_MISMATCH_MESSAGE));
+        }
+        if self.credential_revision().as_ref() != expected_revision {
+            return Ok(());
+        }
+
+        match self.reload_if_account_id_matches(expected_account_id).await {
+            ReloadOutcome::ReloadedChanged => return Ok(()),
+            ReloadOutcome::ReloadedNoChange => {}
+            ReloadOutcome::Skipped => {
+                return Err(permanent_auth_error(REFRESH_TOKEN_ACCOUNT_MISMATCH_MESSAGE));
+            }
+        }
+
+        let Some(authority) = self.read_only_refresh.as_ref() else {
+            return Err(permanent_auth_error(
+                "read-only credential refresh authority is unavailable",
+            ));
+        };
+        authority
+            .force_refresh()
+            .await
+            .map_err(RefreshTokenError::Transient)?;
+
+        match self.reload_if_account_id_matches(expected_account_id).await {
+            ReloadOutcome::ReloadedChanged => Ok(()),
+            ReloadOutcome::ReloadedNoChange => Err(permanent_auth_error(
+                "read-only credential snapshot is unchanged after refresh",
+            )),
+            ReloadOutcome::Skipped => {
+                Err(permanent_auth_error(REFRESH_TOKEN_ACCOUNT_MISMATCH_MESSAGE))
+            }
         }
     }
 
@@ -2887,7 +2963,7 @@ impl AuthManager {
         self.ensure_managed_writes_allowed()
             .map_err(RefreshTokenError::Transient)?;
         if self.workload_identity_selected {
-            return Err(permanent_external_auth_error(
+            return Err(permanent_auth_error(
                 "workload identity auth cannot be replaced at runtime",
             ));
         }
@@ -3065,6 +3141,21 @@ impl AuthManager {
     pub async fn shared_from_read_only_auth_config(
         auth_config: AuthConfig,
     ) -> std::io::Result<Arc<Self>> {
+        Self::shared_from_read_only_auth_config_inner(auth_config, None).await
+    }
+
+    /// Builds a read-only sibling manager with its account-bound credential refresh authority.
+    pub async fn shared_from_read_only_auth_config_with_refresh(
+        auth_config: AuthConfig,
+        refresh: Arc<dyn ReadOnlyAuthRefresh>,
+    ) -> std::io::Result<Arc<Self>> {
+        Self::shared_from_read_only_auth_config_inner(auth_config, Some(refresh)).await
+    }
+
+    async fn shared_from_read_only_auth_config_inner(
+        auth_config: AuthConfig,
+        refresh: Option<Arc<dyn ReadOnlyAuthRefresh>>,
+    ) -> std::io::Result<Arc<Self>> {
         if auth_config.auth_credentials_store_mode != AuthCredentialsStoreMode::File {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -3072,13 +3163,15 @@ impl AuthManager {
             ));
         }
         let loaded_auth: LoadedAuth = read_only::load_auth(&auth_config).await?.into();
-        Ok(Arc::new(Self::from_loaded_auth(
+        let mut manager = Self::from_loaded_auth(
             auth_config,
             loaded_auth,
             /*enable_codex_api_key_env*/ false,
             AuthLoadPolicy::ManagedStoreOnly,
             AuthManagementMode::ReadOnlyFile,
-        )))
+        );
+        manager.read_only_refresh = refresh;
+        Ok(Arc::new(manager))
     }
 
     pub fn unauthorized_recovery(self: &Arc<Self>) -> UnauthorizedRecovery {

@@ -244,6 +244,10 @@ mod plugin_mentions;
 mod rate_limit_refresh;
 mod recap;
 mod reconnect;
+mod canonical_reconnect;
+#[cfg(test)]
+#[path = "app/reconnect_tests.rs"]
+mod reconnect_tests;
 mod replay_filter;
 mod resize_reflow;
 mod resume_config;
@@ -603,6 +607,7 @@ pub(crate) struct App {
     environment_manager: Arc<EnvironmentManager>,
     app_server_target: AppServerTarget,
     reconnect: reconnect::ReconnectState,
+    reconnect_state: canonical_reconnect::ReconnectState,
     /// Set when the user confirms an update; propagated on exit.
     pub(crate) pending_update_action: Option<UpdateAction>,
 

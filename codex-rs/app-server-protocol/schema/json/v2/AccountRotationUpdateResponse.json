@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "AccountRotationSnapshot": {
+      "description": "The global rotation profile shared by inheriting threads.",
+      "properties": {
+        "automaticAccountSlotIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "fixedAccountSlotId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/definitions/ThreadAccountRotationMode"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "automaticAccountSlotIds",
+        "mode",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "ThreadAccountRotationMode": {
+      "enum": [
+        "fixed",
+        "quotaAware",
+        "roundRobin",
+        "exhaustThenNext"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "rotation": {
+      "$ref": "#/definitions/AccountRotationSnapshot"
+    }
+  },
+  "required": [
+    "rotation"
+  ],
+  "title": "AccountRotationUpdateResponse",
+  "type": "object"
+}
