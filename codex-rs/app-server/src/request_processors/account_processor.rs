@@ -4,8 +4,12 @@ use super::bedrock_auth::configure_bedrock_provider;
 use super::bedrock_auth::ensure_user_model_provider_can_be_bedrock;
 use super::*;
 use crate::account_registry::AccountRegistry;
+use crate::account_registry::BrowserLoginOwner;
+use crate::account_registry::live_registration::ERROR_BROWSER_LOGIN_BUSY;
+use crate::account_registry::live_registration::structured_invalid_request;
 use crate::auth_mode::auth_mode_to_api;
 use crate::external_auth::ExternalAuthBridge;
+use crate::session_runtime::SessionRuntimeEngine;
 use chrono::DateTime;
 use codex_app_server_protocol::DesktopOnboardingEntrypoint;
 use codex_login::LoginOnboardingEntrypoint;
@@ -14,6 +18,8 @@ use codex_model_provider::is_supported_amazon_bedrock_region;
 
 mod bedrock_setup;
 mod rate_limit_resets;
+mod slot_login;
+mod slot_logout;
 
 // Duration before a browser ChatGPT login attempt is abandoned.
 const LOGIN_CHATGPT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -92,6 +98,8 @@ pub(crate) struct AccountRequestProcessor {
     config: Arc<Config>,
     config_manager: ConfigManager,
     active_login: Arc<Mutex<Option<ActiveLogin>>>,
+    slot_logins: Arc<slot_login::SlotLoginCoordinator>,
+    session_runtime: Arc<SessionRuntimeEngine>,
 }
 
 impl AccountRequestProcessor {
@@ -102,6 +110,7 @@ impl AccountRequestProcessor {
         outgoing: Arc<OutgoingMessageSender>,
         config: Arc<Config>,
         config_manager: ConfigManager,
+        session_runtime: Arc<SessionRuntimeEngine>,
     ) -> Self {
         Self {
             auth_manager,
@@ -111,6 +120,8 @@ impl AccountRequestProcessor {
             config,
             config_manager,
             active_login: Arc::new(Mutex::new(None)),
+            slot_logins: Arc::new(slot_login::SlotLoginCoordinator::default()),
+            session_runtime,
         }
     }
 
@@ -140,6 +151,14 @@ impl AccountRequestProcessor {
         &self,
         params: CancelLoginAccountParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        if self.cancel_slot_login(&params.login_id).await? {
+            return Ok(Some(
+                CancelLoginAccountResponse {
+                    status: CancelLoginAccountStatus::Canceled,
+                }
+                .into(),
+            ));
+        }
         self.cancel_login_response(params)
             .await
             .map(|response| Some(response.into()))
@@ -165,8 +184,32 @@ impl AccountRequestProcessor {
 
     pub(crate) async fn get_account_rate_limits(
         &self,
+        params: Option<GetAccountRateLimitsParams>,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        self.get_account_rate_limits_response()
+        let thread_id = params.and_then(|params| params.thread_id);
+        let (auth_manager, thread_id, execution_account) = match thread_id {
+            Some(thread_id) => {
+                let parsed_thread_id = ThreadId::from_string(&thread_id)
+                    .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
+                let thread = self
+                    .thread_manager
+                    .get_thread(parsed_thread_id)
+                    .await
+                    .map_err(|_| invalid_request(format!("thread {thread_id} is not loaded")))?;
+                let execution_account = thread.execution_account();
+                let execution_account_ref = SessionRuntimeAccountRef {
+                    account_slot_id: execution_account.binding.slot_id.clone(),
+                    execution_generation: execution_account.binding.generation,
+                };
+                (
+                    Arc::clone(&execution_account.auth_manager),
+                    Some(thread_id),
+                    Some(execution_account_ref),
+                )
+            }
+            None => (Arc::clone(&self.auth_manager), None, None),
+        };
+        self.get_account_rate_limits_response(auth_manager, thread_id, execution_account)
             .await
             .map(|response| Some(response.into()))
     }
@@ -198,6 +241,7 @@ impl AccountRequestProcessor {
     }
 
     pub(crate) async fn cancel_active_login(&self) {
+        self.cancel_all_slot_logins().await;
         let mut guard = self.active_login.lock().await;
         if let Some(active_login) = guard.take() {
             drop(active_login);
@@ -634,9 +678,26 @@ impl AccountRequestProcessor {
         let opts = self
             .login_chatgpt_common(codex_streamlined_login, login_success_page)
             .await?;
-        let server = run_login_server(opts)
-            .map_err(|err| internal_error(format!("failed to start login server: {err}")))?;
         let login_id = Uuid::new_v4();
+        let browser_owner = BrowserLoginOwner::Default(login_id.to_string());
+        self.account_registry
+            .try_begin_browser_login(browser_owner.clone())
+            .await?;
+        let server = match run_login_server_fail_if_busy(opts) {
+            Ok(server) => server,
+            Err(err) => {
+                self.account_registry
+                    .finish_browser_login(&browser_owner)
+                    .await;
+                if err.kind() == std::io::ErrorKind::AddrInUse {
+                    return Err(structured_invalid_request(
+                        ERROR_BROWSER_LOGIN_BUSY,
+                        "browser login callback is unavailable",
+                    ));
+                }
+                return Err(internal_error("failed to start login server"));
+            }
+        };
         let shutdown_handle = server.cancel_handle();
 
         // Replace active login if present.
@@ -656,6 +717,7 @@ impl AccountRequestProcessor {
         let thread_manager = Arc::clone(&self.thread_manager);
         let config = Arc::clone(&self.config);
         let active_login = self.active_login.clone();
+        let account_registry = Arc::clone(&self.account_registry);
         let auth_url = server.auth_url.clone();
         tokio::spawn(async move {
             let (success, error_msg, onboarding_entrypoint) = match tokio::time::timeout(
@@ -695,10 +757,13 @@ impl AccountRequestProcessor {
             .await;
 
             // Clear the active login if it matches this attempt. It may have been replaced or cancelled.
-            let mut guard = active_login.lock().await;
-            if guard.as_ref().map(ActiveLogin::login_id) == Some(login_id) {
-                *guard = None;
+            {
+                let mut guard = active_login.lock().await;
+                if guard.as_ref().map(ActiveLogin::login_id) == Some(login_id) {
+                    *guard = None;
+                }
             }
+            account_registry.finish_browser_login(&browser_owner).await;
         });
 
         Ok(LoginAccountResponse::Chatgpt {
@@ -1141,8 +1206,11 @@ impl AccountRequestProcessor {
 
     async fn get_account_rate_limits_response(
         &self,
+        auth_manager: Arc<AuthManager>,
+        thread_id: Option<String>,
+        execution_account: Option<SessionRuntimeAccountRef>,
     ) -> Result<GetAccountRateLimitsResponse, JSONRPCErrorError> {
-        let Some(auth) = self.auth_manager.auth().await else {
+        let Some(auth) = auth_manager.auth().await else {
             return Err(invalid_request(
                 "codex account authentication required to read rate limits",
             ));
@@ -1211,6 +1279,8 @@ impl AccountRequestProcessor {
         });
 
         Ok(GetAccountRateLimitsResponse {
+            thread_id,
+            execution_account,
             rate_limits: rate_limits.into(),
             rate_limits_by_limit_id: Some(
                 rate_limits_by_limit_id

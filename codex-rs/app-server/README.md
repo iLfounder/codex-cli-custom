@@ -2535,6 +2535,7 @@ Codex supports these authentication modes. The current mode is surfaced in `acco
 
 ### API Overview
 
+- `accountSlot/logout` — revoke and remove credentials from one ready secondary slot using the latest `registryRevision` and `attemptGeneration`. The default slot must use `account/logout`; bound slots, active logins, and stale compare-and-swap values are rejected.
 - `account/read` — fetch current account info; optionally refresh tokens.
 - `account/login/start` — begin login (`apiKey`, `chatgpt`, `chatgptDeviceCode`, `amazonBedrock`, `amazonBedrockAccessKeys`).
 - `account/bedrock/discover` — experimental; list available AWS profiles and identify AWS access keys or Amazon Bedrock API keys visible in the app-server environment.
@@ -2553,6 +2554,24 @@ Codex supports these authentication modes. The current mode is surfaced in `acco
 - `mcpServer/oauthLogin/completed` (notify) — emitted after a `mcpServer/oauth/login` flow finishes for a server; payload includes `{ name, threadId, success, error? }`.
 - `mcpServer/startupStatus/updated` (notify) — emitted when a configured MCP server's startup status changes; payload includes `{ threadId, name, status, error, failureReason }`, where `threadId` is the owning thread when startup is thread-scoped and `null` when it is app-scoped, and `status` is `starting`, `ready`, `failed`, or `cancelled`. `failureReason` is `reauthenticationRequired` when stored OAuth credentials have expired and cannot be refreshed, so clients can prompt the user to reconnect the named server.
 - `mcpServer/event/stream/notification` (experimental, notify) — forwards `{ subscriptionId, notification: { method, params } }` to the connection that owns the subscription.
+
+Account-slot login uses the same bounded operation stream. API-key and externally supplied ChatGPT-token logins complete synchronously as `ready`; browser and device-code logins return a challenge in `running` state and later publish `ready` or `failed`. Browser login returns a busy error instead of cancelling another callback listener. External token refresh requests are accepted only from the connection that registered that slot, and disconnecting that owner makes the slot unavailable.
+
+Example secondary-slot logout:
+
+```json
+{
+  "method": "accountSlot/logout",
+  "id": 12,
+  "params": {
+    "accountSlotId": "0123456789ab4def8123456789abcdef",
+    "expectedRegistryRevision": 9,
+    "expectedAttemptGeneration": 2
+  }
+}
+```
+
+On success the response contains the complete sanitized slot in `loginRequired` state with both revisions advanced, followed by `accountSlot/changed`. A slot is considered bound when it is the current account, active-turn account, or pending switch target of any thread.
 
 ### 1) Check auth state
 

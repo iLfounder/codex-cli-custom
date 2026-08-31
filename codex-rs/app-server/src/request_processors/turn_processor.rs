@@ -12,6 +12,10 @@ use codex_protocol::protocol::AdditionalContextEntry as CoreAdditionalContextEnt
 use codex_protocol::protocol::AdditionalContextKind as CoreAdditionalContextKind;
 use codex_protocol::protocol::TurnSettingsUpdate;
 use codex_protocol::protocol::TurnSettingsUpdateOutcome;
+use codex_protocol::protocol::ExecutionAccountBinding;
+use codex_protocol::protocol::MultiAgentVersion;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_skills::system_cache_root_dir;
 
 use crate::image_url::REMOTE_IMAGE_URL_ERROR;
@@ -75,6 +79,7 @@ fn validate_response_item_image_urls(items: &[ResponseItem]) -> Result<(), JSONR
 pub(crate) struct TurnRequestProcessor {
     agent_runner: AgentRunner,
     thread_manager: Arc<ThreadManager>,
+    thread_store: Arc<dyn ThreadStore>,
     outgoing: Arc<OutgoingMessageSender>,
     analytics_events_client: AnalyticsEventsClient,
     arg0_paths: Arg0DispatchPaths,
@@ -111,6 +116,19 @@ fn map_additional_context(
         .collect()
 }
 
+fn with_expected_execution_account(
+    request: TurnInputRequest,
+    account: Option<SessionRuntimeAccountRef>,
+) -> TurnInputRequest {
+    match account {
+        Some(account) => request.with_expected_execution_account(ExecutionAccountBinding {
+            slot_id: account.account_slot_id,
+            generation: account.execution_generation,
+        }),
+        None => request,
+    }
+}
+
 struct ThreadSettingsBuildParams {
     method: &'static str,
     environments: Option<TurnEnvironmentSelections>,
@@ -130,6 +148,7 @@ impl TurnRequestProcessor {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         thread_manager: Arc<ThreadManager>,
+        thread_store: Arc<dyn ThreadStore>,
         outgoing: Arc<OutgoingMessageSender>,
         analytics_events_client: AnalyticsEventsClient,
         arg0_paths: Arg0DispatchPaths,
@@ -146,6 +165,7 @@ impl TurnRequestProcessor {
         Self {
             agent_runner,
             thread_manager,
+            thread_store,
             outgoing,
             analytics_events_client,
             arg0_paths,
@@ -564,6 +584,7 @@ impl TurnRequestProcessor {
             .map(resolve_runtime_workspace_roots);
         let environment_selections =
             resolve_turn_environment_selections(self.thread_manager.as_ref(), params.environments)?;
+        let expected_execution_account = params.expected_execution_account;
 
         let additional_context = map_additional_context(params.additional_context);
         let turn_has_input = !params.input.is_empty();
@@ -619,31 +640,42 @@ impl TurnRequestProcessor {
                 },
             )
             .await?;
-
-        let submission = thread
-            .start_or_steer_turn(
-                TurnInputRequest::new(input)
-                    .with_thread_settings(thread_settings)
-                    .on_start(TurnStartOptions {
-                        turn_trigger: params.turn_trigger,
-                        final_output_json_schema: params.output_schema,
-                        service_tier: params.service_tier_for_turn,
-                        cyber_access_program: params.cyber_access_program.map(Into::into),
-                        ..Default::default()
-                    })
-                    .with_additional_context(additional_context)
-                    .with_responses_metadata(params.responsesapi_client_metadata)
-                    .with_trace(self.request_trace_context(&request_id).await),
-            )
+        let _transition_admission_permit = self
+            .thread_state_manager
+            .acquire_thread_mutation_permit(thread_id)
             .await
-            .map_err(|err| {
-                let error = internal_error(format!("failed to submit turn input: {err}"));
-                self.track_error_response(&request_id, &error, /*error_type*/ None);
-                error
-            })?;
+            .map_err(|reason| invalid_request(reason.replace('_', " ")))?;
+
+        let request = with_expected_execution_account(
+            TurnInputRequest::new(input)
+                .with_thread_settings(thread_settings)
+                .on_start(TurnStartOptions {
+                    turn_trigger: params.turn_trigger,
+                    final_output_json_schema: params.output_schema,
+                    service_tier: params.service_tier_for_turn,
+                    cyber_access_program: params.cyber_access_program.map(Into::into),
+                    ..Default::default()
+                })
+                .with_additional_context(additional_context)
+                .with_responses_metadata(params.responsesapi_client_metadata)
+                .with_trace(self.request_trace_context(&request_id).await),
+            expected_execution_account,
+        );
+        let submission = thread.start_or_steer_turn(request).await.map_err(|err| {
+            let error = internal_error(format!("failed to submit turn input: {err}"));
+            self.track_error_response(&request_id, &error, /*error_type*/ None);
+            error
+        })?;
         let (turn_id, started) = match submission {
             TurnInputSubmission::Started { turn_id } => (turn_id, true),
             TurnInputSubmission::Steered { turn_id } => (turn_id, false),
+            TurnInputSubmission::NotSubmitted {
+                reason: NotSubmittedReason::ExpectedExecutionAccountMismatch { .. },
+            } => {
+                let error = invalid_request("thread execution account changed");
+                self.track_error_response(&request_id, &error, /*error_type*/ None);
+                return Err(error);
+            }
             TurnInputSubmission::NotSubmitted { reason } => {
                 let error = internal_error(format!("failed to submit turn input: {reason:?}"));
                 self.track_error_response(&request_id, &error, /*error_type*/ None);
@@ -1002,6 +1034,11 @@ impl TurnRequestProcessor {
             })?;
         self.ensure_direct_input_allowed(request_id, thread.as_ref())
             .await?;
+        let _transition_admission_permit = self
+            .thread_state_manager
+            .acquire_thread_mutation_permit(thread_id)
+            .await
+            .map_err(|reason| invalid_request(reason.replace('_', " ")))?;
 
         if params.expected_turn_id.is_empty() {
             return Err(invalid_request("expectedTurnId must not be empty"));
@@ -1024,17 +1061,19 @@ impl TurnRequestProcessor {
             .map(V2UserInput::into_core)
             .collect();
         let additional_context = map_additional_context(params.additional_context);
+        let expected_execution_account = params.expected_execution_account;
 
+        let request = with_expected_execution_account(
+            TurnInputRequest::new(TurnInput::UserInput {
+                content: mapped_items,
+                client_id: params.client_user_message_id,
+            })
+            .with_additional_context(additional_context)
+            .with_responses_metadata(params.responsesapi_client_metadata),
+            expected_execution_account,
+        );
         let submission = thread
-            .steer_turn(
-                TurnInputRequest::new(TurnInput::UserInput {
-                    content: mapped_items,
-                    client_id: params.client_user_message_id,
-                })
-                .with_additional_context(additional_context)
-                .with_responses_metadata(params.responsesapi_client_metadata),
-                params.expected_turn_id,
-            )
+            .steer_turn(request, params.expected_turn_id)
             .await
             .map_err(|err| {
                 let error = internal_error(format!("failed to steer turn: {err}"));
@@ -1059,6 +1098,9 @@ impl TurnRequestProcessor {
                             TurnSteerRequestError::ExpectedTurnMismatch,
                         )),
                     ),
+                    NotSubmittedReason::ExpectedExecutionAccountMismatch { .. } => {
+                        ("thread execution account changed".to_string(), None, None)
+                    }
                     NotSubmittedReason::ActiveTurnNotSteerable { turn_kind } => {
                         let (message, turn_steer_error) = match turn_kind {
                             codex_protocol::protocol::NonSteerableTurnKind::Review => (
@@ -1623,6 +1665,7 @@ impl TurnRequestProcessor {
     fn listener_task_context(&self) -> ListenerTaskContext {
         ListenerTaskContext {
             thread_manager: Arc::clone(&self.thread_manager),
+            thread_store: Arc::clone(&self.thread_store),
             thread_state_manager: self.thread_state_manager.clone(),
             outgoing: Arc::clone(&self.outgoing),
             pending_thread_unloads: Arc::clone(&self.pending_thread_unloads),

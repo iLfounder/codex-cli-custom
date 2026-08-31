@@ -165,6 +165,7 @@ pub(crate) struct MessageProcessor {
     turn_processor: TurnRequestProcessor,
     windows_sandbox_processor: WindowsSandboxRequestProcessor,
     request_serialization_queues: RequestSerializationQueues,
+    session_runtime: Arc<crate::session_runtime::SessionRuntimeEngine>,
 }
 
 #[derive(Debug)]
@@ -321,6 +322,15 @@ impl MessageProcessor {
             Arc::clone(&auth_manager),
             Arc::clone(&default_models_manager),
         ));
+        let startup_account_registry = Arc::clone(&account_registry);
+        tokio::spawn(async move {
+            if let Err(error) = startup_account_registry.reconcile().await {
+                tracing::warn!(
+                    "failed to reconcile account slots during startup: {}",
+                    error.message
+                );
+            }
+        });
         let mut queue_service = None;
         let thread_manager = Arc::new_cyclic(|thread_manager| {
             queue_service = queue_store.map(|queue| {
@@ -395,6 +405,17 @@ impl MessageProcessor {
         let pending_thread_unloads = Arc::new(Mutex::new(HashSet::new()));
         let thread_watch_manager =
             crate::thread_status::ThreadWatchManager::new_with_outgoing(outgoing.clone());
+        let session_runtime = Arc::new(crate::session_runtime::SessionRuntimeEngine::new(
+            Arc::clone(&thread_store),
+            Arc::clone(&thread_manager),
+            thread_state_manager.clone(),
+            thread_watch_manager.clone(),
+            Arc::clone(&pending_thread_unloads),
+            Arc::clone(&account_registry),
+            outgoing.clone(),
+        ));
+        thread_state_manager.attach_runtime_engine(&session_runtime);
+        thread_watch_manager.attach_runtime_engine(&session_runtime);
         let thread_list_state_permit = Arc::new(Semaphore::new(/*permits*/ 1));
         let app_list_shutdown_token = CancellationToken::new();
         let request_serialization_queues = RequestSerializationQueues::default();
@@ -414,11 +435,12 @@ impl MessageProcessor {
             );
         let account_processor = AccountRequestProcessor::new(
             auth_manager.clone(),
-            account_registry,
+            Arc::clone(&account_registry),
             Arc::clone(&thread_manager),
             outgoing.clone(),
             Arc::clone(&config),
             config_manager.clone(),
+            Arc::clone(&session_runtime),
         );
         let apps_processor = AppsRequestProcessor::new(
             auth_manager.clone(),
@@ -609,6 +631,7 @@ impl MessageProcessor {
             turn_processor,
             windows_sandbox_processor,
             request_serialization_queues,
+            session_runtime,
         }
     }
 
@@ -831,6 +854,9 @@ impl MessageProcessor {
                 "timed out waiting for connection RPCs to drain"
             );
         }
+        self.account_processor
+            .slot_login_connection_closed(connection_id)
+            .await;
         self.outgoing.connection_closed(connection_id).await;
         self.fs_processor.connection_closed(connection_id).await;
         self.command_exec_processor
@@ -848,14 +874,23 @@ impl MessageProcessor {
     }
 
     /// Handle a standalone JSON-RPC response originating from the peer.
-    pub(crate) async fn process_response(&self, response: JSONRPCResponse) {
+    pub(crate) async fn process_response(
+        &self,
+        connection_id: ConnectionId,
+        response: JSONRPCResponse,
+    ) {
         let JSONRPCResponse { id, result, .. } = response;
-        self.outgoing.notify_client_response(id, result).await
+        self.outgoing
+            .notify_client_response(connection_id, id, result)
+            .await
     }
 
     /// Handle an error object received from the peer.
-    pub(crate) async fn process_error(&self, err: JSONRPCError) {
-        self.outgoing.notify_client_error(err.id, err.error).await;
+    pub(crate) async fn process_error(&self, connection_id: ConnectionId, err: JSONRPCError) {
+        tracing::error!("<- error: {:?}", err);
+        self.outgoing
+            .notify_client_error(connection_id, err.id, err.error)
+            .await;
     }
 
     async fn handle_client_request(
@@ -994,17 +1029,24 @@ impl MessageProcessor {
                 panic!("Initialize should be handled before initialized request dispatch");
             }
             ClientRequest::ServerDiagnostics { .. } => Ok(Some(read_server_diagnostics().into())),
-            ClientRequest::SessionRuntimeList { .. } => Err(method_not_found(
-                "sessionRuntime/list is not implemented yet",
-            )),
+            ClientRequest::SessionRuntimeList { params, .. } => self
+                .session_runtime
+                .list(params)
+                .await
+                .map(|response| Some(response.into())),
             ClientRequest::AccountSlotList { params, .. } => self
                 .account_processor
                 .list_account_slots(params)
                 .await
                 .map(|response| Some(response.into())),
-            ClientRequest::AccountSlotLoginStart { .. } => Err(method_not_found(
-                "accountSlot/login/start is not implemented yet",
-            )),
+            ClientRequest::AccountSlotLoginStart { params, .. } => {
+                self.account_processor
+                    .login_account_slot(request_id.clone(), params)
+                    .await
+            }
+            ClientRequest::AccountSlotLogout { params, .. } => {
+                self.account_processor.logout_account_slot(params).await
+            }
             ClientRequest::ThreadAccountSwitch { .. } => Err(method_not_found(
                 "thread/account/switch is not implemented yet",
             )),

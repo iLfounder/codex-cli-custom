@@ -71,6 +71,30 @@ const THREAD_TURN_EXECUTION_ACCOUNTS_DEFINITION: &str = r#"CREATE TABLE thread_t
     generation INTEGER NOT NULL CHECK (generation >= 1),
     PRIMARY KEY (thread_id, turn_id)
 )"#;
+const ACCOUNT_SLOT_RUNTIME_VERSIONS_DEFINITION: &str = r#"CREATE TABLE account_slot_runtime_versions (
+    slot_id TEXT PRIMARY KEY NOT NULL,
+    runtime_version INTEGER NOT NULL CHECK (runtime_version >= 1)
+) WITHOUT ROWID"#;
+const THREAD_TRANSITIONS_DEFINITION: &str = r#"CREATE TABLE thread_transitions (
+    revision INTEGER PRIMARY KEY AUTOINCREMENT,
+    transition_id TEXT NOT NULL UNIQUE,
+    request_fingerprint TEXT NOT NULL,
+    reason TEXT NOT NULL CHECK(reason IN ('clear','new')),
+    previous_thread_id TEXT NOT NULL,
+    current_thread_id TEXT NOT NULL UNIQUE,
+    origin_instance_epoch TEXT NOT NULL,
+    initiator_client_incarnation TEXT NOT NULL,
+    previous_precondition_state_revision INTEGER NOT NULL CHECK(previous_precondition_state_revision >= 1),
+    previous_committed_state_revision INTEGER CHECK(previous_committed_state_revision >= 1),
+    previous_writer_store_id TEXT NOT NULL,
+    previous_writer_generation INTEGER NOT NULL CHECK(previous_writer_generation >= 1),
+    current_writer_store_id TEXT,
+    current_writer_generation INTEGER CHECK(current_writer_generation >= 1),
+    current_committed_state_revision INTEGER CHECK(current_committed_state_revision >= 1),
+    status TEXT NOT NULL CHECK(status IN ('preparing','prepared','committed')),
+    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    committed_at INTEGER
+)"#;
 
 const CUSTOM_SCHEMA_V1: CustomSchemaMigration = CustomSchemaMigration {
     version: 1,
@@ -132,9 +156,74 @@ CREATE TABLE thread_turn_execution_accounts (
         },
     ],
 };
+const CUSTOM_SCHEMA_V3: CustomSchemaMigration = CustomSchemaMigration {
+    version: 3,
+    name: "account_slot_runtime_versions",
+    definition: r#"
+CREATE TABLE account_slot_runtime_versions (
+    slot_id TEXT PRIMARY KEY NOT NULL,
+    runtime_version INTEGER NOT NULL CHECK (runtime_version >= 1)
+) WITHOUT ROWID;
+"#,
+    // V3 was never written into the upstream migration registry and is intentionally absent from
+    // `LEGACY_CUSTOM_SCHEMA_MIGRATIONS`; these legacy-only fields are therefore unused sentinels.
+    legacy_upstream_version: 0,
+    legacy_description: "",
+    legacy_checksum: "",
+    required_tables: &[RequiredCustomTable {
+        name: "account_slot_runtime_versions",
+        definition: ACCOUNT_SLOT_RUNTIME_VERSIONS_DEFINITION,
+    }],
+};
+const CUSTOM_SCHEMA_V4: CustomSchemaMigration = CustomSchemaMigration {
+    version: 4,
+    name: "thread_transitions",
+    definition: r#"
+CREATE TABLE thread_transitions (
+    revision INTEGER PRIMARY KEY AUTOINCREMENT,
+    transition_id TEXT NOT NULL UNIQUE,
+    request_fingerprint TEXT NOT NULL,
+    reason TEXT NOT NULL CHECK(reason IN ('clear','new')),
+    previous_thread_id TEXT NOT NULL,
+    current_thread_id TEXT NOT NULL UNIQUE,
+    origin_instance_epoch TEXT NOT NULL,
+    initiator_client_incarnation TEXT NOT NULL,
+    previous_precondition_state_revision INTEGER NOT NULL CHECK(previous_precondition_state_revision >= 1),
+    previous_committed_state_revision INTEGER CHECK(previous_committed_state_revision >= 1),
+    previous_writer_store_id TEXT NOT NULL,
+    previous_writer_generation INTEGER NOT NULL CHECK(previous_writer_generation >= 1),
+    current_writer_store_id TEXT,
+    current_writer_generation INTEGER CHECK(current_writer_generation >= 1),
+    current_committed_state_revision INTEGER CHECK(current_committed_state_revision >= 1),
+    status TEXT NOT NULL CHECK(status IN ('preparing','prepared','committed')),
+    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    committed_at INTEGER
+);
+CREATE UNIQUE INDEX thread_transitions_one_committed_outgoing_authority
+ON thread_transitions(
+    previous_thread_id,
+    previous_precondition_state_revision,
+    previous_writer_store_id,
+    previous_writer_generation
+) WHERE status = 'committed';
+CREATE INDEX thread_transitions_current_status
+ON thread_transitions(current_thread_id, status);
+"#,
+    legacy_upstream_version: 0,
+    legacy_description: "",
+    legacy_checksum: "",
+    required_tables: &[RequiredCustomTable {
+        name: "thread_transitions",
+        definition: THREAD_TRANSITIONS_DEFINITION,
+    }],
+};
 
-const ACTIVE_CUSTOM_SCHEMA_MIGRATIONS: &[&CustomSchemaMigration] =
-    &[&CUSTOM_SCHEMA_V1, &CUSTOM_SCHEMA_V2];
+const ACTIVE_CUSTOM_SCHEMA_MIGRATIONS: &[&CustomSchemaMigration] = &[
+    &CUSTOM_SCHEMA_V1,
+    &CUSTOM_SCHEMA_V2,
+    &CUSTOM_SCHEMA_V3,
+    &CUSTOM_SCHEMA_V4,
+];
 const LEGACY_CUSTOM_SCHEMA_MIGRATIONS: &[&CustomSchemaMigration] =
     &[&CUSTOM_SCHEMA_V1, &CUSTOM_SCHEMA_V2];
 

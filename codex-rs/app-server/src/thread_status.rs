@@ -10,6 +10,8 @@ use codex_app_server_protocol::ThreadStatusChangedNotification;
 use codex_protocol::ThreadId;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use std::sync::Weak;
 use tokio::sync::Mutex;
 #[cfg(test)]
 use tokio::sync::mpsc;
@@ -20,6 +22,7 @@ pub(crate) struct ThreadWatchManager {
     state: Arc<Mutex<ThreadWatchState>>,
     outgoing: Option<Arc<OutgoingMessageSender>>,
     running_turn_count_tx: watch::Sender<usize>,
+    runtime_engine: Arc<StdMutex<Option<Weak<crate::session_runtime::SessionRuntimeEngine>>>>,
 }
 
 pub(crate) struct ThreadWatchActiveGuard {
@@ -76,6 +79,7 @@ impl ThreadWatchManager {
             state: Arc::new(Mutex::new(ThreadWatchState::default())),
             outgoing: None,
             running_turn_count_tx,
+            runtime_engine: Arc::new(StdMutex::new(None)),
         }
     }
 
@@ -85,7 +89,27 @@ impl ThreadWatchManager {
             state: Arc::new(Mutex::new(ThreadWatchState::default())),
             outgoing: Some(outgoing),
             running_turn_count_tx,
+            runtime_engine: Arc::new(StdMutex::new(None)),
         }
+    }
+
+    pub(crate) fn attach_runtime_engine(
+        &self,
+        runtime_engine: &Arc<crate::session_runtime::SessionRuntimeEngine>,
+    ) {
+        *self
+            .runtime_engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(Arc::downgrade(runtime_engine));
+    }
+
+    fn runtime_engine(&self) -> Option<Arc<crate::session_runtime::SessionRuntimeEngine>> {
+        self.runtime_engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(Weak::upgrade)
     }
 
     pub(crate) async fn upsert_thread(&self, thread_id: &str) {
@@ -224,6 +248,10 @@ impl ThreadWatchManager {
     where
         F: FnOnce(&mut ThreadWatchState) -> Option<ThreadStatusChangedNotification>,
     {
+        let runtime_engine = self.runtime_engine();
+        if let Some(runtime_engine) = &runtime_engine {
+            runtime_engine.mark_dirty();
+        }
         let notification = {
             let mut state = self.state.lock().await;
             let notification = mutate(&mut state);
@@ -243,12 +271,20 @@ impl ThreadWatchManager {
             notification
         };
 
+        let changed_thread_id = notification
+            .as_ref()
+            .and_then(|notification| ThreadId::from_string(&notification.thread_id).ok());
         if let Some(notification) = notification
             && let Some(outgoing) = &self.outgoing
         {
             outgoing
                 .send_server_notification(ServerNotification::ThreadStatusChanged(notification))
                 .await;
+        }
+        if let Some(thread_id) = changed_thread_id
+            && let Some(runtime_engine) = runtime_engine
+        {
+            runtime_engine.publish_thread(thread_id).await;
         }
     }
 

@@ -336,6 +336,7 @@ pub enum AccountSlotAction {
     Login,
     RetryLogin,
     SwitchTo,
+    Logout,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -429,6 +430,25 @@ pub struct AccountSlotChangedNotification {
     pub slot: AccountSlotSnapshot,
 }
 
+/// Compare-and-swap parameters for logging out a secondary account slot.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AccountSlotLogoutParams {
+    pub account_slot_id: String,
+    #[ts(type = "number")]
+    pub expected_registry_revision: u64,
+    #[ts(type = "number")]
+    pub expected_attempt_generation: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AccountSlotLogoutResponse {
+    pub slot: AccountSlotSnapshot,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -480,7 +500,21 @@ impl fmt::Debug for ChatgptAuthTokensRefreshResponse {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
+pub struct GetAccountRateLimitsParams {
+    #[ts(optional = nullable)]
+    pub thread_id: Option<String>,
+}
+
+pub type NullableGetAccountRateLimitsParams = Option<GetAccountRateLimitsParams>;
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
 pub struct GetAccountRateLimitsResponse {
+    /// The exact thread subject used for this read, or `null` for legacy process-default reads.
+    pub thread_id: Option<String>,
+    /// The account runtime captured for `thread_id`, or `null` for process-default reads.
+    pub execution_account: Option<super::SessionRuntimeAccountRef>,
     /// Backward-compatible single-bucket view; mirrors the historical payload.
     pub rate_limits: RateLimitSnapshot,
     /// Multi-bucket view keyed by metered `limit_id` (for example, `codex`).
@@ -721,10 +755,15 @@ pub struct AccountUpdatedNotification {
 #[ts(export_to = "v2/")]
 /// Sparse rolling rate-limit update.
 ///
-/// Clients should merge available values into the most recent `account/rateLimits/read` response
-/// or refetch that snapshot. Nullable account metadata may be unavailable in a rolling update and
-/// does not clear a previously observed value.
+/// Clients should merge available values into the most recent matching
+/// `account/rateLimits/read` response or refetch that snapshot. New producers omit the
+/// notification when persisted account provenance is unavailable; nullable fields preserve wire
+/// compatibility with older producers.
 pub struct AccountRateLimitsUpdatedNotification {
+    /// Thread whose persisted turn binding produced this update.
+    pub thread_id: Option<String>,
+    /// Persisted account binding for that turn. Older producers may leave this `null`.
+    pub execution_account: Option<super::SessionRuntimeAccountRef>,
     pub rate_limits: RateLimitSnapshot,
 }
 
