@@ -8,39 +8,31 @@
 
 이 fork는 계정 선택, thread 소유권, session 인계, 외부 session 제어를 명시적인 계약으로 제공한다. Credential과 로컬 경로, 외부 workflow 고유 식별자는 비공개로 유지하면서 typed Goal action과 설치 가능한 plugin command도 추가한다.
 
-> 공식 OpenAI 배포물이 아니다. 현재 series는 upstream [`rust-v0.149.0`](https://github.com/openai/codex/releases/tag/rust-v0.149.0), commit `758ef40f50c1a458425c7cfbf1eb12cbc07af0b0`을 대상으로 한다.
+> 공식 OpenAI 배포물이 아니다. 현재 series는 upstream [`rust-v0.151.0`](https://github.com/openai/codex/releases/tag/rust-v0.151.0), commit `78c290807ce710180111df227df3b7a4fe845452`을 대상으로 한다.
 
 ## Patch series가 추가하는 기능
 
-| Patch | 사용자에게 제공되는 결과 |
+| Logical patch | 사용자에게 제공되는 결과 (P001–P025의 모든 기능을 유지) |
 |---|---|
-| P001 | Thread마다 하나의 영속 writer authority를 두고 stale writer를 거절한다. |
-| P002 | Session, account, Goal, continuity control을 위한 versioned app-server v2 JSON·TypeScript 계약을 제공한다. |
-| P003 | 하나의 app-server에서 격리된 여러 account slot을 운용한다. |
-| P004 | Resume, fork, child thread에도 유지되는 thread-account binding과 versioned Goal state를 제공한다. |
-| P005 | 한 turn에서 model, MCP, app, plugin, hook, telemetry가 같은 execution account를 사용한다. |
-| P006 | `sessionRuntime/list`, runtime change event, 허용 action, committed `/clear`·`/new` continuity receipt를 제공한다. |
-| P007 | App-server 재시작 없이 account login, 재인증, secondary account logout을 수행한다. |
-| P008 | 명시적인 `released` 또는 `failed` 결과가 있는 strict `thread/relinquish`를 제공한다. |
-| P009 | Thread ID를 유지한 채 idle thread의 account를 전환한다. |
-| P010 | TUI `/account`, `/logout`, `/exit`, `/clear`, `/new`, `/goal`과 agent 요청형 clear/new control을 제공한다. |
-| P011 | 설치 가능한 `/namespace:name` plugin command와 ephemeral card, notice, progress presentation을 제공한다. |
-| P012 | 검수된 live-session control 보정과 canonical account login, 취소, 실시간 reconciliation, 선택 가능한 TUI 계정 상태를 제공한다. |
-| P013 | Thread별 고정·자동 계정 순환, 실시간 quota 기반 선택, 정확한 rollout ordinal 복구를 제공한다. |
-| P014 | 다른 account의 credential을 수정하지 않으면서 변경을 감지하는 read-only sibling authentication runtime을 제공한다. |
-| P015 | 각 root turn이 실행 전에 선택된 account runtime과 정확한 credential revision을 capture한다. |
-| P016 | TokenManager 기반 account를 위한 sanitize된 global account catalog, health, quota, inventory change 계약을 제공한다. |
-| P017 | 실시간 TokenManager snapshot을 revisioned global catalog로 만들고 fixed, quota-aware, fallback account 선택을 제공한다. |
-| P018 | Global account를 격리된 execution runtime으로 해석해 account 목록, binding, rotation에 통합한다. |
-| P019 | TUI account picker와 rotation editor가 global account의 health와 quota를 표시하되 local credential action은 제공하지 않는다. |
-| P020 | Turn interrupt race, 현재 account projection, archive visibility, TUI `Esc` interrupt 전반에서 session lifecycle과 control의 일관성을 유지한다. |
-| P021 | Goal edit 중 accounting-only revision drift는 authoritative refresh로 회복하고, 충돌하는 semantic change는 거부한다. |
-| P022 | 0.149를 최종 수렴한다. Writer 반환과 종료 재시도, 등록 계정 전체 목록과 실시간 quota overlay, MCP startup의 terminal 결과, compact된 content를 노출하지 않는 context-compaction JSONL telemetry를 제공한다. |
-| P023 | Codex 내부가 quota-aware 계정 순환과 pre-semantic same-root failover를 소유하고, JSON forced-stdin `exec`·`resume`에 invocation 범위 readiness handshake를 제공한다. |
-| P024 | 검수된 canonical control plane을 통합한다. 하나의 supervised app-server, account-neutral local UDS, 전역 rotation과 managed account lifecycle API, reconnect-safe TUI·CLI, bounded OAuth callback 호환성을 제공한다. |
-| P025 | fresh canonical thread가 시작되기 전에 명시된 managed account slot을 결속하고, resume과 fork에서는 기존 결속을 상속한다. |
+| U01 (P001) | Thread별 영속 writer authority를 보장하고 stale writer를 거절한다. |
+| U02 (P002) | Session·account·Goal·continuity control용 versioned app-server v2 JSON·TypeScript 계약을 제공한다. |
+| U03 (P003) | 하나의 app-server에서 격리된 account slot과 local lifecycle을 운용한다. |
+| U04 (P004–P005) | Resume/fork/child까지 유지되는 thread-account binding과 turn 전체의 execution account 일관성을 제공한다. |
+| U05 (P006–P007) | Session runtime inventory·continuity receipt와 재시작 없는 login·재인증·secondary logout을 제공한다. |
+| U06 (P008–P009) | Strict writer relinquish와 thread ID를 유지하는 idle account 전환을 제공한다. |
+| U07 (P010–P011) | TUI account/continuity/Goal control과 설치 가능한 plugin command·ephemeral presentation을 제공한다. |
+| U08 (P012–P013) | Canonical live-session reconciliation과 fixed/automatic quota-aware rotation·ordinal repair를 제공한다. |
+| U09 (P014–P015) | Read-only sibling auth runtime과 실행 전 account·credential revision capture를 제공한다. |
+| U10 (P016–P017) | Sanitize된 global account catalog, health/quota projection, revisioned TokenManager 선택을 제공한다. |
+| U11 (P018–P019) | Global account 격리 runtime과 credential을 변경하지 않는 TUI health/quota presentation을 제공한다. |
+| U12 (P020–P021) | Session lifecycle race/interrupt 일관성과 accounting-only drift에 대한 충돌 인지형 Goal 복구를 제공한다. |
+| U13 (P022–P023) | Telemetry/compaction/MCP 수렴, Codex 소유 quota failover/rotation, invocation readiness handshake를 제공한다. |
+| U14 (P024) | Supervised canonical control plane, account-neutral UDS, global lifecycle API, reconnect-safe client, bounded OAuth callback을 제공한다. |
+| U15 (P025 + reconciliation) | Fresh canonical thread 전 managed slot binding, resume/fork 상속, 다중 행 `FooterBox`/`FooterAdapter`, generated contract 정합성, Windows 보안 보강을 제공한다. |
 
 App-server는 opaque account reference와 sanitize된 session state만 노출한다. 외부 workflow role, group ID, 사용자 handle은 저장하지 않는다.
+Session-runtime identity도 source 종류와 literal `<workspace>` marker만 유지하며, 로컬 파일시스템
+경로나 custom workflow/source payload는 반환하지 않는다.
 
 ## 제공되는 interface
 
@@ -59,37 +51,82 @@ App-server는 opaque account reference와 sanitize된 session state만 노출한
 
 Patch에는 생성된 Rust, JSON Schema, TypeScript 정의가 `codex-rs/app-server-protocol/schema/` 아래에 포함된다.
 
-## 적용과 build
+## Custom footer
 
-정확한 upstream commit에만 스물네 개 patch를 적용한다.
+TUI는 upstream `tui.status_line` 계약을 유지하면서 선택 가능한 다중 행 `FooterBox`를
+추가한다. `FooterAdapter`는 표시 전용 행을 공급하므로 account/plan label, session/runtime
+상태, quota, rotation, debug 정보를 조합할 수 있고 credential 접근이나 I/O는 수행하지
+않는다. 알 수 없는 adapter ID는 무시하며 managed account는 opaque slot ID로 표시한다.
 
-```sh
-git checkout 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
-/path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD"
+```toml
+[tui.footer]
+enabled = true
+max_rows = 3
+border = "rounded"       # none, plain, rounded, double
+layout = "stacked"       # stacked 또는 compact
+adapter_ids = ["official-statusline", "account", "session", "quota"]
 ```
 
-Applier는 clean tree를 요구하고 각 patch digest를 검증한 뒤 P001–P025를 순서대로 적용하고 최종 Git tree를 확인한다. POSIX shell, Git, `sed`, `awk`, `shasum` 또는 `sha256sum`이 필요하다.
+Footer를 끄면 native status line만 그대로 사용한다.
+
+## Quota-aware 지연과 capacity
+
+Quota-aware rotation은 TokenManager의 최신 sanitize snapshot을 읽을 뿐 provider quota를
+차감하거나 account별 별도 capacity pool을 만들지 않는다. 따라서 provider가 반환하는
+`server_is_overloaded`/“Selected model is at capacity”는 그 자체로 local quota debit이
+아니다. 독립적인 root turn은 동시에 admission될 수 있고 in-flight reservation이 없으면
+같은 snapshot을 보고 같은 account/model을 선택할 수 있어 요청이 한 곳에 집중될 수 있다.
+Runtime probe는 호출자가 넘긴 후보를 동시 확인하고 directory scan을 공유하며 credential
+snapshot hashing을 async executor 밖으로 옮겼지만 revision·identity 검사는 유지한다. 임의의
+8개 account batch 제한은 두지 않는다. 코드 검토
+범위에서는 process-wide memory leak이나 credential cross-talk의 구체 증거를 찾지 못했다.
+호스트 간 속도 비교 시 model/reasoning effort, prewarm, proxy/TLS 경로, 동시성을 동일하게
+맞춰야 한다.
+
+## 적용과 build
+
+정확한 upstream commit에만 15개의 logical patch를 적용한다.
+
+```sh
+git checkout 78c290807ce710180111df227df3b7a4fe845452
+/path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD" rust-v0.151.0
+```
+
+Applier는 clean tree를 요구하고 각 patch digest를 검증한 뒤 U01–U15를 순서대로 적용하고
+최종 Git tree를 확인한다. 과거 `rust-v0.149.0`, `rust-v0.148.0` series는 이름을 명시해
+재현할 수 있다. POSIX shell, Git, `sed`, `awk`, `shasum` 또는 `sha256sum`이 필요하다.
 
 `codex-rs`에서 로컬 build:
 
 ```sh
-perl -0pi -e 's/version = "0\.0\.0"/version = "0.149.0"/g' Cargo.lock
+perl -0pi -e 's/version = "0\.0\.0"/version = "0.151.0"/g' Cargo.lock
 cargo build --locked --release -p codex-cli --bin codex
 cargo build --locked --release -p codex-app-server --bin codex-app-server
 cargo build --locked --release -p codex-code-mode-host --bin codex-code-mode-host
 cargo build --locked --release -p codex-responses-api-proxy --bin codex-responses-api-proxy
 CODEX_REPO_ROOT="$(cd .. && pwd)" python3 ../scripts/build_codex_package.py \
-  --target aarch64-apple-darwin --variant codex --package-version 0.149.0 \
+  --target aarch64-apple-darwin --variant codex --package-version 0.151.0 \
   --entrypoint-bin target/release/codex \
   --code-mode-host-bin target/release/codex-code-mode-host
 CODEX_REPO_ROOT="$(cd .. && pwd)" python3 ../scripts/build_codex_package.py \
-  --target aarch64-apple-darwin --variant codex-app-server --package-version 0.149.0 \
+  --target aarch64-apple-darwin --variant codex-app-server --package-version 0.151.0 \
   --entrypoint-bin target/release/codex-app-server \
   --code-mode-host-bin target/release/codex-code-mode-host
 ```
 
+같은 patch source는 host가 달라도 공통으로 사용한다. Windows에서는 MSVC target으로 local
+CLI/core check 또는 release build를 수행한다(예: `cargo check -p codex-core --target
+x86_64-pc-windows-msvc --locked`, `cargo build -p codex-cli --release --target
+x86_64-pc-windows-msvc`). 배포용 macOS arm64 package는 저장소의 GitHub Actions workflow가
+검증된 상태로 생성하므로 Mac에서 별도 build할 필요가 없다.
+
+Managed app-server daemon/supervisor는 crate 문서에 명시된 대로 Unix 전용이다. 이는 patch
+set에서 기능을 뺀 것이 아니라 daemon process manager의 platform 경계이며, Windows build는
+공유 account·protocol·core·TUI·direct transport 경로를 컴파일하고 daemon lifecycle 명령에는
+명확한 unsupported-platform 오류를 반환한다.
+
 upstream release tag의 `Cargo.lock`에는 workspace package version이 `0.0.0` placeholder로
-남아 있다. 첫 명령은 GitHub Actions build와 동일하게 이 정확한 placeholder만 `0.149.0`으로
+남아 있다. 첫 명령은 GitHub Actions build와 동일하게 이 정확한 placeholder만 `0.151.0`으로
 정규화한 뒤 Cargo가 locked dependency resolution을 수행하게 한다.
 Package builder는 Python 3.10 이상이 필요하다. 또한 upstream source에 고정된 target별
 ripgrep과 patched zsh resource를 다운로드하고 digest를 검증한다.
@@ -112,13 +149,14 @@ Code Mode host build에는 동일 version의 Codex 배포 V8 archive와 generate
 Workflow는 두 package layout을 검사하고, 양쪽에 동일한 build의 Code Mode host가
 들어갔는지 비교한 뒤 SHA-256 digest와 source-tree provenance를 기록해 업로드한다.
 
-## 기존 0.148 custom state store 업그레이드
+## 기존 custom state store 업그레이드
 
-같은 store를 공유하는 구버전 TUI와 app-server를 모두 종료한다. 0.149 build를 `CODEX_STATE_LEGACY_MIGRATION_CUTOVER=1`로 한 번만 시작한 뒤 변수를 제거한다. Migration은 알려진 legacy schema를 검증한 후에만 적용하며 unknown 또는 partial schema는 거절한다. Migration이 끝난 store를 구버전 binary로 다시 열지 않는다.
+같은 store를 공유하는 구버전 TUI와 app-server를 모두 종료한다. 0.151 build를 `CODEX_STATE_LEGACY_MIGRATION_CUTOVER=1`로 한 번만 시작한 뒤 변수를 제거한다. Migration은 알려진 legacy schema를 검증한 후에만 적용하며 unknown 또는 partial schema는 거절한다. Migration이 끝난 store를 구버전 binary로 다시 열지 않는다.
 
 ## 저장소 구성
 
-- `custom-patches/rust-v0.149.0/`: 현재 ordered series와 digest manifest
+- `custom-patches/rust-v0.151.0/`: 현재 15개 logical patch와 digest manifest
+- `custom-patches/rust-v0.149.0/`: 재현성을 위해 보존한 이전 series
 - `custom-patches/rust-v0.148.0/`: 재현성을 위해 보존한 이전 series
 - `custom-patches/apply-series.sh`: clean-tree patch applier
 - `.github/workflows/build-custom-macos-arm64.yml`: 수동 macOS arm64 build

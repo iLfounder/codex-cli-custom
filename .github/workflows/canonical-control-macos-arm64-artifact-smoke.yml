@@ -1,4 +1,4 @@
-name: Canonical control P025 macOS arm64 artifact smoke
+name: Canonical control U15 macOS arm64 artifact smoke
 
 on:
   workflow_dispatch:
@@ -16,7 +16,7 @@ on:
         required: true
         type: string
       patched_tree:
-        description: Exact P001-P025 source tree recorded by the artifact
+        description: Exact U01-U15 source tree recorded by the artifact
         required: true
         type: string
       artifact_digest:
@@ -64,7 +64,7 @@ jobs:
           test "$(jq -r '.digest' <<<"$artifact")" = "$INPUT_ARTIFACT_DIGEST"
           test "$(jq -r '.expired' <<<"$artifact")" = false
           [[ "$(jq -r '.name' <<<"$artifact")" = \
-            codex-custom-rust-v0.149.0-macos-arm64-* ]]
+            codex-custom-rust-v0.151.0-macos-arm64-* ]]
           {
             echo "artifact_id=$(jq -r '.id' <<<"$artifact")"
             echo "artifact_name=$(jq -r '.name' <<<"$artifact")"
@@ -92,7 +92,7 @@ jobs:
           set -euo pipefail
           test "$(uname -m)" = arm64
           test "$PUBLIC_MAIN_SHA" = "${{ github.event.inputs.public_main_sha }}"
-          grep -Fxq "upstream_commit=758ef40f50c1a458425c7cfbf1eb12cbc07af0b0" \
+          grep -Fxq "upstream_commit=78c290807ce710180111df227df3b7a4fe845452" \
             "$DIST/BUILD-METADATA.txt"
           grep -Fxq "patched_tree=$PATCHED_TREE" "$DIST/BUILD-METADATA.txt"
           compiled_tree=$(sed -n 's/^compiled_tree=//p' "$DIST/BUILD-METADATA.txt")
@@ -115,9 +115,9 @@ jobs:
           test -x "$app_server/bin/codex-app-server"
           test -x "$app_server/bin/codex-code-mode-host"
           test -x "$app_server/codex-path/rg"
-          test "$("$primary/bin/codex" --version)" = "codex-cli 0.149.0"
+          test "$("$primary/bin/codex" --version)" = "codex-cli 0.151.0"
           test "$("$app_server/bin/codex-app-server" --version)" = \
-            "codex-app-server 0.149.0"
+            "codex-app-server 0.151.0"
 
       - name: Smoke packaged invocation readiness before prompt
         shell: bash
@@ -144,7 +144,7 @@ jobs:
           import selectors
           import subprocess
 
-          invocation_id = "p025-artifact-smoke"
+          invocation_id = "u15-artifact-smoke"
           env = {
               "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
               "HOME": os.environ["SMOKE_HOME"],
@@ -570,7 +570,7 @@ jobs:
       - name: Upload installation-ready release candidate
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: canonical-control-p025-${{ steps.artifact.outputs.patched_tree }}-smoke-${{ github.run_id }}
+          name: canonical-control-u15-${{ steps.artifact.outputs.patched_tree }}-smoke-${{ github.run_id }}
           path: ${{ runner.temp }}/canonical-control-dist/
           if-no-files-found: error
           retention-days: 14

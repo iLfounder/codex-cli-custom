@@ -1,0 +1,79 @@
+schema_version = 1
+applies_to = "rust-v0.151.0"
+base_commit = "78c290807ce710180111df227df3b7a4fe845452"
+final_tree = "f8e114b2f88162691166bb175eb1f510cf925f6c"
+
+[[patches]]
+number = "U01"
+file = "0001-U01-establish-shared-writer-authority.patch"
+sha256 = "1f52eefea9e0ff0f2a49ee3bd1669085d949d474cc842278898ec4567f5d92f2"
+
+[[patches]]
+number = "U02"
+file = "0002-U02-add-session-runtime-protocol-contract.patch"
+sha256 = "9dc92f8b8cd3c342d5551f1b7b1c177ebdf959ab1738865fce4d2bc0d17250a1"
+
+[[patches]]
+number = "U03"
+file = "0003-U03-add-durable-multi-account-registry.patch"
+sha256 = "043673bbc1773afe7ff2c187f7d3605d96af0b790e7a694059f21c7cd9eca1f1"
+
+[[patches]]
+number = "U04"
+file = "0004-U04-persist-and-propagate-execution-account-binding.patch"
+sha256 = "af8c3bce390ceb83ce6c41e6726798f193a5a24fa93f2541bb3cece7c98e9ec3"
+
+[[patches]]
+number = "U05"
+file = "0005-U05-publish-session-runtimes-and-live-account-lifecy.patch"
+sha256 = "c73b9bb2d2fffec4f9c40269bcb2b318b426da2134c87d06e40fcfd9f786fae8"
+
+[[patches]]
+number = "U06"
+file = "0006-U06-enforce-writer-relinquish-and-thread-account-swi.patch"
+sha256 = "fa10505a248dc37ac58db594084d2b779db881b2bbb3e619e2554c8416dfa3b5"
+
+[[patches]]
+number = "U07"
+file = "0007-U07-add-TUI-controls-and-installable-presentation.patch"
+sha256 = "bd39106cbf5366db035399bd6bcd5d50bf11062fd9e7686758d58945e34372d4"
+
+[[patches]]
+number = "U08"
+file = "0008-U08-reconcile-live-accounts-and-quota-rotation.patch"
+sha256 = "9c9262a62ad0bf7decb8428597ac77cc0efca488b446e9c93c5da170f93221c7"
+
+[[patches]]
+number = "U09"
+file = "0009-U09-add-read-only-account-runtimes-and-root-admissio.patch"
+sha256 = "4625d3b022ec79259d14bd939b239536d4ee26abd69f4e0d128b8cefc74d9251"
+
+[[patches]]
+number = "U10"
+file = "0010-U10-add-TokenManager-catalog-protocol-and-snapshots.patch"
+sha256 = "a27b6d8be563adea9308174aec0ad93005f0c4a6a596c607a7130362d9cac54d"
+
+[[patches]]
+number = "U11"
+file = "0011-U11-integrate-global-runtimes-and-account-controls.patch"
+sha256 = "176e740bb149bd284c96de4330243484ea393dc2b038c8766756216c32503b6a"
+
+[[patches]]
+number = "U12"
+file = "0012-U12-harden-session-lifecycle-and-semantic-goal-edits.patch"
+sha256 = "36a1c6ad45ba122bb3b03c9341470bb3cc93fd49979c528471cab76c6411844a"
+
+[[patches]]
+number = "U13"
+file = "0013-U13-finalize-failover-telemetry-and-invocation-readi.patch"
+sha256 = "702c162fb7567764c611ff180ce99e5551e49bfcc651eb1c405668cd7d5a33ce"
+
+[[patches]]
+number = "U14"
+file = "0014-U14-integrate-canonical-control-plane.patch"
+sha256 = "1430da7f86d8a84dfbe1039582393937255ecd183bd277cdc5c1788d52681c48"
+
+[[patches]]
+number = "U15"
+file = "0015-U15-bind-managed-launches-and-finalize-FooterBox-por.patch"
+sha256 = "fb1b776796b6edaa560855e81bdd4ea420ba85133e24ea0e9494d0ecb3ed271c"

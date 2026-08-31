@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   build:
-    name: rust-v0.149.0 / macOS arm64
+    name: rust-v0.151.0 / macOS arm64
     runs-on: macos-15
     timeout-minutes: 330
     env:
@@ -28,8 +28,8 @@ jobs:
       SCCACHE_GHA_VERSION: codex-macos15-arm64-rust1.95.0-release-incrementaloff-ltooff-cgu8-v1
       SCCACHE_IDLE_TIMEOUT: "0"
       SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
-      SOURCE_COMMIT: 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
-      PATCH_TREE: 1f35e1ae8139df81dfdf4a8eccd4027a736c2754
+      SOURCE_COMMIT: 78c290807ce710180111df227df3b7a4fe845452
+      PATCH_TREE: f8e114b2f88162691166bb175eb1f510cf925f6c
 
     steps:
       - name: Check out patch repository
@@ -101,7 +101,7 @@ jobs:
           set -euo pipefail
           # The release tag carries placeholder versions for workspace packages in Cargo.lock.
           # Normalize only those exact placeholders, then keep dependency resolution locked.
-          perl -0pi -e 's/version = "0\.0\.0"/version = "0.149.0"/g' Cargo.lock
+          perl -0pi -e 's/version = "0\.0\.0"/version = "0.151.0"/g' Cargo.lock
           compiled_lock_sha256=$(shasum -a 256 Cargo.lock | awk '{print $1}')
           git -C .. add codex-rs/Cargo.lock
           compiled_tree=$(git -C .. write-tree)
@@ -214,7 +214,7 @@ jobs:
             printf 'cargo_targets=codex,codex-app-server,codex-code-mode-host,codex-responses-api-proxy\n'
           } > "$identity_dir/build-inputs.txt"
           build_id=$(shasum -a 256 "$identity_dir/build-inputs.txt" | awk '{print $1}')
-          artifact_name="codex-custom-rust-v0.149.0-macos-arm64-$build_id"
+          artifact_name="codex-custom-rust-v0.151.0-macos-arm64-$build_id"
 
           printf 'BUILD_RECIPE_ID=%s\n' "$BUILD_RECIPE_ID" >> "$GITHUB_ENV"
           printf 'BUILD_ID=%s\n' "$build_id" >> "$GITHUB_ENV"
@@ -377,7 +377,7 @@ jobs:
                   package = json.load(package_file)
               assert package == {
                   "layoutVersion": 1,
-                  "version": "0.149.0",
+                  "version": "0.151.0",
                   "target": "aarch64-apple-darwin",
                   "variant": variant,
                   "entrypoint": entrypoint,
@@ -465,7 +465,7 @@ jobs:
           python3 upstream-codex/scripts/build_codex_package.py \
             --target aarch64-apple-darwin \
             --variant codex \
-            --package-version 0.149.0 \
+            --package-version 0.151.0 \
             --package-dir "$RUNNER_TEMP/codex-package-aarch64-apple-darwin" \
             --archive-output "$GITHUB_WORKSPACE/dist/codex-package-aarch64-apple-darwin.tar.gz" \
             --entrypoint-bin "$CARGO_TARGET_DIR/release/codex" \
@@ -473,7 +473,7 @@ jobs:
           python3 upstream-codex/scripts/build_codex_package.py \
             --target aarch64-apple-darwin \
             --variant codex-app-server \
-            --package-version 0.149.0 \
+            --package-version 0.151.0 \
             --package-dir "$RUNNER_TEMP/codex-app-server-package-aarch64-apple-darwin" \
             --archive-output "$GITHUB_WORKSPACE/dist/codex-app-server-package-aarch64-apple-darwin.tar.gz" \
             --entrypoint-bin "$CARGO_TARGET_DIR/release/codex-app-server" \
@@ -534,7 +534,7 @@ jobs:
                   package = json.load(package_file)
               assert package == {
                   "layoutVersion": 1,
-                  "version": "0.149.0",
+                  "version": "0.151.0",
                   "target": "aarch64-apple-darwin",
                   "variant": variant,
                   "entrypoint": entrypoint,

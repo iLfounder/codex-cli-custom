@@ -2,7 +2,9 @@
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-series_name=${2:-rust-v0.149.0}
+# The latest series is the default; pass the historical series name explicitly
+# when reproducing a 0.148/0.149 checkout.
+series_name=${2:-rust-v0.151.0}
 series_dir="$script_dir/$series_name"
 manifest="$series_dir/series.toml"
 target_repo=${1:-.}
@@ -30,18 +32,28 @@ test "$current_commit" = "$base_commit" \
     || die "expected base $base_commit, found $current_commit"
 
 patch_files=$(sed -n 's/^file = "\([^"]*\)"$/\1/p' "$manifest")
-test "$(printf '%s\n' "$patch_files" | sed '/^$/d' | wc -l | tr -d ' ')" = "25" \
-    || die "manifest must contain exactly 25 patches"
+patch_count=$(printf '%s\n' "$patch_files" | sed '/^$/d' | wc -l | tr -d ' ')
+test "$patch_count" -gt 0 || die "manifest must contain at least one patch"
 
 set --
 for patch_file in $patch_files; do
     test -f "$series_dir/$patch_file" || die "missing patch: $patch_file"
     expected_sha=$(awk -v file="$patch_file" '
-        $0 == "file = \"" file "\"" {
+        $0 == sprintf("file = %c%s%c", 34, file, 34) {
             getline
-            sub(/^sha256 = \"/, "")
-            sub(/\"$/, "")
-            print
+            prefix = "sha256 = "
+            quote = sprintf("%c", 34)
+            value = $0
+            if (index(value, prefix) == 1) {
+                value = substr(value, length(prefix) + 1)
+            }
+            if (substr(value, 1, 1) == quote) {
+                value = substr(value, 2)
+            }
+            if (substr(value, length(value), 1) == quote) {
+                value = substr(value, 1, length(value) - 1)
+            }
+            print value
             exit
         }
     ' "$manifest")
@@ -64,4 +76,4 @@ applied_tree=$(git -C "$target_repo" rev-parse 'HEAD^{tree}')
 test "$applied_tree" = "$final_tree" \
     || die "applied tree mismatch: expected $final_tree, found $applied_tree"
 
-printf 'Applied P001-P025; final tree %s\n' "$applied_tree"
+printf 'Applied %s patch(es) from %s; final tree %s\n' "$patch_count" "$series_name" "$applied_tree"

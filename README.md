@@ -8,39 +8,31 @@ An experimental fork of OpenAI Codex for people who keep several accounts and lo
 
 The fork makes account selection, thread ownership, session handoff, and external session control explicit. It also adds typed Goal actions and installable plugin commands while keeping credentials, local paths, and workflow-specific identities private.
 
-> This is an unofficial distribution. The current series targets upstream [`rust-v0.149.0`](https://github.com/openai/codex/releases/tag/rust-v0.149.0), commit `758ef40f50c1a458425c7cfbf1eb12cbc07af0b0`.
+> This is an unofficial distribution. The current series targets upstream [`rust-v0.151.0`](https://github.com/openai/codex/releases/tag/rust-v0.151.0), commit `78c290807ce710180111df227df3b7a4fe845452`.
 
 ## What the patch series adds
 
-| Patch | User-facing result |
+| Logical patch | User-facing result (the complete P001–P025 feature set is retained) |
 |---|---|
-| P001 | One durable writer authority per thread; stale writers are rejected. |
-| P002 | Versioned app-server v2 JSON and TypeScript contracts for session, account, Goal, and continuity controls. |
-| P003 | Multiple isolated account slots in one app-server. |
-| P004 | Durable thread-to-account binding across resume, fork, and child threads, plus versioned Goal state. |
-| P005 | The same execution account is used by the model, MCP, apps, plugins, hooks, and telemetry for a turn. |
-| P006 | `sessionRuntime/list`, runtime change events, allowed actions, and committed `/clear` and `/new` continuity receipts. |
-| P007 | Account login, reauthentication, and secondary-account logout without restarting the app-server. |
-| P008 | Strict `thread/relinquish` with explicit `released` or `failed` terminal results. |
-| P009 | Idle-thread account switching while keeping the same thread ID. |
-| P010 | TUI `/account`, `/logout`, `/exit`, `/clear`, `/new`, and `/goal` controls, including typed agent-requested clear/new. |
-| P011 | Installable `/namespace:name` plugin commands and ephemeral card, notice, and progress presentation. |
-| P012 | Reviewed live-session control fixes plus canonical account login, cancellation, reconciliation, and selectable TUI account status. |
-| P013 | Per-thread fixed and automatic account rotation, live quota-aware selection, and exact rollout ordinal repair. |
-| P014 | Read-only authentication runtimes for sibling accounts, with credential changes detected without allowing the fork to rewrite those credentials. |
-| P015 | Each root turn captures the selected account runtime and its exact credential revision before execution begins. |
-| P016 | Sanitized global account catalog, health, quota, and inventory-change contracts for TokenManager-backed accounts. |
-| P017 | Live TokenManager snapshots become a revisioned global catalog with fixed, quota-aware, and fallback account selection. |
-| P018 | Global accounts are resolved into isolated execution runtimes and integrated with account listing, binding, and rotation. |
-| P019 | The TUI account picker and rotation editor show global account health and quota while keeping local credential actions unavailable. |
-| P020 | Session lifecycle and controls stay consistent across turn-interrupt races, current-account projection, archive visibility, and TUI `Esc` interrupts. |
-| P021 | Goal edits recover from accounting-only revision drift through an authoritative refresh, while conflicting semantic changes are rejected. |
-| P022 | Final 0.149 convergence: reliable writer release and exit retry, complete registered-account inventory with live quota overlays, terminal MCP startup reporting, and context-compaction JSONL telemetry without exposing compacted content. |
-| P023 | Codex-owned quota-aware account rotation and pre-semantic same-root failover, plus an invocation-scoped readiness handshake for JSON forced-stdin `exec` and `resume`. |
-| P024 | The reviewed canonical control plane: one supervised app-server, account-neutral local UDS, global rotation and managed account lifecycle APIs, reconnect-safe TUI/CLI clients, and bounded OAuth callback compatibility. |
-| P025 | Bind an explicitly managed account slot before a fresh canonical thread starts, while preserving inherited bindings for resume and fork. |
+| U01 (P001) | Durable per-thread writer authority; stale writers are rejected. |
+| U02 (P002) | Versioned app-server v2 JSON/TypeScript contracts for session, account, Goal, and continuity controls. |
+| U03 (P003) | Isolated account slots in one app-server, with local account lifecycle operations. |
+| U04 (P004–P005) | Durable thread/account binding and one execution account shared by model, MCP, apps, plugins, hooks, and telemetry. |
+| U05 (P006–P007) | Session-runtime inventory and continuity receipts, plus login, reauthentication, and secondary-account logout without restart. |
+| U06 (P008–P009) | Strict writer relinquish and idle-thread account switching while preserving thread identity. |
+| U07 (P010–P011) | TUI account/continuity/Goal controls and installable plugin commands with ephemeral presentation. |
+| U08 (P012–P013) | Canonical live-session account reconciliation and fixed/automatic quota-aware account rotation with ordinal repair. |
+| U09 (P014–P015) | Read-only sibling authentication runtimes and exact per-turn account/credential-revision capture. |
+| U10 (P016–P017) | Sanitized global account catalog with health/quota projections and revisioned TokenManager selection. |
+| U11 (P018–P019) | Isolated global execution runtimes and TUI account/rotation presentation without local credential mutation. |
+| U12 (P020–P021) | Session lifecycle race/interrupt consistency and conflict-aware Goal recovery across accounting-only drift. |
+| U13 (P022–P023) | Final telemetry/compaction and MCP convergence, Codex-owned quota failover/rotation, and invocation readiness handshake. |
+| U14 (P024) | Supervised canonical control plane, account-neutral local UDS, global lifecycle APIs, reconnect-safe clients, and bounded OAuth callback compatibility. |
+| U15 (P025 + reconciliation) | Managed-slot binding before fresh canonical threads, inherited resume/fork bindings, multi-row `FooterBox`/`FooterAdapter`, generated-contract reconciliation, and Windows security hardening. |
 
 The app-server exposes opaque account references and sanitized session state. It never stores external workflow roles, group IDs, or user handles.
+Session-runtime identity keeps only a source kind and the literal `<workspace>` marker; it does not
+return local filesystem paths or custom workflow/source payloads.
 
 ## Interfaces produced
 
@@ -59,34 +51,83 @@ The app-server exposes opaque account references and sanitized session state. It
 
 Generated Rust, JSON Schema, and TypeScript definitions are included by the patches under `codex-rs/app-server-protocol/schema/`.
 
-## Apply and build
+## Custom footer
 
-Apply the twenty-four patches only to the exact upstream commit:
+The TUI keeps the upstream `tui.status_line` contract and adds an optional multi-row
+`FooterBox`. `FooterAdapter` instances supply display-only rows, so account/plan labels,
+session/runtime state, quota, rotation, and debug fields can be composed without giving the
+footer access to credentials or performing I/O. Unknown adapter IDs are ignored and managed
+accounts are represented by opaque slot identifiers.
 
-```sh
-git checkout 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
-/path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD"
+Example configuration:
+
+```toml
+[tui.footer]
+enabled = true
+max_rows = 3
+border = "rounded"       # none, plain, rounded, or double
+layout = "stacked"       # stacked or compact
+adapter_ids = ["official-statusline", "account", "session", "quota"]
 ```
 
-The applier requires a clean tree, verifies every patch digest, applies P001–P025 in order, and verifies the final Git tree. It needs a POSIX shell, Git, `sed`, `awk`, and either `shasum` or `sha256sum`.
+`max_rows` may be increased for additional rows; a disabled footer leaves the native status
+line unchanged.
+
+## Quota-aware latency and capacity
+
+Quota-aware rotation reads TokenManager's latest sanitized snapshots; it does not decrement a
+provider quota or create a separate per-account capacity pool. The provider's
+`server_is_overloaded`/“Selected model is at capacity” response is therefore not itself a local
+quota debit. Independent root turns can still be admitted concurrently and choose the same
+account/model from the same snapshot when no in-flight reservation exists, which can concentrate
+requests. Runtime probes for the caller-supplied candidates run concurrently, share one directory
+scan, and move credential snapshot hashing off the async executor while retaining revision and
+identity checks; there is no arbitrary eight-account batch cap.
+The code review found no concrete process-wide memory leak or credential cross-talk; compare the
+same model/reasoning effort, prewarm setting, proxy/TLS path, and concurrency when comparing hosts.
+
+## Apply and build
+
+Apply the fifteen logical patches only to the exact upstream commit:
+
+```sh
+git checkout 78c290807ce710180111df227df3b7a4fe845452
+/path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD" rust-v0.151.0
+```
+
+The applier requires a clean tree, verifies every patch digest, applies U01–U15 in order, and
+verifies the final Git tree. The historical `rust-v0.149.0` and `rust-v0.148.0` series remain
+available by passing their series name explicitly. The script needs a POSIX shell, Git, `sed`,
+`awk`, and either `shasum` or `sha256sum`.
 
 Build locally from `codex-rs`:
 
 ```sh
-perl -0pi -e 's/version = "0\.0\.0"/version = "0.149.0"/g' Cargo.lock
+perl -0pi -e 's/version = "0\.0\.0"/version = "0.151.0"/g' Cargo.lock
 cargo build --locked --release -p codex-cli --bin codex
 cargo build --locked --release -p codex-app-server --bin codex-app-server
 cargo build --locked --release -p codex-code-mode-host --bin codex-code-mode-host
 cargo build --locked --release -p codex-responses-api-proxy --bin codex-responses-api-proxy
 CODEX_REPO_ROOT="$(cd .. && pwd)" python3 ../scripts/build_codex_package.py \
-  --target aarch64-apple-darwin --variant codex --package-version 0.149.0 \
+  --target aarch64-apple-darwin --variant codex --package-version 0.151.0 \
   --entrypoint-bin target/release/codex \
   --code-mode-host-bin target/release/codex-code-mode-host
 CODEX_REPO_ROOT="$(cd .. && pwd)" python3 ../scripts/build_codex_package.py \
-  --target aarch64-apple-darwin --variant codex-app-server --package-version 0.149.0 \
+  --target aarch64-apple-darwin --variant codex-app-server --package-version 0.151.0 \
   --entrypoint-bin target/release/codex-app-server \
   --code-mode-host-bin target/release/codex-code-mode-host
 ```
+
+The same patched source is portable across hosts. On Windows, use the MSVC target for the
+local CLI/core check or release build (for example, `cargo check -p codex-core --target
+x86_64-pc-windows-msvc --locked` and `cargo build -p codex-cli --release --target
+x86_64-pc-windows-msvc`). The distributable macOS arm64 packages are produced by the checked-in
+GitHub Actions workflow; no local Mac build is required.
+
+The managed app-server daemon/supervisor remains explicitly Unix-only (as documented by its
+crate); this is a platform boundary of the daemon process manager, not a removal from the patch
+set. Windows builds still compile the shared account, protocol, core, TUI, and direct transport
+paths and return a clear unsupported-platform error for daemon lifecycle commands.
 
 The tagged upstream source keeps workspace-package versions as `0.0.0` placeholders in
 `Cargo.lock`. The first command normalizes only those exact placeholders, matching the GitHub
@@ -112,13 +153,14 @@ The manual GitHub Actions workflow uses a standard macOS arm64 runner and produc
 The workflow checks both package layouts, verifies that they contain the exact same built
 Code Mode host, and records SHA-256 digests and source-tree provenance before upload.
 
-## Upgrading a 0.148 custom state store
+## Upgrading an older custom state store
 
-Stop every older TUI and app-server sharing the store. Start the 0.149 build once with `CODEX_STATE_LEGACY_MIGRATION_CUTOVER=1`, then remove the variable. The migration validates the known legacy schema before adoption and rejects unknown or partial schemas. Do not reopen the migrated store with an older binary.
+Stop every older TUI and app-server sharing the store. Start the 0.151 build once with `CODEX_STATE_LEGACY_MIGRATION_CUTOVER=1`, then remove the variable. The migration validates the known legacy schema before adoption and rejects unknown or partial schemas. Do not reopen the migrated store with an older binary.
 
 ## Repository layout
 
-- `custom-patches/rust-v0.149.0/`: current ordered series and digest manifest
+- `custom-patches/rust-v0.151.0/`: current fifteen-patch ordered series and digest manifest
+- `custom-patches/rust-v0.149.0/`: preserved historical ordered series
 - `custom-patches/rust-v0.148.0/`: previous series retained for reproducibility
 - `custom-patches/apply-series.sh`: clean-tree patch applier
 - `.github/workflows/build-custom-macos-arm64.yml`: manual macOS arm64 build
