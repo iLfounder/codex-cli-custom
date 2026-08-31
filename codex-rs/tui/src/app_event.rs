@@ -41,6 +41,7 @@ use codex_app_server_protocol::SkillsListResponse;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadAccountRotationReadResponse;
 use codex_app_server_protocol::ThreadAccountRotationUpdateResponse;
+use codex_app_server_protocol::ThreadGoal;
 use codex_app_server_protocol::ThreadGoalStatus;
 use codex_app_server_protocol::ThreadItemsListResponse;
 use codex_app_server_protocol::ThreadPresentation;
@@ -81,6 +82,34 @@ use codex_protocol::models::ActivePermissionProfile;
 use crate::history_cell::HistoryCell;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ThreadGoalSemanticSnapshot {
+    pub(crate) goal_id: String,
+    pub(crate) objective: String,
+    pub(crate) status: ThreadGoalStatus,
+    pub(crate) token_budget: Option<i64>,
+}
+
+impl ThreadGoalSemanticSnapshot {
+    pub(crate) fn matches(&self, goal: &ThreadGoal) -> bool {
+        self.goal_id == goal.goal_id
+            && self.objective == goal.objective
+            && self.status == goal.status
+            && self.token_budget == goal.token_budget
+    }
+}
+
+impl From<&ThreadGoal> for ThreadGoalSemanticSnapshot {
+    fn from(goal: &ThreadGoal) -> Self {
+        Self {
+            goal_id: goal.goal_id.clone(),
+            objective: goal.objective.clone(),
+            status: goal.status,
+            token_budget: goal.token_budget,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ThreadGoalSetMode {
     ConfirmIfExists,
     Create {
@@ -89,12 +118,10 @@ pub(crate) enum ThreadGoalSetMode {
     #[cfg_attr(not(test), allow(dead_code))]
     ReplaceExisting,
     ReplaceExistingExact {
-        expected_goal_id: String,
-        expected_revision: i64,
+        snapshot: ThreadGoalSemanticSnapshot,
     },
     UpdateExisting {
-        expected_goal_id: String,
-        expected_revision: i64,
+        snapshot: ThreadGoalSemanticSnapshot,
         status: ThreadGoalStatus,
         token_budget: Option<i64>,
     },

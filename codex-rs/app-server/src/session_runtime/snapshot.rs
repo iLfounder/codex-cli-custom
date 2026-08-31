@@ -50,6 +50,10 @@ const CONTROL_CAPABILITY: &str = "ananke_session_control_v1";
 const TRANSITION_CAPABILITY: &str = "ananke_thread_transition_v1";
 const RUNTIME_SNAPSHOT_UNAVAILABLE: &str = "thread store runtime state is unavailable";
 
+#[cfg(test)]
+#[path = "snapshot_tests.rs"]
+mod tests;
+
 #[derive(Clone)]
 pub(super) enum RuntimeRecord {
     Stored(Box<StoredThread>),
@@ -256,17 +260,20 @@ impl SessionRuntimeEngine {
                     RUNTIME_SNAPSHOT_UNAVAILABLE,
                 )
             });
-        let current_binding = match loaded_thread.as_ref() {
-            Some(thread) => Ok(Some(thread.execution_account().binding.clone())),
+        let loaded_current_binding = loaded_thread
+            .as_ref()
+            .map(|thread| thread.execution_account().binding.clone());
+        let current_binding = match loaded_current_binding.as_ref() {
+            Some(binding) => Ok(Some(binding.clone())),
             None => self.thread_store.execution_account_binding(thread_id).await,
         };
         let active_binding = match subscriptions.active_turn_id.as_ref() {
-            Some(turn_id) => self
-                .thread_store
-                .turn_execution_account(thread_id, turn_id.clone())
-                .await
-                .ok()
-                .flatten(),
+            Some(turn_id) => resolve_active_turn_binding(
+                self.thread_store
+                    .turn_execution_account(thread_id, turn_id.clone())
+                    .await,
+                loaded_current_binding.as_ref(),
+            ),
             None => None,
         };
         let account_capability = match overlay {
@@ -619,6 +626,17 @@ fn account_snapshot(
         rotation,
         switch_target_slot_id: None,
         deny_reason,
+    }
+}
+
+fn resolve_active_turn_binding<E>(
+    durable_binding: Result<Option<ExecutionAccountBinding>, E>,
+    loaded_current_binding: Option<&ExecutionAccountBinding>,
+) -> Option<ExecutionAccountBinding> {
+    match durable_binding {
+        Ok(Some(binding)) => Some(binding),
+        Ok(None) => loaded_current_binding.cloned(),
+        Err(_) => None,
     }
 }
 

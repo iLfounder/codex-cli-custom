@@ -199,7 +199,7 @@ pub(crate) async fn apply_bespoke_event_handling(
         EventMsg::TurnComplete(turn_complete_event) => {
             // All per-thread requests are bound to a turn, so abort them.
             outgoing.abort_pending_server_requests().await;
-            respond_to_pending_interrupts(&thread_state, &outgoing).await;
+            respond_to_pending_interrupts(&event_turn_id, &thread_state, &outgoing).await;
             let turn_failed = thread_state.lock().await.turn_summary.last_error.is_some();
             thread_watch_manager
                 .note_turn_completed(&conversation_id.to_string(), turn_failed)
@@ -1220,7 +1220,7 @@ pub(crate) async fn apply_bespoke_event_handling(
         EventMsg::TurnAborted(turn_aborted_event) => {
             // All per-thread requests are bound to a turn, so abort them.
             outgoing.abort_pending_server_requests().await;
-            respond_to_pending_interrupts(&thread_state, &outgoing).await;
+            respond_to_pending_interrupts(&event_turn_id, &thread_state, &outgoing).await;
 
             thread_watch_manager
                 .note_turn_interrupted(&conversation_id.to_string())
@@ -1667,17 +1667,22 @@ fn thread_rollback_response_from_stored_thread(
 }
 
 async fn respond_to_pending_interrupts(
+    event_turn_id: &str,
     thread_state: &Arc<Mutex<ThreadState>>,
     outgoing: &ThreadScopedOutgoingMessageSender,
 ) {
-    let pending = {
+    let matching = {
         let mut state = thread_state.lock().await;
-        std::mem::take(&mut state.pending_interrupts)
+        let (matching, unmatched) = std::mem::take(&mut state.pending_interrupts)
+            .into_iter()
+            .partition(|pending| pending.turn_id == event_turn_id);
+        state.pending_interrupts = unmatched;
+        matching
     };
 
-    for request_id in pending {
+    for pending in matching {
         outgoing
-            .send_response(request_id, TurnInterruptResponse {})
+            .send_response(pending.request_id, TurnInterruptResponse {})
             .await;
     }
 }
@@ -2311,6 +2316,50 @@ mod tests {
             bail!("unexpected message: {message:?}");
         };
         Ok(envelope.notification)
+    }
+
+    #[tokio::test]
+    async fn stale_terminal_only_resolves_interrupt_for_matching_turn() -> Result<()> {
+        let current_request_id = crate::outgoing_message::ConnectionRequestId {
+            connection_id: ConnectionId(1),
+            request_id: RequestId::Integer(2),
+        };
+        let current_interrupt = crate::thread_state::PendingInterrupt {
+            request_id: current_request_id.clone(),
+            turn_id: "turn-2".to_string(),
+        };
+        let thread_state = new_thread_state();
+        thread_state.lock().await.pending_interrupts = vec![current_interrupt.clone()];
+        let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let outgoing = ThreadScopedOutgoingMessageSender::new(
+            Arc::new(OutgoingMessageSender::new(
+                tx,
+                codex_analytics::AnalyticsEventsClient::disabled(),
+            )),
+            vec![ConnectionId(1)],
+            ThreadId::new(),
+        );
+
+        respond_to_pending_interrupts("turn-1", &thread_state, &outgoing).await;
+
+        assert_eq!(
+            thread_state.lock().await.pending_interrupts,
+            vec![current_interrupt]
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "newer-turn interrupt must remain pending"
+        );
+
+        respond_to_pending_interrupts("turn-2", &thread_state, &outgoing).await;
+
+        let OutgoingMessage::Response(current_response) = recv_broadcast_message(&mut rx).await?
+        else {
+            bail!("expected current-turn interrupt response");
+        };
+        assert_eq!(current_response.id, current_request_id.request_id);
+        assert!(thread_state.lock().await.pending_interrupts.is_empty());
+        Ok(())
     }
 
     #[test]

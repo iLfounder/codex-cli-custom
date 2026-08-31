@@ -713,6 +713,14 @@ impl TurnRequestProcessor {
             }
         };
 
+        if started {
+            let thread_state = self.thread_state_manager.thread_state(thread_id).await;
+            thread_state
+                .lock()
+                .await
+                .register_admitted_turn(turn_id.clone());
+        }
+
         if turn_has_input && started {
             let execution_account = thread.execution_account();
             let config_snapshot = thread.config_snapshot().await;
@@ -1482,6 +1490,15 @@ impl TurnRequestProcessor {
             )
             .await
             .map_err(|err| internal_error(format!("failed to start review: {err}")))?;
+        let parent_thread_uuid = parent_thread.session_configured().thread_id;
+        let thread_state = self
+            .thread_state_manager
+            .thread_state(parent_thread_uuid)
+            .await;
+        thread_state
+            .lock()
+            .await
+            .register_admitted_turn(turn_id.clone());
         let turn = Self::build_review_turn(turn_id, display_text);
         self.emit_review_started(request_id, turn, parent_thread_id)
             .await;
@@ -1575,6 +1592,11 @@ impl TurnRequestProcessor {
             request_id.connection_id,
             "review thread",
         );
+        let thread_state = self.thread_state_manager.thread_state(thread_id).await;
+        thread_state
+            .lock()
+            .await
+            .register_admitted_turn(turn_id.clone());
 
         let turn = Self::build_review_turn(turn_id, prompt);
         let review_thread_id = thread_id.to_string();
@@ -1644,22 +1666,23 @@ impl TurnRequestProcessor {
         // interrupts do not have a turn and are acknowledged after submission.
         if !is_startup_interrupt {
             let thread_state = self.thread_state_manager.thread_state(thread_uuid).await;
-            let is_running = matches!(thread.agent_status().await, AgentStatus::Running);
             {
                 let mut thread_state = thread_state.lock().await;
-                if let Some(active_turn) = thread_state.active_turn_snapshot() {
-                    if active_turn.id != turn_id {
+                match thread_state.interruptible_turn_id() {
+                    Some(active_turn_id) if active_turn_id == turn_id => {}
+                    Some(active_turn_id) => {
                         return Err(invalid_request(format!(
-                            "expected active turn id {turn_id} but found {}",
-                            active_turn.id
+                            "expected active turn id {turn_id} but found {active_turn_id}"
                         )));
                     }
-                } else if thread_state.last_terminal_turn_id.as_deref() == Some(turn_id.as_str())
-                    || !is_running
-                {
-                    return Err(invalid_request("no active turn to interrupt"));
+                    None => return Err(invalid_request("no active turn to interrupt")),
                 }
-                thread_state.pending_interrupts.push(request_id.clone());
+                thread_state
+                    .pending_interrupts
+                    .push(crate::thread_state::PendingInterrupt {
+                        request_id: request_id.clone(),
+                        turn_id: turn_id.clone(),
+                    });
             }
 
             self.outgoing
@@ -1681,7 +1704,7 @@ impl TurnRequestProcessor {
                     let mut thread_state = thread_state.lock().await;
                     thread_state
                         .pending_interrupts
-                        .retain(|pending_request_id| pending_request_id != request_id);
+                        .retain(|pending| pending.request_id != *request_id);
                 }
                 let interrupt_target = if is_startup_interrupt {
                     "startup"

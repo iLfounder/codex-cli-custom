@@ -1,5 +1,6 @@
 use super::App;
 use crate::app_event::AppEvent;
+use crate::app_event::ThreadGoalSemanticSnapshot;
 use crate::app_event::ThreadGoalSetMode;
 use crate::app_server_session::AppServerSession;
 use crate::bottom_pane::SelectionAction;
@@ -11,6 +12,7 @@ use crate::goal_display::goal_status_label;
 use crate::goal_display::goal_usage_summary;
 use crate::goal_files;
 use crate::text_formatting::truncate_text;
+use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::ThreadGoal;
 use codex_app_server_protocol::ThreadGoalStatus;
 use codex_protocol::ThreadId;
@@ -113,6 +115,7 @@ impl App {
             self.show_no_thread_goal_to_edit();
             return;
         };
+        let snapshot = ThreadGoalSemanticSnapshot::from(&goal);
 
         let codex_home = app_server.codex_home_path(&self.config.codex_home);
         match goal_files::objective_text_for_edit(app_server, codex_home.as_ref(), &goal.objective)
@@ -126,7 +129,8 @@ impl App {
         if self.current_displayed_thread_id() != Some(thread_id) {
             return;
         }
-        self.chat_widget.show_goal_edit_prompt(thread_id, goal);
+        self.chat_widget
+            .show_goal_edit_prompt_for_snapshot(thread_id, goal, snapshot);
     }
 
     pub(super) async fn set_thread_goal_draft(
@@ -153,14 +157,12 @@ impl App {
                         self.show_replace_thread_goal_confirmation(
                             thread_id,
                             draft,
-                            goal.goal_id.clone(),
-                            goal.revision,
+                            ThreadGoalSemanticSnapshot::from(goal),
                         );
                         return;
                     }
                     Some(goal) => ThreadGoalSetMode::ReplaceExistingExact {
-                        expected_goal_id: goal.goal_id.clone(),
-                        expected_revision: goal.revision,
+                        snapshot: ThreadGoalSemanticSnapshot::from(goal),
                     },
                     None => ThreadGoalSetMode::Create {
                         expected_revision: response.revision,
@@ -214,33 +216,80 @@ impl App {
                 )
                 .await
                 .map(|response| response.goal),
-            ThreadGoalSetMode::ReplaceExistingExact {
-                expected_goal_id,
-                expected_revision,
-            } => app_server
-                .thread_goal_replace(
-                    thread_id,
-                    expected_goal_id,
-                    expected_revision,
-                    objective,
-                    /*token_budget*/ None,
-                )
-                .await
-                .map(|response| response.goal),
-            ThreadGoalSetMode::UpdateExisting {
-                expected_goal_id,
-                expected_revision,
-                ..
-            } => app_server
-                .thread_goal_set(
-                    thread_id,
-                    Some(objective),
-                    Some(status),
-                    token_budget,
-                    Some((&expected_goal_id, expected_revision)),
-                )
-                .await
-                .map(|response| response.goal),
+            ThreadGoalSetMode::ReplaceExistingExact { snapshot } => {
+                match refresh_thread_goal_revision(app_server, thread_id, &snapshot).await {
+                    Ok(expected_revision) => {
+                        let result = app_server
+                            .thread_goal_replace(
+                                thread_id,
+                                snapshot.goal_id.clone(),
+                                expected_revision,
+                                objective.clone(),
+                                /*token_budget*/ None,
+                            )
+                            .await
+                            .map(|response| response.goal);
+                        match result {
+                            Err(err) if is_goal_revision_conflict(&err) => {
+                                match refresh_thread_goal_revision(app_server, thread_id, &snapshot)
+                                    .await
+                                {
+                                    Ok(retry_revision) => app_server
+                                        .thread_goal_replace(
+                                            thread_id,
+                                            snapshot.goal_id,
+                                            retry_revision,
+                                            objective,
+                                            /*token_budget*/ None,
+                                        )
+                                        .await
+                                        .map(|response| response.goal),
+                                    Err(err) => Err(err),
+                                }
+                            }
+                            result => result,
+                        }
+                    }
+                    Err(err) => Err(err),
+                }
+            }
+            ThreadGoalSetMode::UpdateExisting { snapshot, .. } => {
+                match refresh_thread_goal_revision(app_server, thread_id, &snapshot).await {
+                    Ok(expected_revision) => {
+                        let result = app_server
+                            .thread_goal_set(
+                                thread_id,
+                                Some(objective.clone()),
+                                Some(status),
+                                token_budget,
+                                Some((&snapshot.goal_id, expected_revision)),
+                            )
+                            .await
+                            .map(|response| response.goal);
+                        match result {
+                            Err(err) if is_goal_revision_conflict(&err) => {
+                                match refresh_thread_goal_revision(app_server, thread_id, &snapshot)
+                                    .await
+                                {
+                                    Ok(retry_revision) => app_server
+                                        .thread_goal_set(
+                                            thread_id,
+                                            Some(objective),
+                                            Some(status),
+                                            token_budget,
+                                            Some((&snapshot.goal_id, retry_revision)),
+                                        )
+                                        .await
+                                        .map(|response| response.goal),
+                                    Err(err) => Err(err),
+                                }
+                            }
+                            result => result,
+                        }
+                    }
+                    Err(err) => Err(err),
+                }
+            }
             ThreadGoalSetMode::ConfirmIfExists | ThreadGoalSetMode::ReplaceExisting => {
                 unreachable!("goal lookup resolves set mode")
             }
@@ -355,8 +404,7 @@ impl App {
         &mut self,
         thread_id: ThreadId,
         draft: goal_files::GoalDraft,
-        expected_goal_id: String,
-        expected_revision: i64,
+        snapshot: ThreadGoalSemanticSnapshot,
     ) {
         let objective = draft.objective.clone();
         let replace_draft = draft;
@@ -365,8 +413,7 @@ impl App {
                 thread_id,
                 draft: replace_draft.clone(),
                 mode: ThreadGoalSetMode::ReplaceExistingExact {
-                    expected_goal_id: expected_goal_id.clone(),
-                    expected_revision,
+                    snapshot: snapshot.clone(),
                 },
             });
         })];
@@ -405,6 +452,34 @@ impl App {
             Some("Create a goal before editing it.".to_string()),
         );
     }
+}
+
+async fn refresh_thread_goal_revision(
+    app_server: &mut AppServerSession,
+    thread_id: ThreadId,
+    snapshot: &ThreadGoalSemanticSnapshot,
+) -> color_eyre::Result<i64> {
+    let Some(goal) = app_server.thread_goal_get(thread_id).await?.goal else {
+        return Err(color_eyre::eyre::eyre!("goal revision conflict"));
+    };
+    if !snapshot.matches(&goal) {
+        return Err(color_eyre::eyre::eyre!("goal revision conflict"));
+    }
+    Ok(goal.revision)
+}
+
+fn is_goal_revision_conflict(err: &color_eyre::Report) -> bool {
+    matches!(
+        err.downcast_ref::<TypedRequestError>(),
+        Some(TypedRequestError::Server { method, source })
+            if matches!(method.as_str(), "thread/goal/replace" | "thread/goal/set")
+                && source
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.get("reason"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("goal_revision_conflict")
+    )
 }
 
 async fn cleanup_materialized_goal_files(

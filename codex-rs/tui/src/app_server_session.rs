@@ -3862,6 +3862,7 @@ mod tests {
             params,
             ThreadResumeParams {
                 thread_id: thread_id.to_string(),
+                dynamic_tools: Some(thread_control_dynamic_tools()),
                 ..ThreadResumeParams::default()
             }
         );

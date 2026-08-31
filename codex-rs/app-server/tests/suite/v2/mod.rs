@@ -124,6 +124,7 @@ mod thread_unsubscribe;
 mod turn_cost_otel;
 mod turn_interrupt;
 mod turn_settings_update;
+mod turn_interrupt_race;
 mod turn_start;
 mod turn_start_zsh_fork;
 mod turn_steer;
