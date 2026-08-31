@@ -111,6 +111,49 @@ async fn explicit_reload_updates_the_cached_auth_source() {
     assert_eq!(manager.auth_source_kind(), AuthSourceKind::ManagedStore);
 }
 
+#[tokio::test]
+async fn managed_file_reload_updates_credential_revision_from_the_same_snapshot() {
+    let auth_home = tempdir().expect("temp auth home");
+    login_with_api_key(
+        auth_home.path(),
+        "managed-key-a",
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )
+    .expect("write initial managed auth");
+    let manager = AuthManager::new(
+        auth_home.path().to_path_buf(),
+        /*enable_codex_api_key_env*/ false,
+        AuthCredentialsStoreMode::File,
+        /*forced_chatgpt_workspace_id*/ None,
+        /*chatgpt_base_url*/ None,
+        AuthKeyringBackendKind::default(),
+        crate::test_support::transport_default_auth_route_config(),
+    )
+    .await;
+    let initial_revision = manager
+        .credential_revision()
+        .expect("initial file credential revision");
+
+    login_with_api_key(
+        auth_home.path(),
+        "managed-key-b",
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )
+    .expect("replace managed auth");
+
+    assert!(manager.reload().await);
+    assert_ne!(manager.credential_revision(), Some(initial_revision));
+    assert_eq!(
+        manager
+            .auth_cached()
+            .and_then(|auth| auth.api_key().map(str::to_string))
+            .as_deref(),
+        Some("managed-key-b")
+    );
+}
+
 #[test]
 fn header_auth_exposes_a_valid_chatgpt_account_id() {
     for (account_id_header, expected_account_id) in [

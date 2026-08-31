@@ -37,6 +37,7 @@ use super::agent_identity::register_managed_chatgpt_agent_identity;
 use super::agent_identity::require_agent_identity_authapi_base_url;
 use super::agent_identity::verified_record_from_jwt;
 use super::external_bearer::BearerTokenRefresher;
+use super::read_only;
 use super::revoke::revoke_auth_tokens;
 use super::workload_identity::WorkloadIdentityExternalAuth;
 use super::workload_identity::WorkloadIdentitySessionError;
@@ -51,6 +52,8 @@ pub use crate::auth::storage::AgentIdentityStorage;
 pub use crate::auth::storage::AuthDotJson;
 pub use crate::auth::storage::AuthKeyringBackendKind;
 use crate::auth::storage::AuthStorageBackend;
+use crate::auth::storage::CredentialRevision;
+use crate::auth::storage::FileAuthStorage;
 use crate::auth::storage::create_auth_storage;
 use crate::auth::util::try_parse_error_message;
 use crate::default_client::create_client;
@@ -236,6 +239,23 @@ enum AuthLoadPolicy {
 struct LoadedAuth {
     auth: Option<CodexAuth>,
     source_kind: AuthSourceKind,
+    credential_revision: Option<CredentialRevision>,
+}
+
+impl From<read_only::LoadedAuth> for LoadedAuth {
+    fn from(loaded: read_only::LoadedAuth) -> Self {
+        Self {
+            auth: loaded.auth,
+            source_kind: AuthSourceKind::ManagedStore,
+            credential_revision: loaded.credential_revision,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuthManagementMode {
+    ReadWrite,
+    ReadOnlyFile,
 }
 
 #[derive(Debug, Error)]
@@ -319,7 +339,7 @@ impl From<RefreshTokenError> for std::io::Error {
 }
 
 impl CodexAuth {
-    async fn from_auth_dot_json(
+    pub(super) async fn from_auth_dot_json(
         codex_home: &Path,
         auth_dot_json: AuthDotJson,
         auth_credentials_store_mode: AuthCredentialsStoreMode,
@@ -1079,7 +1099,7 @@ pub async fn login_with_access_token(
     )
 }
 
-fn ensure_auth_workspace_allowed(
+pub(super) fn ensure_auth_workspace_allowed(
     expected_workspace_ids: Option<&[String]>,
     account_id: &str,
 ) -> std::io::Result<()> {
@@ -1239,6 +1259,7 @@ impl AuthConfig {
         Ok(LoadedAuth {
             auth: loaded.auth.filter(|auth| self.allows_auth(auth)),
             source_kind: loaded.source_kind,
+            credential_revision: loaded.credential_revision,
         })
     }
 
@@ -1529,6 +1550,7 @@ async fn load_auth_with_policy(
         return Ok(LoadedAuth {
             auth: Some(CodexAuth::from_api_key(api_key.as_str())),
             source_kind: AuthSourceKind::CodexApiKeyEnvironment,
+            credential_revision: None,
         });
     }
 
@@ -1561,6 +1583,7 @@ async fn load_auth_with_policy(
         return Ok(LoadedAuth {
             auth: Some(auth),
             source_kind: AuthSourceKind::ManagedStore,
+            credential_revision: None,
         });
     }
 
@@ -1591,6 +1614,7 @@ async fn load_auth_with_policy(
         return Ok(LoadedAuth {
             auth: Some(auth),
             source_kind: AuthSourceKind::CodexAccessTokenEnvironment,
+            credential_revision: None,
         });
     }
 
@@ -1599,21 +1623,32 @@ async fn load_auth_with_policy(
         return Ok(LoadedAuth {
             auth: None,
             source_kind: AuthSourceKind::ManagedStore,
+            credential_revision: None,
         });
     }
 
-    // Fall back to the configured persistent store (file/keyring/auto) for managed auth.
-    let storage = create_auth_storage(
-        codex_home.to_path_buf(),
-        auth_credentials_store_mode,
-        keyring_backend_kind,
-    );
-    let auth_dot_json = match storage.load()? {
-        Some(auth) => auth,
+    // Fall back to the configured persistent store (file/keyring/auto) for managed auth. File
+    // storage also carries an opaque revision from the same complete read used for parsing.
+    let snapshot = if auth_credentials_store_mode == AuthCredentialsStoreMode::File {
+        FileAuthStorage::new(codex_home.to_path_buf())
+            .load_snapshot()?
+            .map(|snapshot| (snapshot.auth, Some(snapshot.revision)))
+    } else {
+        create_auth_storage(
+            codex_home.to_path_buf(),
+            auth_credentials_store_mode,
+            keyring_backend_kind,
+        )
+        .load()?
+        .map(|auth| (auth, None))
+    };
+    let (auth_dot_json, credential_revision) = match snapshot {
+        Some(snapshot) => snapshot,
         None => {
             return Ok(LoadedAuth {
                 auth: None,
                 source_kind: AuthSourceKind::ManagedStore,
+                credential_revision: None,
             });
         }
     };
@@ -1621,6 +1656,7 @@ async fn load_auth_with_policy(
         return Ok(LoadedAuth {
             auth: None,
             source_kind: AuthSourceKind::ManagedStore,
+            credential_revision,
         });
     }
     if let Some(agent_identity) = auth_dot_json.agent_identity.as_ref() {
@@ -1643,6 +1679,7 @@ async fn load_auth_with_policy(
     Ok(LoadedAuth {
         auth: Some(auth),
         source_kind: AuthSourceKind::ManagedStore,
+        credential_revision,
     })
 }
 
@@ -1881,6 +1918,7 @@ impl AuthDotJson {
 struct CachedAuth {
     auth: Option<CodexAuth>,
     source_kind: AuthSourceKind,
+    credential_revision: Option<CredentialRevision>,
     /// Permanent refresh failure cached for the current auth snapshot so
     /// later refresh attempts for the same credentials fail fast without network.
     permanent_refresh_failure: Option<AuthScopedRefreshFailure>,
@@ -1900,6 +1938,10 @@ impl Debug for CachedAuth {
                 &self.auth.as_ref().map(CodexAuth::api_auth_mode),
             )
             .field("source_kind", &self.source_kind)
+            .field(
+                "has_credential_revision",
+                &self.credential_revision.is_some(),
+            )
             .field(
                 "permanent_refresh_failure",
                 &self
@@ -1930,6 +1972,7 @@ enum ReloadOutcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UnauthorizedRecoveryMode {
     Managed,
+    ReadOnlyFile,
     External,
 }
 
@@ -1970,11 +2013,15 @@ impl UnauthorizedRecovery {
         let expected_account_id = cached_auth.as_ref().and_then(CodexAuth::get_account_id);
         let mode = if manager.has_external_auth() {
             UnauthorizedRecoveryMode::External
+        } else if manager.management_mode == AuthManagementMode::ReadOnlyFile {
+            UnauthorizedRecoveryMode::ReadOnlyFile
         } else {
             UnauthorizedRecoveryMode::Managed
         };
         let step = match mode {
-            UnauthorizedRecoveryMode::Managed => UnauthorizedRecoveryStep::Reload,
+            UnauthorizedRecoveryMode::Managed | UnauthorizedRecoveryMode::ReadOnlyFile => {
+                UnauthorizedRecoveryStep::Reload
+            }
             UnauthorizedRecoveryMode::External => UnauthorizedRecoveryStep::ExternalRefresh,
         };
         Self {
@@ -2047,6 +2094,7 @@ impl UnauthorizedRecovery {
     pub fn mode_name(&self) -> &'static str {
         match self.mode {
             UnauthorizedRecoveryMode::Managed => "managed",
+            UnauthorizedRecoveryMode::ReadOnlyFile => "read_only_file",
             UnauthorizedRecoveryMode::External => "external",
         }
     }
@@ -2076,12 +2124,27 @@ impl UnauthorizedRecovery {
                     .await
                 {
                     ReloadOutcome::ReloadedChanged => {
-                        self.step = UnauthorizedRecoveryStep::RefreshToken;
+                        self.step = match self.mode {
+                            UnauthorizedRecoveryMode::Managed => {
+                                UnauthorizedRecoveryStep::RefreshToken
+                            }
+                            UnauthorizedRecoveryMode::ReadOnlyFile
+                            | UnauthorizedRecoveryMode::External => UnauthorizedRecoveryStep::Done,
+                        };
                         return Ok(UnauthorizedRecoveryStepResult {
                             auth_state_changed: Some(true),
                         });
                     }
                     ReloadOutcome::ReloadedNoChange => {
+                        if self.mode == UnauthorizedRecoveryMode::ReadOnlyFile {
+                            self.step = UnauthorizedRecoveryStep::Done;
+                            return Err(RefreshTokenError::Permanent(
+                                RefreshTokenFailedError::new(
+                                    RefreshTokenFailedReason::Other,
+                                    "read-only credential snapshot is unchanged".to_string(),
+                                ),
+                            ));
+                        }
                         self.step = UnauthorizedRecoveryStep::RefreshToken;
                         return Ok(UnauthorizedRecoveryStepResult {
                             auth_state_changed: Some(false),
@@ -2132,6 +2195,7 @@ pub struct AuthManager {
     auth_change_tx: watch::Sender<u64>,
     enable_codex_api_key_env: bool,
     auth_load_policy: AuthLoadPolicy,
+    management_mode: AuthManagementMode,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     keyring_backend_kind: AuthKeyringBackendKind,
     forced_login_method: Option<ForcedLoginMethod>,
@@ -2185,6 +2249,7 @@ impl Debug for AuthManager {
             .field("codex_home", &self.codex_home)
             .field("inner", &self.inner)
             .field("enable_codex_api_key_env", &self.enable_codex_api_key_env)
+            .field("management_mode", &self.management_mode)
             .field(
                 "auth_credentials_store_mode",
                 &self.auth_credentials_store_mode,
@@ -2254,7 +2319,24 @@ impl AuthManager {
             .unwrap_or(LoadedAuth {
                 auth: None,
                 source_kind: AuthSourceKind::ManagedStore,
+                credential_revision: None,
             });
+        Self::from_loaded_auth(
+            auth_config,
+            loaded_auth,
+            enable_codex_api_key_env,
+            auth_load_policy,
+            AuthManagementMode::ReadWrite,
+        )
+    }
+
+    fn from_loaded_auth(
+        auth_config: AuthConfig,
+        loaded_auth: LoadedAuth,
+        enable_codex_api_key_env: bool,
+        auth_load_policy: AuthLoadPolicy,
+        management_mode: AuthManagementMode,
+    ) -> Self {
         let AuthConfig {
             codex_home,
             auth_credentials_store_mode,
@@ -2273,11 +2355,13 @@ impl AuthManager {
             inner: RwLock::new(CachedAuth {
                 auth: loaded_auth.auth,
                 source_kind: loaded_auth.source_kind,
+                credential_revision: loaded_auth.credential_revision,
                 permanent_refresh_failure: None,
             }),
             auth_change_tx,
             enable_codex_api_key_env,
             auth_load_policy,
+            management_mode,
             auth_credentials_store_mode,
             keyring_backend_kind,
             forced_login_method,
@@ -2304,6 +2388,7 @@ impl AuthManager {
         let cached = CachedAuth {
             auth,
             source_kind: AuthSourceKind::ManagedStore,
+            credential_revision: None,
             permanent_refresh_failure: None,
         };
         let (auth_change_tx, _auth_change_rx) = watch::channel(0);
@@ -2314,6 +2399,7 @@ impl AuthManager {
             auth_change_tx,
             enable_codex_api_key_env: false,
             auth_load_policy: AuthLoadPolicy::ManagedStoreOnly,
+            management_mode: AuthManagementMode::ReadWrite,
             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
             keyring_backend_kind: AuthKeyringBackendKind::default(),
             forced_login_method: None,
@@ -2335,6 +2421,7 @@ impl AuthManager {
         let cached = CachedAuth {
             auth: Some(auth),
             source_kind: AuthSourceKind::ManagedStore,
+            credential_revision: None,
             permanent_refresh_failure: None,
         };
         let (auth_change_tx, _auth_change_rx) = watch::channel(0);
@@ -2344,6 +2431,7 @@ impl AuthManager {
             auth_change_tx,
             enable_codex_api_key_env: false,
             auth_load_policy: AuthLoadPolicy::ManagedStoreOnly,
+            management_mode: AuthManagementMode::ReadWrite,
             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
             keyring_backend_kind: AuthKeyringBackendKind::default(),
             forced_login_method: None,
@@ -2369,6 +2457,7 @@ impl AuthManager {
         let cached = CachedAuth {
             auth: Some(auth),
             source_kind: AuthSourceKind::ManagedStore,
+            credential_revision: None,
             permanent_refresh_failure: None,
         };
         let (auth_change_tx, _auth_change_rx) = watch::channel(0);
@@ -2378,6 +2467,7 @@ impl AuthManager {
             auth_change_tx,
             enable_codex_api_key_env: false,
             auth_load_policy: AuthLoadPolicy::ManagedStoreOnly,
+            management_mode: AuthManagementMode::ReadWrite,
             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
             keyring_backend_kind: AuthKeyringBackendKind::default(),
             forced_login_method: None,
@@ -2405,11 +2495,13 @@ impl AuthManager {
             inner: RwLock::new(CachedAuth {
                 auth: None,
                 source_kind: AuthSourceKind::External,
+                credential_revision: None,
                 permanent_refresh_failure: None,
             }),
             auth_change_tx,
             enable_codex_api_key_env: false,
             auth_load_policy: AuthLoadPolicy::ManagedStoreOnly,
+            management_mode: AuthManagementMode::ReadWrite,
             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
             keyring_backend_kind: AuthKeyringBackendKind::default(),
             forced_login_method: None,
@@ -2438,6 +2530,14 @@ impl AuthManager {
             .and_then(|cached| cached.auth.clone())
     }
 
+    /// Returns the opaque identity of the complete credential file currently cached.
+    pub fn credential_revision(&self) -> Option<CredentialRevision> {
+        self.inner
+            .read()
+            .ok()
+            .and_then(|cached| cached.credential_revision.clone())
+    }
+
     /// Subscribes to cached auth changes that can affect request recovery.
     pub fn auth_change_receiver(&self) -> watch::Receiver<u64> {
         self.auth_change_tx.subscribe()
@@ -2464,6 +2564,9 @@ impl AuthManager {
         }
 
         let auth = self.auth_cached()?;
+        if self.management_mode == AuthManagementMode::ReadOnlyFile {
+            return Some(auth);
+        }
         if Self::should_refresh_proactively(&auth)
             && let Err(err) = self.refresh_token().await
         {
@@ -2478,6 +2581,14 @@ impl AuthManager {
         policy: AgentIdentityAuthPolicy,
         session_source: SessionSource,
     ) -> std::io::Result<Option<AgentIdentityAuth>> {
+        if self.management_mode == AuthManagementMode::ReadOnlyFile
+            && policy == AgentIdentityAuthPolicy::ChatGptAuth
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "read-only sibling auth cannot create or update agent identity",
+            ));
+        }
         let Some(auth) = self.auth().await else {
             return Ok(None);
         };
@@ -2568,8 +2679,10 @@ impl AuthManager {
 
         tracing::info!("Reloading auth for account {expected_account_id}");
         let cached_before_reload = self.auth_cached();
+        let revision_before_reload = self.credential_revision();
         let auth_changed =
-            !Self::auths_equal_for_refresh(cached_before_reload.as_ref(), loaded.auth.as_ref());
+            !Self::auths_equal_for_refresh(cached_before_reload.as_ref(), loaded.auth.as_ref())
+                || revision_before_reload != loaded.credential_revision;
         self.set_loaded_auth(loaded);
         if auth_changed {
             ReloadOutcome::ReloadedChanged
@@ -2633,6 +2746,29 @@ impl AuthManager {
     }
 
     async fn load_auth(&self) -> LoadedAuth {
+        if self.management_mode == AuthManagementMode::ReadOnlyFile {
+            let auth_config = AuthConfig {
+                codex_home: self.codex_home.clone(),
+                auth_credentials_store_mode: AuthCredentialsStoreMode::File,
+                keyring_backend_kind: self.keyring_backend_kind,
+                forced_login_method: self.forced_login_method,
+                chatgpt_base_url: self.chatgpt_base_url.clone(),
+                forced_chatgpt_workspace_id: self.forced_chatgpt_workspace_id(),
+                managed_auth_policy: self.managed_auth_policy.clone(),
+                auth_route_config: self.auth_route_config.clone(),
+            };
+            return match read_only::load_auth(&auth_config).await {
+                Ok(loaded) => loaded.into(),
+                Err(error) => {
+                    tracing::warn!("failed to reload read-only sibling auth: {error}");
+                    LoadedAuth {
+                        auth: self.auth_cached(),
+                        source_kind: AuthSourceKind::ManagedStore,
+                        credential_revision: self.credential_revision(),
+                    }
+                }
+            };
+        }
         if let Some(external_auth) = self.external_auth_provider() {
             let cached_auth = self.auth_cached();
             if cached_auth
@@ -2642,6 +2778,7 @@ impl AuthManager {
                 return LoadedAuth {
                     auth: cached_auth,
                     source_kind: AuthSourceKind::External,
+                    credential_revision: None,
                 };
             }
             let auth = match self.resolve_external_auth(external_auth.as_ref()).await {
@@ -2662,6 +2799,7 @@ impl AuthManager {
             return LoadedAuth {
                 auth,
                 source_kind: AuthSourceKind::External,
+                credential_revision: None,
             };
         }
 
@@ -2694,25 +2832,34 @@ impl AuthManager {
         .unwrap_or(LoadedAuth {
             auth: None,
             source_kind: AuthSourceKind::ManagedStore,
+            credential_revision: None,
         })
     }
 
     fn set_loaded_auth(&self, loaded: LoadedAuth) -> bool {
-        self.set_cached_auth_with_source(loaded.auth, Some(loaded.source_kind))
+        self.set_cached_auth_with_source(
+            loaded.auth,
+            Some(loaded.source_kind),
+            loaded.credential_revision,
+        )
     }
 
     fn set_cached_auth(&self, new_auth: Option<CodexAuth>) -> bool {
-        self.set_cached_auth_with_source(new_auth, /*source_kind*/ None)
+        self.set_cached_auth_with_source(
+            new_auth, /*source_kind*/ None, /*credential_revision*/ None,
+        )
     }
 
     fn set_cached_auth_with_source(
         &self,
         new_auth: Option<CodexAuth>,
         source_kind: Option<AuthSourceKind>,
+        credential_revision: Option<CredentialRevision>,
     ) -> bool {
         if let Ok(mut guard) = self.inner.write() {
             let previous = guard.auth.as_ref();
-            let changed = !AuthManager::auths_equal(previous, new_auth.as_ref());
+            let changed = !AuthManager::auths_equal(previous, new_auth.as_ref())
+                || guard.credential_revision != credential_revision;
             let auth_changed_for_refresh =
                 !Self::auths_equal_for_refresh(previous, new_auth.as_ref());
             if auth_changed_for_refresh {
@@ -2723,6 +2870,7 @@ impl AuthManager {
             if let Some(source_kind) = source_kind {
                 guard.source_kind = source_kind;
             }
+            guard.credential_revision = credential_revision;
             if auth_changed_for_refresh {
                 self.auth_change_tx.send_modify(|revision| *revision += 1);
             }
@@ -2736,6 +2884,8 @@ impl AuthManager {
         &self,
         external_auth: Arc<dyn ExternalAuth>,
     ) -> Result<(), RefreshTokenError> {
+        self.ensure_managed_writes_allowed()
+            .map_err(RefreshTokenError::Transient)?;
         if self.workload_identity_selected {
             return Err(permanent_external_auth_error(
                 "workload identity auth cannot be replaced at runtime",
@@ -2908,6 +3058,29 @@ impl AuthManager {
         )
     }
 
+    /// Builds a manager for a sibling account's private `auth.json`.
+    ///
+    /// This manager only reloads that exact file. It never selects process or external auth,
+    /// refreshes OAuth credentials, persists auth changes, or removes credentials.
+    pub async fn shared_from_read_only_auth_config(
+        auth_config: AuthConfig,
+    ) -> std::io::Result<Arc<Self>> {
+        if auth_config.auth_credentials_store_mode != AuthCredentialsStoreMode::File {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "read-only sibling auth requires file credential storage",
+            ));
+        }
+        let loaded_auth: LoadedAuth = read_only::load_auth(&auth_config).await?.into();
+        Ok(Arc::new(Self::from_loaded_auth(
+            auth_config,
+            loaded_auth,
+            /*enable_codex_api_key_env*/ false,
+            AuthLoadPolicy::ManagedStoreOnly,
+            AuthManagementMode::ReadOnlyFile,
+        )))
+    }
+
     pub fn unauthorized_recovery(self: &Arc<Self>) -> UnauthorizedRecovery {
         UnauthorizedRecovery::new(Arc::clone(self))
     }
@@ -2944,6 +3117,8 @@ impl AuthManager {
     /// we can assume that the source already refreshed it. Otherwise, ask the
     /// token authority to refresh.
     pub async fn refresh_token(&self) -> Result<(), RefreshTokenError> {
+        self.ensure_managed_writes_allowed()
+            .map_err(RefreshTokenError::Transient)?;
         let _refresh_guard = self.refresh_lock.acquire().await.map_err(|_| {
             RefreshTokenError::Permanent(RefreshTokenFailedError::new(
                 RefreshTokenFailedReason::Other,
@@ -2983,6 +3158,8 @@ impl AuthManager {
     /// it and update the shared cache. If the token refresh fails, returns the
     /// error to the caller.
     pub async fn refresh_token_from_authority(&self) -> Result<(), RefreshTokenError> {
+        self.ensure_managed_writes_allowed()
+            .map_err(RefreshTokenError::Transient)?;
         let _refresh_guard = self.refresh_lock.acquire().await.map_err(|_| {
             RefreshTokenError::Permanent(RefreshTokenFailedError::new(
                 RefreshTokenFailedReason::Other,
@@ -3075,10 +3252,21 @@ impl AuthManager {
     }
 
     fn ensure_logout_allowed(&self) -> std::io::Result<()> {
+        self.ensure_managed_writes_allowed()?;
         if self.workload_identity_selected {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "workload identity auth is managed by the host and cannot be logged out",
+            ));
+        }
+        Ok(())
+    }
+
+    fn ensure_managed_writes_allowed(&self) -> std::io::Result<()> {
+        if self.management_mode == AuthManagementMode::ReadOnlyFile {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "read-only sibling auth cannot modify credentials",
             ));
         }
         Ok(())
