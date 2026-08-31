@@ -1,27 +1,27 @@
 {
   "schema": "codex-a.runtime-artifact/v1",
-  "releaseIdentity": "codex-a/0.149.0/p024/darwin-arm64",
-  "sourceRevision": "d2c19347ca12c9bdba0ac4e5816884a75dc5e22c",
+  "releaseIdentity": "codex-a/0.149.0/p025/darwin-arm64",
+  "sourceRevision": "7c45bcdab1e5eb1ab38d3797d02af67c827b0b7b",
   "provenance": {
     "repository": "ilfounder/Codex-Cli-Custom",
-    "buildRevision": "1c3aa6e31485ad6d558929ee30b1a337dea363b7",
+    "buildRevision": "7c45bcdab1e5eb1ab38d3797d02af67c827b0b7b",
     "buildWorkflow": ".github/workflows/build-custom-macos-arm64.yml",
-    "buildRunId": 33295539074,
+    "buildRunId": 33351787543,
     "buildArtifact": {
-      "id": 9728206200,
-      "name": "codex-custom-rust-v0.149.0-macos-arm64-ba401ca060b1128c6fb99280f08ab42846a7e95613cf0de290d51a48c8b43da7",
-      "digest": "sha256:d77a695a1d132673ec3735f864a63ad38f8d8586284272004dbccded035fa0ae"
+      "id": 9745209324,
+      "name": "codex-custom-rust-v0.149.0-macos-arm64-f0f700c7c7c4732230b5d4a2cdcea435e396c58ac500df9cc1e2f75b2ea8daac",
+      "digest": "sha256:524c1d18e434dddcfa5f2f9273b4363201469a49caf96617b30542e343ed98cb"
     },
     "smokeWorkflow": ".github/workflows/canonical-control-macos-arm64-artifact-smoke.yml",
-    "smokeRunId": 33299202294
+    "smokeRunId": 33356279166
   },
   "artifact": {
-    "id": 9728371465,
-    "name": "canonical-control-p024-8b334b2b723f599a7db9139a7d5693c4472d44c2-smoke-33299202294",
-    "digest": "sha256:5b7d4c581ef256cfd96a756fd4a1de8b97b4f3635688003d0ba25b19c60f9c63",
+    "id": 9745233008,
+    "name": "canonical-control-p025-1f35e1ae8139df81dfdf4a8eccd4027a736c2754-smoke-33356279166",
+    "digest": "sha256:e3041829b578e33769cafdbba11ddec36b4f9de7b0634d3b019d5794f2d738e2",
     "payloadChecksum": {
       "path": "SHA256SUMS",
-      "digest": "sha256:f4237b3f883f2cc8b727cfbf18ab2bd312e3f237cda6c28cb0053ae13be3d5cd"
+      "digest": "sha256:27a8aa9c294cdf416cf86b088481021e23c9c5963dbc03ec37a9812783799d3d"
     },
     "exactFileSet": [
       "BUILD-METADATA.txt",
@@ -40,11 +40,11 @@
     "upstreamCommit": "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0",
     "patchedTree": {
       "grammar": "git-tree-sha1",
-      "digest": "8b334b2b723f599a7db9139a7d5693c4472d44c2"
+      "digest": "1f35e1ae8139df81dfdf4a8eccd4027a736c2754"
     },
     "compiledTree": {
       "grammar": "git-tree-sha1",
-      "digest": "8b334b2b723f599a7db9139a7d5693c4472d44c2"
+      "digest": "1f35e1ae8139df81dfdf4a8eccd4027a736c2754"
     }
   },
   "platform": {
@@ -155,7 +155,7 @@
     ]
   },
   "rollback": {
-    "compatibilityIdentity": "codex-a/0.149/p024/external-state-v1",
+    "compatibilityIdentity": "codex-a/0.149/p025/external-state-v1",
     "previousReleaseFence": {
       "allowInitialActivationWithoutPrevious": true,
       "requireCoordinatorSelectedImmutablePrevious": true,
