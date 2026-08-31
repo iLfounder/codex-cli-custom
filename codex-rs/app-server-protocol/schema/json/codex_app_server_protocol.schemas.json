@@ -7598,6 +7598,12 @@
               "$ref": "#/definitions/v2/AppInfo"
             },
             "type": "array"
+          },
+          "threadId": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -20318,6 +20324,13 @@
           "forceReload": {
             "description": "When true, bypass the skills cache and re-scan skills from disk.",
             "type": "boolean"
+          },
+          "threadId": {
+            "description": "When set, resolve account-bound plugins for this thread.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "title": "SkillsListParams",

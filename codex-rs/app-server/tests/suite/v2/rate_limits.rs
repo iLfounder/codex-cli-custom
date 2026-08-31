@@ -250,6 +250,8 @@ async fn get_account_rate_limits_returns_snapshot(
 
     let expected = GetAccountRateLimitsResponse {
         account_id: Some("account-123".to_string()),
+        thread_id: None,
+        execution_account: None,
         rate_limit_upsell: Some(banner),
         rate_limits: RateLimitSnapshot {
             limit_id: Some("codex".to_string()),

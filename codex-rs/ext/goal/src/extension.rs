@@ -136,6 +136,11 @@ where
                         .root_accounting_state()
                         .unwrap_or_else(|| parent.accounting_state())
                 });
+            let analytics = input
+                .session_store
+                .get::<AnalyticsEventsClient>()
+                .map(|client| GoalAnalytics::new(client.as_ref().clone()))
+                .unwrap_or_else(|| self.analytics.clone());
             let runtime = input.thread_store.get_or_init::<GoalRuntimeHandle>(|| {
                 GoalRuntimeHandle::new(
                     thread_id,
@@ -145,7 +150,7 @@ where
                     self.thread_manager.clone(),
                     accounting_state,
                     GoalRuntimeConfig {
-                        analytics: self.analytics.clone(),
+                        analytics,
                         enabled,
                         tools_available_for_thread,
                         root_accounting_state,
@@ -496,7 +501,7 @@ where
 {
     fn tools(
         &self,
-        _session_store: &ExtensionData,
+        session_store: &ExtensionData,
         thread_store: &ExtensionData,
     ) -> Vec<
         Arc<dyn for<'call> codex_extension_api::ToolExecutor<codex_extension_api::ToolCall<'call>>>,
@@ -510,13 +515,17 @@ where
         let max_goal_token_budget = thread_store
             .get::<GoalExtensionConfig>()
             .and_then(|config| config.max_goal_token_budget);
+        let analytics = session_store
+            .get::<AnalyticsEventsClient>()
+            .map(|client| GoalAnalytics::new(client.as_ref().clone()))
+            .unwrap_or_else(|| self.analytics.clone());
 
         vec![
             Arc::new(GoalToolExecutor::get(
                 runtime.thread_id(),
                 Arc::clone(&self.state_dbs),
                 runtime.accounting_state(),
-                self.analytics.clone(),
+                analytics.clone(),
                 self.event_emitter.clone(),
                 self.metrics.clone(),
             )),
@@ -524,7 +533,7 @@ where
                 runtime.thread_id(),
                 Arc::clone(&self.state_dbs),
                 runtime.accounting_state(),
-                self.analytics.clone(),
+                analytics.clone(),
                 self.event_emitter.clone(),
                 self.metrics.clone(),
                 max_goal_token_budget,
@@ -533,7 +542,7 @@ where
                 runtime.thread_id(),
                 Arc::clone(&self.state_dbs),
                 runtime.accounting_state(),
-                self.analytics.clone(),
+                analytics,
                 self.event_emitter.clone(),
                 self.metrics.clone(),
             )),

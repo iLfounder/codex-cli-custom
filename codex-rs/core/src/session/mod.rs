@@ -420,6 +420,7 @@ pub(crate) struct SessionSpawnArgs {
     pub(crate) auth_manager: Arc<AuthManager>,
     pub(crate) models_manager: SharedModelsManager,
     pub(crate) git_root_discovery: Arc<GitRootDiscovery>,
+    pub(crate) execution_account: Arc<crate::execution_account::ExecutionAccountContext>,
     pub(crate) environment_manager: Arc<EnvironmentManager>,
     pub(crate) skills_service: Arc<HostSkillsService>,
     pub(crate) plugins_manager: Arc<PluginsManager>,
@@ -524,6 +525,7 @@ impl Session {
             auth_manager,
             models_manager,
             git_root_discovery,
+            execution_account,
             environment_manager,
             skills_service,
             plugins_manager,
@@ -781,6 +783,7 @@ impl Session {
             auth_manager.clone(),
             models_manager.clone(),
             git_root_discovery,
+            execution_account,
             model_info,
             exec_policy,
             tx_event.clone(),
@@ -3586,7 +3589,7 @@ impl Session {
                     &selected_capability_roots,
                     required_servers,
                 ),
-                turn::prepare_tool_recommendations(self.as_ref(), turn_context.as_ref()),
+                turn::prepare_tool_recommendations(turn_context.as_ref()),
             )
         }
         .or_cancel(cancellation_token)

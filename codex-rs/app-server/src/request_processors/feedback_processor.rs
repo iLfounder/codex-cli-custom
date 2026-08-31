@@ -19,6 +19,7 @@ pub(crate) struct FeedbackRequestProcessor {
     auth_manager: Arc<AuthManager>,
     thread_manager: Arc<ThreadManager>,
     config: Arc<Config>,
+    config_manager: ConfigManager,
     feedback: CodexFeedback,
     log_db: Option<LogDbLayer>,
     state_db: Option<StateDbHandle>,
@@ -30,6 +31,7 @@ impl FeedbackRequestProcessor {
         auth_manager: Arc<AuthManager>,
         thread_manager: Arc<ThreadManager>,
         config: Arc<Config>,
+        config_manager: ConfigManager,
         feedback: CodexFeedback,
         log_db: Option<LogDbLayer>,
         state_db: Option<StateDbHandle>,
@@ -38,6 +40,7 @@ impl FeedbackRequestProcessor {
             auth_manager,
             thread_manager,
             config,
+            config_manager,
             feedback,
             log_db,
             state_db,
@@ -58,11 +61,6 @@ impl FeedbackRequestProcessor {
         &self,
         params: FeedbackUploadParams,
     ) -> Result<FeedbackUploadResponse, JSONRPCErrorError> {
-        if !self.config.feedback_enabled {
-            return Err(invalid_request(
-                "sending feedback is disabled by configuration",
-            ));
-        }
         let permit = self
             .uploads
             .clone()
@@ -74,7 +72,6 @@ impl FeedbackRequestProcessor {
                         .to_string(),
                 data: None,
             })?;
-
         let FeedbackUploadParams {
             classification,
             reason,
@@ -93,7 +90,46 @@ impl FeedbackRequestProcessor {
             None => None,
         };
 
-        let auth = self.auth_manager.auth_cached();
+        let (feedback_config, auth_manager) = match conversation_id {
+            Some(conversation_id) => match self.thread_manager.get_thread(conversation_id).await {
+                Ok(thread) => {
+                    let execution_account = thread.execution_account();
+                    let thread_config = thread.config().await;
+                    let feedback_config = self
+                        .config_manager
+                        .load_latest_config_for_thread(thread_config.as_ref())
+                        .await
+                        .map_err(|err| {
+                            internal_error(format!(
+                                "failed to reload feedback thread config: {err}"
+                            ))
+                        })?;
+                    (feedback_config, Arc::clone(&execution_account.auth_manager))
+                }
+                Err(_) => {
+                    let execution_account = self
+                        .thread_manager
+                        .execution_account_for_thread(conversation_id)
+                        .await
+                        .map_err(|err| {
+                            internal_error(format!(
+                                "failed to resolve feedback execution account: {err}"
+                            ))
+                        })?;
+                    (
+                        self.config.as_ref().clone(),
+                        Arc::clone(&execution_account.auth_manager),
+                    )
+                }
+            },
+            None => (self.config.as_ref().clone(), Arc::clone(&self.auth_manager)),
+        };
+        if !feedback_config.feedback_enabled {
+            return Err(invalid_request(
+                "sending feedback is disabled by configuration",
+            ));
+        }
+        let auth = auth_manager.auth_cached();
         let turn_metadata = if let Some(conversation_id) = conversation_id
             && let Some(rollout_path) = self
                 .resolve_rollout_path(conversation_id, self.state_db.as_ref())
@@ -234,14 +270,14 @@ impl FeedbackRequestProcessor {
                 }
             }
             if let Some(sandbox_log_attachment) =
-                windows_sandbox_log_attachment(&self.config.codex_home)
+                windows_sandbox_log_attachment(&feedback_config.codex_home)
                 && seen_attachment_paths.insert(sandbox_log_attachment.path.clone())
             {
                 attachment_paths.push(sandbox_log_attachment);
             }
             for cache_attachment in tool_cache_feedback_attachments(
-                self.config.codex_home.as_path(),
-                &self.config.chatgpt_base_url,
+                feedback_config.codex_home.as_path(),
+                &feedback_config.chatgpt_base_url,
                 auth.as_ref(),
             ) {
                 if seen_attachment_paths.insert(cache_attachment.path.clone()) {
@@ -265,11 +301,11 @@ impl FeedbackRequestProcessor {
                 &self.thread_manager,
                 self.state_db.as_ref(),
                 conversation_id,
-                self.config.cwd.as_path(),
+                feedback_config.cwd.as_path(),
             )
             .await;
             if let Some(doctor_report) =
-                super::feedback_doctor_report::doctor_feedback_report(&self.config, &doctor_cwd)
+                super::feedback_doctor_report::doctor_feedback_report(&feedback_config, &doctor_cwd)
                     .await
             {
                 extra_attachments.push(doctor_report.attachment);
@@ -723,6 +759,7 @@ mod tests {
                 item: RolloutItem::TurnContext(TurnContextItem {
                     turn_id: Some((*turn_id).to_string()),
                     root_turn_id: None,
+                    execution_account: None,
                     cwd: AbsolutePathBuf::from_absolute_path(tempdir.path())
                         .expect("absolute feedback rollout directory"),
                     workspace_roots: None,

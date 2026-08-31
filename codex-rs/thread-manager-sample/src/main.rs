@@ -136,7 +136,7 @@ async fn run_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
         config.codex_home.clone(),
     ));
     let mut extensions = ExtensionRegistryBuilder::<Config>::new();
-    install_image_generation_extension(&mut extensions, auth_manager.clone(), |config: &Config| {
+    install_image_generation_extension(&mut extensions, |config: &Config| {
         Some(config.codex_home.clone())
     });
     let thread_manager = ThreadManager::new(

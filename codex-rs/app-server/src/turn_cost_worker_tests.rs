@@ -74,6 +74,7 @@ async fn handle_observes_only_matching_model_provider() {
     };
     config.model_provider = model_provider.clone();
     let config = Arc::new(config);
+    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("sk-test"));
     let (sender, mut receiver) = mpsc::channel(OBSERVATION_CHANNEL_CAPACITY);
     let handle = TurnCostWorkerHandle {
         sender,
@@ -100,12 +101,12 @@ async fn handle_observes_only_matching_model_provider() {
         ..model_provider
     };
 
-    handle.observe_event(thread_id, &mismatched_config, &event, || {
+    handle.observe_event(thread_id, &mismatched_config, &event, Arc::clone(&auth_manager), || {
         panic!("telemetry should not be captured for a mismatched provider")
     });
     assert!(receiver.try_recv().is_err());
 
-    handle.observe_event(thread_id, config.as_ref(), &event, || {
+    handle.observe_event(thread_id, config.as_ref(), &event, Arc::clone(&auth_manager), || {
         test_session_telemetry(thread_id)
     });
     let observation = receiver.recv().await.expect("matching observation");
@@ -299,13 +300,14 @@ async fn transient_probe_failure_keeps_worker_alive() {
 async fn priced_cost_uses_telemetry_captured_before_thread_removal() {
     let server = MockServer::start().await;
     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("sk-test"));
-    let mut runtime = test_runtime(&server, auth_manager).await;
+    let mut runtime = test_runtime(&server, Arc::clone(&auth_manager)).await;
     let thread_id = ThreadId::new();
     let turn_id = "turn-1";
 
     runtime.record_observation(TurnCostObservation {
         thread_id,
         turn_id: turn_id.to_string(),
+        auth_manager: Arc::clone(&auth_manager),
         kind: TurnCostObservationKind::Started {
             session_telemetry: Box::new(test_session_telemetry(thread_id)),
         },
@@ -313,6 +315,7 @@ async fn priced_cost_uses_telemetry_captured_before_thread_removal() {
     runtime.record_observation(TurnCostObservation {
         thread_id,
         turn_id: turn_id.to_string(),
+        auth_manager: Arc::clone(&auth_manager),
         kind: TurnCostObservationKind::ResponseCompleted {
             response_id: "resp-one".to_string(),
         },
@@ -320,6 +323,7 @@ async fn priced_cost_uses_telemetry_captured_before_thread_removal() {
     runtime.record_observation(TurnCostObservation {
         thread_id,
         turn_id: turn_id.to_string(),
+        auth_manager: Arc::clone(&auth_manager),
         kind: TurnCostObservationKind::Finished { interrupted: false },
     });
 
@@ -344,7 +348,7 @@ async fn priced_cost_uses_telemetry_captured_before_thread_removal() {
 async fn priced_cost_waits_for_every_response_when_response_costs_are_available() {
     let server = MockServer::start().await;
     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("sk-test"));
-    let mut runtime = test_runtime(&server, auth_manager).await;
+    let mut runtime = test_runtime(&server, Arc::clone(&auth_manager)).await;
     let thread_id = ThreadId::new();
     let turn_id = "turn-1";
 
@@ -352,6 +356,7 @@ async fn priced_cost_waits_for_every_response_when_response_costs_are_available(
         turn_id.to_string(),
         TurnCostEntry {
             thread_id,
+            auth_manager: Arc::clone(&auth_manager),
             session_telemetry: test_session_telemetry(thread_id),
             expected_response_ids: HashSet::from(["resp-one".to_string(), "resp-two".to_string()]),
             status: TurnCostStatus::Completed,
@@ -480,7 +485,7 @@ async fn turn_cost_failures_do_not_log_response_bodies(status: u16) {
             runtime.probe_backend().await,
             BackendAvailability::RetryProbe
         );
-        runtime.poll_entries(&["turn-1".to_string()]).await;
+        runtime.poll_entries(&["turn-1".to_string()], None).await;
     }
     .with_subscriber(subscriber)
     .await;

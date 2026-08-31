@@ -234,11 +234,16 @@ pub(super) async fn ensure_listener_task_running(
     };
     let config = conversation.config().await;
     let environments = conversation.environment_selections().await;
+    let execution_account = conversation.execution_account();
+    let execution_services = listener_task_context
+        .thread_manager
+        .execution_account_services(&execution_account);
     let watch_registration = listener_task_context
         .skills_watcher
         .register_thread_config(
             config.as_ref(),
             listener_task_context.thread_manager.as_ref(),
+            execution_services.plugins_manager.as_ref(),
             &environments,
         )
         .await;
@@ -318,6 +323,7 @@ pub(super) async fn ensure_listener_task_running(
                             conversation_id,
                             config.as_ref(),
                             &event,
+                            Arc::clone(&conversation.execution_account().auth_manager),
                             || conversation.session_telemetry(),
                         );
                     }

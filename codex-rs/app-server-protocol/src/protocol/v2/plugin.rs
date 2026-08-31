@@ -18,6 +18,10 @@ use std::path::PathBuf;
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct SkillsListParams {
+    /// When set, resolve account-bound plugins for this thread.
+    #[ts(optional = nullable)]
+    pub thread_id: Option<String>,
+
     /// When empty, defaults to the current session working directory.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cwds: Vec<PathBuf>,

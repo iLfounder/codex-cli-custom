@@ -71,15 +71,12 @@ impl MessageProcessor {
         );
         codex_git_attribution::install(
             &mut extensions,
-            auth_manager.clone(),
             config.chatgpt_base_url.clone(),
             config.http_client_factory(),
         );
-        codex_image_generation_extension::install(
-            &mut extensions,
-            auth_manager.clone(),
-            |config: &Config| Some(config.codex_home.clone()),
-        );
+        codex_image_generation_extension::install(&mut extensions, |config: &Config| {
+            Some(config.codex_home.clone())
+        });
         let skill_providers = codex_skills_extension::SkillProviders::new()
             .with_host_provider(Arc::new(codex_skills_extension::HostSkillProvider::new()));
         codex_skills_extension::install_with_providers_and_metrics(

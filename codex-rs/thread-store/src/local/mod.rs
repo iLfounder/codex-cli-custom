@@ -31,6 +31,7 @@ mod pending_thread_metadata_tests;
 mod test_support;
 
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::ExecutionAccountBinding;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_rollout::RolloutRecorder;
 use codex_rollout::StateDbHandle;
@@ -258,6 +259,35 @@ impl LocalThreadStore {
         self.state_db.clone()
     }
 
+    /// Check the durable thread binding authority for an account slot.
+    pub async fn durable_execution_account_slot_in_use(
+        &self,
+        account_slot_id: &str,
+    ) -> ThreadStoreResult<bool> {
+        if self.state_db.is_none() {
+            return Ok(false);
+        }
+        let pool = self
+            .config
+            .sqlite
+            .open_read_only_pool(&self.config.sqlite.state_db_path())
+            .await
+            .map_err(|err| ThreadStoreError::Internal {
+                message: format!("failed to open execution account binding store: {err}"),
+            })?;
+        let result = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM thread_execution_account_bindings WHERE slot_id = ?)",
+        )
+        .bind(account_slot_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|err| ThreadStoreError::Internal {
+            message: format!("failed to scan execution account bindings: {err}"),
+        });
+        pool.close().await;
+        result
+    }
+
     /// Probe current writer ownership and persistent control metadata without
     /// creating, deleting, or taking ownership of a thread lock.
     pub async fn probe_writer_authority(
@@ -475,6 +505,92 @@ impl LocalThreadStore {
 impl ThreadStore for LocalThreadStore {
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn execution_account_binding(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Ok(Some(ExecutionAccountBinding {
+                    slot_id: "default".to_string(),
+                    generation: 1,
+                }));
+            };
+            state_db
+                .execution_account_binding(thread_id)
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!("failed to read execution account binding: {err}"),
+                })
+        })
+    }
+
+    fn initialize_execution_account_binding(
+        &self,
+        thread_id: ThreadId,
+        initial: ExecutionAccountBinding,
+    ) -> ThreadStoreFuture<'_, ExecutionAccountBinding> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                if initial.slot_id == "default" && initial.generation == 1 {
+                    return Ok(initial);
+                }
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "initialize_non_default_execution_account_binding",
+                });
+            };
+            state_db
+                .initialize_execution_account_binding(thread_id, &initial)
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!("failed to initialize execution account binding: {err}"),
+                })
+        })
+    }
+
+    fn compare_and_swap_execution_account_binding(
+        &self,
+        thread_id: ThreadId,
+        expected: ExecutionAccountBinding,
+        next_slot_id: String,
+    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "compare_and_swap_execution_account_binding",
+                });
+            };
+            state_db
+                .compare_and_swap_execution_account_binding(
+                    thread_id,
+                    &expected,
+                    next_slot_id.as_str(),
+                )
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!("failed to compare and swap execution account binding: {err}"),
+                })
+        })
+    }
+
+    fn turn_execution_account(
+        &self,
+        thread_id: ThreadId,
+        turn_id: String,
+    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Ok(None);
+            };
+            state_db
+                .turn_execution_account(thread_id, turn_id.as_str())
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!("failed to read turn execution account: {err}"),
+                })
+        })
     }
 
     fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreFuture<'_, ()> {
@@ -741,6 +857,7 @@ mod tests {
     use codex_protocol::protocol::AgentMessageEvent;
     use codex_protocol::protocol::AskForApproval;
     use codex_protocol::protocol::EventMsg;
+    use codex_protocol::protocol::ExecutionAccountBinding;
     use codex_protocol::protocol::ItemCompletedEvent;
     use codex_protocol::protocol::SandboxPolicy;
     use codex_protocol::protocol::SessionSource;
@@ -844,6 +961,96 @@ mod tests {
                 .await
                 .expect("sqlite metadata read"),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_append_records_turn_execution_account_after_durable_jsonl() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = LocalThreadStore::new(config, Some(runtime));
+        let thread_id = ThreadId::default();
+        let binding = ExecutionAccountBinding {
+            slot_id: "secondary".to_string(),
+            generation: 3,
+        };
+
+        store
+            .create_thread(create_thread_params(thread_id))
+            .await
+            .expect("create legacy thread");
+        store
+            .initialize_execution_account_binding(thread_id, binding.clone())
+            .await
+            .expect("initialize binding");
+        let context = serde_json::from_value(serde_json::json!({
+            "turn_id": "turn-legacy",
+            "execution_account": {"slotId": "secondary", "generation": 3},
+            "cwd": std::env::current_dir().expect("current directory"),
+            "approval_policy": "never",
+            "sandbox_policy": {"type": "danger-full-access"},
+            "model": "test-model",
+            "summary": "auto"
+        }))
+        .expect("turn context");
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![RolloutItem::TurnContext(context)],
+            })
+            .await
+            .expect("append legacy turn context");
+
+        assert_eq!(
+            store
+                .turn_execution_account(thread_id, "turn-legacy".to_string())
+                .await
+                .expect("read turn binding"),
+            Some(binding)
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_execution_account_slot_scan_reads_binding_authority() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = LocalThreadStore::new(config, Some(runtime));
+        let thread_id = ThreadId::default();
+
+        store
+            .initialize_execution_account_binding(
+                thread_id,
+                ExecutionAccountBinding {
+                    slot_id: "secondary".to_string(),
+                    generation: 1,
+                },
+            )
+            .await
+            .expect("initialize durable binding");
+
+        assert!(
+            store
+                .durable_execution_account_slot_in_use("secondary")
+                .await
+                .expect("scan durable bindings")
+        );
+        assert!(
+            !store
+                .durable_execution_account_slot_in_use("unused")
+                .await
+                .expect("scan durable bindings")
         );
     }
 
@@ -984,6 +1191,7 @@ mod tests {
             RolloutItem::TurnContext(TurnContextItem {
                 turn_id: Some("turn-1".to_string()),
                 root_turn_id: None,
+                execution_account: None,
                 cwd: serde_json::from_value(serde_json::json!(cwd)).expect("absolute cwd"),
                 workspace_roots: None,
                 current_date: None,

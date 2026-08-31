@@ -5,6 +5,7 @@ use std::time::Duration;
 use codex_analytics::AnalyticsEventsClient;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ThreadGoal;
+use codex_app_server_protocol::ThreadGoalClearedNotification;
 use codex_app_server_protocol::ThreadGoalUpdatedNotification;
 use codex_app_server_protocol::ThreadQueueChangedNotification;
 use codex_app_server_protocol::WarningNotification;
@@ -91,24 +92,13 @@ where
             },
         );
     }
-    codex_git_attribution::install(
-        &mut builder,
-        auth_manager.clone(),
-        git_attribution_base_url,
-        http_client_factory,
-    );
-    codex_guardian_v2::install(
-        &mut builder,
-        guardian_agent_spawner,
-        internal_session_spawner(thread_manager.clone()),
-        auth_manager.clone(),
-        thread_manager,
-    );
+    codex_git_attribution::install(&mut builder, git_attribution_base_url, http_client_factory);
+    codex_guardian_v2::install(&mut builder, guardian_agent_spawner, thread_manager);
     codex_memories_extension::install(&mut builder, codex_otel::global());
     codex_mcp_extension::install(&mut builder);
     codex_mcp_extension::install_executor_plugins(&mut builder, environment_manager);
-    codex_web_search_extension::install(&mut builder, auth_manager.clone());
-    codex_image_generation_extension::install(&mut builder, auth_manager, |config: &Config| {
+    codex_web_search_extension::install(&mut builder);
+    codex_image_generation_extension::install(&mut builder, |config: &Config| {
         Some(config.codex_home.clone())
     });
     let skill_providers = codex_skills_extension::SkillProviders::new()
@@ -238,6 +228,38 @@ impl ExtensionEventSink for AppServerExtensionEventSink {
                                 thread_id: thread_id.to_string(),
                                 turn_id,
                                 goal,
+                            },
+                        ))
+                        .await;
+                });
+            }
+            EventMsg::ThreadGoalCleared(thread_goal_event) => {
+                let thread_id = thread_goal_event.thread_id;
+                let turn_id = thread_goal_event.turn_id;
+                let previous_goal: ThreadGoal = thread_goal_event.previous_goal.into();
+                let revision = thread_goal_event.revision;
+                if let Some(listener_command_tx) = self
+                    .thread_state_manager
+                    .current_listener_command_tx(thread_id)
+                {
+                    let command = ThreadListenerCommand::EmitThreadGoalCleared {
+                        turn_id: turn_id.clone(),
+                        previous_goal: Some(previous_goal.clone()),
+                        revision,
+                    };
+                    if listener_command_tx.send(command).is_ok() {
+                        return;
+                    }
+                }
+                let outgoing = Arc::clone(&self.outgoing);
+                tokio::spawn(async move {
+                    outgoing
+                        .send_server_notification(ServerNotification::ThreadGoalCleared(
+                            ThreadGoalClearedNotification {
+                                thread_id: thread_id.to_string(),
+                                turn_id,
+                                previous_goal: Some(previous_goal),
+                                revision,
                             },
                         ))
                         .await;
@@ -379,7 +401,11 @@ mod tests {
         });
         sink.emit(thread_goal_updated_event(thread_id, "turn-2"));
         listener_command_tx
-            .send(ThreadListenerCommand::EmitThreadGoalCleared)
+            .send(ThreadListenerCommand::EmitThreadGoalCleared {
+                turn_id: None,
+                previous_goal: None,
+                revision: 0,
+            })
             .expect("listener command channel should be open");
 
         let mut observed = Vec::new();
@@ -393,7 +419,7 @@ mod tests {
                     observed.push(turn_id.expect("extension goal updates should include turn ids"));
                 }
                 ThreadListenerCommand::EmitWarning { message } => observed.push(message),
-                ThreadListenerCommand::EmitThreadGoalCleared => {
+                ThreadListenerCommand::EmitThreadGoalCleared { .. } => {
                     observed.push("cleared".to_string())
                 }
                 _ => panic!("unexpected listener command"),
@@ -646,6 +672,8 @@ mod tests {
                 turn_id: Some(turn_id.to_string()),
                 goal: CoreThreadGoal {
                     thread_id,
+                    goal_id: "goal-1".to_string(),
+                    revision: 1,
                     objective: "wire extension events".to_string(),
                     status: ThreadGoalStatus::Active,
                     token_budget: Some(123),

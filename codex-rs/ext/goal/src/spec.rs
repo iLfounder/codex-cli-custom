@@ -9,11 +9,13 @@ use std::collections::BTreeMap;
 pub const GET_GOAL_TOOL_NAME: &str = "get_goal";
 pub const CREATE_GOAL_TOOL_NAME: &str = "create_goal";
 pub const UPDATE_GOAL_TOOL_NAME: &str = "update_goal";
+pub const CLEAR_GOAL_TOOL_NAME: &str = "clear_goal";
+pub const REPLACE_GOAL_TOOL_NAME: &str = "replace_goal";
 
 pub fn create_get_goal_tool() -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: GET_GOAL_TOOL_NAME.to_string(),
-        description: "Get the current goal for this thread, including status, budgets, token and elapsed-time usage, and remaining token budget."
+        description: "Get the current goal for this thread, including its exact goal ID and revision, status, budgets, token and elapsed-time usage, and remaining token budget. When no goal exists, the returned revision is the exact tombstone revision for a stale-safe create."
             .to_string(),
         strict: false,
         defer_loading: None,
@@ -24,6 +26,12 @@ pub fn create_get_goal_tool() -> ToolSpec {
 
 pub fn create_create_goal_tool() -> ToolSpec {
     let properties = BTreeMap::from([
+        (
+            "expected_revision".to_string(),
+            JsonSchema::integer(Some(
+                "Exact no-goal or tombstone revision returned by get_goal.".to_string(),
+            )),
+        ),
         (
             "objective".to_string(),
             JsonSchema::string(Some(
@@ -50,7 +58,11 @@ Set token_budget only when an explicit token budget is requested. Fails if an un
         defer_loading: None,
         parameters: JsonSchema::object(
             properties,
-            /*required*/ Some(vec!["objective".to_string()]),
+            /*required*/
+            Some(vec![
+                "expected_revision".to_string(),
+                "objective".to_string(),
+            ]),
             Some(false.into()),
         ),
         output_schema: None,
@@ -58,16 +70,16 @@ Set token_budget only when an explicit token budget is requested. Fails if an un
 }
 
 pub fn create_update_goal_tool() -> ToolSpec {
-    let properties = BTreeMap::from([(
-        "status".to_string(),
-        JsonSchema::string_enum(
-            vec![json!("complete"), json!("blocked")],
-            Some(
-                "Required. Set to `complete` only when the objective is achieved and no required work remains. Set to `blocked` only after the same blocking condition has recurred for at least three consecutive goal turns and the agent is at an impasse. After a previously blocked goal is resumed, the resumed run starts a fresh blocked audit."
-                    .to_string(),
+    let properties = version_properties().into_iter().chain([(
+            "status".to_string(),
+            JsonSchema::string_enum(
+                vec![json!("complete"), json!("blocked")],
+                Some(
+                    "Required. Set to `complete` only when the objective is achieved and no required work remains. Set to `blocked` only after the same blocking condition has recurred for at least three consecutive goal turns and the agent is at an impasse. After a previously blocked goal is resumed, the resumed run starts a fresh blocked audit."
+                        .to_string(),
+                ),
             ),
-        ),
-    )]);
+        )]).collect();
 
     ToolSpec::Function(ResponsesApiTool {
         name: UPDATE_GOAL_TOOL_NAME.to_string(),
@@ -86,9 +98,84 @@ When marking a budgeted goal achieved with status `complete`, report the final t
         defer_loading: None,
         parameters: JsonSchema::object(
             properties,
-            /*required*/ Some(vec!["status".to_string()]),
+            /*required*/ Some(vec![
+                "expected_goal_id".to_string(),
+                "expected_revision".to_string(),
+                "status".to_string(),
+            ]),
             Some(false.into()),
         ),
+        output_schema: None,
+    })
+}
+
+pub fn create_clear_goal_tool() -> ToolSpec {
+    goal_mutation_tool(
+        CLEAR_GOAL_TOOL_NAME,
+        "Clear the exact current goal. The goal ID and revision must match get_goal.",
+        version_properties(),
+        vec![
+            "expected_goal_id".to_string(),
+            "expected_revision".to_string(),
+        ],
+    )
+}
+
+pub fn create_replace_goal_tool() -> ToolSpec {
+    let properties = version_properties()
+        .into_iter()
+        .chain([
+            (
+                "objective".to_string(),
+                JsonSchema::string(Some("Required replacement objective.".to_string())),
+            ),
+            (
+                "token_budget".to_string(),
+                JsonSchema::integer(Some(
+                    "Positive budget; omit to use the configured default.".to_string(),
+                )),
+            ),
+        ])
+        .collect();
+    goal_mutation_tool(
+        REPLACE_GOAL_TOOL_NAME,
+        "Replace the exact current goal atomically with a new active goal.",
+        properties,
+        vec![
+            "expected_goal_id".to_string(),
+            "expected_revision".to_string(),
+            "objective".to_string(),
+        ],
+    )
+}
+
+fn version_properties() -> BTreeMap<String, JsonSchema> {
+    BTreeMap::from([
+        (
+            "expected_goal_id".to_string(),
+            JsonSchema::string(Some("Exact goal ID returned by get_goal.".to_string())),
+        ),
+        (
+            "expected_revision".to_string(),
+            JsonSchema::integer(Some(
+                "Exact goal revision returned by get_goal.".to_string(),
+            )),
+        ),
+    ])
+}
+
+fn goal_mutation_tool(
+    name: &str,
+    description: &str,
+    properties: BTreeMap<String, JsonSchema>,
+    required: Vec<String>,
+) -> ToolSpec {
+    ToolSpec::Function(ResponsesApiTool {
+        name: name.to_string(),
+        description: description.to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(properties, Some(required), Some(false.into())),
         output_schema: None,
     })
 }

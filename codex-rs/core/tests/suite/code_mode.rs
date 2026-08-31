@@ -523,9 +523,8 @@ text(result);
     .await;
 
     let auth = CodexAuth::from_api_key("dummy");
-    let auth_manager = codex_core::test_support::auth_manager_from_auth(auth.clone());
     let mut extension_builder = ExtensionRegistryBuilder::<Config>::new();
-    install_web_search_extension(&mut extension_builder, auth_manager);
+    install_web_search_extension(&mut extension_builder);
     let mut builder = test_codex()
         .with_auth(auth)
         .with_extensions(Arc::new(extension_builder.build()))

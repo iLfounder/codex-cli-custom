@@ -369,6 +369,10 @@ impl MessageProcessor {
                     thread_state_manager.clone(),
                 )),
             );
+            let manager =
+                manager
+                    .with_execution_account_resolver(Arc::clone(&account_registry)
+                        as Arc<dyn codex_core::ExecutionAccountResolver>);
             match code_mode_session_provider {
                 Some(provider) => manager.with_code_mode_session_provider(provider),
                 None => manager,
@@ -445,6 +449,7 @@ impl MessageProcessor {
             auth_manager.clone(),
             Arc::clone(&thread_manager),
             Arc::clone(&config),
+            config_manager.clone(),
             feedback,
             log_db.clone(),
             state_db.clone(),
@@ -499,7 +504,7 @@ impl MessageProcessor {
             Arc::clone(&thread_list_state_permit),
         );
         let thread_processor = ThreadRequestProcessor::new(
-            auth_manager.clone(),
+            auth_manager,
             Arc::clone(&thread_manager),
             outgoing.clone(),
             arg0_paths.clone(),
@@ -518,7 +523,6 @@ impl MessageProcessor {
             config_warnings,
         );
         let turn_processor = TurnRequestProcessor::new(
-            auth_manager,
             Arc::clone(&thread_manager),
             outgoing.clone(),
             analytics_events_client.clone(),

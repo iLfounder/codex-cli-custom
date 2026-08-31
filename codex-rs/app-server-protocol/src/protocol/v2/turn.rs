@@ -1,6 +1,7 @@
 use super::ApprovalsReviewer;
 use super::AskForApproval;
 use super::SandboxPolicy;
+use super::SessionRuntimeAccountRef;
 use super::Turn;
 use crate::JsonSchema;
 use crate::TS;
@@ -155,6 +156,9 @@ pub struct TurnToolOutput {
 #[ts(export_to = "v2/")]
 pub struct TurnStartParams {
     pub thread_id: String,
+    /// Exact execution account expected by the client that produced this input.
+    #[ts(optional = nullable)]
+    pub expected_execution_account: Option<SessionRuntimeAccountRef>,
     #[ts(optional = nullable)]
     pub client_user_message_id: Option<String>,
     pub input: Vec<UserInput>,
@@ -276,6 +280,9 @@ pub struct TurnStartResponse {
 #[ts(export_to = "v2/")]
 pub struct TurnSteerParams {
     pub thread_id: String,
+    /// Exact execution account expected by the client that produced this input.
+    #[ts(optional = nullable)]
+    pub expected_execution_account: Option<SessionRuntimeAccountRef>,
     #[ts(optional = nullable)]
     pub client_user_message_id: Option<String>,
     pub input: Vec<UserInput>,

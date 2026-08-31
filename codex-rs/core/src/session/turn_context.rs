@@ -190,7 +190,6 @@ pub(crate) struct NewTurnContextOptions {
 }
 
 /// The context needed for a single turn of the thread.
-#[derive(Debug)]
 pub struct TurnContext {
     pub(crate) sub_id: String,
     pub(crate) trace_id: Option<String>,
@@ -203,6 +202,11 @@ pub struct TurnContext {
     pub(crate) configured_token_budget: Option<TokenBudgetConfig>,
     /// Captured once so later steps do not re-read config layers to detect user preferences.
     pub(crate) use_model_token_budget_defaults: bool,
+    pub(crate) execution_account: Arc<crate::execution_account::ExecutionAccountContext>,
+    pub(crate) model_client: ModelClient,
+    pub(crate) plugins_manager: Arc<PluginsManager>,
+    pub(crate) mcp_manager: Arc<McpManager>,
+    pub(crate) analytics_events_client: AnalyticsEventsClient,
     pub(crate) auth_manager: Option<Arc<AuthManager>>,
     /// Frozen settings used to construct this context. Legacy turn consumers
     /// keep this view even when later steps use different settings.
@@ -243,6 +247,17 @@ pub struct TurnContext {
     pub(crate) model_verification_emitted: AtomicBool,
     /// Effective cyber treatment for this turn, including any child-agent inheritance.
     pub(crate) cyber_access_program: Option<CyberAccessProgram>,
+}
+
+impl std::fmt::Debug for TurnContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TurnContext")
+            .field("sub_id", &self.sub_id)
+            .field("execution_account", &self.execution_account)
+            .field("model", &self.model_info().slug)
+            .finish_non_exhaustive()
+    }
 }
 
 enum TurnMultiAgentRuntime {
@@ -516,6 +531,11 @@ impl TurnContext {
             config: Arc::new(config),
             configured_token_budget: self.configured_token_budget.clone(),
             use_model_token_budget_defaults: self.use_model_token_budget_defaults,
+            execution_account: Arc::clone(&self.execution_account),
+            model_client: self.model_client.clone(),
+            plugins_manager: Arc::clone(&self.plugins_manager),
+            mcp_manager: Arc::clone(&self.mcp_manager),
+            analytics_events_client: self.analytics_events_client.clone(),
             auth_manager: self.auth_manager.clone(),
             initial_settings: Arc::clone(&step_settings),
             current_settings: ArcSwap::from(step_settings),
@@ -579,6 +599,7 @@ impl TurnContext {
         TurnContextItem {
             turn_id: Some(self.sub_id.clone()),
             root_turn_id: self.turn_metadata_state.root_turn_id(),
+            execution_account: Some(self.execution_account.binding.clone()),
             cwd,
             workspace_roots: (!workspace_roots.is_empty()).then_some(workspace_roots),
             current_date: self.current_date.clone(),
@@ -711,6 +732,7 @@ impl Session {
         thread_id: ThreadId,
         session_id: SessionId,
         auth_manager: Option<Arc<AuthManager>>,
+        execution_account: Arc<crate::execution_account::ExecutionAccountContext>,
         session_telemetry: &SessionTelemetry,
         provider: SharedModelProvider,
         session_configuration: &SessionConfiguration,
@@ -788,6 +810,11 @@ impl Session {
             config: per_turn_config,
             configured_token_budget,
             use_model_token_budget_defaults,
+            execution_account,
+            model_client: self.services.model_client.clone(),
+            plugins_manager: Arc::clone(&self.services.plugins_manager),
+            mcp_manager: Arc::clone(&self.services.mcp_manager),
+            analytics_events_client: self.services.analytics_events_client.clone(),
             auth_manager,
             initial_settings: Arc::clone(&step_settings),
             current_settings: ArcSwap::from(step_settings),
@@ -995,6 +1022,7 @@ impl Session {
             self.thread_id(),
             self.session_id(),
             Some(Arc::clone(&self.services.auth_manager)),
+            self.execution_account(),
             &self.services.session_telemetry,
             session_configuration.provider.clone(),
             &session_configuration,

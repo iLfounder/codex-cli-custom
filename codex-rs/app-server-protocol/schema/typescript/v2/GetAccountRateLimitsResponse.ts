@@ -4,8 +4,17 @@
 import type { JsonValue } from "../serde_json/JsonValue";
 import type { RateLimitResetCreditsSummary } from "./RateLimitResetCreditsSummary";
 import type { RateLimitSnapshot } from "./RateLimitSnapshot";
+import type { SessionRuntimeAccountRef } from "./SessionRuntimeAccountRef";
 
 export type GetAccountRateLimitsResponse = {
+/**
+ * The exact thread subject used for this read, or `null` for legacy process-default reads.
+ */
+threadId: string | null,
+/**
+ * The account runtime captured for `thread_id`, or `null` for process-default reads.
+ */
+executionAccount: SessionRuntimeAccountRef | null,
 /**
  * Backward-compatible single-bucket view; mirrors the historical payload.
  */

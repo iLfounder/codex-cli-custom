@@ -1,10 +1,9 @@
 use super::*;
 use crate::model::ThreadGoalRow;
-use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct GoalStore {
-    pool: Arc<SqlitePool>,
+    pub(super) pool: Arc<SqlitePool>,
 }
 
 impl GoalStore {
@@ -22,6 +21,33 @@ pub struct GoalUpdate {
     pub status: Option<crate::ThreadGoalStatus>,
     pub token_budget: Option<Option<i64>>,
     pub expected_goal_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GoalVersion {
+    pub goal_id: String,
+    pub revision: i64,
+}
+
+impl From<&crate::ThreadGoal> for GoalVersion {
+    fn from(goal: &crate::ThreadGoal) -> Self {
+        Self {
+            goal_id: goal.goal_id.clone(),
+            revision: goal.revision,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GoalClearOutcome {
+    pub previous_goal: crate::ThreadGoal,
+    pub revision: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GoalReplaceOutcome {
+    pub previous_goal: crate::ThreadGoal,
+    pub goal: crate::ThreadGoal,
 }
 
 pub enum GoalAccountingOutcome {
@@ -47,6 +73,7 @@ impl GoalStore {
 SELECT
     thread_id,
     goal_id,
+    revision,
     objective,
     status,
     token_budget,
@@ -65,16 +92,54 @@ WHERE thread_id = ?
         row.map(|row| thread_goal_from_row(&row)).transpose()
     }
 
+    pub async fn get_thread_goal_revision(&self, thread_id: ThreadId) -> anyhow::Result<i64> {
+        sqlx::query_scalar(
+            r#"
+SELECT COALESCE(
+    (SELECT revision FROM thread_goals WHERE thread_id = ?),
+    (SELECT revision FROM thread_goal_revision_tombstones WHERE thread_id = ?),
+    0
+)
+            "#,
+        )
+        .bind(thread_id.to_string())
+        .bind(thread_id.to_string())
+        .fetch_one(self.pool.as_ref())
+        .await
+        .map_err(Into::into)
+    }
+
     pub async fn replace_thread_goal_snapshot(
         &self,
         goal: &crate::ThreadGoal,
     ) -> anyhow::Result<()> {
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let (current_revision, has_goal): (i64, bool) = sqlx::query_as(
+            r#"
+SELECT COALESCE(
+    (SELECT revision FROM thread_goals WHERE thread_id = ?),
+    (SELECT revision FROM thread_goal_revision_tombstones WHERE thread_id = ?),
+    0
+), EXISTS(SELECT 1 FROM thread_goals WHERE thread_id = ?)
+            "#,
+        )
+        .bind(goal.thread_id.to_string())
+        .bind(goal.thread_id.to_string())
+        .bind(goal.thread_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if has_goal {
+            anyhow::bail!("target thread already has a goal snapshot");
+        }
+        let revision = current_revision
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("goal revision overflow"))?;
         sqlx::query(
             r#"
 INSERT INTO thread_goals (
     thread_id,
     goal_id,
+    revision,
     objective,
     status,
     token_budget,
@@ -82,20 +147,12 @@ INSERT INTO thread_goals (
     time_used_seconds,
     created_at_ms,
     updated_at_ms
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(thread_id) DO UPDATE SET
-    goal_id = excluded.goal_id,
-    objective = excluded.objective,
-    status = excluded.status,
-    token_budget = excluded.token_budget,
-    tokens_used = excluded.tokens_used,
-    time_used_seconds = excluded.time_used_seconds,
-    created_at_ms = excluded.created_at_ms,
-    updated_at_ms = excluded.updated_at_ms
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(goal.thread_id.to_string())
         .bind(&goal.goal_id)
+        .bind(revision)
         .bind(&goal.objective)
         .bind(goal.status.as_str())
         .bind(goal.token_budget)
@@ -105,6 +162,11 @@ ON CONFLICT(thread_id) DO UPDATE SET
         .bind(datetime_to_epoch_millis(goal.updated_at))
         .execute(&mut *transaction)
         .await?;
+
+        sqlx::query("DELETE FROM thread_goal_revision_tombstones WHERE thread_id = ?")
+            .bind(goal.thread_id.to_string())
+            .execute(&mut *transaction)
+            .await?;
 
         sqlx::query(
             r#"
@@ -160,54 +222,23 @@ SELECT EXISTS(
         status: crate::ThreadGoalStatus,
         token_budget: Option<i64>,
     ) -> anyhow::Result<crate::ThreadGoal> {
-        let goal_id = Uuid::new_v4().to_string();
-        let now_ms = datetime_to_epoch_millis(Utc::now());
-        let status = status_after_budget_limit(status, /*tokens_used*/ 0, token_budget);
-        let row = sqlx::query(
-            r#"
-INSERT INTO thread_goals (
-    thread_id,
-    goal_id,
-    objective,
-    status,
-    token_budget,
-    tokens_used,
-    time_used_seconds,
-    created_at_ms,
-    updated_at_ms
-) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?)
-ON CONFLICT(thread_id) DO UPDATE SET
-    goal_id = excluded.goal_id,
-    objective = excluded.objective,
-    status = excluded.status,
-    token_budget = excluded.token_budget,
-    tokens_used = 0,
-    time_used_seconds = 0,
-    created_at_ms = excluded.created_at_ms,
-    updated_at_ms = excluded.updated_at_ms
-RETURNING
-    thread_id,
-    goal_id,
-    objective,
-    status,
-    token_budget,
-    tokens_used,
-    time_used_seconds,
-    created_at_ms,
-    updated_at_ms
-            "#,
-        )
-        .bind(thread_id.to_string())
-        .bind(goal_id)
-        .bind(objective)
-        .bind(status.as_str())
-        .bind(token_budget)
-        .bind(now_ms)
-        .bind(now_ms)
-        .fetch_one(self.pool.as_ref())
-        .await?;
-
-        thread_goal_from_row(&row)
+        if let Some(goal) = self.get_thread_goal(thread_id).await? {
+            return self
+                .replace_thread_goal_exact(
+                    thread_id,
+                    &GoalVersion::from(&goal),
+                    objective,
+                    status,
+                    token_budget,
+                )
+                .await?
+                .map(|outcome| outcome.goal)
+                .ok_or_else(|| anyhow::anyhow!("goal changed during replacement"));
+        }
+        let revision = self.get_thread_goal_revision(thread_id).await?;
+        self.create_thread_goal_exact(thread_id, revision, objective, status, token_budget)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("goal changed during creation"))
     }
 
     pub async fn insert_thread_goal(
@@ -217,55 +248,24 @@ RETURNING
         status: crate::ThreadGoalStatus,
         token_budget: Option<i64>,
     ) -> anyhow::Result<Option<crate::ThreadGoal>> {
-        let goal_id = Uuid::new_v4().to_string();
-        let now_ms = datetime_to_epoch_millis(Utc::now());
-        let status = status_after_budget_limit(status, /*tokens_used*/ 0, token_budget);
-        let row = sqlx::query(
-            r#"
-INSERT INTO thread_goals (
-    thread_id,
-    goal_id,
-    objective,
-    status,
-    token_budget,
-    tokens_used,
-    time_used_seconds,
-    created_at_ms,
-    updated_at_ms
-) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?)
-ON CONFLICT(thread_id) DO UPDATE SET
-    goal_id = excluded.goal_id,
-    objective = excluded.objective,
-    status = excluded.status,
-    token_budget = excluded.token_budget,
-    tokens_used = 0,
-    time_used_seconds = 0,
-    created_at_ms = excluded.created_at_ms,
-    updated_at_ms = excluded.updated_at_ms
-WHERE thread_goals.status = 'complete'
-RETURNING
-    thread_id,
-    goal_id,
-    objective,
-    status,
-    token_budget,
-    tokens_used,
-    time_used_seconds,
-    created_at_ms,
-    updated_at_ms
-            "#,
-        )
-        .bind(thread_id.to_string())
-        .bind(goal_id)
-        .bind(objective)
-        .bind(status.as_str())
-        .bind(token_budget)
-        .bind(now_ms)
-        .bind(now_ms)
-        .fetch_optional(self.pool.as_ref())
-        .await?;
-
-        row.map(|row| thread_goal_from_row(&row)).transpose()
+        match self.get_thread_goal(thread_id).await? {
+            Some(goal) if goal.status == crate::ThreadGoalStatus::Complete => self
+                .replace_thread_goal_exact(
+                    thread_id,
+                    &GoalVersion::from(&goal),
+                    objective,
+                    status,
+                    token_budget,
+                )
+                .await
+                .map(|outcome| outcome.map(|outcome| outcome.goal)),
+            Some(_) => Ok(None),
+            None => {
+                let revision = self.get_thread_goal_revision(thread_id).await?;
+                self.create_thread_goal_exact(thread_id, revision, objective, status, token_budget)
+                    .await
+            }
+        }
     }
 
     pub async fn update_thread_goal(
@@ -295,8 +295,10 @@ SET
         ELSE ?
     END,
     token_budget = ?,
+    revision = revision + 1,
     updated_at_ms = ?
 WHERE thread_id = ?
+  AND revision < 9223372036854775807
   AND (? IS NULL OR goal_id = ?)
             "#,
                 )
@@ -329,8 +331,10 @@ SET
         WHEN ? = 'active' AND token_budget IS NOT NULL AND tokens_used >= token_budget THEN ?
         ELSE ?
     END,
+    revision = revision + 1,
     updated_at_ms = ?
 WHERE thread_id = ?
+  AND revision < 9223372036854775807
   AND (? IS NULL OR goal_id = ?)
             "#,
                 )
@@ -360,8 +364,10 @@ SET
         WHEN status = 'active' AND ? IS NOT NULL AND tokens_used >= ? THEN ?
         ELSE status
     END,
+    revision = revision + 1,
     updated_at_ms = ?
 WHERE thread_id = ?
+  AND revision < 9223372036854775807
   AND (? IS NULL OR goal_id = ?)
             "#,
                 )
@@ -384,8 +390,10 @@ WHERE thread_id = ?
 UPDATE thread_goals
 SET
     objective = ?,
+    revision = revision + 1,
     updated_at_ms = ?
 WHERE thread_id = ?
+  AND revision < 9223372036854775807
   AND (? IS NULL OR goal_id = ?)
             "#,
                     )
@@ -444,8 +452,10 @@ WHERE thread_id = ?
 UPDATE thread_goals
 SET
     status = ?,
+    revision = revision + 1,
     updated_at_ms = ?
 WHERE thread_id = ?
+  AND revision < 9223372036854775807
   AND (
       status = 'active'
       OR (
@@ -473,27 +483,12 @@ WHERE thread_id = ?
         &self,
         thread_id: ThreadId,
     ) -> anyhow::Result<Option<crate::ThreadGoal>> {
-        let row = sqlx::query(
-            r#"
-DELETE FROM thread_goals
-WHERE thread_id = ?
-RETURNING
-    thread_id,
-    goal_id,
-    objective,
-    status,
-    token_budget,
-    tokens_used,
-    time_used_seconds,
-    created_at_ms,
-    updated_at_ms
-            "#,
-        )
-        .bind(thread_id.to_string())
-        .fetch_optional(self.pool.as_ref())
-        .await?;
-
-        row.map(|row| thread_goal_from_row(&row)).transpose()
+        let Some(goal) = self.get_thread_goal(thread_id).await? else {
+            return Ok(None);
+        };
+        self.clear_thread_goal_exact(thread_id, &GoalVersion::from(&goal))
+            .await
+            .map(|outcome| outcome.map(|outcome| outcome.previous_goal))
     }
 
     pub async fn account_thread_goal_usage(
@@ -503,6 +498,26 @@ RETURNING
         token_delta: i64,
         mode: GoalAccountingMode,
         expected_goal_id: Option<&str>,
+    ) -> anyhow::Result<GoalAccountingOutcome> {
+        self.account_thread_goal_usage_inner(
+            thread_id,
+            time_delta_seconds,
+            token_delta,
+            mode,
+            expected_goal_id,
+            /*expected_revision*/ None,
+        )
+        .await
+    }
+
+    pub(super) async fn account_thread_goal_usage_inner(
+        &self,
+        thread_id: ThreadId,
+        time_delta_seconds: i64,
+        token_delta: i64,
+        mode: GoalAccountingMode,
+        expected_goal_id: Option<&str>,
+        expected_revision: Option<i64>,
     ) -> anyhow::Result<GoalAccountingOutcome> {
         let time_delta_seconds = time_delta_seconds.max(0);
         let token_delta = token_delta.max(0);
@@ -568,6 +583,7 @@ SET
             r#"
         ELSE status
     END,
+    revision = revision + 1,
     updated_at_ms =
             "#,
         );
@@ -580,14 +596,21 @@ WHERE thread_id =
         builder.push_bind(thread_id.to_string());
         builder.push(" AND ");
         builder.push(status_filter);
+        builder.push(" AND revision < 9223372036854775807");
         if let Some(expected_goal_id) = expected_goal_id {
             builder.push(" AND goal_id = ").push_bind(expected_goal_id);
+        }
+        if let Some(expected_revision) = expected_revision {
+            builder
+                .push(" AND revision = ")
+                .push_bind(expected_revision);
         }
         builder.push(
             r#"
 RETURNING
     thread_id,
     goal_id,
+    revision,
     objective,
     status,
     token_budget,
@@ -611,11 +634,13 @@ RETURNING
     }
 }
 
-fn thread_goal_from_row(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<crate::ThreadGoal> {
+pub(super) fn thread_goal_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> anyhow::Result<crate::ThreadGoal> {
     ThreadGoalRow::try_from_row(row).and_then(crate::ThreadGoal::try_from)
 }
 
-fn status_after_budget_limit(
+pub(super) fn status_after_budget_limit(
     status: crate::ThreadGoalStatus,
     tokens_used: i64,
     token_budget: Option<i64>,
@@ -628,6 +653,10 @@ fn status_after_budget_limit(
         status
     }
 }
+
+#[cfg(test)]
+#[path = "goals_revision_tests.rs"]
+mod revision_tests;
 
 #[cfg(test)]
 mod tests {
@@ -707,6 +736,7 @@ mod tests {
         let expected = crate::ThreadGoal {
             status: crate::ThreadGoalStatus::Paused,
             token_budget: Some(200_000),
+            revision: updated.revision,
             updated_at: updated.updated_at,
             ..goal.clone()
         };
@@ -1007,6 +1037,7 @@ mod tests {
             objective: "draft the report clearly".to_string(),
             status: crate::ThreadGoalStatus::Paused,
             token_budget: Some(200),
+            revision: updated.revision,
             updated_at: updated.updated_at,
             ..accounted
         };
@@ -1085,6 +1116,7 @@ mod tests {
             .expect("active goal should be paused");
         let expected = crate::ThreadGoal {
             status: crate::ThreadGoalStatus::Paused,
+            revision: paused.revision,
             updated_at: paused.updated_at,
             ..goal
         };
@@ -1144,6 +1176,7 @@ mod tests {
             .expect("active goal should become usage limited");
         let expected = crate::ThreadGoal {
             status: crate::ThreadGoalStatus::UsageLimited,
+            revision: usage_limited.revision,
             updated_at: usage_limited.updated_at,
             ..goal
         };
@@ -1174,6 +1207,7 @@ mod tests {
             .expect("budget-limited goal should become usage limited");
         let expected = crate::ThreadGoal {
             status: crate::ThreadGoalStatus::UsageLimited,
+            revision: usage_limited.revision,
             updated_at: usage_limited.updated_at,
             ..budget_limited
         };
@@ -1525,6 +1559,7 @@ mod tests {
             .expect("goal should exist");
 
         let expected = crate::ThreadGoal {
+            revision: blocked.revision,
             updated_at: blocked.updated_at,
             ..budget_limited
         };
@@ -1723,6 +1758,14 @@ mod tests {
                 .get_thread_goal(thread_id)
                 .await
                 .expect("goal read should succeed")
+        );
+        assert_eq!(
+            0,
+            runtime
+                .thread_goals()
+                .get_thread_goal_revision(thread_id)
+                .await
+                .expect("goal revision read should succeed")
         );
     }
 }

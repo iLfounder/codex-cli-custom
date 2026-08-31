@@ -64,13 +64,16 @@ impl AppsRequestProcessor {
         };
         let mut config = self.load_latest_config(fallback_cwd).await?;
 
-        if let Some(thread) = thread {
+        if let Some(thread) = thread.as_ref() {
             let _ = config
                 .features
                 .set_enabled(Feature::Apps, thread.enabled(Feature::Apps));
         }
 
-        let auth = self.auth_manager.auth().await;
+        let (auth_manager, execution_services) = self
+            .execution_account_resources(params.thread_id.as_deref())
+            .await?;
+        let auth = auth_manager.auth().await;
         if !config
             .features
             .apps_enabled_for_auth(auth.as_ref().is_some_and(CodexAuth::uses_codex_backend))
@@ -86,8 +89,8 @@ impl AppsRequestProcessor {
         let request = request_id.clone();
         let outgoing = Arc::clone(&self.outgoing);
         let environment_manager = self.thread_manager.environment_manager();
-        let mcp_manager = self.thread_manager.mcp_manager();
-        let plugins_manager = self.thread_manager.plugins_manager();
+        let mcp_manager = execution_services.mcp_manager;
+        let plugins_manager = execution_services.plugins_manager;
         let shutdown_token = self.shutdown_token.child_token();
         tokio::spawn(async move {
             tokio::select! {
@@ -100,6 +103,7 @@ impl AppsRequestProcessor {
                     environment_manager,
                     mcp_manager,
                     plugins_manager,
+                    auth_manager,
                     installed_start,
                 ) => {}
             }
@@ -120,6 +124,7 @@ impl AppsRequestProcessor {
         environment_manager: Arc<EnvironmentManager>,
         mcp_manager: Arc<McpManager>,
         plugins_manager: Arc<PluginsManager>,
+        auth_manager: Arc<AuthManager>,
         installed_start: Instant,
     ) {
         let reload = params.force_refetch;
@@ -128,6 +133,7 @@ impl AppsRequestProcessor {
         let retry_environment_manager = Arc::clone(&environment_manager);
         let retry_mcp_manager = Arc::clone(&mcp_manager);
         let retry_plugins_manager = Arc::clone(&plugins_manager);
+        let retry_auth_manager = Arc::clone(&auth_manager);
         let result = Self::apps_list_response(
             &outgoing,
             params,
@@ -135,6 +141,7 @@ impl AppsRequestProcessor {
             environment_manager,
             mcp_manager,
             plugins_manager,
+            auth_manager,
         )
         .await;
         if result.is_ok() {
@@ -157,6 +164,7 @@ impl AppsRequestProcessor {
                 retry_environment_manager,
                 retry_mcp_manager,
                 retry_plugins_manager,
+                retry_auth_manager,
             )
             .await
             {
@@ -172,11 +180,12 @@ impl AppsRequestProcessor {
         environment_manager: Arc<EnvironmentManager>,
         mcp_manager: Arc<McpManager>,
         plugins_manager: Arc<PluginsManager>,
+        auth_manager: Arc<AuthManager>,
     ) -> Result<(AppsListResponse, bool), JSONRPCErrorError> {
         let AppsListParams {
             cursor,
             limit,
-            thread_id: _,
+            thread_id,
             force_refetch,
         } = params;
         let start = match cursor {
@@ -195,38 +204,51 @@ impl AppsRequestProcessor {
                 loaded_plugins.capability_summaries(),
             );
         let plugin_apps = connector_snapshot.connector_ids().to_vec();
-        let (mut accessible_connectors, mut all_connectors) = tokio::join!(
-            connectors::list_cached_accessible_connectors_from_mcp_tools(&config),
-            connectors::list_cached_all_connectors(&config, &plugin_apps)
-        );
+        let auth = auth_manager.auth().await;
+        let mut accessible_connectors =
+            connectors::list_cached_accessible_connectors_from_mcp_tools_with_auth(
+                &config,
+                auth.as_ref(),
+            );
+        let mut all_connectors =
+            connectors::list_cached_all_connectors(&config, auth.as_ref(), &plugin_apps).await;
         let cached_all_connectors = all_connectors.clone();
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         let accessible_config = config.clone();
         let accessible_tx = tx.clone();
+        let accessible_auth_manager = Arc::clone(&auth_manager);
+        let accessible_auth = auth.clone();
         tokio::spawn(async move {
-            let result = connectors::list_accessible_connectors_from_mcp_tools_with_mcp_manager(
-                &accessible_config,
-                force_refetch,
-                Arc::clone(&environment_manager),
-                mcp_manager,
-            )
-            .await
-            .map_err(|err| format!("failed to load accessible apps: {err}"));
+            let result =
+                connectors::list_accessible_connectors_from_mcp_tools_with_mcp_manager_and_auth(
+                    &accessible_config,
+                    force_refetch,
+                    Arc::clone(&environment_manager),
+                    mcp_manager,
+                    accessible_auth_manager,
+                    accessible_auth,
+                )
+                .await
+                .map_err(|err| format!("failed to load accessible apps: {err}"));
             let _ = accessible_tx.send(AppListLoadResult::Accessible(result));
         });
 
         let all_config = config.clone();
         let all_plugin_apps = plugin_apps.clone();
         tokio::spawn(async move {
-            let result = connectors::list_all_connectors_with_options(
-                &all_config,
-                force_refetch,
-                &all_plugin_apps,
-            )
-            .await
-            .map_err(|err| format!("failed to list apps: {err}"));
+            let result = match auth.as_ref() {
+                Some(auth) => connectors::list_all_connectors_with_options(
+                    &all_config,
+                    auth,
+                    force_refetch,
+                    &all_plugin_apps,
+                )
+                .await
+                .map_err(|err| format!("failed to list apps: {err}")),
+                None => Err("ChatGPT auth not available".to_string()),
+            };
             let _ = tx.send(AppListLoadResult::Directory(result));
         });
 
@@ -250,7 +272,8 @@ impl AppsRequestProcessor {
                 accessible_loaded,
                 all_loaded,
             ) {
-                send_app_list_updated_notification(outgoing, merged.clone()).await;
+                send_app_list_updated_notification(outgoing, thread_id.clone(), merged.clone())
+                    .await;
                 last_notified_apps = Some(merged);
                 sent_app_list_update = true;
             }
@@ -316,7 +339,8 @@ impl AppsRequestProcessor {
                     && all_loaded
                     && !sent_app_list_update))
             {
-                send_app_list_updated_notification(outgoing, merged.clone()).await;
+                send_app_list_updated_notification(outgoing, thread_id.clone(), merged.clone())
+                    .await;
                 last_notified_apps = Some(merged.clone());
                 sent_app_list_update = true;
             }
@@ -342,6 +366,28 @@ impl AppsRequestProcessor {
             .map_err(|_| invalid_request(format!("thread not found: {thread_id}")))?;
 
         Ok((thread_id, thread))
+    }
+
+    async fn execution_account_resources(
+        &self,
+        thread_id: Option<&str>,
+    ) -> Result<(Arc<AuthManager>, ExecutionAccountServices), JSONRPCErrorError> {
+        let Some(thread_id) = thread_id else {
+            return Ok((
+                Arc::clone(&self.auth_manager),
+                ExecutionAccountServices {
+                    plugins_manager: self.thread_manager.plugins_manager(),
+                    mcp_manager: self.thread_manager.mcp_manager(),
+                },
+            ));
+        };
+        let (_, thread) = self.load_thread(thread_id).await?;
+        let execution_account = thread.execution_account();
+        Ok((
+            Arc::clone(&execution_account.auth_manager),
+            self.thread_manager
+                .execution_account_services(&execution_account),
+        ))
     }
 
     async fn load_latest_config(
@@ -435,12 +481,13 @@ fn paginate_apps(
 
 async fn send_app_list_updated_notification(
     outgoing: &Arc<OutgoingMessageSender>,
+    thread_id: Option<String>,
     data: Vec<AppInfo>,
 ) {
     let data = data.into_iter().map(app_info_to_api).collect();
     outgoing
         .send_server_notification(ServerNotification::AppListUpdated(
-            AppListUpdatedNotification { data },
+            AppListUpdatedNotification { thread_id, data },
         ))
         .await;
 }

@@ -14,6 +14,9 @@ use codex_app_server_protocol::AccountSlotListResponse;
 use codex_app_server_protocol::AccountSlotSnapshot;
 use codex_app_server_protocol::AccountSlotStatus;
 use codex_app_server_protocol::JSONRPCErrorError;
+use codex_core::ExecutionAccountContext;
+use codex_core::ExecutionAccountResolver;
+use codex_core::ExecutionAccountResolverFuture;
 use codex_core::config::Config;
 use codex_core::path_utils::write_atomically;
 use codex_login::AuthConfig;
@@ -21,6 +24,8 @@ use codex_login::AuthManager;
 use codex_login::AuthSourceKind;
 use codex_model_provider::create_model_provider;
 use codex_models_manager::manager::SharedModelsManager;
+use codex_protocol::error::CodexErr;
+use codex_protocol::protocol::ExecutionAccountBinding;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::OnceCell;
@@ -490,6 +495,55 @@ impl AccountRegistry {
                     .values()
                     .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
             })
+    }
+}
+
+impl ExecutionAccountResolver for AccountRegistry {
+    fn resolve(&self, binding: ExecutionAccountBinding) -> ExecutionAccountResolverFuture<'_> {
+        Box::pin(async move {
+            let (slot, manifest_error) = {
+                let state = self.state.read().map_err(|_| {
+                    CodexErr::Fatal("account slot registry is unavailable".to_string())
+                })?;
+                (
+                    state
+                        .slots
+                        .iter()
+                        .find(|slot| slot.manifest.account_slot_id == binding.slot_id)
+                        .cloned(),
+                    state.manifest_error,
+                )
+            };
+            let slot = slot.ok_or_else(|| {
+                CodexErr::InvalidRequest(format!(
+                    "execution account slot `{}` is unavailable",
+                    binding.slot_id
+                ))
+            })?;
+            let capability = self.capability(manifest_error);
+            if !slot.manifest.is_default && !capability.available {
+                return Err(CodexErr::InvalidRequest(format!(
+                    "execution account slot `{}` is unavailable: {}",
+                    binding.slot_id,
+                    capability
+                        .deny_reason
+                        .as_deref()
+                        .unwrap_or("multi_account_unavailable")
+                )));
+            }
+            if !slot.manifest.is_default && slot.manifest.status != ManifestSlotStatus::Ready {
+                return Err(CodexErr::InvalidRequest(format!(
+                    "execution account slot `{}` is not ready",
+                    binding.slot_id
+                )));
+            }
+            let runtime = self.runtime(&slot).await;
+            Ok(Arc::new(ExecutionAccountContext {
+                binding,
+                auth_manager: Arc::clone(&runtime.auth_manager),
+                models_manager: Arc::clone(&runtime.models_manager),
+            }))
+        })
     }
 }
 

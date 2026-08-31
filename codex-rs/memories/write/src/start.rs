@@ -7,10 +7,10 @@ use crate::phase1;
 use crate::phase2;
 use crate::runtime::MemoryStartupContext;
 use codex_core::CodexThread;
+use codex_core::ExecutionAccountContext;
 use codex_core::ThreadManager;
 use codex_core::config::Config;
 use codex_features::Feature;
-use codex_login::AuthManager;
 use codex_protocol::ThreadId;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::SessionSource;
@@ -23,7 +23,7 @@ use tracing::warn;
 /// subagent sessions.
 pub fn start_memories_startup_task(
     thread_manager: Arc<ThreadManager>,
-    auth_manager: Arc<AuthManager>,
+    execution_account: Arc<ExecutionAccountContext>,
     thread_id: ThreadId,
     thread: Arc<CodexThread>,
     config: Arc<Config>,
@@ -37,9 +37,9 @@ pub fn start_memories_startup_task(
         return;
     }
 
-    let context = Arc::new(MemoryStartupContext::new(
+    let context = Arc::new(MemoryStartupContext::new_with_execution_account(
         thread_manager,
-        Arc::clone(&auth_manager),
+        Arc::clone(&execution_account),
         thread_id,
         thread,
         config.as_ref(),
@@ -65,7 +65,7 @@ pub fn start_memories_startup_task(
         // done before the quota check.
         phase1::prune(context.as_ref(), &config).await;
 
-        if !guard::rate_limits_ok(&auth_manager, &config).await {
+        if !guard::rate_limits_ok(&execution_account.auth_manager, &config).await {
             context.counter(
                 MEMORY_STARTUP,
                 /*inc*/ 1,

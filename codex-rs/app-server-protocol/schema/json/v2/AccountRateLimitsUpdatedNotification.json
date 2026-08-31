@@ -164,6 +164,23 @@
       ],
       "type": "object"
     },
+    "SessionRuntimeAccountRef": {
+      "properties": {
+        "accountSlotId": {
+          "type": "string"
+        },
+        "executionGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "accountSlotId",
+        "executionGeneration"
+      ],
+      "type": "object"
+    },
     "SpendControlLimitSnapshot": {
       "properties": {
         "limit": {
@@ -190,10 +207,28 @@
       "type": "object"
     }
   },
-  "description": "Sparse rolling rate-limit update.\n\nClients should merge available values into the most recent `account/rateLimits/read` response or refetch that snapshot. Nullable account metadata may be unavailable in a rolling update and does not clear a previously observed value.",
+  "description": "Sparse rolling rate-limit update.\n\nClients should merge available values into the most recent matching `account/rateLimits/read` response or refetch that snapshot. New producers omit the notification when persisted account provenance is unavailable; nullable fields preserve wire compatibility with older producers.",
   "properties": {
+    "executionAccount": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/SessionRuntimeAccountRef"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Persisted account binding for that turn. Older producers may leave this `null`."
+    },
     "rateLimits": {
       "$ref": "#/definitions/RateLimitSnapshot"
+    },
+    "threadId": {
+      "description": "Thread whose persisted turn binding produced this update.",
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "required": [

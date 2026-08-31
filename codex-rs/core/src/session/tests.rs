@@ -91,6 +91,20 @@ use codex_protocol::turn_input::TurnInput as SubmittedTurnInput;
 use codex_protocol::turn_input::TurnInputMode;
 use codex_protocol::turn_input::TurnInputRequest;
 use codex_protocol::turn_input::TurnInputSubmission;
+
+fn default_execution_account(
+    auth_manager: &Arc<AuthManager>,
+    models_manager: &SharedModelsManager,
+) -> Arc<crate::execution_account::ExecutionAccountContext> {
+    Arc::new(crate::execution_account::ExecutionAccountContext {
+        binding: codex_protocol::protocol::ExecutionAccountBinding {
+            slot_id: "default".to_string(),
+            generation: 1,
+        },
+        auth_manager: Arc::clone(auth_manager),
+        models_manager: Arc::clone(models_manager),
+    })
+}
 use codex_tools::ToolSpec;
 use codex_utils_path_uri::PathUri;
 use std::collections::BTreeMap;
@@ -3764,6 +3778,7 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
     let previous_context_item = TurnContextItem {
         turn_id: Some(turn_context.sub_id.clone()),
         root_turn_id: None,
+        execution_account: None,
         #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
         workspace_roots: None,
@@ -4207,6 +4222,7 @@ async fn thread_rollback_restores_cleared_reference_context_item_after_compactio
         })),
         RolloutItem::TurnContext(TurnContextItem {
             turn_id: Some(rolled_back_turn_id.clone()),
+            execution_account: None,
             model: "rolled-back-model".to_string(),
             comp_hash: None,
             ..first_context_item.clone()
@@ -6326,9 +6342,10 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         Arc::clone(&config),
         /*user_instructions*/ None,
         "11111111-1111-4111-8111-111111111111".to_string(),
-        auth_manager,
-        models_manager,
+        Arc::clone(&auth_manager),
+        Arc::clone(&models_manager),
         Arc::default(),
+        default_execution_account(&auth_manager, &models_manager),
         model_info,
         Arc::new(ExecPolicyManager::default()),
         tx_event,
@@ -6601,6 +6618,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
 
     let session = Session {
         thread_id,
+        execution_account: default_execution_account(&auth_manager, &models_manager),
         installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
         tx_event,
         agent_status: agent_status_tx,
@@ -6655,6 +6673,11 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         thread_id,
         SessionId::from(thread_id),
         Some(Arc::clone(&auth_manager)),
+        default_execution_account(&auth_manager, &models_manager),
+        session.services.model_client.clone(),
+        Arc::clone(&session.services.plugins_manager),
+        Arc::clone(&session.services.mcp_manager),
+        session.services.analytics_events_client.clone(),
         &session_telemetry,
         session_configuration.provider.clone(),
         &session_configuration,
@@ -6783,9 +6806,10 @@ async fn make_session_with_config_and_rx(
         Arc::clone(&config),
         /*user_instructions*/ None,
         "11111111-1111-4111-8111-111111111111".to_string(),
-        auth_manager,
-        models_manager,
+        Arc::clone(&auth_manager),
+        Arc::clone(&models_manager),
         Arc::default(),
+        default_execution_account(&auth_manager, &models_manager),
         model_info,
         Arc::new(ExecPolicyManager::default()),
         tx_event,
@@ -6910,9 +6934,10 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         Arc::clone(&config),
         /*user_instructions*/ None,
         "11111111-1111-4111-8111-111111111111".to_string(),
-        auth_manager,
-        models_manager,
+        Arc::clone(&auth_manager),
+        Arc::clone(&models_manager),
         Arc::default(),
+        default_execution_account(&auth_manager, &models_manager),
         model_info,
         Arc::new(ExecPolicyManager::default()),
         tx_event,
@@ -6979,6 +7004,27 @@ async fn resumed_root_session_uses_thread_id_as_session_id() {
     };
     assert_eq!(event.session_id, SessionId::from(thread_id));
     assert_eq!(event.thread_id, thread_id);
+}
+
+#[tokio::test]
+async fn ephemeral_session_does_not_create_durable_execution_account_binding() {
+    let (session, _rx_event) = make_session_with_history_source_and_agent_control_and_rx(
+        InitialHistory::New,
+        SessionSource::Exec,
+        AgentControl::default(),
+    )
+    .await
+    .expect("ephemeral session should start");
+
+    assert_eq!(
+        session
+            .services
+            .thread_store
+            .execution_account_binding(session.thread_id())
+            .await
+            .expect("read durable binding"),
+        None
+    );
 }
 
 #[tokio::test]
@@ -8901,6 +8947,7 @@ where
 
     let session = Arc::new(Session {
         thread_id,
+        execution_account: default_execution_account(&auth_manager, &models_manager),
         installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
         tx_event,
         agent_status: agent_status_tx,
@@ -8955,6 +9002,11 @@ where
         thread_id,
         SessionId::from(thread_id),
         Some(Arc::clone(&auth_manager)),
+        default_execution_account(&auth_manager, &models_manager),
+        session.services.model_client.clone(),
+        Arc::clone(&session.services.plugins_manager),
+        Arc::clone(&session.services.mcp_manager),
+        session.services.analytics_events_client.clone(),
         &session_telemetry,
         session_configuration.provider.clone(),
         &session_configuration,

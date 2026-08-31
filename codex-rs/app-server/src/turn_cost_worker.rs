@@ -58,6 +58,7 @@ enum TurnCostObservationKind {
 struct TurnCostObservation {
     thread_id: ThreadId,
     turn_id: String,
+    auth_manager: Arc<AuthManager>,
     kind: TurnCostObservationKind,
 }
 
@@ -70,6 +71,7 @@ enum TurnCostStatus {
 
 struct TurnCostEntry {
     thread_id: ThreadId,
+    auth_manager: Arc<AuthManager>,
     session_telemetry: SessionTelemetry,
     expected_response_ids: HashSet<String>,
     status: TurnCostStatus,
@@ -164,12 +166,15 @@ impl TurnCostWorkerHandle {
         thread_id: ThreadId,
         thread_config: &Config,
         event: &Event,
+        auth_manager: Arc<AuthManager>,
         session_telemetry: impl FnOnce() -> SessionTelemetry,
     ) {
         if thread_config.model_provider != self.config.model_provider {
             return;
         }
-        if let TurnCostBackend::OpenAi(auth_manager) = &self.backend {
+        if matches!(&self.backend, TurnCostBackend::OpenAi(_))
+            && matches!(&event.msg, EventMsg::TurnStarted(_))
+        {
             let Some(auth) = auth_manager.auth_cached() else {
                 return;
             };
@@ -191,6 +196,7 @@ impl TurnCostWorkerHandle {
         let _ = self.sender.try_send(TurnCostObservation {
             thread_id,
             turn_id: event.id.clone(),
+            auth_manager,
             kind,
         });
     }
@@ -263,7 +269,12 @@ impl WorkerRuntime {
 
     async fn probe_backend(&self) -> BackendAvailability {
         let probe_turn_ids = [uuid::Uuid::new_v4().to_string()];
-        match tokio::time::timeout(REQUEST_TIMEOUT, self.query_turn_costs(&probe_turn_ids)).await {
+        match tokio::time::timeout(
+            REQUEST_TIMEOUT,
+            self.query_turn_costs(&probe_turn_ids, None),
+        )
+        .await
+        {
             Ok(Ok(Some(_))) => BackendAvailability::Ready,
             Ok(Ok(None)) => match self.backend {
                 TurnCostBackend::OpenAi(_) => BackendAvailability::AwaitingAuthChange,
@@ -310,6 +321,7 @@ impl WorkerRuntime {
                         .entry(observation.turn_id)
                         .or_insert(TurnCostEntry {
                             thread_id: observation.thread_id,
+                            auth_manager: observation.auth_manager,
                             session_telemetry: *session_telemetry,
                             expected_response_ids: HashSet::new(),
                             status: TurnCostStatus::Running,
@@ -348,23 +360,58 @@ impl WorkerRuntime {
 
     async fn poll_due(&mut self) {
         let now = Instant::now();
-        let due_turn_ids: Vec<String> = self
-            .turns
-            .iter()
-            .filter(|(_, entry)| {
-                entry.status != TurnCostStatus::Running && entry.next_poll_at <= now
-            })
-            .take(MAX_QUERY_TURNS)
-            .map(|(turn_id, _)| turn_id.clone())
-            .collect();
-        if !due_turn_ids.is_empty() {
-            self.poll_entries(&due_turn_ids).await;
+        let mut due_by_account: HashMap<usize, (Arc<AuthManager>, Vec<String>)> = HashMap::new();
+        for (turn_id, entry) in self.turns.iter().filter(|(_, entry)| {
+            entry.status != TurnCostStatus::Running && entry.next_poll_at <= now
+        }) {
+            let key = Arc::as_ptr(&entry.auth_manager) as usize;
+            let (_, ids) = due_by_account
+                .entry(key)
+                .or_insert_with(|| (Arc::clone(&entry.auth_manager), Vec::new()));
+            if ids.len() < MAX_QUERY_TURNS {
+                ids.push(turn_id.clone());
+            }
+        }
+        if matches!(&self.backend, TurnCostBackend::OpenAi(_)) {
+            for (_, (auth_manager, turn_ids)) in due_by_account {
+                let Some(auth) = auth_manager.auth().await else {
+                    self.retry_entries(&turn_ids);
+                    continue;
+                };
+                if !auth.is_api_key_auth() && !auth.is_chatgpt_auth() {
+                    self.retry_entries(&turn_ids);
+                    continue;
+                }
+                self.poll_entries(&turn_ids, Some(auth_manager)).await;
+            }
+        } else {
+            let due_turn_ids: Vec<String> = self
+                .turns
+                .iter()
+                .filter(|(_, entry)| {
+                    entry.status != TurnCostStatus::Running && entry.next_poll_at <= now
+                })
+                .take(MAX_QUERY_TURNS)
+                .map(|(turn_id, _)| turn_id.clone())
+                .collect();
+            if !due_turn_ids.is_empty() {
+                self.poll_entries(&due_turn_ids, None).await;
+            }
         }
     }
 
-    async fn poll_entries(&mut self, turn_ids: &[String]) {
+    async fn poll_entries(
+        &mut self,
+        turn_ids: &[String],
+        auth_manager: Option<Arc<AuthManager>>,
+    ) {
         let costs =
-            match tokio::time::timeout(REQUEST_TIMEOUT, self.query_turn_costs(turn_ids)).await {
+            match tokio::time::timeout(
+                REQUEST_TIMEOUT,
+                self.query_turn_costs(turn_ids, auth_manager.as_ref()),
+            )
+            .await
+            {
                 Ok(Ok(Some(costs))) => costs,
                 Ok(Ok(None)) => return,
                 Ok(Err(error)) => {
@@ -397,9 +444,11 @@ impl WorkerRuntime {
     async fn query_turn_costs(
         &self,
         turn_ids: &[String],
+        auth_override: Option<&Arc<AuthManager>>,
     ) -> Result<Option<Vec<ApiKeyTurnCost>>, RequestError> {
         match &self.backend {
-            TurnCostBackend::OpenAi(auth_manager) => {
+            TurnCostBackend::OpenAi(default_auth_manager) => {
+                let auth_manager = auth_override.unwrap_or(default_auth_manager);
                 let Some(auth) = auth_manager.auth().await else {
                     return Ok(None);
                 };
@@ -428,19 +477,27 @@ impl WorkerRuntime {
                     .map(Some)
             }
             TurnCostBackend::ModelProvider(model_provider) => {
-                if model_provider.info().requires_openai_auth {
-                    let Some(auth) = model_provider.auth().await else {
+                let effective_provider = if let Some(auth_manager) = auth_override {
+                    create_model_provider(
+                        self.config.model_provider.clone(),
+                        Some(Arc::clone(auth_manager)),
+                    )
+                } else {
+                    model_provider.clone()
+                };
+                if effective_provider.info().requires_openai_auth {
+                    let Some(auth) = effective_provider.auth().await else {
                         return Ok(None);
                     };
                     if !auth.is_api_key_auth() {
                         return Ok(None);
                     }
                 }
-                let provider = model_provider
+                let provider = effective_provider
                     .api_provider()
                     .await
                     .map_err(|error| RequestError::Other(error.into()))?;
-                let auth = model_provider
+                let auth = effective_provider
                     .api_auth()
                     .await
                     .map_err(|error| RequestError::Other(error.into()))?;

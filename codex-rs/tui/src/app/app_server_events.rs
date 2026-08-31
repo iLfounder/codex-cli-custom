@@ -257,7 +257,13 @@ impl App {
                 return;
             }
             ServerNotification::AppListUpdated(notification) => {
-                if self.current_displayed_thread_id().is_some() {
+                let displayed_thread_id = self.current_displayed_thread_id();
+                let targets_displayed_thread = match notification.thread_id.as_deref() {
+                    Some(thread_id) => ThreadId::from_string(thread_id)
+                        .is_ok_and(|thread_id| Some(thread_id) == displayed_thread_id),
+                    None => displayed_thread_id.is_some(),
+                };
+                if targets_displayed_thread {
                     self.chat_widget
                         .refresh_connector_directory_after_notification(
                             notification

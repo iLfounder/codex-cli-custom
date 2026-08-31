@@ -49,8 +49,8 @@ use crate::session::completed_session_loop_termination;
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_codex_thread_interactive(
     mut config: Config,
-    auth_manager: Arc<AuthManager>,
-    models_manager: SharedModelsManager,
+    _auth_manager: Arc<AuthManager>,
+    _models_manager: SharedModelsManager,
     parent_session: Arc<Session>,
     parent_ctx: Arc<TurnContext>,
     parent_environments: TurnEnvironmentSnapshot,
@@ -91,16 +91,17 @@ pub(crate) async fn run_codex_thread_interactive(
         allow_provider_model_fallback: false,
         user_instructions,
         installation_id: parent_session.installation_id.clone(),
-        auth_manager,
-        models_manager,
+        auth_manager: Arc::clone(&parent_ctx.execution_account.auth_manager),
+        models_manager: Arc::clone(&parent_ctx.execution_account.models_manager),
+        execution_account: Arc::clone(&parent_ctx.execution_account),
         git_root_discovery: Arc::clone(&parent_session.services.git_root_discovery),
         environment_manager: parent_session
             .services
             .turn_environments
             .environment_manager(),
         skills_service: Arc::clone(&parent_session.services.skills_service),
-        plugins_manager: Arc::clone(&parent_session.services.plugins_manager),
-        mcp_manager: Arc::clone(&parent_session.services.mcp_manager),
+        plugins_manager: Arc::clone(&parent_ctx.plugins_manager),
+        mcp_manager: Arc::clone(&parent_ctx.mcp_manager),
         code_mode_session_provider: parent_session.services.code_mode_service.session_provider(),
         extensions,
         conversation_history,
@@ -127,7 +128,7 @@ pub(crate) async fn run_codex_thread_interactive(
         thread_extension_init: codex_extension_api::ExtensionDataInit::default(),
         client_mcp_extensions: parent_session.services.client_mcp_extensions.clone(),
         reserved_thread_id: None,
-        analytics_events_client: Some(parent_session.services.analytics_events_client.clone()),
+        analytics_events_client: Some(parent_ctx.analytics_events_client.clone()),
         thread_store: Arc::clone(&parent_session.services.thread_store),
         attestation_provider: parent_session.services.attestation_provider.clone(),
         external_time_provider: Some(Arc::clone(&parent_session.services.time_provider)),
@@ -140,7 +141,7 @@ pub(crate) async fn run_codex_thread_interactive(
     let thread_config = session.thread_config_snapshot().await;
     let client_metadata = parent_session.app_server_client_metadata().await;
     emit_subagent_session_started(
-        &parent_session.services.analytics_events_client,
+        &parent_ctx.analytics_events_client,
         client_metadata,
         session.session_id(),
         session.thread_id(),

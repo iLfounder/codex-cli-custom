@@ -35,7 +35,7 @@ struct GoalAccountingInner {
 struct GoalTurnAccounting {
     current_token_usage: TokenUsage,
     last_accounted_token_usage: TokenUsage,
-    active_goal_id: Option<String>,
+    active_goal_version: Option<codex_state::GoalVersion>,
     account_tokens: bool,
     failed_execution: bool,
     successful_tool: bool,
@@ -44,14 +44,14 @@ struct GoalTurnAccounting {
 #[derive(Debug)]
 struct GoalWallClockAccounting {
     last_accounted_at: Instant,
-    active_goal_id: Option<String>,
+    active_goal_version: Option<codex_state::GoalVersion>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct GoalProgressSnapshot {
     pub(crate) current_token_usage: TokenUsage,
     current_descendant_token_usage: i64,
-    pub(crate) expected_goal_id: String,
+    pub(crate) expected_version: codex_state::GoalVersion,
     pub(crate) time_delta_seconds: i64,
     pub(crate) token_delta: i64,
 }
@@ -59,7 +59,7 @@ pub(crate) struct GoalProgressSnapshot {
 #[derive(Debug, Clone)]
 pub(crate) struct IdleGoalProgressSnapshot {
     current_descendant_token_usage: i64,
-    pub(crate) expected_goal_id: String,
+    pub(crate) expected_version: codex_state::GoalVersion,
     pub(crate) time_delta_seconds: i64,
     pub(crate) token_delta: i64,
 }
@@ -109,7 +109,7 @@ impl GoalAccountingState {
         let Some(turn) = inner.turns.get_mut(turn_id) else {
             return;
         };
-        if turn.active_goal_id.is_none() {
+        if turn.active_goal_version.is_none() {
             return;
         }
 
@@ -134,7 +134,7 @@ impl GoalAccountingState {
     pub(crate) fn execution_failure_goal(&self, turn_id: &str) -> Option<String> {
         let mut inner = self.inner();
         let turn = inner.turns.get(turn_id)?;
-        let goal_id = turn.active_goal_id.clone()?;
+        let goal_id = turn.active_goal_version.as_ref()?.goal_id.clone();
         if turn.successful_tool {
             return None;
         }
@@ -171,7 +171,9 @@ impl GoalAccountingState {
         if !turn.account_tokens {
             return None;
         }
-        turn.active_goal_id.clone()
+        turn.active_goal_version
+            .as_ref()
+            .map(|version| version.goal_id.clone())
     }
 
     pub(crate) fn record_token_usage(
@@ -205,68 +207,87 @@ impl GoalAccountingState {
         }
     }
 
-    pub(crate) fn mark_turn_goal_active(&self, turn_id: &str, goal_id: impl Into<String>) {
+    pub(crate) fn mark_turn_goal_active(
+        &self,
+        turn_id: &str,
+        goal_version: codex_state::GoalVersion,
+    ) {
         let mut inner = self.inner();
-        let goal_id = goal_id.into();
-        if inner.budget_limit_reported_goal_id.as_deref() != Some(goal_id.as_str()) {
+        if inner.budget_limit_reported_goal_id.as_deref() != Some(goal_version.goal_id.as_str()) {
             inner.budget_limit_reported_goal_id = None;
         }
+        let goal_changed = inner
+            .wall_clock
+            .active_goal_version
+            .as_ref()
+            .is_none_or(|active| active.goal_id != goal_version.goal_id);
         if let Some(turn) = inner.turns.get_mut(turn_id) {
-            turn.active_goal_id = Some(goal_id.clone());
+            turn.active_goal_version = Some(goal_version.clone());
             if inner.current_turn_id.as_deref() == Some(turn_id) {
-                if inner.wall_clock.active_goal_id.as_deref() != Some(goal_id.as_str()) {
+                if goal_changed {
                     inner.last_accounted_descendant_token_usage =
                         self.descendant_token_usage.load(Ordering::Relaxed);
                 }
-                inner.wall_clock.mark_active_goal(goal_id);
+                inner.wall_clock.mark_active_goal(goal_version);
             }
         }
     }
 
     pub(crate) fn mark_current_turn_goal_active(
         &self,
-        goal_id: impl Into<String>,
+        goal_version: codex_state::GoalVersion,
     ) -> Option<String> {
         let mut inner = self.inner();
         let turn_id = inner.current_turn_id.clone()?;
-        let goal_id = goal_id.into();
-        if inner.budget_limit_reported_goal_id.as_deref() != Some(goal_id.as_str()) {
+        if inner.budget_limit_reported_goal_id.as_deref() != Some(goal_version.goal_id.as_str()) {
             inner.budget_limit_reported_goal_id = None;
         }
-        let goal_changed = inner.wall_clock.active_goal_id.as_deref() != Some(goal_id.as_str());
+        let goal_changed = inner
+            .wall_clock
+            .active_goal_version
+            .as_ref()
+            .is_none_or(|active| active.goal_id != goal_version.goal_id);
         let turn = inner.turns.get_mut(turn_id.as_str())?;
-        if turn.active_goal_id.as_deref() != Some(goal_id.as_str()) {
+        if turn
+            .active_goal_version
+            .as_ref()
+            .is_none_or(|active| active.goal_id != goal_version.goal_id)
+        {
             turn.failed_execution = false;
             turn.successful_tool = false;
         }
-        turn.active_goal_id = Some(goal_id.clone());
+        turn.active_goal_version = Some(goal_version.clone());
         if goal_changed {
             turn.reset_baseline_to_current();
             inner.last_accounted_descendant_token_usage =
                 self.descendant_token_usage.load(Ordering::Relaxed);
         }
-        inner.wall_clock.mark_active_goal(goal_id);
+        inner.wall_clock.mark_active_goal(goal_version);
         Some(turn_id)
     }
 
-    pub(crate) fn mark_idle_goal_active(&self, goal_id: impl Into<String>) {
+    pub(crate) fn mark_idle_goal_active(&self, goal_version: codex_state::GoalVersion) {
         let mut inner = self.inner();
-        let goal_id = goal_id.into();
-        if inner.budget_limit_reported_goal_id.as_deref() != Some(goal_id.as_str()) {
+        if inner.budget_limit_reported_goal_id.as_deref() != Some(goal_version.goal_id.as_str()) {
             inner.budget_limit_reported_goal_id = None;
         }
-        if inner.wall_clock.active_goal_id.as_deref() != Some(goal_id.as_str()) {
+        let goal_changed = inner
+            .wall_clock
+            .active_goal_version
+            .as_ref()
+            .is_none_or(|active| active.goal_id != goal_version.goal_id);
+        if goal_changed {
             inner.last_accounted_descendant_token_usage =
                 self.descendant_token_usage.load(Ordering::Relaxed);
         }
-        inner.wall_clock.mark_active_goal(goal_id);
+        inner.wall_clock.mark_active_goal(goal_version);
     }
 
     pub(crate) fn clear_current_turn_goal(&self) -> Option<String> {
         let mut inner = self.inner();
         let turn_id = inner.current_turn_id.clone()?;
         if let Some(turn) = inner.turns.get_mut(turn_id.as_str()) {
-            turn.active_goal_id = None;
+            turn.active_goal_version = None;
         }
         inner.wall_clock.clear_active_goal();
         inner.budget_limit_reported_goal_id = None;
@@ -280,7 +301,7 @@ impl GoalAccountingState {
         if let Some(turn_id) = inner.current_turn_id.clone()
             && let Some(turn) = inner.turns.get_mut(turn_id.as_str())
         {
-            turn.active_goal_id = None;
+            turn.active_goal_version = None;
         }
         inner.wall_clock.clear_active_goal();
         inner.budget_limit_reported_goal_id = None;
@@ -294,7 +315,7 @@ impl GoalAccountingState {
         if !turn.account_tokens {
             return None;
         }
-        let expected_goal_id = turn.active_goal_id()?;
+        let expected_version = turn.active_goal_version()?;
         let current_descendant_token_usage = self.descendant_token_usage.load(Ordering::Relaxed);
         let descendant_token_delta = current_descendant_token_usage
             .saturating_sub(inner.last_accounted_descendant_token_usage);
@@ -302,7 +323,7 @@ impl GoalAccountingState {
             .token_delta_since_last_accounting()
             .saturating_add(descendant_token_delta);
         let time_delta_seconds =
-            if inner.wall_clock.active_goal_id.as_deref() == Some(expected_goal_id.as_str()) {
+            if inner.wall_clock.active_goal_version.as_ref() == Some(&expected_version) {
                 inner.wall_clock.time_delta_since_last_accounting()
             } else {
                 0
@@ -313,7 +334,7 @@ impl GoalAccountingState {
         Some(GoalProgressSnapshot {
             current_token_usage: turn.current_token_usage.clone(),
             current_descendant_token_usage,
-            expected_goal_id,
+            expected_version,
             time_delta_seconds,
             token_delta,
         })
@@ -321,7 +342,7 @@ impl GoalAccountingState {
 
     pub(crate) fn idle_progress_snapshot(&self) -> Option<IdleGoalProgressSnapshot> {
         let inner = self.inner();
-        let expected_goal_id = inner.wall_clock.active_goal_id.clone()?;
+        let expected_version = inner.wall_clock.active_goal_version.clone()?;
         let time_delta_seconds = inner.wall_clock.time_delta_since_last_accounting();
         let current_descendant_token_usage = self.descendant_token_usage.load(Ordering::Relaxed);
         let token_delta = current_descendant_token_usage
@@ -331,7 +352,7 @@ impl GoalAccountingState {
         }
         Some(IdleGoalProgressSnapshot {
             current_descendant_token_usage,
-            expected_goal_id,
+            expected_version,
             time_delta_seconds,
             token_delta,
         })
@@ -341,6 +362,7 @@ impl GoalAccountingState {
         &self,
         turn_id: &str,
         snapshot: &GoalProgressSnapshot,
+        updated_version: codex_state::GoalVersion,
         status: ThreadGoalStatus,
         budget_limited_goal_disposition: BudgetLimitedGoalDisposition,
     ) {
@@ -349,13 +371,17 @@ impl GoalAccountingState {
         if let Some(turn) = inner.turns.get_mut(turn_id) {
             turn.last_accounted_token_usage = snapshot.current_token_usage.clone();
             if clear_active_goal {
-                turn.active_goal_id = None;
+                turn.active_goal_version = None;
+            } else {
+                turn.active_goal_version = Some(updated_version.clone());
             }
         }
         inner.last_accounted_descendant_token_usage = snapshot.current_descendant_token_usage;
         inner.wall_clock.mark_accounted(snapshot.time_delta_seconds);
         if clear_active_goal {
             inner.wall_clock.clear_active_goal();
+        } else {
+            inner.wall_clock.active_goal_version = Some(updated_version);
         }
         if status != ThreadGoalStatus::BudgetLimited {
             inner.budget_limit_reported_goal_id = None;
@@ -373,6 +399,7 @@ impl GoalAccountingState {
     pub(crate) fn mark_idle_progress_accounted_for_status(
         &self,
         snapshot: &IdleGoalProgressSnapshot,
+        updated_version: codex_state::GoalVersion,
         status: ThreadGoalStatus,
         budget_limited_goal_disposition: BudgetLimitedGoalDisposition,
     ) {
@@ -382,6 +409,8 @@ impl GoalAccountingState {
         inner.wall_clock.mark_accounted(snapshot.time_delta_seconds);
         if clear_active_goal {
             inner.wall_clock.clear_active_goal();
+        } else {
+            inner.wall_clock.active_goal_version = Some(updated_version);
         }
         if status != ThreadGoalStatus::BudgetLimited {
             inner.budget_limit_reported_goal_id = None;
@@ -475,15 +504,15 @@ impl GoalTurnAccounting {
         Self {
             last_accounted_token_usage: current_token_usage.clone(),
             current_token_usage,
-            active_goal_id: None,
+            active_goal_version: None,
             account_tokens,
             failed_execution: false,
             successful_tool: false,
         }
     }
 
-    fn active_goal_id(&self) -> Option<String> {
-        self.active_goal_id.clone()
+    fn active_goal_version(&self) -> Option<codex_state::GoalVersion> {
+        self.active_goal_version.clone()
     }
 
     fn reset_baseline_to_current(&mut self) {
@@ -502,7 +531,7 @@ impl GoalWallClockAccounting {
     fn new() -> Self {
         Self {
             last_accounted_at: Instant::now(),
-            active_goal_id: None,
+            active_goal_version: None,
         }
     }
 
@@ -525,16 +554,15 @@ impl GoalWallClockAccounting {
         self.last_accounted_at = Instant::now();
     }
 
-    fn mark_active_goal(&mut self, goal_id: impl Into<String>) {
-        let goal_id = goal_id.into();
-        if self.active_goal_id.as_deref() != Some(goal_id.as_str()) {
+    fn mark_active_goal(&mut self, goal_version: codex_state::GoalVersion) {
+        if self.active_goal_version.as_ref() != Some(&goal_version) {
             self.reset_baseline();
-            self.active_goal_id = Some(goal_id);
+            self.active_goal_version = Some(goal_version);
         }
     }
 
     fn clear_active_goal(&mut self) {
-        self.active_goal_id = None;
+        self.active_goal_version = None;
         self.reset_baseline();
     }
 }

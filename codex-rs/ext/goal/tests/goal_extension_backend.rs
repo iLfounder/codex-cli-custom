@@ -1276,6 +1276,180 @@ async fn goal_service_external_set_active_preserves_concurrent_usage() -> anyhow
 }
 
 #[tokio::test]
+async fn stale_set_runtime_effects_do_not_replace_current_accounting_version() -> anyhow::Result<()>
+{
+    let runtime = test_runtime().await?;
+    let thread_id = test_thread_id()?;
+    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
+    let harness = GoalExtensionHarness::new(runtime.clone(), thread_id).await?;
+    harness
+        .start_turn(
+            "turn-1",
+            &token_usage(
+                /*input_tokens*/ 100, /*cached_input_tokens*/ 0,
+                /*output_tokens*/ 0, /*reasoning_output_tokens*/ 0,
+                /*total_tokens*/ 100,
+            ),
+        )
+        .await;
+    let initial_revision = runtime
+        .thread_goals()
+        .get_thread_goal_revision(thread_id)
+        .await?;
+    let initial = harness
+        .goal_service
+        .create_thread_goal_exact(
+            runtime.as_ref(),
+            thread_id,
+            initial_revision,
+            "initial objective",
+            /*token_budget*/ None,
+            /*max_goal_token_budget*/ None,
+        )
+        .await?;
+    initial.apply_runtime_effects(&harness.goal_service).await;
+
+    let stale = harness
+        .goal_service
+        .set_thread_goal(
+            runtime.as_ref(),
+            GoalSetRequest {
+                thread_id,
+                objective: GoalObjectiveUpdate::Set("stale objective"),
+                status: Some(ThreadGoalStatus::Active),
+                token_budget: GoalTokenBudgetUpdate::Keep,
+                max_goal_token_budget: None,
+            },
+        )
+        .await?;
+    let current = harness
+        .goal_service
+        .set_thread_goal(
+            runtime.as_ref(),
+            GoalSetRequest {
+                thread_id,
+                objective: GoalObjectiveUpdate::Set("current objective"),
+                status: Some(ThreadGoalStatus::Active),
+                token_budget: GoalTokenBudgetUpdate::Keep,
+                max_goal_token_budget: None,
+            },
+        )
+        .await?;
+    current.apply_runtime_effects(&harness.goal_service).await;
+    stale.apply_runtime_effects(&harness.goal_service).await;
+
+    harness
+        .record_token_usage(
+            "turn-1",
+            &token_usage(
+                /*input_tokens*/ 110, /*cached_input_tokens*/ 0,
+                /*output_tokens*/ 0, /*reasoning_output_tokens*/ 0,
+                /*total_tokens*/ 110,
+            ),
+        )
+        .await;
+    harness
+        .notify_tool_finish("turn-1", "call-shell", "shell")
+        .await;
+
+    let goal = runtime
+        .thread_goals()
+        .get_thread_goal(thread_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("goal should exist"))?;
+    assert_eq!("current objective", goal.objective);
+    assert_eq!(10, goal.tokens_used);
+    Ok(())
+}
+
+#[tokio::test]
+async fn stale_clear_runtime_effects_do_not_clear_replacement_accounting() -> anyhow::Result<()> {
+    let runtime = test_runtime().await?;
+    let thread_id = test_thread_id()?;
+    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
+    let harness = GoalExtensionHarness::new(runtime.clone(), thread_id).await?;
+    harness
+        .start_turn(
+            "turn-1",
+            &token_usage(
+                /*input_tokens*/ 100, /*cached_input_tokens*/ 0,
+                /*output_tokens*/ 0, /*reasoning_output_tokens*/ 0,
+                /*total_tokens*/ 100,
+            ),
+        )
+        .await;
+    let initial_revision = runtime
+        .thread_goals()
+        .get_thread_goal_revision(thread_id)
+        .await?;
+    let initial = harness
+        .goal_service
+        .create_thread_goal_exact(
+            runtime.as_ref(),
+            thread_id,
+            initial_revision,
+            "old objective",
+            /*token_budget*/ None,
+            /*max_goal_token_budget*/ None,
+        )
+        .await?;
+    initial.apply_runtime_effects(&harness.goal_service).await;
+
+    let old_goal = runtime
+        .thread_goals()
+        .get_thread_goal(thread_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("old goal should exist"))?;
+    let cleared = runtime
+        .thread_goals()
+        .clear_thread_goal_exact(thread_id, &codex_state::GoalVersion::from(&old_goal))
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("old goal should clear"))?;
+    let replacement = harness
+        .goal_service
+        .create_thread_goal_exact(
+            runtime.as_ref(),
+            thread_id,
+            cleared.revision,
+            "replacement objective",
+            /*token_budget*/ None,
+            /*max_goal_token_budget*/ None,
+        )
+        .await?;
+    replacement
+        .apply_runtime_effects(&harness.goal_service)
+        .await;
+    harness
+        .runtime_handle()
+        .apply_external_goal_clear(cleared.previous_goal)
+        .await
+        .map_err(anyhow::Error::msg)?;
+
+    harness
+        .record_token_usage(
+            "turn-1",
+            &token_usage(
+                /*input_tokens*/ 110, /*cached_input_tokens*/ 0,
+                /*output_tokens*/ 0, /*reasoning_output_tokens*/ 0,
+                /*total_tokens*/ 110,
+            ),
+        )
+        .await;
+    harness
+        .notify_tool_finish("turn-1", "call-shell", "shell")
+        .await;
+
+    let goal = runtime
+        .thread_goals()
+        .get_thread_goal(thread_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("replacement goal should exist"))?;
+    assert_eq!("replacement objective", goal.objective);
+    assert_eq!(10, goal.tokens_used);
+    Ok(())
+}
+
+#[tokio::test]
 async fn thread_stop_unregisters_goal_runtime_from_service() -> anyhow::Result<()> {
     let runtime = test_runtime().await?;
     let thread_id = test_thread_id()?;

@@ -141,6 +141,7 @@ async fn skills_list_disabled_bundled_skills_preserves_shared_system_skill_cache
 
     let enabled_skills_request_id = enabled_mcp
         .send_skills_list_request(SkillsListParams {
+            thread_id: None,
             cwds: vec![cwd.path().to_path_buf()],
             force_reload: true,
         })
@@ -171,6 +172,7 @@ async fn skills_list_disabled_bundled_skills_preserves_shared_system_skill_cache
         .await?;
     let disabled_skills_request_id = disabled_mcp
         .send_skills_list_request(SkillsListParams {
+            thread_id: None,
             cwds: vec![cwd.path().to_path_buf()],
             force_reload: true,
         })
@@ -197,6 +199,7 @@ async fn skills_list_disabled_bundled_skills_preserves_shared_system_skill_cache
 
     let reloaded_skills_request_id = enabled_mcp
         .send_skills_list_request(SkillsListParams {
+            thread_id: None,
             cwds: vec![cwd.path().to_path_buf()],
             force_reload: true,
         })
@@ -241,6 +244,7 @@ async fn skills_list_uses_each_cwds_bundled_skills_configuration() -> Result<()>
 
     let request_id = app_server
         .send_skills_list_request(SkillsListParams {
+            thread_id: None,
             cwds: vec![
                 disabled_cwd.path().to_path_buf(),
                 enabled_cwd.path().to_path_buf(),
@@ -299,6 +303,7 @@ async fn skills_list_runtime_enable_refreshes_shared_system_skill_cache() -> Res
 
     let disabled_skills_request_id = mcp
         .send_skills_list_request(SkillsListParams {
+            thread_id: None,
             cwds: vec![cwd.path().to_path_buf()],
             force_reload: true,
         })
@@ -335,6 +340,7 @@ async fn skills_list_runtime_enable_refreshes_shared_system_skill_cache() -> Res
 
     let enabled_skills_request_id = mcp
         .send_skills_list_request(SkillsListParams {
+            thread_id: None,
             cwds: vec![cwd.path().to_path_buf()],
             force_reload: true,
         })
@@ -406,6 +412,7 @@ enabled = true
 
     let initial_skills_list_request_id = mcp
         .send_skills_list_request(SkillsListParams {
+            thread_id: None,
             cwds: vec![cwd.path().to_path_buf()],
             force_reload: false,
         })
@@ -439,6 +446,7 @@ enabled = true
     for force_reload in [true, false] {
         let request_id = mcp
             .send_skills_list_request(SkillsListParams {
+                thread_id: None,
                 cwds: vec![cwd.path().to_path_buf()],
                 force_reload,
             })
@@ -463,6 +471,7 @@ enabled = true
 
     let skills_list_request_id = mcp
         .send_skills_list_request(SkillsListParams {
+            thread_id: None,
             cwds: vec![cwd.path().to_path_buf()],
             force_reload: true,
         })
@@ -575,6 +584,7 @@ async fn skills_list_loads_remote_installed_plugin_skills_from_cache() -> Result
 
     let stale_skills_list_request_id = mcp
         .send_skills_list_request(SkillsListParams {
+            thread_id: None,
             cwds: vec![cwd.path().to_path_buf()],
             force_reload: true,
         })
@@ -630,6 +640,7 @@ async fn skills_list_loads_remote_installed_plugin_skills_from_cache() -> Result
         loop {
             let skills_list_request_id = mcp
                 .send_skills_list_request(SkillsListParams {
+                    thread_id: None,
                     cwds: vec![cwd.path().to_path_buf()],
                     force_reload: false,
                 })
@@ -679,6 +690,7 @@ async fn config_reads_complete_alongside_skills_list_request() -> Result<()> {
 
     let skills_request_id = mcp
         .send_skills_list_request(SkillsListParams {
+            thread_id: None,
             cwds: vec![cwd.path().to_path_buf()],
             force_reload: true,
         })
@@ -743,6 +755,7 @@ async fn skills_list_skips_cwd_roots_when_environment_disabled() -> Result<()> {
 
     let request_id = mcp
         .send_skills_list_request(SkillsListParams {
+            thread_id: None,
             cwds: vec![cwd.path().to_path_buf()],
             force_reload: true,
         })
@@ -782,6 +795,7 @@ async fn skills_list_accepts_relative_cwds() -> Result<()> {
 
     let request_id = mcp
         .send_skills_list_request(SkillsListParams {
+            thread_id: None,
             cwds: vec![relative_cwd.clone()],
             force_reload: true,
         })
@@ -876,6 +890,7 @@ enabled = false
     for force_reload in [false, false, true] {
         let request_id = mcp
             .send_skills_list_request(SkillsListParams {
+                thread_id: None,
                 cwds: vec![
                     first_cwd.path().to_path_buf(),
                     second_cwd.path().to_path_buf(),
@@ -989,6 +1004,7 @@ enabled = true
 
         let request_id = mcp
             .send_skills_list_request(SkillsListParams {
+                thread_id: None,
                 cwds: vec![cwd.to_path_buf()],
                 force_reload,
             })
@@ -1023,6 +1039,7 @@ async fn skills_list_uses_cached_result_after_session_default_writes_until_force
     // Seed the cwd cache before the cwd-local skill exists.
     let first_request_id = mcp
         .send_skills_list_request(SkillsListParams {
+            thread_id: None,
             cwds: vec![cwd.path().to_path_buf()],
             force_reload: false,
         })
@@ -1087,6 +1104,7 @@ async fn skills_list_uses_cached_result_after_session_default_writes_until_force
 
     let second_request_id = mcp
         .send_skills_list_request(SkillsListParams {
+            thread_id: None,
             cwds: vec![cwd.path().to_path_buf()],
             force_reload: false,
         })
@@ -1103,6 +1121,7 @@ async fn skills_list_uses_cached_result_after_session_default_writes_until_force
 
     let third_request_id = mcp
         .send_skills_list_request(SkillsListParams {
+            thread_id: None,
             cwds: vec![cwd.path().to_path_buf()],
             force_reload: true,
         })
@@ -1149,6 +1168,7 @@ async fn skills_extra_roots_set_updates_process_runtime_roots() -> Result<()> {
 
     let skills_request_id = mcp
         .send_skills_list_request(SkillsListParams {
+            thread_id: None,
             cwds: vec![cwd.path().to_path_buf()],
             force_reload: false,
         })
@@ -1176,6 +1196,7 @@ async fn skills_extra_roots_set_updates_process_runtime_roots() -> Result<()> {
 
     let skills_request_id = mcp
         .send_skills_list_request(SkillsListParams {
+            thread_id: None,
             cwds: vec![cwd.path().to_path_buf()],
             force_reload: false,
         })
@@ -1201,6 +1222,7 @@ async fn skills_extra_roots_set_updates_process_runtime_roots() -> Result<()> {
     expect_skills_changed_notification(&mut mcp, DEFAULT_TIMEOUT).await?;
     let skills_request_id = mcp
         .send_skills_list_request(SkillsListParams {
+            thread_id: None,
             cwds: vec![cwd.path().to_path_buf()],
             force_reload: false,
         })
@@ -1224,6 +1246,7 @@ async fn skills_extra_roots_set_updates_process_runtime_roots() -> Result<()> {
         .await?;
     let skills_request_id = mcp
         .send_skills_list_request(SkillsListParams {
+            thread_id: None,
             cwds: vec![cwd.path().to_path_buf()],
             force_reload: false,
         })
@@ -1262,6 +1285,7 @@ async fn skills_changed_notification_is_emitted_after_skill_change() -> Result<(
         .await?;
     let initial_skills_request_id = mcp
         .send_skills_list_request(SkillsListParams {
+            thread_id: None,
             cwds: vec![codex_home.path().to_path_buf()],
             force_reload: true,
         })
@@ -1325,6 +1349,7 @@ async fn skills_changed_notification_is_emitted_after_skill_change() -> Result<(
     expect_skills_changed_notification(&mut mcp, WATCHER_TIMEOUT).await?;
     let updated_skills_request_id = mcp
         .send_skills_list_request(SkillsListParams {
+            thread_id: None,
             cwds: vec![codex_home.path().to_path_buf()],
             force_reload: false,
         })

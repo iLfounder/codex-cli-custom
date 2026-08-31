@@ -61,6 +61,7 @@ impl TryFrom<&str> for ThreadGoalStatus {
 pub struct ThreadGoal {
     pub thread_id: ThreadId,
     pub goal_id: String,
+    pub revision: i64,
     pub objective: String,
     pub status: ThreadGoalStatus,
     pub token_budget: Option<i64>,
@@ -73,6 +74,7 @@ pub struct ThreadGoal {
 pub(crate) struct ThreadGoalRow {
     pub thread_id: String,
     pub goal_id: String,
+    pub revision: i64,
     pub objective: String,
     pub status: String,
     pub token_budget: Option<i64>,
@@ -87,6 +89,7 @@ impl ThreadGoalRow {
         Ok(Self {
             thread_id: row.try_get("thread_id")?,
             goal_id: row.try_get("goal_id")?,
+            revision: row.try_get("revision")?,
             objective: row.try_get("objective")?,
             status: row.try_get("status")?,
             token_budget: row.try_get("token_budget")?,
@@ -105,6 +108,7 @@ impl TryFrom<ThreadGoalRow> for ThreadGoal {
         Ok(Self {
             thread_id: ThreadId::try_from(row.thread_id)?,
             goal_id: row.goal_id,
+            revision: row.revision,
             objective: row.objective,
             status: ThreadGoalStatus::try_from(row.status.as_str())?,
             token_budget: row.token_budget,

@@ -28,7 +28,7 @@ pub(crate) fn effective_plugins_changed_callback(
     request_serialization_queues: RequestSerializationQueues,
 ) -> Arc<dyn Fn(EffectivePluginsChange) + Send + Sync> {
     Arc::new(move |change| {
-        thread_manager.plugins_manager().clear_cache();
+        thread_manager.clear_all_account_plugin_caches();
         thread_manager.skills_service().clear_cache();
 
         let refresh_thread_manager = Arc::clone(&thread_manager);

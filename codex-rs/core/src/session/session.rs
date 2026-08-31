@@ -41,6 +41,7 @@ use tokio::sync::Semaphore;
 /// A session has at most 1 running task at a time, and can be interrupted by user input.
 pub(crate) struct Session {
     pub(crate) thread_id: ThreadId,
+    pub(crate) execution_account: Arc<crate::execution_account::ExecutionAccountContext>,
     pub(crate) installation_id: String,
     pub(super) tx_event: Sender<Event>,
     pub(super) agent_status: watch::Sender<AgentStatus>,
@@ -634,6 +635,12 @@ impl Session {
         }
     }
 
+    pub(crate) fn execution_account(
+        &self,
+    ) -> Arc<crate::execution_account::ExecutionAccountContext> {
+        Arc::clone(&self.execution_account)
+    }
+
     #[instrument(name = "session_init", level = "info", skip_all)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new(
@@ -645,6 +652,7 @@ impl Session {
         auth_manager: Arc<AuthManager>,
         models_manager: SharedModelsManager,
         git_root_discovery: Arc<GitRootDiscovery>,
+        execution_account: Arc<crate::execution_account::ExecutionAccountContext>,
         model_info: ModelInfo,
         exec_policy: Arc<ExecPolicyManager>,
         tx_event: Sender<Event>,
@@ -1374,6 +1382,8 @@ impl Session {
             }
             let session_extension_data =
                 codex_extension_api::ExtensionData::new(session_id.to_string());
+            session_extension_data.insert(execution_account.as_ref().clone());
+            session_extension_data.insert(Arc::clone(&execution_account.auth_manager));
             session_extension_data.insert(analytics_events_client.clone());
             let mcp_resource_client = Arc::new(McpResourceClient::new(Arc::clone(&mcp_runtime)));
             let extension_metrics =
@@ -1487,6 +1497,7 @@ impl Session {
             let (mcp_prewarm_tx, mcp_prewarm_rx) = async_channel::bounded(1);
             let sess = Arc::new(Session {
                 thread_id,
+                execution_account: Arc::clone(&execution_account),
                 installation_id,
                 tx_event: tx_event.clone(),
                 agent_status,
@@ -1617,6 +1628,19 @@ impl Session {
                 // Keep the source reserved until the child's history reference is durable.
                 sess.try_ensure_rollout_materialized(PersistContext::Standard)
                     .await?;
+            }
+            if !config.ephemeral {
+                let persisted_binding = thread_store
+                    .initialize_execution_account_binding(
+                        thread_id,
+                        execution_account.binding.clone(),
+                    )
+                    .await?;
+                if persisted_binding != execution_account.binding {
+                    anyhow::bail!(
+                        "thread {thread_id} execution account changed during session startup"
+                    );
+                }
             }
             {
                 let mut state = sess.state.lock().await;
