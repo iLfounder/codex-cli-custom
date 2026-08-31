@@ -1,7 +1,7 @@
 schema_version = 1
 applies_to = "rust-v0.149.0"
 base_commit = "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0"
-final_tree = "8b334b2b723f599a7db9139a7d5693c4472d44c2"
+final_tree = "1f35e1ae8139df81dfdf4a8eccd4027a736c2754"
 
 [[patches]]
 number = "P001"
@@ -122,3 +122,8 @@ sha256 = "91af85d1bfc876eadb24529060aa3a37a4086a5bdb39d2e470de0f39f7520dd5"
 number = "P024"
 file = "0024-P024-integrate-canonical-control-plane-and-final-review-corrections.patch"
 sha256 = "fe6336260af8b39f08035b85976c574edac1844ee7c641ee9ede844f8b091bad"
+
+[[patches]]
+number = "P025"
+file = "0025-P025-bind-managed-launches-before-thread-start.patch"
+sha256 = "7a3b497b6b93636e041d8319c79a91e0539b866f8ccb33d5a7340fa59bf8afc0"
