@@ -945,6 +945,26 @@ impl SessionIo {
         Ok(())
     }
 
+    /// Strictly release the exact writer generation and wait for runtime termination.
+    pub(crate) async fn relinquish_and_wait(
+        &self,
+        expected_writer_generation: u64,
+    ) -> Result<(), String> {
+        let session_loop_termination = self.session_loop_termination.clone();
+        let (reply, result) = oneshot::channel();
+        self.submit(Op::Relinquish {
+            expected_writer_generation,
+            reply,
+        })
+        .await
+        .map_err(|_| "thread runtime is unavailable".to_string())?;
+        result
+            .await
+            .map_err(|_| "thread runtime ended before writer release completed".to_string())??;
+        session_loop_termination.await;
+        Ok(())
+    }
+
     pub(crate) async fn next_event(&self) -> CodexResult<Event> {
         let event = self
             .rx_event
@@ -1193,7 +1213,9 @@ impl Session {
                 &self.services.network_approval,
             ))),
             self.services.managed_network_requirements_configured,
-            self.services.network_proxy_audit_metadata.clone(),
+            self.execution_account_runtime()
+                .network_proxy_audit_metadata
+                .clone(),
         )
         .await
         {
@@ -1914,9 +1936,10 @@ impl Session {
 
     pub(crate) async fn refresh_hooks(&self, config: Arc<Config>) {
         let environments = self.services.turn_environments.snapshot().await;
+        let account_runtime = self.execution_account_runtime();
         let hooks_config = build_hooks_config(
             config.as_ref(),
-            self.services.plugins_manager.as_ref(),
+            account_runtime.services.plugins_manager.as_ref(),
             environments.single_local_environment(),
         )
         .await;
@@ -1927,7 +1950,8 @@ impl Session {
         if Arc::ptr_eq(
             &state.session_configuration.original_config_do_not_use,
             &config,
-        ) {
+        ) && Arc::ptr_eq(&self.execution_account_runtime(), &account_runtime)
+        {
             let hooks = self.hooks().reconfigured(hooks_config);
             self.services.hooks.store(Arc::new(hooks));
         }
@@ -2055,19 +2079,22 @@ impl Session {
             config
         };
         self.services.skills_service.clear_cache();
-        self.services.plugins_manager.clear_cache();
+        self.execution_account_runtime()
+            .services
+            .plugins_manager
+            .clear_cache();
         self.refresh_runtime_config(next_config).await;
     }
 
     /// Record a terminal CodexErr before the app-server completion notification is reduced.
     pub(crate) fn track_turn_codex_error(&self, turn_context: &TurnContext, error: &CodexErr) {
-        self.services
-            .analytics_events_client
-            .track_turn_codex_error(TurnCodexErrorFact::from_codex_err(
+        turn_context.analytics_events_client.track_turn_codex_error(
+            TurnCodexErrorFact::from_codex_err(
                 self.thread_id.to_string(),
                 turn_context.sub_id.clone(),
                 error,
-            ));
+            ),
+        );
     }
 
     /// Persist the event to rollout and send it to clients.
@@ -3386,7 +3413,7 @@ impl Session {
                 .record_annotated_items(&items, turn_context.model_info().truncation_policy.into());
         }
         for image in image_preparations {
-            self.services
+            turn_context
                 .analytics_events_client
                 .track_image_preparation(ImagePreparationFact {
                     turn_id: turn_context.sub_id.clone(),
@@ -3925,8 +3952,7 @@ impl Session {
             developer_sections
                 .push(DeveloperInstructions::new(developer_instructions).render_fragment());
         }
-        let loaded_plugins = self
-            .services
+        let loaded_plugins = turn_context
             .plugins_manager
             .plugins_for_config(&turn_context.config.plugins_config_input())
             .await;
@@ -3935,9 +3961,12 @@ impl Session {
             .features
             .plugin_recommendations_enabled()
         {
-            let auth = self.services.auth_manager.auth().await;
+            let auth = match turn_context.auth_manager.as_ref() {
+                Some(auth_manager) => auth_manager.auth().await,
+                None => None,
+            };
             let plugins_config = turn_context.config.plugins_config_input();
-            self.services
+            turn_context
                 .plugins_manager
                 .recommended_plugin_candidates_for_config(RecommendedPluginCandidatesInput {
                     plugins_config: &plugins_config,

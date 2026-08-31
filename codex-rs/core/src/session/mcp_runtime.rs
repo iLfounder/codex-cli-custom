@@ -51,7 +51,7 @@ impl Session {
     /// Waits on this session's refreshed server before tool execution is admitted.
     pub(crate) async fn wait_for_mcp_server(self: &Arc<Self>, server: &str) {
         self.refresh_mcp_if_dirty().await;
-        self.services
+        self.execution_account_runtime()
             .mcp_runtime
             .wait_for_server_startup(server)
             .await;
@@ -64,7 +64,7 @@ impl Session {
         tool: &str,
     ) -> Option<PreparedMcpCall> {
         self.refresh_mcp_if_dirty().await;
-        self.services
+        self.execution_account_runtime()
             .mcp_runtime
             .current_binding_for_call(server)
             .await?
@@ -312,14 +312,17 @@ impl Session {
                 mcp_projection,
             )
             .await;
+        let account_runtime = self.execution_account_runtime();
         let selected_plugins = mcp_projection.selected_plugins.clone();
-        let input = self.build_mcp_runtime_input(
+        let input = self.build_mcp_runtime_input_for_account(
             desired,
             mcp_projection,
             ready_selected_capability_roots,
             elicitation_reviewer,
+            &account_runtime.services,
+            &account_runtime.execution_account.auth_manager,
         );
-        self.services.mcp_runtime.replace(input).await;
+        account_runtime.mcp_runtime.replace(input).await;
         self.services.thread_extension_data.insert(selected_plugins);
     }
 
@@ -329,6 +332,26 @@ impl Session {
         mcp_projection: McpRuntimeProjection,
         ready_selected_capability_roots: &[SelectedCapabilityRoot],
         elicitation_reviewer: Option<ElicitationReviewerHandle>,
+    ) -> McpRuntimeInput {
+        let runtime = self.execution_account_runtime();
+        self.build_mcp_runtime_input_for_account(
+            desired,
+            mcp_projection,
+            ready_selected_capability_roots,
+            elicitation_reviewer,
+            &runtime.services,
+            &runtime.execution_account.auth_manager,
+        )
+    }
+
+    fn build_mcp_runtime_input_for_account(
+        &self,
+        desired: &McpDesiredState,
+        mcp_projection: McpRuntimeProjection,
+        ready_selected_capability_roots: &[SelectedCapabilityRoot],
+        elicitation_reviewer: Option<ElicitationReviewerHandle>,
+        services: &crate::execution_account::ExecutionAccountServices,
+        auth_manager: &Arc<AuthManager>,
     ) -> McpRuntimeInput {
         let auth = desired.auth.clone();
         let McpRuntimeProjection {
@@ -380,6 +403,10 @@ impl Session {
                 })
                 .collect(),
         );
+        let codex_apps_auth_manager =
+            codex_mcp::host_owned_codex_apps_enabled(&mcp_config, auth.as_ref())
+                .then(|| Arc::clone(auth_manager));
+
         McpRuntimeInput {
             startup_policy: if matches!(desired.session_source, SessionSource::SubAgent(_)) {
                 McpStartupPolicy::LazyWhenCached
@@ -394,14 +421,63 @@ impl Session {
             tx_event: Some(self.get_tx_event()),
             startup_cancellation_token: CancellationToken::new(),
             runtime_context,
-            codex_apps_tools_cache: self.services.mcp_manager.codex_apps_tools_cache(),
-            tool_catalog_cache: self.services.mcp_manager.tool_catalog_cache(),
+            codex_apps_tools_cache: services.mcp_manager.codex_apps_tools_cache(),
+            tool_catalog_cache: services.mcp_manager.tool_catalog_cache(),
             codex_apps_tools_cache_key: connector_runtime_context_key(auth.as_ref()),
             client_mcp_extensions: self.services.client_mcp_extensions.for_mcp_servers(),
             auth,
-            auth_manager: Some(Arc::clone(&self.services.auth_manager)),
+            auth_manager: codex_apps_auth_manager,
             elicitation_reviewer,
             elicitation_lifecycle: Some(self.mcp_elicitation_lifecycle()),
         }
+    }
+
+    pub(super) async fn prepare_mcp_runtime_for_execution_account(
+        self: &Arc<Self>,
+        execution_account: &crate::execution_account::ExecutionAccountContext,
+        services: &crate::execution_account::ExecutionAccountServices,
+    ) -> anyhow::Result<Arc<McpRuntime>> {
+        let auth = execution_account.auth_manager.auth().await;
+        let desired = self.latest_mcp_desired_state(auth).await;
+        let selected_capability_roots = self
+            .resolve_selected_capability_roots_for_step(&desired.environments)
+            .await;
+        let ready_selected_capability_roots =
+            Self::ready_selected_capability_roots(&selected_capability_roots);
+        let executor_capability_discovery = self
+            .executor_capability_discovery_for_step(
+                &desired.config,
+                &ready_selected_capability_roots,
+                &desired.environments,
+                desired.windows_sandbox_level,
+            )
+            .await;
+        let projection = services
+            .mcp_manager
+            .runtime_config_for_step(
+                &desired.config,
+                &self.services.mcp_thread_init,
+                &self.services.thread_extension_data,
+                McpThreadIdentity {
+                    session_source: &desired.session_source,
+                    originator: &desired.originator,
+                    environments: McpEnvironmentScope::Live(&self.services.turn_environments),
+                },
+                &ready_selected_capability_roots,
+                executor_capability_discovery.as_deref(),
+            )
+            .await;
+        let runtime = Arc::new(McpRuntime::empty(projection.config.prefix_mcp_tool_names));
+        let input = self.build_mcp_runtime_input_for_account(
+            &desired,
+            projection,
+            &ready_selected_capability_roots,
+            Some(self.mcp_elicitation_reviewer()),
+            services,
+            &execution_account.auth_manager,
+        );
+        runtime.replace(input).await;
+        runtime.validate_required_servers().await?;
+        Ok(runtime)
     }
 }

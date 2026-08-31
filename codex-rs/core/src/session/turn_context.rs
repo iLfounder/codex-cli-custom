@@ -912,9 +912,11 @@ impl Session {
         session_configuration: SessionConfiguration,
         options: NewTurnContextOptions,
     ) -> Arc<TurnContext> {
+        let execution_account_runtime = self.execution_account_runtime();
         self.new_turn_context_from_configuration(
             sub_id,
             session_configuration,
+            execution_account_runtime,
             options,
             TurnMultiAgentRuntime::ResolveAndStore,
             self.git_enrichment_policy,
@@ -927,9 +929,11 @@ impl Session {
         sub_id: String,
         session_configuration: SessionConfiguration,
     ) -> Arc<TurnContext> {
+        let execution_account_runtime = self.execution_account_runtime();
         self.new_turn_context_from_configuration(
             sub_id,
             session_configuration,
+            execution_account_runtime,
             NewTurnContextOptions::default(),
             TurnMultiAgentRuntime::Preview,
             GitEnrichmentPolicy::Skip,
@@ -942,6 +946,7 @@ impl Session {
         &self,
         sub_id: String,
         session_configuration: SessionConfiguration,
+        account_runtime: Arc<crate::execution_account::ExecutionAccountRuntime>,
         options: NewTurnContextOptions,
         multi_agent_runtime: TurnMultiAgentRuntime,
         git_enrichment_policy: GitEnrichmentPolicy,
@@ -962,7 +967,7 @@ impl Session {
         let model_info = session_configuration
             .step_settings
             .resolve_model_info(
-                self.services.models_manager.as_ref(),
+                account_runtime.execution_account.models_manager.as_ref(),
                 &session_configuration.model_info_overrides,
                 self.features.enabled(Feature::Personality),
             )
@@ -981,7 +986,7 @@ impl Session {
             ),
         };
         let plugins_input = per_turn_config.plugins_config_input();
-        let plugin_outcome = self
+        let plugin_outcome = account_runtime
             .services
             .plugins_manager
             .plugins_for_config(&plugins_input)
@@ -999,7 +1004,7 @@ impl Session {
             HostSkillsSnapshot::new(Arc::new(SkillLoadOutcome::default()))
         } else {
             let effective_skill_roots = plugin_outcome.effective_plugin_skill_roots();
-            let plugin_skill_snapshots = self
+            let plugin_skill_snapshots = account_runtime
                 .services
                 .plugins_manager
                 .plugin_skill_snapshots_for_config(&plugins_input);
@@ -1021,9 +1026,9 @@ impl Session {
         let mut turn_context: TurnContext = Self::make_turn_context(
             self.thread_id(),
             self.session_id(),
-            Some(Arc::clone(&self.services.auth_manager)),
-            self.execution_account(),
-            &self.services.session_telemetry,
+            Some(Arc::clone(&account_runtime.execution_account.auth_manager)),
+            Arc::clone(&account_runtime.execution_account),
+            &account_runtime.session_telemetry,
             session_configuration.provider.clone(),
             &session_configuration,
             multi_agent_version,
@@ -1032,7 +1037,7 @@ impl Session {
             self.services.main_execve_wrapper_exe.as_ref(),
             per_turn_config,
             step_settings,
-            &self.services.models_manager,
+            &account_runtime.execution_account.models_manager,
             self.services
                 .network_proxy
                 .load_full()
@@ -1048,6 +1053,18 @@ impl Session {
             sub_id,
             skills_snapshot,
         );
+        // Capture all account-sensitive clients from the same immutable runtime. This keeps a
+        // turn coherent when the session publishes a different runtime for a later turn.
+        turn_context.model_client = account_runtime.model_client.clone();
+        turn_context.plugins_manager = Arc::clone(&account_runtime.services.plugins_manager);
+        turn_context.mcp_manager = Arc::clone(&account_runtime.services.mcp_manager);
+        turn_context.analytics_events_client = account_runtime.analytics_events_client.clone();
+        turn_context
+            .extension_data
+            .insert(account_runtime.execution_account.as_ref().clone());
+        turn_context
+            .extension_data
+            .insert(account_runtime.analytics_events_client.clone());
         turn_context.code_mode_available = self.services.code_mode_service.is_available();
         turn_context.extension_data.insert(trusted_plugin_roots);
         turn_context.realtime_active = self.conversation.running_state().await.is_some();

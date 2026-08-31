@@ -198,6 +198,47 @@ pub(super) async fn shutdown_thread(
     Ok(())
 }
 
+pub(super) async fn relinquish_thread(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    expected_writer_generation: u64,
+) -> ThreadStoreResult<()> {
+    let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
+    let (recorder, rollout_id, history_mode) = {
+        let live_recorders = store.live_recorders.lock().await;
+        let entry = live_recorders
+            .get(&thread_id)
+            .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
+        if entry.writer_lock.generation() != Some(expected_writer_generation) {
+            return Err(ThreadStoreError::Conflict {
+                message: format!(
+                    "thread {thread_id} writer generation does not match expected generation {expected_writer_generation}"
+                ),
+            });
+        }
+        (entry.recorder.clone(), entry.rollout_id, entry.history_mode)
+    };
+    let rollout_path = recorder.rollout_path().to_path_buf();
+
+    recorder.flush().await.map_err(thread_store_io_error)?;
+    recorder.progress().await.map_err(thread_store_io_error)?;
+    if !matches!(history_mode, ThreadHistoryMode::Legacy) {
+        super::thread_history_materialization::materialize_to_sqlite(
+            store,
+            rollout_id,
+            rollout_path.as_path(),
+        )
+        .await?;
+    }
+    sync_materialized_rollout_path_strict(store, thread_id, rollout_path.as_path()).await?;
+    recorder
+        .shutdown_with_progress()
+        .await
+        .map_err(thread_store_io_error)?;
+    store.live_recorders.lock().await.remove(&thread_id);
+    Ok(())
+}
+
 pub(super) async fn discard_thread(
     store: &LocalThreadStore,
     thread_id: ThreadId,
@@ -236,6 +277,18 @@ async fn sync_materialized_rollout_path(
     thread_id: ThreadId,
     rollout_path: &std::path::Path,
 ) -> ThreadStoreResult<()> {
+    let result = sync_materialized_rollout_path_strict(store, thread_id, rollout_path).await;
+    if let Err(err) = result {
+        warn!("failed to sync materialized rollout path for thread {thread_id}: {err}");
+    }
+    Ok(())
+}
+
+async fn sync_materialized_rollout_path_strict(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    rollout_path: &std::path::Path,
+) -> ThreadStoreResult<()> {
     if codex_rollout::existing_rollout_path(rollout_path)
         .await
         .is_none()
@@ -268,10 +321,7 @@ async fn sync_materialized_rollout_path(
         Ok(())
     }
     .await;
-    if let Err(err) = result {
-        warn!("failed to sync materialized rollout path for thread {thread_id}: {err}");
-    }
-    Ok(())
+    result
 }
 
 fn thread_store_io_error(err: std::io::Error) -> ThreadStoreError {

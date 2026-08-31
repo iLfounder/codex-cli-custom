@@ -78,29 +78,46 @@ pub async fn realtime_conversation_list_voices(sess: &Session, sub_id: String) {
 
 /// Queues an inter-agent message, then lets the shared pending-work scheduler
 /// decide whether an idle session should start a regular turn.
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "mailbox admission and execution control share one transition fence"
+)]
 pub async fn inter_agent_communication(
     sess: &Arc<Session>,
     sub_id: String,
     communication: InterAgentCommunication,
     start_options: codex_protocol::turn_input::TurnStartOptions,
 ) {
+    let transition = sess.execution_runtime_transition_lock.lock().await;
+    if sess.execution_control_is_closing() {
+        return;
+    }
     let trigger_turn = communication.trigger_turn;
     sess.input_queue
         .enqueue_mailbox_communication(communication, start_options)
         .await;
     crate::agent_communication::emit_agent_communication_receive(&sub_id);
+    drop(transition);
     if trigger_turn || sess.has_outstanding_durable_sleep() {
         sess.maybe_start_turn_for_pending_work_with_sub_id(sub_id)
             .await;
     }
 }
 
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "idle shell admission and execution control share one transition fence"
+)]
 pub async fn run_user_shell_command(
     sess: &Arc<Session>,
     sub_id: String,
     command: String,
     timeout_ms: Option<u64>,
 ) {
+    let _transition = sess.execution_runtime_transition_lock.lock().await;
+    if sess.execution_control_is_closing() {
+        return;
+    }
     if let Some((turn_context, cancellation_token)) =
         sess.active_turn_context_and_cancellation_token().await
     {
@@ -243,7 +260,15 @@ pub async fn reload_user_config(sess: &Arc<Session>) {
     sess.reload_user_config_layer().await;
 }
 
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "compact admission and execution control share one transition fence"
+)]
 pub async fn compact(sess: &Arc<Session>, sub_id: String) {
+    let _transition = sess.execution_runtime_transition_lock.lock().await;
+    if sess.execution_control_is_closing() {
+        return;
+    }
     let turn_context = sess
         .new_turn_with_default_settings(sub_id, Default::default())
         .await;
@@ -338,7 +363,7 @@ pub async fn thread_rollback(sess: &Arc<Session>, sub_id: String, num_turns: u32
     sess.services
         .thread_extension_data
         .remove::<NodeReplReviewEvidence>();
-    sess.guardian_review_session.invalidate().await;
+    sess.guardian_review_session().invalidate().await;
     sess.services
         .agent_control
         .rollout_budget()
@@ -411,8 +436,9 @@ pub(super) async fn shutdown_session_runtime(sess: &Arc<Session>) {
         let _ = shell_snapshot_prewarm.await;
     }
     sess.hooks().shutdown().await;
-    sess.async_hook_results.close();
-    while sess.async_hook_results.try_recv().is_ok() {}
+    let async_hook_results = sess.async_hook_results.load_full();
+    async_hook_results.close();
+    while async_hook_results.try_recv().is_ok() {}
     sess.services
         .unified_exec_manager
         .terminate_all_processes()
@@ -426,7 +452,7 @@ pub(super) async fn shutdown_session_runtime(sess: &Arc<Session>) {
         sess.mcp_refresh.close();
         sess.services.mcp_runtime.shutdown().await;
     }
-    sess.guardian_review_session.shutdown().await;
+    sess.guardian_review_session().shutdown().await;
 
     crate::hook_runtime::run_session_end_hooks(sess).await;
 }
@@ -450,7 +476,7 @@ pub async fn shutdown(sess: &Arc<Session>, sub_id: String) -> bool {
         .raw_items()
         .filter(|item| is_user_turn_boundary(item))
         .count();
-    sess.services.session_telemetry.counter(
+    sess.session_telemetry().counter(
         "codex.conversation.turn.count",
         i64::try_from(turn_count).unwrap_or(0),
         &[],
@@ -489,12 +515,57 @@ pub async fn shutdown(sess: &Arc<Session>, sub_id: String) -> bool {
     true
 }
 
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "strict writer release owns the execution transition through its commit"
+)]
+pub async fn relinquish(
+    sess: &Arc<Session>,
+    expected_writer_generation: u64,
+    reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+) -> bool {
+    let transition = sess.execution_runtime_transition_lock.lock().await;
+    if sess.begin_execution_control_transition().await.is_err() {
+        let _ = reply.send(Err("thread is not idle".to_string()));
+        return false;
+    }
+    let result = match sess.live_thread() {
+        Some(live_thread) => live_thread
+            .relinquish(expected_writer_generation)
+            .await
+            .map_err(|err| err.to_string()),
+        None => Err("thread persistence is unavailable".to_string()),
+    };
+    if let Err(err) = result {
+        sess.end_execution_control_transition();
+        let _ = reply.send(Err(err));
+        return false;
+    }
+    drop(transition);
+
+    shutdown_session_runtime(sess).await;
+    emit_thread_stop_lifecycle(sess.as_ref()).await;
+    sess.services
+        .rollout_thread_trace
+        .record_ended(codex_rollout_trace::RolloutStatus::Completed);
+    let _ = reply.send(Ok(()));
+    true
+}
+
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "review admission and execution control share one transition fence"
+)]
 pub async fn review(
     sess: &Arc<Session>,
     config: &Arc<Config>,
     sub_id: String,
     review_request: ReviewRequest,
 ) {
+    let _transition = sess.execution_runtime_transition_lock.lock().await;
+    if sess.execution_control_is_closing() {
+        return;
+    }
     let turn_context = sess
         .new_turn_with_default_settings(sub_id.clone(), Default::default())
         .await;
@@ -703,6 +774,10 @@ pub(super) async fn submission_loop(
                     false
                 }
                 Op::Shutdown => shutdown(&sess, sub.id.clone()).await,
+                Op::Relinquish {
+                    expected_writer_generation,
+                    reply,
+                } => relinquish(&sess, expected_writer_generation, reply).await,
                 Op::Review { review_request } => {
                     review(&sess, &config, sub.id.clone(), review_request).await;
                     false

@@ -231,13 +231,34 @@ impl CodexThread {
         self.io.submit(op).await
     }
 
+    /// Strictly release the exact persistent writer generation and wait for termination.
+    pub async fn relinquish_and_wait(&self, expected_writer_generation: u64) -> Result<(), String> {
+        self.io
+            .relinquish_and_wait(expected_writer_generation)
+            .await
+    }
+
     /// Returns the session telemetry handle for thread-scoped production instrumentation.
     pub fn session_telemetry(&self) -> SessionTelemetry {
-        self.session.services.session_telemetry.clone()
+        self.session.session_telemetry()
     }
 
     pub fn execution_account(&self) -> Arc<crate::execution_account::ExecutionAccountContext> {
         self.session.execution_account()
+    }
+
+    pub(crate) async fn switch_execution_account(
+        &self,
+        expected: codex_protocol::protocol::ExecutionAccountBinding,
+        target: Arc<crate::execution_account::ExecutionAccountContext>,
+        services: crate::execution_account::ExecutionAccountServices,
+    ) -> Result<
+        codex_protocol::protocol::ExecutionAccountBinding,
+        crate::execution_account::ExecutionAccountSwitchError,
+    > {
+        self.session
+            .switch_execution_account(expected, target, services)
+            .await
     }
 
     /// Returns extension-owned data attached to this thread runtime.
@@ -670,7 +691,7 @@ impl CodexThread {
 
     pub async fn guardian_trunk_rollout_path(&self) -> Option<PathBuf> {
         self.session
-            .guardian_review_session
+            .guardian_review_session()
             .trunk_rollout_path()
             .await
     }
@@ -929,6 +950,10 @@ impl CodexThread {
             .await
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "out-of-turn MCP calls and execution control share one transition fence"
+    )]
     pub async fn call_mcp_tool(
         &self,
         server: &str,
@@ -936,10 +961,13 @@ impl CodexThread {
         arguments: Option<serde_json::Value>,
         meta: Option<serde_json::Value>,
     ) -> anyhow::Result<CallToolResult> {
+        let _transition = self.session.execution_runtime_transition_lock.lock().await;
+        if self.session.execution_control_is_closing() {
+            anyhow::bail!("thread runtime is closing");
+        }
         self.session.refresh_mcp_if_dirty().await;
-        self.session
-            .services
-            .mcp_runtime
+        let mcp_runtime = Arc::clone(&self.session.execution_account_runtime().mcp_runtime);
+        mcp_runtime
             .latest_call_tool(
                 server, tool, /*environment_id*/ None, arguments, meta,
                 /*requested_timeout*/ None, /*wait_for_server*/ true,
@@ -951,7 +979,17 @@ impl CodexThread {
         self.session.enabled(feature)
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "out-of-band input ownership and execution control share one transition fence"
+    )]
     pub async fn increment_out_of_band_elicitation_count(&self) -> CodexResult<i64> {
+        let _transition = self.session.execution_runtime_transition_lock.lock().await;
+        if self.session.execution_control_is_closing() {
+            return Err(CodexErr::InvalidRequest(
+                "thread runtime is closing".to_string(),
+            ));
+        }
         let mut elicitations = self.out_of_band_elicitations.lock().await;
         let incremented = elicitations.count.checked_add(1).ok_or_else(|| {
             CodexErr::Fatal("out-of-band elicitation count overflowed".to_string())
@@ -963,7 +1001,12 @@ impl CodexThread {
         Ok(incremented)
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "out-of-band cleanup and execution control share one transition fence"
+    )]
     pub async fn decrement_out_of_band_elicitation_count(&self) -> CodexResult<i64> {
+        let _transition = self.session.execution_runtime_transition_lock.lock().await;
         let mut elicitations = self.out_of_band_elicitations.lock().await;
         if elicitations.count == 0 {
             return Err(CodexErr::InvalidRequest(

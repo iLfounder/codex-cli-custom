@@ -180,6 +180,7 @@ impl Session {
             return;
         };
         loop {
+            let account_runtime = self.execution_account_runtime();
             let environments = self.services.turn_environments.snapshot().await;
             let ready_environments = environments
                 .turn_environments()
@@ -198,9 +199,8 @@ impl Session {
             {
                 self.mark_mcp_runtime_dirty();
             }
-            let auth = self.services.auth_manager.auth_cached();
-            if !self
-                .services
+            let auth = account_runtime.execution_account.auth_manager.auth_cached();
+            if !account_runtime
                 .mcp_runtime
                 .current_auth_matches(auth.as_ref())
             {
@@ -214,7 +214,7 @@ impl Session {
                 refresh: &self.mcp_refresh,
                 published: false,
             };
-            let auth = self.services.auth_manager.auth().await;
+            let auth = account_runtime.execution_account.auth_manager.auth().await;
             let desired = self.latest_mcp_desired_state(auth).await;
             let selected_capability_roots = self
                 .resolve_selected_capability_roots_for_step(&desired.environments)
@@ -228,7 +228,7 @@ impl Session {
                     &desired.environments,
                 )
                 .await;
-            let mcp_projection = self
+            let mcp_projection = account_runtime
                 .services
                 .mcp_manager
                 .runtime_config_for_step(
@@ -265,7 +265,8 @@ impl Session {
             .acquire()
             .await
             .map_err(|_| anyhow::anyhow!("MCP runtime refresh semaphore closed"))?;
-        let auth = self.services.auth_manager.auth().await;
+        let account_runtime = self.execution_account_runtime();
+        let auth = account_runtime.execution_account.auth_manager.auth().await;
         let desired = self.latest_mcp_desired_state(auth).await;
         let selected_capability_roots = self
             .resolve_selected_capability_roots_for_step(&desired.environments)
@@ -279,7 +280,7 @@ impl Session {
                 &desired.environments,
             )
             .await;
-        let mcp_projection = self
+        let mcp_projection = account_runtime
             .services
             .mcp_manager
             .runtime_config_for_step(
@@ -314,7 +315,7 @@ impl Session {
             input.mcp_servers.contains_key(CODEX_APPS_MCP_SERVER_NAME),
             "unknown MCP server '{CODEX_APPS_MCP_SERVER_NAME}'"
         );
-        let refreshed = self.services.mcp_runtime.replace_fresh(input).await;
+        let refreshed = account_runtime.mcp_runtime.replace_fresh(input).await;
         self.services.thread_extension_data.insert(selected_plugins);
         refreshed
     }
@@ -332,8 +333,8 @@ impl Session {
     ) -> Arc<codex_mcp::McpBinding> {
         let ready_selected_capability_roots =
             Self::ready_selected_capability_roots(selected_capability_roots);
-        if self
-            .services
+        let account_runtime = self.execution_account_runtime();
+        if account_runtime
             .mcp_runtime
             .current_ready_selected_capability_roots()
             != ready_selected_capability_roots
@@ -341,15 +342,13 @@ impl Session {
             self.mark_mcp_runtime_dirty();
         }
 
-        let recovered_oauth_servers = self
-            .services
+        let recovered_oauth_servers = account_runtime
             .mcp_runtime
             .updated_oauth_credentials_after_auth_failure()
             .await;
         if !recovered_oauth_servers.is_empty()
             && let Ok(_refresh) = self.mcp_refresh.acquire().await
-            && self
-                .services
+            && account_runtime
                 .mcp_runtime
                 .has_authentication_failed_servers(&recovered_oauth_servers)
                 .await
@@ -362,8 +361,8 @@ impl Session {
             .chain(&recovered_oauth_servers)
             .cloned()
             .collect::<Vec<_>>();
-        if let Some(binding) = self
-            .services
+        let account_runtime = self.execution_account_runtime();
+        if let Some(binding) = account_runtime
             .mcp_runtime
             .current_binding_with_required_servers(&required_servers)
             .await
@@ -542,7 +541,11 @@ impl Session {
         request_id: RequestId,
         request: ElicitationRequest,
     ) -> McpServerElicitationOutcome {
-        if self.services.mcp_runtime.elicitations_auto_deny() {
+        if self
+            .execution_account_runtime()
+            .mcp_runtime
+            .elicitations_auto_deny()
+        {
             return McpServerElicitationOutcome {
                 response: Some(ElicitationResponse {
                     action: codex_rmcp_client::ElicitationAction::Accept,
@@ -635,7 +638,7 @@ impl Session {
             return Ok(());
         }
 
-        self.services
+        self.execution_account_runtime()
             .mcp_runtime
             .resolve_elicitation(server_name, id, response)
             .await
@@ -651,15 +654,15 @@ impl Session {
             error!("MCP runtime refresh semaphore closed");
             return;
         };
-        let auth = self.services.auth_manager.auth().await;
+        let account_runtime = self.execution_account_runtime();
+        let auth = account_runtime.execution_account.auth_manager.auth().await;
         {
             let mut state = self.state.lock().await;
             let mut config = (*state.session_configuration.original_config_do_not_use).clone();
             config.mcp_servers = refresh_config.mcp_servers.clone();
             state.session_configuration.original_config_do_not_use = Arc::new(config);
         }
-        let ready_selected_capability_roots = self
-            .services
+        let ready_selected_capability_roots = account_runtime
             .mcp_runtime
             .current_ready_selected_capability_roots();
         let environments = self.services.turn_environments.snapshot().await;
@@ -670,7 +673,7 @@ impl Session {
                 &environments,
             )
             .await;
-        let mcp_projection = self
+        let mcp_projection = account_runtime
             .services
             .mcp_manager
             .runtime_config_for_step(
@@ -707,7 +710,9 @@ impl Session {
     }
 
     pub(crate) fn cancel_mcp_startup(&self) {
-        self.services.mcp_runtime.cancel_startup();
+        self.execution_account_runtime()
+            .mcp_runtime
+            .cancel_startup();
     }
 }
 
@@ -721,7 +726,11 @@ async fn review_guardian_mcp_elicitation(
         return Ok(None);
     };
 
-    let Some(mcp_config) = session.services.mcp_runtime.current_config() else {
+    let Some(mcp_config) = session
+        .execution_account_runtime()
+        .mcp_runtime
+        .current_config()
+    else {
         return Ok(None);
     };
     let step_settings = turn_context.current_settings.load_full();

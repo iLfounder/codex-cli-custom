@@ -261,6 +261,29 @@ pub trait ThreadStore: Any + Send + Sync {
     /// Flushes pending items and closes the live thread writer.
     fn shutdown_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()>;
 
+    /// Strictly durabilizes and releases the live writer for an explicit ownership handoff.
+    ///
+    /// Implementations must validate `expected_writer_generation` before mutating persistence and
+    /// retain the writer when any durability step fails. Only success may release ownership.
+    fn relinquish_thread(
+        &self,
+        thread_id: ThreadId,
+        expected_writer_generation: u64,
+    ) -> ThreadStoreFuture<'_, ()>;
+
+    /// Validates the exact live writer generation without mutating persistence.
+    fn validate_writer_generation(
+        &self,
+        _thread_id: ThreadId,
+        _expected_writer_generation: u64,
+    ) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "validate_writer_generation",
+            })
+        })
+    }
+
     /// Discards the live thread writer without forcing pending in-memory items to become durable.
     ///
     /// Core calls this when session initialization fails after a live writer has been created.

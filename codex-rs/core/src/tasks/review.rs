@@ -58,9 +58,7 @@ impl SessionTask for ReviewTask {
         input: Vec<TurnInput>,
         cancellation_token: CancellationToken,
     ) -> SessionTaskResult {
-        session
-            .services
-            .session_telemetry
+        ctx.session_telemetry
             .counter("codex.task.review", /*inc*/ 1, &[]);
 
         let mut user_input = Vec::new();

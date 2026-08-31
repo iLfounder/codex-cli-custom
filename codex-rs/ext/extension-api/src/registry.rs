@@ -8,6 +8,7 @@ use crate::ApprovalReviewError;
 use crate::ApprovalReviewInput;
 use crate::ConfigContributor;
 use crate::ContextContributor;
+use crate::ExecutionAccountRuntimeContributor;
 use crate::ExtensionData;
 use crate::ExtensionEventSink;
 use crate::ExtensionMetrics;
@@ -32,6 +33,7 @@ impl<C: Sync> Default for ExtensionRegistryBuilder<C> {
         Self {
             registry: ExtensionRegistry {
                 event_sink: Arc::new(NoopExtensionEventSink),
+                execution_account_runtime_contributors: Vec::new(),
                 thread_lifecycle_contributors: Vec::new(),
                 turn_lifecycle_contributors: Vec::new(),
                 config_contributors: Vec::new(),
@@ -79,6 +81,16 @@ impl<C: Sync> ExtensionRegistryBuilder<C> {
     ) {
         self.registry
             .thread_lifecycle_contributors
+            .push(contributor);
+    }
+
+    /// Registers account-sensitive extension state that must follow a hot switch.
+    pub fn execution_account_runtime_contributor(
+        &mut self,
+        contributor: Arc<dyn ExecutionAccountRuntimeContributor<C>>,
+    ) {
+        self.registry
+            .execution_account_runtime_contributors
             .push(contributor);
     }
 
@@ -146,6 +158,7 @@ impl<C: Sync> ExtensionRegistryBuilder<C> {
 /// Immutable typed registry produced after extensions are installed.
 pub struct ExtensionRegistry<C: Sync> {
     event_sink: Arc<dyn ExtensionEventSink>,
+    execution_account_runtime_contributors: Vec<Arc<dyn ExecutionAccountRuntimeContributor<C>>>,
     thread_lifecycle_contributors: Vec<Arc<dyn ThreadLifecycleContributor<C>>>,
     turn_lifecycle_contributors: Vec<Arc<dyn TurnLifecycleContributor>>,
     config_contributors: Vec<Arc<dyn ConfigContributor<C>>>,
@@ -164,6 +177,13 @@ impl<C: Sync> ExtensionRegistry<C> {
     /// Returns the host event sink retained by this registry.
     pub fn event_sink(&self) -> Arc<dyn ExtensionEventSink> {
         Arc::clone(&self.event_sink)
+    }
+
+    /// Returns account-sensitive runtime contributors in registration order.
+    pub fn execution_account_runtime_contributors(
+        &self,
+    ) -> &[Arc<dyn ExecutionAccountRuntimeContributor<C>>] {
+        &self.execution_account_runtime_contributors
     }
 
     /// Returns the registered thread-lifecycle contributors.

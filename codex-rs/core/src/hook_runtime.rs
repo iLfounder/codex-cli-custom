@@ -760,7 +760,8 @@ pub(crate) async fn drain_async_hook_results(
     turn_context: &Arc<TurnContext>,
     before_user_prompt: bool,
 ) {
-    while let Ok(result) = sess.async_hook_results.try_recv() {
+    let async_hook_results = sess.async_hook_results.load_full();
+    while let Ok(result) = async_hook_results.try_recv() {
         let additional_contexts = result
             .run
             .entries
@@ -923,7 +924,7 @@ fn track_hook_completed_analytics(
 ) {
     let (tracking, hook) =
         hook_run_analytics_payload(sess.thread_id.to_string(), turn_context, completed);
-    sess.services
+    turn_context
         .analytics_events_client
         .track_hook_run(tracking, hook);
 }

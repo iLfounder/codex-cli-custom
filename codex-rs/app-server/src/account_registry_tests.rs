@@ -505,3 +505,45 @@ async fn logout_reservation_blocks_only_the_target_slot_resolver() {
         .await
         .expect("clear reservation");
 }
+
+#[tokio::test]
+async fn transition_resolution_holds_target_readiness_lease() {
+    let process_home = tempdir().expect("temp process home");
+    let mut slots = manifest(process_home.path(), 7);
+    slots.slots[1].status = ManifestSlotStatus::Ready;
+    slots
+        .persist(&process_home.path().join(MANIFEST_FILE))
+        .expect("persist manifest");
+    let registry = registry_for_home(process_home.path()).await;
+    let slot_auth = AuthManager::from_auth_for_testing_with_home(
+        CodexAuth::from_api_key("slot-key"),
+        slots.slots[1].auth_home.clone(),
+    );
+    let slot_models = codex_core::build_models_manager(registry.config.as_ref(), slot_auth.clone());
+    let runtime = Arc::new(AccountRuntimeBundle {
+        auth_manager: slot_auth,
+        models_manager: slot_models,
+    });
+    let binding_transition = {
+        let state = registry.state.read().expect("registry state");
+        let slot = state
+            .slots
+            .iter()
+            .find(|slot| slot.manifest.account_slot_id == SECOND_SLOT_ID)
+            .expect("secondary slot");
+        assert!(slot.runtime.set(runtime).is_ok());
+        Arc::clone(&slot.binding_transition)
+    };
+
+    let transition = registry
+        .resolve_for_transition(ExecutionAccountBinding {
+            slot_id: SECOND_SLOT_ID.to_string(),
+            generation: 1,
+        })
+        .await
+        .expect("resolve transition");
+
+    assert!(Arc::clone(&binding_transition).try_lock_owned().is_err());
+    drop(transition);
+    assert!(binding_transition.try_lock_owned().is_ok());
+}

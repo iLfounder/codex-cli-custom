@@ -381,6 +381,7 @@ pub(crate) struct ThreadManagerState {
 #[derive(Clone)]
 struct AccountServiceEntry {
     auth_manager: Arc<AuthManager>,
+    models_manager: SharedModelsManager,
     services: ExecutionAccountServices,
 }
 
@@ -482,6 +483,7 @@ impl ThreadManager {
             "default".to_string(),
             AccountServiceEntry {
                 auth_manager: Arc::clone(&auth_manager),
+                models_manager: Arc::clone(&models_manager),
                 services: ExecutionAccountServices {
                     plugins_manager: Arc::clone(&plugins_manager),
                     mcp_manager: Arc::clone(&mcp_manager),
@@ -651,10 +653,13 @@ impl ThreadManager {
             skills_service.clone(),
         ));
         let mcp_manager = Arc::new(McpManager::new(Arc::clone(&plugins_manager)));
+        let models_manager = create_model_provider(provider, Some(auth_manager.clone()))
+            .models_manager(codex_home.clone(), /*config_model_catalog*/ None);
         let account_services = HashMap::from([(
             "default".to_string(),
             AccountServiceEntry {
                 auth_manager: Arc::clone(&auth_manager),
+                models_manager: Arc::clone(&models_manager),
                 services: ExecutionAccountServices {
                     plugins_manager: Arc::clone(&plugins_manager),
                     mcp_manager: Arc::clone(&mcp_manager),
@@ -672,8 +677,6 @@ impl ThreadManager {
             state_db.clone(),
         ));
         let agent_graph_store = local_agent_graph_store_from_state_db(state_db.as_ref());
-        let models_manager = create_model_provider(provider, Some(auth_manager.clone()))
-            .models_manager(codex_home.clone(), /*config_model_catalog*/ None);
         let execution_account_resolver = Arc::new(DefaultExecutionAccountResolver::new(
             Arc::clone(&auth_manager),
             Arc::clone(&models_manager),
@@ -862,6 +865,41 @@ impl ThreadManager {
         execution_account: &ExecutionAccountContext,
     ) -> ExecutionAccountServices {
         self.state.execution_account_services(execution_account)
+    }
+
+    /// Resolves, prepares, and commits an idle thread's next-turn account binding.
+    pub async fn switch_thread_execution_account(
+        &self,
+        thread_id: ThreadId,
+        expected: ExecutionAccountBinding,
+        target_slot_id: String,
+    ) -> Result<ExecutionAccountBinding, crate::execution_account::ExecutionAccountSwitchError>
+    {
+        let target_binding = ExecutionAccountBinding {
+            slot_id: target_slot_id,
+            generation: expected
+                .generation
+                .checked_add(1)
+                .ok_or(crate::execution_account::ExecutionAccountSwitchError::PreparationFailed)?,
+        };
+        let target = self
+            .state
+            .execution_account_resolver
+            .resolve_for_transition(target_binding)
+            .await
+            .map_err(|_| {
+                crate::execution_account::ExecutionAccountSwitchError::TargetUnavailable
+            })?;
+        let services = self.execution_account_services(target.execution_account());
+        let thread = self
+            .get_thread(thread_id)
+            .await
+            .map_err(|_| crate::execution_account::ExecutionAccountSwitchError::StaleGeneration)?;
+        let result = thread
+            .switch_execution_account(expected, Arc::clone(target.execution_account()), services)
+            .await;
+        drop(target);
+        result
     }
 
     pub fn clear_all_account_plugin_caches(&self) {
@@ -1625,6 +1663,7 @@ impl ThreadManagerState {
             .get(slot_id)
             .cloned()
             && Arc::ptr_eq(&entry.auth_manager, &execution_account.auth_manager)
+            && Arc::ptr_eq(&entry.models_manager, &execution_account.models_manager)
         {
             return entry.services;
         }
@@ -1635,6 +1674,7 @@ impl ThreadManagerState {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(entry) = account_services.get(slot_id)
             && Arc::ptr_eq(&entry.auth_manager, &execution_account.auth_manager)
+            && Arc::ptr_eq(&entry.models_manager, &execution_account.models_manager)
         {
             return entry.services.clone();
         }
@@ -1657,6 +1697,7 @@ impl ThreadManagerState {
             slot_id.to_string(),
             AccountServiceEntry {
                 auth_manager: Arc::clone(&execution_account.auth_manager),
+                models_manager: Arc::clone(&execution_account.models_manager),
                 services: services.clone(),
             },
         );

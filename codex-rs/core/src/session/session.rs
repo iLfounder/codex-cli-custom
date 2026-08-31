@@ -34,6 +34,8 @@ use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_skills::SkillError;
 use codex_utils_git_discovery::GitRootDiscovery;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use tokio::sync::Semaphore;
 
 /// Context for an initialized model agent
@@ -41,7 +43,8 @@ use tokio::sync::Semaphore;
 /// A session has at most 1 running task at a time, and can be interrupted by user input.
 pub(crate) struct Session {
     pub(crate) thread_id: ThreadId,
-    pub(crate) execution_account: Arc<crate::execution_account::ExecutionAccountContext>,
+    pub(crate) execution_account_runtime:
+        arc_swap::ArcSwap<crate::execution_account::ExecutionAccountRuntime>,
     pub(crate) installation_id: String,
     pub(super) tx_event: Sender<Event>,
     pub(super) agent_status: watch::Sender<AgentStatus>,
@@ -63,19 +66,27 @@ pub(crate) struct Session {
     pub(super) mcp_elicitation_reviewer_handle: OnceLock<codex_mcp::ElicitationReviewerHandle>,
     pub(super) mcp_elicitation_lifecycle_handle: OnceLock<codex_mcp::ElicitationLifecycle>,
     pub(super) mcp_prewarm_tx: async_channel::Sender<()>,
-    pub(super) mcp_prewarm_shutdown: CancellationToken,
+    pub(super) mcp_prewarm_rx: async_channel::Receiver<()>,
+    pub(super) mcp_prewarm_shutdown: std::sync::Mutex<CancellationToken>,
     pub(super) mcp_prewarm_task: std::sync::Mutex<Option<JoinHandle<()>>>,
     pub(crate) conversation: Arc<RealtimeConversationManager>,
     pub(crate) realtime_history: Option<Mutex<crate::realtime_history::RealtimeHistoryState>>,
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
-    pub(crate) async_hook_results: async_channel::Receiver<HookCompletedEvent>,
+    pub(crate) execution_runtime_transition_lock: Mutex<()>,
+    pub(crate) execution_control_closing: AtomicBool,
+    pub(crate) async_hook_results: arc_swap::ArcSwap<async_channel::Receiver<HookCompletedEvent>>,
     pub(crate) input_queue: InputQueue,
-    pub(crate) guardian_review_session: GuardianReviewSessionManager,
     pub(crate) services: SessionServices,
     pub(super) git_enrichment_policy: GitEnrichmentPolicy,
     pub(super) fork_persistence: ForkPersistence,
     pub(super) forked_from_ordinal_exclusive: Option<u64>,
     pub(super) next_internal_sub_id: AtomicU64,
+}
+
+struct PreparedExecutionAccountRuntime {
+    runtime: Arc<crate::execution_account::ExecutionAccountRuntime>,
+    hooks: Hooks,
+    async_hook_results: async_channel::Receiver<HookCompletedEvent>,
 }
 
 #[derive(Clone)]
@@ -638,7 +649,405 @@ impl Session {
     pub(crate) fn execution_account(
         &self,
     ) -> Arc<crate::execution_account::ExecutionAccountContext> {
-        Arc::clone(&self.execution_account)
+        Arc::clone(&self.execution_account_runtime.load_full().execution_account)
+    }
+
+    pub(crate) fn execution_account_runtime(
+        &self,
+    ) -> Arc<crate::execution_account::ExecutionAccountRuntime> {
+        self.execution_account_runtime.load_full()
+    }
+
+    pub(crate) fn guardian_review_session(&self) -> Arc<GuardianReviewSessionManager> {
+        Arc::clone(
+            &self
+                .execution_account_runtime
+                .load_full()
+                .guardian_review_session,
+        )
+    }
+
+    pub(crate) fn session_telemetry(&self) -> SessionTelemetry {
+        self.execution_account_runtime().session_telemetry.clone()
+    }
+
+    pub(crate) fn analytics_events_client(&self) -> AnalyticsEventsClient {
+        self.execution_account_runtime()
+            .analytics_events_client
+            .clone()
+    }
+
+    async fn prepare_execution_account_runtime(
+        self: &Arc<Self>,
+        execution_account: Arc<crate::execution_account::ExecutionAccountContext>,
+        services: crate::execution_account::ExecutionAccountServices,
+    ) -> Result<
+        PreparedExecutionAccountRuntime,
+        crate::execution_account::ExecutionAccountSwitchError,
+    > {
+        let session_configuration = self.state.lock().await.session_configuration.clone();
+        let config = Arc::new(self.build_effective_session_config(&session_configuration));
+        let environments = self.services.turn_environments.snapshot().await;
+        let _skill_errors = warm_plugins_and_skills_for_session_init(
+            Arc::clone(&config),
+            Arc::clone(&services.plugins_manager),
+            Arc::clone(&self.services.skills_service),
+            &environments,
+        )
+        .await;
+        let hooks_config = build_hooks_config(
+            config.as_ref(),
+            services.plugins_manager.as_ref(),
+            environments.single_local_environment(),
+        )
+        .await;
+        let (hooks, async_hook_results) = self
+            .hooks()
+            .isolated_for_account_transition(hooks_config)
+            .map_err(|_| {
+                crate::execution_account::ExecutionAccountSwitchError::PreparationFailed
+            })?;
+        let auth = execution_account.auth_manager.auth().await;
+        let auth_mode = auth
+            .as_ref()
+            .map(CodexAuth::auth_mode)
+            .map(TelemetryAuthMode::from);
+        let account_id = auth.as_ref().and_then(CodexAuth::get_account_id);
+        let account_email = auth.as_ref().and_then(CodexAuth::get_account_email);
+        let originator = session_configuration.originator.clone();
+        let terminal_type = user_agent();
+        let session_model = session_configuration.collaboration_mode.model().to_string();
+        let auth_env_telemetry = collect_auth_env_telemetry(
+            session_configuration.provider.info(),
+            execution_account.auth_manager.codex_api_key_env_enabled(),
+        );
+        let mut session_telemetry = SessionTelemetry::new(
+            self.thread_id,
+            session_model.as_str(),
+            session_model.as_str(),
+            account_id.clone(),
+            account_email.clone(),
+            auth_mode,
+            originator.clone(),
+            config.otel.log_user_prompt,
+            terminal_type.clone(),
+            session_configuration.session_source.clone(),
+        )
+        .with_auth_env(auth_env_telemetry.to_otel_metadata());
+        if let Some(service_name) = session_configuration.metrics_service_name.as_deref() {
+            session_telemetry = session_telemetry.with_metrics_service_name(service_name);
+        }
+        let network_proxy_audit_metadata = NetworkProxyAuditMetadata {
+            conversation_id: Some(self.thread_id.to_string()),
+            app_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            user_account_id: account_id,
+            auth_mode: auth_mode.map(|mode| mode.to_string()),
+            originator: Some(originator),
+            user_email: account_email,
+            terminal_type: Some(terminal_type),
+            model: Some(session_model.clone()),
+            slug: Some(session_model),
+        };
+        let shell_snapshot = if config.features.enabled(Feature::ShellSnapshot) {
+            ShellSnapshot::new(
+                config.codex_home.clone(),
+                self.thread_id,
+                session_telemetry.clone(),
+                self.services.state_db.clone(),
+            )
+        } else {
+            ShellSnapshot::disabled()
+        };
+        let analytics_events_client = AnalyticsEventsClient::new(
+            Arc::clone(&execution_account.auth_manager),
+            config.chatgpt_base_url.trim_end_matches('/').to_string(),
+            config.analytics_enabled,
+        );
+        services
+            .plugins_manager
+            .set_analytics_events_client(analytics_events_client.clone());
+        let model_client = ModelClient::new(
+            Some(Arc::clone(&execution_account.auth_manager)),
+            if config.features.enabled(Feature::UseAgentIdentity) {
+                AgentIdentityAuthPolicy::ChatGptAuth
+            } else {
+                AgentIdentityAuthPolicy::JwtOnly
+            },
+            self.thread_id,
+            session_configuration.provider.info().clone(),
+            session_configuration.session_source.clone(),
+            session_configuration.originator.clone(),
+            config.model_verbosity,
+            config.features.enabled(Feature::ContentItemKinds),
+            config.features.enabled(Feature::EnableRequestCompression),
+            config.features.enabled(Feature::RuntimeMetrics),
+            Self::build_model_client_beta_features_header(config.as_ref()),
+            config
+                .features
+                .enabled(Feature::ConcurrentReasoningSummaries),
+            self.services.attestation_provider.clone(),
+            config.http_client_factory(),
+        )
+        .with_session_context(
+            crate::guardian::prompt_cache_key_override_for_review_session(
+                &session_configuration.session_source,
+                session_configuration.parent_thread_id,
+            ),
+            self.tx_event.clone(),
+        );
+        let mcp_runtime = self
+            .prepare_mcp_runtime_for_execution_account(&execution_account, &services)
+            .await
+            .map_err(|_| {
+                crate::execution_account::ExecutionAccountSwitchError::PreparationFailed
+            })?;
+        let target_session_store =
+            codex_extension_api::ExtensionData::new(self.session_id().to_string());
+        target_session_store.insert(execution_account.as_ref().clone());
+        target_session_store.insert(Arc::clone(&execution_account.auth_manager));
+        target_session_store.insert(analytics_events_client.clone());
+        let mcp_resource_client = Arc::new(McpResourceClient::new(Arc::clone(&mcp_runtime)));
+        let extension_metrics =
+            extension_metrics::from_session_telemetry(session_telemetry.clone());
+        let mut extension_runtimes = Vec::new();
+        for contributor in self
+            .services
+            .extensions
+            .execution_account_runtime_contributors()
+        {
+            let prepared = contributor
+                .prepare(codex_extension_api::ExecutionAccountRuntimePrepareInput {
+                    config: config.as_ref(),
+                    session_source: &session_configuration.session_source,
+                    session_store: &self.services.session_extension_data,
+                    target_session_store: &target_session_store,
+                    thread_store: &self.services.thread_extension_data,
+                    mcp_resource_client: Arc::clone(&mcp_resource_client),
+                    extension_metrics: Some(Arc::clone(&extension_metrics)),
+                })
+                .await
+                .map_err(|_| {
+                    crate::execution_account::ExecutionAccountSwitchError::PreparationFailed
+                })?;
+            extension_runtimes.push(prepared);
+        }
+        Ok(PreparedExecutionAccountRuntime {
+            runtime: Arc::new(crate::execution_account::ExecutionAccountRuntime {
+                execution_account,
+                services,
+                mcp_runtime,
+                model_client,
+                analytics_events_client,
+                session_telemetry,
+                network_proxy_audit_metadata,
+                shell_snapshot,
+                extension_runtimes,
+                guardian_review_session: Arc::new(GuardianReviewSessionManager::default()),
+            }),
+            hooks,
+            async_hook_results,
+        })
+    }
+
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "account runtime preparation and durable binding commit share one transition fence"
+    )]
+    pub(crate) async fn switch_execution_account(
+        self: &Arc<Self>,
+        expected: codex_protocol::protocol::ExecutionAccountBinding,
+        target: Arc<crate::execution_account::ExecutionAccountContext>,
+        services: crate::execution_account::ExecutionAccountServices,
+    ) -> Result<
+        codex_protocol::protocol::ExecutionAccountBinding,
+        crate::execution_account::ExecutionAccountSwitchError,
+    > {
+        let _transition = self.execution_runtime_transition_lock.lock().await;
+        let _mcp_refresh = self.mcp_refresh.acquire().await.map_err(|_| {
+            crate::execution_account::ExecutionAccountSwitchError::PreparationFailed
+        })?;
+        if self.execution_account().binding != expected
+            || self.conversation.running_state().await.is_some()
+        {
+            return Err(crate::execution_account::ExecutionAccountSwitchError::ThreadBusy);
+        }
+        let PreparedExecutionAccountRuntime {
+            runtime: prepared,
+            hooks: prepared_hooks,
+            async_hook_results: prepared_async_hook_results,
+        } = self
+            .prepare_execution_account_runtime(Arc::clone(&target), services)
+            .await?;
+        if self.execution_account().binding != expected
+            || self.conversation.running_state().await.is_some()
+        {
+            return Err(crate::execution_account::ExecutionAccountSwitchError::ThreadBusy);
+        }
+        let previous = self.execution_account_runtime();
+        let rollback_mcp_runtime = self
+            .prepare_mcp_runtime_for_execution_account(
+                &previous.execution_account,
+                &previous.services,
+            )
+            .await
+            .map_err(|_| {
+                crate::execution_account::ExecutionAccountSwitchError::PreparationFailed
+            })?;
+        let rollback = Arc::new(crate::execution_account::ExecutionAccountRuntime {
+            execution_account: Arc::clone(&previous.execution_account),
+            services: previous.services.clone(),
+            mcp_runtime: Arc::clone(&previous.mcp_runtime),
+            model_client: previous.model_client.clone(),
+            analytics_events_client: previous.analytics_events_client.clone(),
+            session_telemetry: previous.session_telemetry.clone(),
+            network_proxy_audit_metadata: previous.network_proxy_audit_metadata.clone(),
+            shell_snapshot: previous.shell_snapshot.clone(),
+            extension_runtimes: previous.extension_runtimes.clone(),
+            guardian_review_session: Arc::new(GuardianReviewSessionManager::default()),
+        });
+        self.begin_execution_control_transition()
+            .await
+            .map_err(|()| crate::execution_account::ExecutionAccountSwitchError::ThreadBusy)?;
+        let rollback_base_instructions = self.get_base_instructions().await.text;
+        let startup_prewarm = self.take_session_startup_prewarm().await;
+        let restart_startup_prewarm = startup_prewarm.is_some();
+        if let Some(startup_prewarm) = startup_prewarm {
+            startup_prewarm.abort().await;
+        }
+        self.stop_mcp_prewarm_worker().await;
+        for extension_runtime in &prepared.extension_runtimes {
+            extension_runtime.quiesce().await.map_err(|_| {
+                crate::execution_account::ExecutionAccountSwitchError::PreparationFailed
+            })?;
+        }
+        previous.guardian_review_session.shutdown().await;
+        previous.mcp_runtime.shutdown().await;
+        let target_auth_changes = target.auth_manager.auth_change_receiver();
+        let result = async {
+            if self.execution_account().binding != expected {
+                return Err(crate::execution_account::ExecutionAccountSwitchError::StaleGeneration);
+            }
+            let next = self
+                .services
+                .thread_store
+                .compare_and_swap_execution_account_binding(
+                    self.thread_id,
+                    expected,
+                    target.binding.slot_id.clone(),
+                )
+                .await
+                .map_err(|_| {
+                    crate::execution_account::ExecutionAccountSwitchError::PersistenceFailed
+                })?
+                .ok_or(crate::execution_account::ExecutionAccountSwitchError::StaleGeneration)?;
+            if next != target.binding {
+                return Err(
+                    crate::execution_account::ExecutionAccountSwitchError::PersistenceFailed,
+                );
+            }
+
+            let previous_hooks = self.hooks();
+            previous_hooks.shutdown().await;
+            let previous_async_hook_results = self.async_hook_results.load_full();
+            previous_async_hook_results.close();
+            while previous_async_hook_results.try_recv().is_ok() {}
+            self.async_hook_results
+                .store(Arc::new(prepared_async_hook_results));
+            self.services.hooks.store(Arc::new(prepared_hooks));
+
+            previous.mcp_runtime.adopt_prepared(&prepared.mcp_runtime);
+            self.services
+                .mcp_runtime
+                .adopt_prepared(&prepared.mcp_runtime);
+            self.services
+                .session_extension_data
+                .insert(target.as_ref().clone());
+            self.services
+                .session_extension_data
+                .insert(Arc::clone(&target.auth_manager));
+            self.services
+                .session_extension_data
+                .insert(prepared.analytics_events_client.clone());
+            self.services
+                .thread_extension_data
+                .insert(target.as_ref().clone());
+            self.services
+                .thread_extension_data
+                .insert(Arc::clone(&target.auth_manager));
+            self.services
+                .thread_extension_data
+                .insert(prepared.analytics_events_client.clone());
+            self.services
+                .hook_mcp_runtime
+                .store(Arc::clone(&prepared.mcp_runtime));
+            self.services
+                .turn_environments
+                .replace_shell_snapshot(prepared.shell_snapshot.clone());
+            if let Some(network_proxy) = self.services.network_proxy.load_full() {
+                network_proxy
+                    .proxy()
+                    .replace_audit_metadata(prepared.network_proxy_audit_metadata.clone());
+            }
+            for extension_runtime in &prepared.extension_runtimes {
+                extension_runtime.publish(
+                    &self.services.session_extension_data,
+                    &self.services.thread_extension_data,
+                );
+            }
+            self.execution_account_runtime.store(Arc::clone(&prepared));
+            self.start_mcp_prewarm_worker(target_auth_changes);
+            self.schedule_mcp_prewarm();
+            Ok(next)
+        }
+        .await;
+        if result.is_err() {
+            drop(prepared);
+            previous.mcp_runtime.adopt_prepared(&rollback_mcp_runtime);
+            self.services
+                .mcp_runtime
+                .adopt_prepared(&rollback_mcp_runtime);
+            self.execution_account_runtime.store(rollback);
+            self.start_mcp_prewarm_worker(
+                previous
+                    .execution_account
+                    .auth_manager
+                    .auth_change_receiver(),
+            );
+            self.schedule_mcp_prewarm();
+            if restart_startup_prewarm {
+                self.schedule_startup_prewarm(rollback_base_instructions)
+                    .await;
+            }
+        }
+        self.end_execution_control_transition();
+        result
+    }
+
+    /// Close the idle input boundary immediately before a writer-control commit.
+    ///
+    /// Callers must hold `execution_runtime_transition_lock`. Every admission path uses the same
+    /// lock, while the closing flag keeps a successfully relinquished runtime terminal.
+    pub(crate) async fn begin_execution_control_transition(&self) -> Result<(), ()> {
+        if self.execution_control_is_closing()
+            || self.active_turn.lock().await.is_some()
+            || self.input_queue.has_pending_mailbox_items().await
+            || *self.services.elicitations.subscribe().borrow()
+            || self.conversation.running_state().await.is_some()
+        {
+            return Err(());
+        }
+        self.execution_control_closing
+            .store(true, Ordering::Release);
+        Ok(())
+    }
+
+    pub(crate) fn end_execution_control_transition(&self) {
+        self.execution_control_closing
+            .store(false, Ordering::Release);
+    }
+
+    pub(crate) fn execution_control_is_closing(&self) -> bool {
+        self.execution_control_closing.load(Ordering::Acquire)
     }
 
     #[instrument(name = "session_init", level = "info", skip_all)]
@@ -1220,7 +1629,7 @@ impl Session {
                 environment_manager,
                 default_shell.clone(),
                 session_configuration.inferred_environment_config(),
-                shell_snapshot,
+                shell_snapshot.clone(),
                 inherited_environments.unwrap_or_default(),
                 config.features.enabled(Feature::DeferredExecutor),
             ));
@@ -1331,6 +1740,7 @@ impl Session {
             let mcp_runtime = Arc::new(McpRuntime::empty(
                 mcp_projection.config.prefix_mcp_tool_names,
             ));
+            let hook_mcp_runtime = Arc::new(arc_swap::ArcSwap::from(Arc::clone(&mcp_runtime)));
             let hooks_config = build_hooks_config(
                 &config,
                 plugins_manager.as_ref(),
@@ -1341,7 +1751,7 @@ impl Session {
                 hooks_config,
                 thread_id,
                 Arc::new(CoreHookMcpExecutor {
-                    runtime: Arc::clone(&mcp_runtime),
+                    runtime: Arc::clone(&hook_mcp_runtime),
                     thread_id,
                 }),
             )?;
@@ -1405,6 +1815,53 @@ impl Session {
                 .features
                 .enabled(Feature::ExecutedToolCallMetadata)
                 .then(|| Arc::new(crate::state::ExecutedToolCallRecorder::default()));
+            let model_client = ModelClient::new(
+                Some(Arc::clone(&auth_manager)),
+                if config.features.enabled(Feature::UseAgentIdentity) {
+                    AgentIdentityAuthPolicy::ChatGptAuth
+                } else {
+                    AgentIdentityAuthPolicy::JwtOnly
+                },
+                thread_id,
+                session_configuration.provider.info().clone(),
+                session_configuration.session_source.clone(),
+                session_configuration.originator.clone(),
+                config.model_verbosity,
+                config.features.enabled(Feature::ContentItemKinds),
+                config.features.enabled(Feature::EnableRequestCompression),
+                config.features.enabled(Feature::RuntimeMetrics),
+                Self::build_model_client_beta_features_header(config.as_ref()),
+                /*concurrent_reasoning_summaries_enabled*/ config
+                    .features
+                    .enabled(Feature::ConcurrentReasoningSummaries),
+                attestation_provider.clone(),
+                config.http_client_factory(),
+            )
+            .with_free_guardian_enabled(config.free_guardian_enabled())
+            .with_session_context(
+                crate::guardian::prompt_cache_key_override_for_review_session(
+                    &session_configuration.session_source,
+                    session_configuration.parent_thread_id,
+                ),
+                tx_event.clone(),
+            );
+            let execution_account_runtime = Arc::new(
+                crate::execution_account::ExecutionAccountRuntime {
+                    execution_account: Arc::clone(&execution_account),
+                    services: crate::execution_account::ExecutionAccountServices {
+                        plugins_manager: Arc::clone(&plugins_manager),
+                        mcp_manager: Arc::clone(&mcp_manager),
+                    },
+                    mcp_runtime: Arc::clone(&mcp_runtime),
+                    model_client: model_client.clone(),
+                    analytics_events_client: analytics_events_client.clone(),
+                    session_telemetry: session_telemetry.clone(),
+                    network_proxy_audit_metadata: network_proxy_audit_metadata.clone(),
+                    shell_snapshot: shell_snapshot.clone(),
+                    extension_runtimes: Vec::new(),
+                    guardian_review_session: Arc::new(GuardianReviewSessionManager::default()),
+                },
+            );
             let services = SessionServices {
                 // Start with an empty connection set. The initialized set is
                 // published after SessionConfigured so MCP events follow it.
@@ -1418,6 +1875,7 @@ impl Session {
                 main_execve_wrapper_exe: config.main_execve_wrapper_exe.clone(),
                 analytics_events_client,
                 hooks: arc_swap::ArcSwap::from_pointee(hooks),
+                hook_mcp_runtime,
                 rollout_thread_trace,
                 user_shell: Arc::new(default_shell),
                 show_raw_agent_reasoning: config.show_raw_agent_reasoning,
@@ -1455,36 +1913,7 @@ impl Session {
                 thread_store: Arc::clone(&thread_store),
                 attestation_provider: attestation_provider.clone(),
                 time_provider,
-                model_client: ModelClient::new(
-                    Some(Arc::clone(&auth_manager)),
-                    if config.features.enabled(Feature::UseAgentIdentity) {
-                        AgentIdentityAuthPolicy::ChatGptAuth
-                    } else {
-                        AgentIdentityAuthPolicy::JwtOnly
-                    },
-                    thread_id,
-                    session_configuration.provider.info().clone(),
-                    session_configuration.session_source.clone(),
-                    session_configuration.originator.clone(),
-                    config.model_verbosity,
-                    config.features.enabled(Feature::ContentItemKinds),
-                    config.features.enabled(Feature::EnableRequestCompression),
-                    config.features.enabled(Feature::RuntimeMetrics),
-                    Self::build_model_client_beta_features_header(config.as_ref()),
-                    /*concurrent_reasoning_summaries_enabled*/ config
-                        .features
-                        .enabled(Feature::ConcurrentReasoningSummaries),
-                    attestation_provider,
-                    config.http_client_factory(),
-                )
-                .with_free_guardian_enabled(config.free_guardian_enabled())
-                .with_session_context(
-                    crate::guardian::prompt_cache_key_override_for_review_session(
-                        &session_configuration.session_source,
-                        session_configuration.parent_thread_id,
-                    ),
-                    tx_event.clone(),
-                ),
+                model_client,
                 executed_tool_calls: executed_tool_calls.clone(),
                 code_mode_service: crate::tools::code_mode::CodeModeService::new(
                     Arc::clone(&code_mode_session_provider),
@@ -1497,7 +1926,7 @@ impl Session {
             let (mcp_prewarm_tx, mcp_prewarm_rx) = async_channel::bounded(1);
             let sess = Arc::new(Session {
                 thread_id,
-                execution_account: Arc::clone(&execution_account),
+                execution_account_runtime: arc_swap::ArcSwap::from(execution_account_runtime),
                 installation_id,
                 tx_event: tx_event.clone(),
                 agent_status,
@@ -1511,16 +1940,18 @@ impl Session {
                 mcp_elicitation_reviewer_handle: OnceLock::new(),
                 mcp_elicitation_lifecycle_handle: OnceLock::new(),
                 mcp_prewarm_tx,
-                mcp_prewarm_shutdown: CancellationToken::new(),
+                mcp_prewarm_rx,
+                mcp_prewarm_shutdown: std::sync::Mutex::new(CancellationToken::new()),
                 mcp_prewarm_task: std::sync::Mutex::new(None),
                 conversation: Arc::new(RealtimeConversationManager::new()),
                 realtime_history: (session_configuration.history_mode == ThreadHistoryMode::Paginated
                     && services.live_thread.is_some())
                 .then(|| Mutex::new(Default::default())),
                 active_turn: Mutex::new(None),
-                async_hook_results,
+                execution_runtime_transition_lock: Mutex::new(()),
+                execution_control_closing: AtomicBool::new(false),
+                async_hook_results: arc_swap::ArcSwap::from_pointee(async_hook_results),
                 input_queue: InputQueue::new(),
-                guardian_review_session: GuardianReviewSessionManager::default(),
                 services,
                 git_enrichment_policy,
                 fork_persistence,
@@ -1605,7 +2036,7 @@ impl Session {
                 mcp_runtime_cwd,
             )
             .await?;
-            sess.start_mcp_prewarm_worker(mcp_prewarm_rx, mcp_auth_changes);
+            sess.start_mcp_prewarm_worker(mcp_auth_changes);
             sess.schedule_startup_prewarm(sess.get_prompt_base_instructions().await.text)
                 .await;
             let session_start_source = match &initial_history {

@@ -113,7 +113,7 @@ pub(crate) async fn emit_explicit_skill_invocations(
             invocation_type: InvocationType::Explicit,
         })
         .collect();
-    sess.services
+    turn_context
         .analytics_events_client
         .track_skill_invocations(tracking, invocations);
 }
@@ -195,7 +195,7 @@ pub(crate) async fn maybe_emit_implicit_skill_invocation(
             ("reasoning_effort", reasoning_effort.as_str()),
         ],
     );
-    sess.services
+    turn_context
         .analytics_events_client
         .track_skill_invocations(
             build_track_events_context(

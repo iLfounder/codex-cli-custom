@@ -78,15 +78,14 @@ impl CodeModeExecuteHandler {
             .map_err(FunctionCallError::RespondToModel)?;
         let cell_id = started_cell.cell_id.clone();
         telemetry.cell_id = Some(cell_id.to_string());
-        exec.session
-            .services
-            .analytics_events_client
-            .track_code_mode_tool_call(codex_analytics::CodeModeToolCallFact::CellStarted {
+        exec.turn.analytics_events_client.track_code_mode_tool_call(
+            codex_analytics::CodeModeToolCallFact::CellStarted {
                 thread_id: exec.session.thread_id.to_string(),
                 turn_id: exec.turn.sub_id.clone(),
                 call_id: call_id.clone(),
                 cell_id: cell_id.to_string(),
-            });
+            },
+        );
         if let Some(executed_tool_calls) = exec.session.services.executed_tool_calls.as_ref() {
             executed_tool_calls.start_cell(&cell_id, &call_id);
         }
@@ -124,14 +123,13 @@ impl CodeModeExecuteHandler {
                 .services
                 .code_mode_service
                 .finish_cell_dispatch(&cell_id);
-            exec.session
-                .services
-                .analytics_events_client
-                .track_code_mode_tool_call(codex_analytics::CodeModeToolCallFact::CellClosed {
+            exec.turn.analytics_events_client.track_code_mode_tool_call(
+                codex_analytics::CodeModeToolCallFact::CellClosed {
                     thread_id: exec.session.thread_id.to_string(),
                     turn_id: exec.turn.sub_id.clone(),
                     cell_id: cell_id.to_string(),
-                });
+                },
+            );
         }
         exec.session.services.elicitations.wait_until_clear().await;
         let wall_time = response

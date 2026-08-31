@@ -36,6 +36,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::RwLock as SyncRwLock;
 use std::time::Duration;
 use time::OffsetDateTime;
 use tokio::net::lookup_host;
@@ -235,7 +236,7 @@ pub struct NetworkProxyState {
     blocked_request_observer: Arc<RwLock<Option<Arc<dyn BlockedRequestObserver>>>>,
     pub(crate) policy_audit_observer: Option<NetworkPolicyAuditObserver>,
     credential_broker: CredentialBroker,
-    audit_metadata: NetworkProxyAuditMetadata,
+    audit_metadata: Arc<SyncRwLock<NetworkProxyAuditMetadata>>,
     execution_attributions: Arc<Mutex<HashMap<String, ExecutionAttribution>>>,
     environment_id: Option<Arc<str>>,
     execution_id: Option<Arc<str>>,
@@ -270,7 +271,7 @@ impl Clone for NetworkProxyState {
             blocked_request_observer: self.blocked_request_observer.clone(),
             policy_audit_observer: self.policy_audit_observer.clone(),
             credential_broker: self.credential_broker.clone(),
-            audit_metadata: self.audit_metadata.clone(),
+            audit_metadata: Arc::clone(&self.audit_metadata),
             execution_attributions: self.execution_attributions.clone(),
             environment_id: self.environment_id.clone(),
             execution_id: self.execution_id.clone(),
@@ -355,7 +356,7 @@ impl NetworkProxyState {
             reloader,
             blocked_request_observer: Arc::new(RwLock::new(blocked_request_observer)),
             policy_audit_observer: None,
-            audit_metadata,
+            audit_metadata: Arc::new(SyncRwLock::new(audit_metadata)),
             execution_attributions: Arc::new(Mutex::new(HashMap::new())),
             environment_id: None,
             execution_id: None,
@@ -422,8 +423,18 @@ impl NetworkProxyState {
         self.policy_audit_observer = Some(observer);
     }
 
-    pub fn audit_metadata(&self) -> &NetworkProxyAuditMetadata {
-        &self.audit_metadata
+    pub fn audit_metadata(&self) -> NetworkProxyAuditMetadata {
+        self.audit_metadata
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn replace_audit_metadata(&self, audit_metadata: NetworkProxyAuditMetadata) {
+        *self
+            .audit_metadata
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = audit_metadata;
     }
 
     pub fn virtualize_child_credentials(&self, env: &mut HashMap<String, String>) {

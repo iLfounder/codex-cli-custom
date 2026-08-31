@@ -184,6 +184,7 @@ impl SessionStartupPrewarmHandle {
 
 impl Session {
     pub(crate) async fn schedule_startup_prewarm(self: &Arc<Self>, base_instructions: String) {
+        let account_runtime = self.execution_account_runtime();
         if self.features().enabled(Feature::CodeModePrewarm)
             && self.services.code_mode_service.is_available()
         {
@@ -195,10 +196,10 @@ impl Session {
             });
         }
 
-        if !self.services.model_client.responses_websocket_enabled() {
+        if !account_runtime.model_client.responses_websocket_enabled() {
             // Without websocket prewarm, resolve auth once so Agent Identity bootstrap can
             // register or engage this session's bearer fallback before the first user request.
-            let model_client = self.services.model_client.clone();
+            let model_client = account_runtime.model_client.clone();
             tokio::spawn(async move {
                 if let Err(err) = model_client.prewarm_auth().await {
                     warn!("startup auth prewarm failed: {err:#}");
@@ -207,7 +208,7 @@ impl Session {
             return;
         }
 
-        let session_telemetry = self.services.session_telemetry.clone();
+        let session_telemetry = account_runtime.session_telemetry.clone();
         let websocket_connect_timeout = self.provider().await.websocket_connect_timeout();
         let started_at = Instant::now();
         let startup_prewarm_session = Arc::clone(self);
@@ -254,7 +255,7 @@ impl Session {
             };
         };
         startup_prewarm
-            .resolve(&self.services.session_telemetry, cancellation_token)
+            .resolve(&self.session_telemetry(), cancellation_token)
             .await
     }
 }
@@ -277,7 +278,7 @@ async fn schedule_startup_prewarm_inner(
         let guardian_parent_turn = Arc::clone(&startup_turn_context);
         drop(tokio::spawn(async move {
             if let Err(err) = guardian_session
-                .guardian_review_session
+                .guardian_review_session()
                 .initialize(Arc::clone(&guardian_session), guardian_parent_turn)
                 .await
             {
@@ -316,7 +317,10 @@ async fn schedule_startup_prewarm_inner(
     let responses_metadata = session
         .responses_metadata(&startup_turn_context, CodexResponsesRequestKind::Prewarm)
         .await;
-    let mut client_session = session.services.model_client.new_session();
+    let mut client_session = session
+        .execution_account_runtime()
+        .model_client
+        .new_session();
     let websocket_warmup_started_at = Instant::now();
     client_session
         .prewarm_websocket(

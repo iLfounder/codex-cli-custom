@@ -12,12 +12,15 @@ use codex_exec_server::ResolvedSelectedCapabilityRoot;
 use codex_extension_api::ConfigContributor;
 use codex_extension_api::ContextContributor;
 use codex_extension_api::ContextualUserFragment;
+use codex_extension_api::ExecutionAccountRuntimeContributor;
+use codex_extension_api::ExecutionAccountRuntimePrepareInput;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionEventSink;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionMetrics;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::ExtensionWarning;
+use codex_extension_api::PreparedExecutionAccountRuntime;
 use codex_extension_api::PromptFragment;
 use codex_extension_api::SelectedPluginSnapshot;
 use codex_extension_api::SkillInvocationContributor;
@@ -81,6 +84,41 @@ struct SkillsExtension<C> {
     event_sink: Arc<dyn ExtensionEventSink>,
     config_from_host: Arc<dyn Fn(&C) -> SkillsExtensionConfig + Send + Sync>,
     shadow_selection: Arc<ShadowSelectionExperiment>,
+}
+
+struct PreparedSkillsAccountRuntime {
+    mcp_resources: Arc<McpResourceClient>,
+    extension_metrics: Option<Arc<dyn ExtensionMetrics>>,
+}
+
+impl PreparedExecutionAccountRuntime for PreparedSkillsAccountRuntime {
+    fn quiesce(&self) -> ExtensionFuture<'_, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn publish(&self, session_store: &ExtensionData, _thread_store: &ExtensionData) {
+        session_store.insert(SkillsSessionState {
+            mcp_resources: Some(Arc::clone(&self.mcp_resources)),
+            extension_metrics: self.extension_metrics.clone(),
+        });
+    }
+}
+
+impl<C> ExecutionAccountRuntimeContributor<C> for SkillsExtension<C>
+where
+    C: Send + Sync + 'static,
+{
+    fn prepare<'a>(
+        &'a self,
+        input: ExecutionAccountRuntimePrepareInput<'a, C>,
+    ) -> ExtensionFuture<'a, Result<Arc<dyn PreparedExecutionAccountRuntime>, String>> {
+        Box::pin(async move {
+            Ok(Arc::new(PreparedSkillsAccountRuntime {
+                mcp_resources: input.mcp_resource_client,
+                extension_metrics: input.extension_metrics,
+            }) as Arc<dyn PreparedExecutionAccountRuntime>)
+        })
+    }
 }
 
 #[derive(Default)]
@@ -674,6 +712,7 @@ pub fn install_with_providers_and_metrics<C>(
     });
     registry.thread_lifecycle_contributor(extension.clone());
     registry.turn_lifecycle_contributor(Arc::new(SkillTelemetry));
+    registry.execution_account_runtime_contributor(extension.clone());
     registry.config_contributor(extension.clone());
     registry.prompt_contributor(extension.clone());
     registry.turn_input_contributor(extension.clone());

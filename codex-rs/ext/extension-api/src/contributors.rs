@@ -14,6 +14,7 @@ use crate::ExtensionMetrics;
 
 mod approval_review;
 mod context;
+mod execution_account;
 mod mcp;
 mod prompt;
 mod skill_invocation;
@@ -28,6 +29,9 @@ pub use approval_review::ApprovalReviewError;
 pub use approval_review::ApprovalReviewInput;
 pub use approval_review::GuardianV2Enabled;
 pub use context::TurnContextContributionInput;
+pub use execution_account::ExecutionAccountRuntimeContributor;
+pub use execution_account::ExecutionAccountRuntimePrepareInput;
+pub use execution_account::PreparedExecutionAccountRuntime;
 pub use mcp::McpServerContribution;
 pub use mcp::McpServerContributionContext;
 pub use mcp::SelectedPluginIdentity;

@@ -30,8 +30,7 @@ impl Drop for ControlToolCallGuard<'_> {
     fn drop(&mut self) {
         let invocation = self.invocation;
         invocation
-            .session
-            .services
+            .turn
             .analytics_events_client
             .track_control_tool_call(ControlToolCallFact {
                 thread_id: invocation.session.thread_id.to_string(),

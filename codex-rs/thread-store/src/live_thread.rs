@@ -287,6 +287,18 @@ impl LiveThread {
         }
     }
 
+    /// Durably release this thread's exact writer generation for an ownership handoff.
+    pub async fn relinquish(&self, expected_writer_generation: u64) -> ThreadStoreResult<()> {
+        self.thread_store
+            .validate_writer_generation(self.thread_id, expected_writer_generation)
+            .await?;
+        self.flush_pending_metadata_update_for_existing_history()
+            .await?;
+        self.thread_store
+            .relinquish_thread(self.thread_id, expected_writer_generation)
+            .await
+    }
+
     pub async fn discard(&self) -> ThreadStoreResult<()> {
         self.thread_store.discard_thread(self.thread_id).await
     }

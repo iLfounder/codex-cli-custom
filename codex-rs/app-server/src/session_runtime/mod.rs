@@ -1,7 +1,9 @@
 #[allow(dead_code)]
 mod operations;
 mod pagination;
+mod relinquish;
 mod snapshot;
+mod switch_account;
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -42,6 +44,7 @@ pub(crate) struct SessionRuntimeEngine {
     thread_state_manager: ThreadStateManager,
     thread_watch_manager: ThreadWatchManager,
     pending_thread_unloads: Arc<Mutex<HashSet<ThreadId>>>,
+    thread_list_state_permit: Arc<Semaphore>,
     account_registry: Arc<AccountRegistry>,
     outgoing: Arc<OutgoingMessageSender>,
 }
@@ -54,6 +57,7 @@ struct EngineState {
     pages: pagination::SnapshotCache,
     #[allow(dead_code)]
     operations: OperationCache,
+    switching_accounts: HashMap<ThreadId, String>,
 }
 
 #[derive(Default)]
@@ -71,6 +75,7 @@ impl SessionRuntimeEngine {
         thread_state_manager: ThreadStateManager,
         thread_watch_manager: ThreadWatchManager,
         pending_thread_unloads: Arc<Mutex<HashSet<ThreadId>>>,
+        thread_list_state_permit: Arc<Semaphore>,
         account_registry: Arc<AccountRegistry>,
         outgoing: Arc<OutgoingMessageSender>,
     ) -> Self {
@@ -84,6 +89,7 @@ impl SessionRuntimeEngine {
             thread_state_manager,
             thread_watch_manager,
             pending_thread_unloads,
+            thread_list_state_permit,
             account_registry,
             outgoing,
         }

@@ -127,6 +127,13 @@ pub(crate) enum PendingUnloadSubscription<T> {
     Subscribed(T),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RelinquishReservation {
+    Reserved,
+    AlreadyClosing,
+    OtherSubscribersPresent,
+}
+
 impl ThreadState {
     fn runtime_snapshot(&self) -> (Option<String>, Option<ThreadSettings>) {
         (
@@ -515,6 +522,50 @@ impl ThreadStateManager {
             settings,
             unload_at,
         }
+    }
+
+    pub(crate) async fn caller_subscription(
+        &self,
+        thread_id: ThreadId,
+        connection_id: ConnectionId,
+    ) -> (bool, u32) {
+        let state = self.state.lock().await;
+        let Some(entry) = state.threads.get(&thread_id) else {
+            return (false, 0);
+        };
+        (
+            entry.connection_ids.contains(&connection_id),
+            u32::try_from(entry.connection_ids.len()).unwrap_or(u32::MAX),
+        )
+    }
+
+    /// Atomically fence new subscriptions and validate the caller's existing subscription set.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "the pending-unload fence must cover subscriber validation and reservation"
+    )]
+    pub(crate) async fn reserve_relinquish(
+        &self,
+        pending_thread_unloads: &Mutex<HashSet<ThreadId>>,
+        thread_id: ThreadId,
+        connection_id: ConnectionId,
+    ) -> RelinquishReservation {
+        let mut pending = pending_thread_unloads.lock().await;
+        if pending.contains(&thread_id) {
+            return RelinquishReservation::AlreadyClosing;
+        }
+        let state = self.state.lock().await;
+        let Some(entry) = state.threads.get(&thread_id) else {
+            pending.insert(thread_id);
+            return RelinquishReservation::Reserved;
+        };
+        let caller_subscribed = entry.connection_ids.contains(&connection_id);
+        if entry.connection_ids.len() > 1 || (entry.connection_ids.len() == 1 && !caller_subscribed)
+        {
+            return RelinquishReservation::OtherSubscribersPresent;
+        }
+        pending.insert(thread_id);
+        RelinquishReservation::Reserved
     }
 
     pub(crate) async fn set_unload_at(&self, thread_id: ThreadId, unload_at: Option<i64>) {

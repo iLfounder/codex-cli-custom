@@ -105,6 +105,28 @@ fn default_execution_account(
         models_manager: Arc::clone(models_manager),
     })
 }
+
+fn default_execution_account_runtime(
+    auth_manager: &Arc<AuthManager>,
+    models_manager: &SharedModelsManager,
+    services: &SessionServices,
+) -> arc_swap::ArcSwap<crate::execution_account::ExecutionAccountRuntime> {
+    arc_swap::ArcSwap::from_pointee(crate::execution_account::ExecutionAccountRuntime {
+        execution_account: default_execution_account(auth_manager, models_manager),
+        services: crate::execution_account::ExecutionAccountServices {
+            plugins_manager: Arc::clone(&services.plugins_manager),
+            mcp_manager: Arc::clone(&services.mcp_manager),
+        },
+        mcp_runtime: Arc::clone(&services.mcp_runtime),
+        model_client: services.model_client.clone(),
+        analytics_events_client: services.analytics_events_client.clone(),
+        session_telemetry: services.session_telemetry.clone(),
+        network_proxy_audit_metadata: services.network_proxy_audit_metadata.clone(),
+        shell_snapshot: ShellSnapshot::disabled(),
+        extension_runtimes: Vec::new(),
+        guardian_review_session: Arc::new(crate::guardian::GuardianReviewSessionManager::default()),
+    })
+}
 use codex_tools::ToolSpec;
 use codex_utils_path_uri::PathUri;
 use std::collections::BTreeMap;
@@ -883,7 +905,9 @@ async fn preview_session_start_hooks(
         },
         thread_id,
         Arc::new(CoreHookMcpExecutor {
-            runtime: Arc::new(McpRuntime::empty(config.prefix_mcp_tool_names())),
+            runtime: Arc::new(arc_swap::ArcSwap::from_pointee(McpRuntime::empty(
+                config.prefix_mcp_tool_names(),
+            ))),
             thread_id,
         }),
     )
@@ -6515,6 +6539,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     ));
     let network_approval = Arc::new(NetworkApprovalService::default());
     let mcp_runtime = Arc::new(codex_mcp::McpRuntime::empty(config.prefix_mcp_tool_names()));
+    let hook_mcp_runtime = Arc::new(arc_swap::ArcSwap::from(Arc::clone(&mcp_runtime)));
     let executed_tool_calls = config
         .features
         .enabled(Feature::ExecutedToolCallMetadata)
@@ -6526,7 +6551,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         },
         thread_id,
         Arc::new(CoreHookMcpExecutor {
-            runtime: Arc::clone(&mcp_runtime),
+            runtime: Arc::clone(&hook_mcp_runtime),
             thread_id,
         }),
     )
@@ -6546,6 +6571,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
             config.analytics_enabled,
         ),
         hooks: arc_swap::ArcSwap::from_pointee(hooks),
+        hook_mcp_runtime,
         rollout_thread_trace: codex_rollout_trace::ThreadTraceContext::disabled(),
         user_shell: Arc::new(default_user_shell()),
         show_raw_agent_reasoning: config.show_raw_agent_reasoning,
@@ -6618,7 +6644,11 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
 
     let session = Session {
         thread_id,
-        execution_account: default_execution_account(&auth_manager, &models_manager),
+        execution_account_runtime: default_execution_account_runtime(
+            &auth_manager,
+            &models_manager,
+            &services,
+        ),
         installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
         tx_event,
         agent_status: agent_status_tx,
@@ -6633,14 +6663,16 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         mcp_elicitation_reviewer_handle: OnceLock::new(),
         mcp_elicitation_lifecycle_handle: OnceLock::new(),
         mcp_prewarm_tx: async_channel::bounded(1).0,
-        mcp_prewarm_shutdown: CancellationToken::new(),
+        mcp_prewarm_rx: async_channel::bounded(1).1,
+        mcp_prewarm_shutdown: std::sync::Mutex::new(CancellationToken::new()),
         mcp_prewarm_task: std::sync::Mutex::new(None),
         conversation: Arc::new(RealtimeConversationManager::new()),
         realtime_history: None,
         active_turn: Mutex::new(None),
-        async_hook_results,
+        execution_runtime_transition_lock: Mutex::new(()),
+        execution_control_closing: std::sync::atomic::AtomicBool::new(false),
+        async_hook_results: arc_swap::ArcSwap::from_pointee(async_hook_results),
         input_queue: super::input_queue::InputQueue::new(),
-        guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
         fork_persistence: ForkPersistence::Copied,
@@ -8296,12 +8328,12 @@ async fn shutdown_complete_does_not_append_to_thread_store_after_shutdown() {
             .expect("valid buffered async hook result"),
         )
         .expect("buffer an async hook result before shutdown");
-    session.async_hook_results = result_receiver;
+    session.async_hook_results.store(Arc::new(result_receiver));
     let session = Arc::new(session);
 
     assert!(handlers::shutdown(&session, "sub-1".to_string()).await);
-    assert!(session.async_hook_results.is_closed());
-    assert!(session.async_hook_results.is_empty());
+    assert!(session.async_hook_results.load().is_closed());
+    assert!(session.async_hook_results.load().is_empty());
     assert!(result_sender.is_closed());
 
     assert_eq!(
@@ -8604,7 +8636,7 @@ async fn shutdown_and_wait_shuts_down_cached_guardian_subagent() {
         session_loop_termination: session_loop_termination_from_handle(child_session_loop_handle),
     };
     parent_session
-        .guardian_review_session
+        .guardian_review_session()
         .cache_for_test(child_session, child_io)
         .await;
 
@@ -8636,13 +8668,13 @@ async fn cached_guardian_subagent_exposes_its_rollout_path() {
         session_loop_termination: session_loop_termination_from_handle(child_session_loop_handle),
     };
     parent_session
-        .guardian_review_session
+        .guardian_review_session()
         .cache_for_test(child_session, child_io)
         .await;
 
     assert_eq!(
         parent_session
-            .guardian_review_session
+            .guardian_review_session()
             .trunk_rollout_path()
             .await,
         Some(child_rollout_path)
@@ -8689,7 +8721,7 @@ async fn shutdown_and_wait_shuts_down_tracked_ephemeral_guardian_review() {
         session_loop_termination: session_loop_termination_from_handle(child_session_loop_handle),
     };
     parent_session
-        .guardian_review_session
+        .guardian_review_session()
         .register_ephemeral_for_test(child_session, child_io)
         .await;
 
@@ -8844,6 +8876,7 @@ where
     ));
     let network_approval = Arc::new(NetworkApprovalService::default());
     let mcp_runtime = Arc::new(codex_mcp::McpRuntime::empty(config.prefix_mcp_tool_names()));
+    let hook_mcp_runtime = Arc::new(arc_swap::ArcSwap::from(Arc::clone(&mcp_runtime)));
     let executed_tool_calls = config
         .features
         .enabled(Feature::ExecutedToolCallMetadata)
@@ -8855,7 +8888,7 @@ where
         },
         thread_id,
         Arc::new(CoreHookMcpExecutor {
-            runtime: Arc::clone(&mcp_runtime),
+            runtime: Arc::clone(&hook_mcp_runtime),
             thread_id,
         }),
     )
@@ -8875,6 +8908,7 @@ where
             config.analytics_enabled,
         ),
         hooks: arc_swap::ArcSwap::from_pointee(hooks),
+        hook_mcp_runtime,
         rollout_thread_trace: codex_rollout_trace::ThreadTraceContext::disabled(),
         user_shell: Arc::new(default_user_shell()),
         show_raw_agent_reasoning: config.show_raw_agent_reasoning,
@@ -8947,7 +8981,11 @@ where
 
     let session = Arc::new(Session {
         thread_id,
-        execution_account: default_execution_account(&auth_manager, &models_manager),
+        execution_account_runtime: default_execution_account_runtime(
+            &auth_manager,
+            &models_manager,
+            &services,
+        ),
         installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
         tx_event,
         agent_status: agent_status_tx,
@@ -8962,14 +9000,16 @@ where
         mcp_elicitation_reviewer_handle: OnceLock::new(),
         mcp_elicitation_lifecycle_handle: OnceLock::new(),
         mcp_prewarm_tx: async_channel::bounded(1).0,
-        mcp_prewarm_shutdown: CancellationToken::new(),
+        mcp_prewarm_rx: async_channel::bounded(1).1,
+        mcp_prewarm_shutdown: std::sync::Mutex::new(CancellationToken::new()),
         mcp_prewarm_task: std::sync::Mutex::new(None),
         conversation: Arc::new(RealtimeConversationManager::new()),
         realtime_history: None,
         active_turn: Mutex::new(None),
-        async_hook_results,
+        execution_runtime_transition_lock: Mutex::new(()),
+        execution_control_closing: std::sync::atomic::AtomicBool::new(false),
+        async_hook_results: arc_swap::ArcSwap::from_pointee(async_hook_results),
         input_queue: super::input_queue::InputQueue::new(),
-        guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
         fork_persistence: ForkPersistence::Copied,
