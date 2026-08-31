@@ -125,23 +125,23 @@ class RuntimeArtifactManifestTest(unittest.TestCase):
                 "platform": manifest["platform"],
             },
             {
-                "sourceRevision": "d2c19347ca12c9bdba0ac4e5816884a75dc5e22c",
+                "sourceRevision": "7c45bcdab1e5eb1ab38d3797d02af67c827b0b7b",
                 "artifact": {
-                    "id": 9728371465,
-                    "digest": "sha256:5b7d4c581ef256cfd96a756fd4a1de8b97b4f3635688003d0ba25b19c60f9c63",
+                    "id": 9745233008,
+                    "digest": "sha256:e3041829b578e33769cafdbba11ddec36b4f9de7b0634d3b019d5794f2d738e2",
                     "payloadChecksum": {
                         "path": "SHA256SUMS",
-                        "digest": "sha256:f4237b3f883f2cc8b727cfbf18ab2bd312e3f237cda6c28cb0053ae13be3d5cd",
+                        "digest": "sha256:27a8aa9c294cdf416cf86b088481021e23c9c5963dbc03ec37a9812783799d3d",
                     },
                 },
                 "trees": {
                     "patched": {
                         "grammar": "git-tree-sha1",
-                        "digest": "8b334b2b723f599a7db9139a7d5693c4472d44c2",
+                        "digest": "1f35e1ae8139df81dfdf4a8eccd4027a736c2754",
                     },
                     "compiled": {
                         "grammar": "git-tree-sha1",
-                        "digest": "8b334b2b723f599a7db9139a7d5693c4472d44c2",
+                        "digest": "1f35e1ae8139df81dfdf4a8eccd4027a736c2754",
                     },
                 },
                 "platform": {
