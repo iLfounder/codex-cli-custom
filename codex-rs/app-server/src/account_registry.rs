@@ -12,6 +12,8 @@ use std::sync::atomic::Ordering;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use codex_app_server_protocol::AccountSlotCapability;
+use codex_app_server_protocol::AccountSlotCatalogKind;
+use codex_app_server_protocol::AccountSlotHealth;
 use codex_app_server_protocol::AccountSlotListParams;
 use codex_app_server_protocol::AccountSlotListResponse;
 use codex_app_server_protocol::AccountSlotSnapshot;
@@ -41,6 +43,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::Mutex;
 use tokio::sync::OwnedMutexGuard;
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::auth_mode::auth_mode_to_api;
@@ -56,6 +59,7 @@ const DEFAULT_SLOT_ID: &str = "default";
 const DEFAULT_LIST_LIMIT: usize = 50;
 const MAX_LIST_LIMIT: usize = 100;
 const MAX_MANIFEST_SLOTS: usize = 1_000;
+const TOKEN_MANAGER_URL: &str = "http://127.0.0.1:3101/";
 
 const DENY_MANIFEST_INVALID: &str = "account_slot_manifest_invalid";
 const DENY_HOST_ACCESS_TOKEN: &str = "host_owned_codex_access_token";
@@ -344,6 +348,12 @@ pub(crate) struct AccountRegistry {
     browser_login: StdMutex<Option<BrowserLoginOwner>>,
     quota_cache: quota::QuotaCache,
     exhaustion_hints: Mutex<HashSet<rotation::ExhaustionHintKey>>,
+    global_catalog: Arc<global::GlobalAccountCatalog>,
+    global_directory_user_home: Option<PathBuf>,
+    global_directory: RwLock<global::GlobalAccountDirectory>,
+    global_runtimes: Mutex<HashMap<global::AccountId, Arc<global::GlobalAccountRuntime>>>,
+    global_catalog_refresh: Semaphore,
+    token_manager_client: Option<global::TokenManagerClient>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -366,6 +376,15 @@ impl AccountRegistry {
         default_models_manager: SharedModelsManager,
         thread_store: Arc<dyn ThreadStore>,
     ) -> Self {
+        let global_directory_user_home = global::GlobalAccountDirectory::user_home();
+        let global_directory = global_directory_user_home
+            .as_deref()
+            .map_or_else(global::GlobalAccountDirectory::default, |user_home| {
+                global::GlobalAccountDirectory::load_from(user_home, &config.codex_home)
+            });
+        let token_manager_client = url::Url::parse(TOKEN_MANAGER_URL).ok().and_then(|url| {
+            global::TokenManagerClient::new(config.http_client_factory(), url).ok()
+        });
         let manifest_path = config.codex_home.join(MANIFEST_FILE);
         let (manifest, manifest_error, manifest_present) =
             match AccountSlotsManifest::load(&manifest_path, &config.codex_home) {
@@ -426,13 +445,81 @@ impl AccountRegistry {
             browser_login: StdMutex::new(None),
             quota_cache: quota::QuotaCache::default(),
             exhaustion_hints: Mutex::new(HashSet::new()),
+            global_catalog: Arc::new(global::GlobalAccountCatalog::default()),
+            global_directory_user_home,
+            global_directory: RwLock::new(global_directory),
+            global_runtimes: Mutex::new(HashMap::new()),
+            global_catalog_refresh: Semaphore::new(/*permits*/ 1),
+            token_manager_client,
         }
+    }
+
+    fn refresh_global_directory(&self) -> global::GlobalAccountDirectory {
+        let refreshed = self.global_directory_user_home.as_deref().map_or_else(
+            global::GlobalAccountDirectory::default,
+            |user_home| {
+                global::GlobalAccountDirectory::load_from(user_home, &self.config.codex_home)
+            },
+        );
+        if let Ok(mut directory) = self.global_directory.write() {
+            *directory = refreshed.clone();
+        }
+        refreshed
     }
 
     pub(crate) async fn list(
         &self,
         params: AccountSlotListParams,
     ) -> Result<AccountSlotListResponse, JSONRPCErrorError> {
+        let global_directory = self.refresh_global_directory();
+        if global_directory.process_account_id.is_some() && self.global_catalog.generation() == 0 {
+            let _ = self.ensure_global_catalog().await;
+        }
+        let generation = self.global_catalog.generation();
+        let projections = self
+            .global_catalog
+            .projection(chrono::Utc::now().timestamp());
+        if global_directory.process_account_id.is_some()
+            && generation > 0
+            && !projections.is_empty()
+        {
+            let limit = match params.limit.map(|limit| limit as usize) {
+                Some(0) => return Err(invalid_params("accountSlot/list limit must be positive")),
+                Some(limit) => limit.min(MAX_LIST_LIMIT),
+                None => DEFAULT_LIST_LIMIT,
+            };
+            let start = global_cursor_start(params.cursor.as_deref(), generation, &projections)?;
+            let end = start.saturating_add(limit).min(projections.len());
+            let now = chrono::Utc::now().timestamp();
+            let mut data = Vec::with_capacity(end.saturating_sub(start));
+            for projection in &projections[start..end] {
+                data.push(
+                    self.global_snapshot(projection.clone(), generation, now)
+                        .await,
+                );
+            }
+            let next_cursor = if end < projections.len() {
+                Some(
+                    encode_cursor(AccountSlotCursor {
+                        revision: generation,
+                        after_slot_id: projections[end - 1].account_slot_id.clone(),
+                    })
+                    .map_err(|_| internal_error("account slot cursor could not be serialized"))?,
+                )
+            } else {
+                None
+            };
+            return Ok(AccountSlotListResponse {
+                data,
+                next_cursor,
+                registry_revision: generation,
+                catalog_kind: AccountSlotCatalogKind::Global,
+                multi_account: AccountSlotCapability {
+                    available: true,
+                    deny_reason: None,
+                },
+            });
+        }
         self.reconcile().await?;
         let (revision, slots, manifest_error) = {
             let state = self
@@ -473,6 +560,7 @@ impl AccountRegistry {
             data,
             next_cursor,
             registry_revision: revision,
+            catalog_kind: AccountSlotCatalogKind::Legacy,
             multi_account: capability,
         })
     }
@@ -585,6 +673,12 @@ impl AccountRegistry {
             label: slot.manifest.label.clone(),
             is_default: slot.manifest.is_default,
             status,
+            health: if status == AccountSlotStatus::Ready {
+                AccountSlotHealth::Healthy
+            } else {
+                AccountSlotHealth::Unavailable
+            },
+            quota: None,
             auth_mode,
             attempt_generation: slot.manifest.attempt_generation,
             registry_revision: revision,
@@ -807,7 +901,6 @@ impl AccountRegistry {
             binding_transition,
         ))
     }
-
     pub(crate) async fn slot_quota_subject(
         &self,
         account_slot_id: &str,
@@ -839,6 +932,25 @@ impl AccountRegistry {
     pub(crate) async fn rotation_slot_inventory(
         &self,
     ) -> Result<Vec<RotationSlotIdentity>, JSONRPCErrorError> {
+        let global_directory = self.refresh_global_directory();
+        if global_directory.process_account_id.is_some() && self.global_catalog.generation() == 0 {
+            let _ = self.ensure_global_catalog().await;
+        }
+        let projections = self
+            .global_catalog
+            .projection(chrono::Utc::now().timestamp());
+        if global_directory.process_account_id.is_some()
+            && self.global_catalog.generation() > 0
+            && !projections.is_empty()
+        {
+            return Ok(projections
+                .into_iter()
+                .map(|account| RotationSlotIdentity {
+                    account_slot_id: account.account_slot_id,
+                    account_number: account.account_number,
+                })
+                .collect());
+        }
         self.reconcile().await?;
         let state = self
             .state
@@ -959,15 +1071,43 @@ impl AccountRegistry {
     }
 }
 
+mod global;
 pub(crate) mod live_registration;
 pub(crate) mod quota;
 pub(crate) mod rotation;
 
 impl ExecutionAccountResolver for AccountRegistry {
+    fn initial_binding_for_new_thread(&self) -> ExecutionAccountBinding {
+        let process_account_id = self.refresh_global_directory().process_account_id;
+        process_account_id
+            .filter(|account_id| {
+                self.global_catalog.generation() > 0
+                    && self
+                        .global_catalog
+                        .projection(chrono::Utc::now().timestamp())
+                        .iter()
+                        .any(|projection| projection.account_slot_id == account_id.to_string())
+            })
+            .map_or_else(
+                || ExecutionAccountBinding {
+                    slot_id: DEFAULT_SLOT_ID.to_string(),
+                    generation: 1,
+                },
+                |account_id| ExecutionAccountBinding {
+                    slot_id: account_id.to_string(),
+                    generation: 1,
+                },
+            )
+    }
+
     fn resolve(&self, binding: ExecutionAccountBinding) -> ExecutionAccountResolverFuture<'_> {
         Box::pin(async move {
             let (execution_account, _binding_transition) =
-                self.resolve_execution_account(binding).await?;
+                if global::AccountId::parse(&binding.slot_id).is_some() {
+                    self.resolve_global_execution_account(binding).await?
+                } else {
+                    self.resolve_execution_account(binding).await?
+                };
             Ok(execution_account)
         })
     }
@@ -978,7 +1118,11 @@ impl ExecutionAccountResolver for AccountRegistry {
     ) -> ExecutionAccountTransitionResolverFuture<'_> {
         Box::pin(async move {
             let (execution_account, binding_transition) =
-                self.resolve_execution_account(binding).await?;
+                if global::AccountId::parse(&binding.slot_id).is_some() {
+                    self.resolve_global_execution_account(binding).await?
+                } else {
+                    self.resolve_execution_account(binding).await?
+                };
             Ok(ResolvedExecutionAccountTransition::with_readiness_lease(
                 execution_account,
                 binding_transition,
@@ -1101,6 +1245,27 @@ fn cursor_start(
     slots
         .iter()
         .position(|slot| slot.manifest.account_slot_id == cursor.after_slot_id)
+        .map(|index| index + 1)
+        .ok_or_else(|| invalid_params("accountSlot/list cursor is invalid"))
+}
+
+fn global_cursor_start(
+    cursor: Option<&str>,
+    revision: u64,
+    accounts: &[global::CatalogAccountProjection],
+) -> Result<usize, JSONRPCErrorError> {
+    let Some(cursor) = cursor else {
+        return Ok(0);
+    };
+    let cursor = decode_cursor(cursor, revision).map_err(|error| match error {
+        CursorError::Invalid => invalid_params("accountSlot/list cursor is invalid"),
+        CursorError::Stale => {
+            invalid_params("accountSlot/list cursor is stale; restart pagination")
+        }
+    })?;
+    accounts
+        .iter()
+        .position(|account| account.account_slot_id == cursor.after_slot_id)
         .map(|index| index + 1)
         .ok_or_else(|| invalid_params("accountSlot/list cursor is invalid"))
 }

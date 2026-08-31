@@ -1,4 +1,5 @@
 use codex_app_server_protocol::RateLimitWindow;
+use codex_thread_store::ThreadAccountRotationPolicy;
 
 use super::*;
 
@@ -27,6 +28,23 @@ fn candidate(number: u32, used: i32, resets_at: i64) -> RotationCandidate {
         ),
         hard_exhausted_hint: false,
     }
+}
+
+#[test]
+fn only_canonical_cn_policies_use_the_global_catalog() {
+    let fixed = |slot_id: &str| ThreadAccountRotationPolicy {
+        mode: StoreRotationMode::Fixed,
+        fixed_account_slot_id: Some(slot_id.to_string()),
+        automatic_account_slot_ids: Vec::new(),
+        revision: 0,
+        last_committed_account_slot_id: Some(slot_id.to_string()),
+    };
+
+    assert!(global_policy(&fixed("C2")));
+    assert!(!global_policy(&fixed("default")));
+    assert!(!global_policy(&fixed(
+        "019ff6cc-f375-7630-85bf-553126ffa0b6"
+    )));
 }
 
 #[test]

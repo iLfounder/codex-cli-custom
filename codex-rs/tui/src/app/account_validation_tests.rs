@@ -2,6 +2,8 @@ use super::AccountSlotUpdateDisposition;
 use super::revision_meets_lower_bound;
 use super::runtime_revision_meets_lower_bound;
 use crate::app::test_support::make_test_app;
+use codex_app_server_protocol::AccountSlotCatalogKind;
+use codex_app_server_protocol::AccountSlotHealth;
 use codex_app_server_protocol::AccountSlotSnapshot;
 use codex_app_server_protocol::AccountSlotStatus;
 use pretty_assertions::assert_eq;
@@ -31,11 +33,13 @@ fn runtime_revision_may_restart_with_a_new_epoch_but_not_regress_within_an_epoch
 }
 fn snapshot(revision: u64, label: &str) -> AccountSlotSnapshot {
     AccountSlotSnapshot {
-        account_slot_id: "secondary".to_string(),
+        account_slot_id: "C2".to_string(),
         account_number: 2,
         label: label.to_string(),
         is_default: false,
         status: AccountSlotStatus::Ready,
+        health: AccountSlotHealth::Healthy,
+        quota: None,
         auth_mode: None,
         attempt_generation: 1,
         registry_revision: revision,
@@ -44,6 +48,57 @@ fn snapshot(revision: u64, label: &str) -> AccountSlotSnapshot {
         actions: Vec::new(),
         updated_at: 0,
     }
+}
+
+#[tokio::test]
+async fn legacy_slot_update_cannot_advance_global_revision_or_block_a_canonical_successor() {
+    let mut app = make_test_app().await;
+    app.account_catalog_kind = Some(AccountSlotCatalogKind::Global);
+    app.account_registry_revision = 5;
+    app.account_slots = vec![snapshot(5, "global")];
+    let mut legacy = snapshot(99, "legacy");
+    legacy.account_slot_id = "default".to_string();
+    let legacy_disposition = app.handle_account_slot_changed(99, legacy);
+    let successor_disposition = app.handle_account_slot_changed(6, snapshot(6, "successor"));
+
+    assert_eq!(
+        (
+            legacy_disposition,
+            successor_disposition,
+            app.account_registry_revision,
+            app.account_slots
+                .iter()
+                .map(|slot| (slot.account_slot_id.as_str(), slot.label.as_str()))
+                .collect::<Vec<_>>(),
+        ),
+        (
+            AccountSlotUpdateDisposition::Stale,
+            AccountSlotUpdateDisposition::Successor,
+            6,
+            vec![("C2", "successor")],
+        )
+    );
+}
+
+#[tokio::test]
+async fn legacy_catalog_accepts_legacy_slot_successors() {
+    let mut app = make_test_app().await;
+    app.account_catalog_kind = Some(AccountSlotCatalogKind::Legacy);
+    app.account_registry_revision = 5;
+    let mut original = snapshot(5, "original");
+    original.account_slot_id = "default".to_string();
+    app.account_slots = vec![original];
+    let mut successor = snapshot(6, "successor");
+    successor.account_slot_id = "default".to_string();
+
+    assert_eq!(
+        (
+            app.handle_account_slot_changed(6, successor),
+            app.account_registry_revision,
+            app.account_slots[0].label.as_str(),
+        ),
+        (AccountSlotUpdateDisposition::Successor, 6, "successor")
+    );
 }
 #[tokio::test]
 async fn slot_updates_apply_only_exact_successors_without_reopening_closed_ui() {

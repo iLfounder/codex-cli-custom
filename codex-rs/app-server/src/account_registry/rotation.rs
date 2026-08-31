@@ -16,6 +16,7 @@ use codex_thread_store::ThreadStoreError;
 
 use super::AccountRegistry;
 use super::ManifestSlotStatus;
+use super::global;
 use super::quota::QuotaCacheLookup;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -93,6 +94,43 @@ impl TurnExecutionAccountSelector for AccountRotationService {
                 }
             };
             let mode = api_mode(policy.mode);
+            if global_policy(&policy) {
+                let selected = self
+                    .registry
+                    .select_global_account(
+                        mode,
+                        policy.fixed_account_slot_id.as_deref(),
+                        &policy.automatic_account_slot_ids,
+                        Some(&selection.current_binding.slot_id),
+                        policy.last_committed_account_slot_id.as_deref(),
+                    )
+                    .await?;
+                let Some((token, runtime)) = selected else {
+                    return Err(CodexErr::InvalidRequest(
+                        "no eligible account slot is available".to_string(),
+                    ));
+                };
+                let target_slot_id = token.account_id.to_string();
+                if target_slot_id == selection.current_binding.slot_id
+                    && runtime.credential_revision != selection.credential_revision
+                {
+                    return Ok(TurnExecutionAccountDecision::ReprepareCurrent {
+                        policy_revision: policy.revision,
+                    });
+                }
+                return Ok(selection_decision(
+                    mode,
+                    target_slot_id,
+                    &selection.current_binding.slot_id,
+                    policy.revision,
+                ));
+            }
+            if mode == ThreadAccountRotationMode::Fixed
+                && policy.fixed_account_slot_id.as_deref()
+                    == Some(selection.current_binding.slot_id.as_str())
+            {
+                return Ok(TurnExecutionAccountDecision::Keep);
+            }
             let candidates = self
                 .registry
                 .rotation_candidates(
@@ -130,6 +168,21 @@ impl TurnExecutionAccountSelector for AccountRotationService {
     }
 }
 
+fn global_policy(policy: &codex_thread_store::ThreadAccountRotationPolicy) -> bool {
+    let ids = match policy.mode {
+        StoreRotationMode::Fixed => policy.fixed_account_slot_id.iter().collect::<Vec<_>>(),
+        StoreRotationMode::QuotaAware
+        | StoreRotationMode::RoundRobin
+        | StoreRotationMode::ExhaustThenNext => {
+            policy.automatic_account_slot_ids.iter().collect::<Vec<_>>()
+        }
+    };
+    !ids.is_empty()
+        && ids
+            .into_iter()
+            .all(|account_slot_id| global::AccountId::parse(account_slot_id).is_some())
+}
+
 fn selection_decision(
     mode: ThreadAccountRotationMode,
     target_slot_id: String,
@@ -147,6 +200,70 @@ fn selection_decision(
 }
 
 impl AccountRegistry {
+    async fn select_global_account(
+        &self,
+        mode: ThreadAccountRotationMode,
+        fixed_account_slot_id: Option<&str>,
+        automatic_account_slot_ids: &[String],
+        current_account_slot_id: Option<&str>,
+        last_committed_account_slot_id: Option<&str>,
+    ) -> Result<
+        Option<(
+            global::CatalogSelectionToken,
+            Arc<global::GlobalAccountRuntime>,
+        )>,
+        CodexErr,
+    > {
+        self.ensure_global_catalog().await?;
+        let fixed_account_id = fixed_account_slot_id.and_then(global::AccountId::parse);
+        let automatic_account_ids = automatic_account_slot_ids
+            .iter()
+            .filter_map(|account_slot_id| global::AccountId::parse(account_slot_id))
+            .collect::<Vec<_>>();
+        let current_account_id = current_account_slot_id.and_then(global::AccountId::parse);
+        let last_committed_account_id =
+            last_committed_account_slot_id.and_then(global::AccountId::parse);
+        let mut account_ids = automatic_account_ids.clone();
+        account_ids.extend(fixed_account_id);
+        account_ids.sort_unstable();
+        account_ids.dedup();
+        let mut runtimes = HashMap::new();
+        let mut credential_readiness = Vec::with_capacity(account_ids.len());
+        for account_id in account_ids {
+            if let Ok(runtime) = self.global_runtime(account_id).await {
+                credential_readiness.push(global::CredentialReadiness {
+                    account_id,
+                    ready: true,
+                });
+                runtimes.insert(account_id, runtime);
+            }
+        }
+        let selected = self.global_catalog.select(global::CatalogSelectionRequest {
+            mode: match mode {
+                ThreadAccountRotationMode::Fixed => global::RotationMode::Fixed,
+                ThreadAccountRotationMode::QuotaAware => global::RotationMode::QuotaAware,
+                ThreadAccountRotationMode::RoundRobin => global::RotationMode::RoundRobin,
+                ThreadAccountRotationMode::ExhaustThenNext => global::RotationMode::ExhaustThenNext,
+            },
+            fixed_account_id,
+            automatic_account_ids: &automatic_account_ids,
+            current_account_id,
+            last_committed_account_id,
+            credential_readiness: &credential_readiness,
+            now: chrono::Utc::now().timestamp(),
+        });
+        let global::CatalogSelection::Selected(token) = selected else {
+            return Ok(None);
+        };
+        let Some(runtime) = runtimes.remove(&token.account_id) else {
+            return Ok(None);
+        };
+        if token.source_ref() != runtime.source_ref {
+            return Ok(None);
+        }
+        Ok(Some((token, runtime)))
+    }
+
     async fn rotation_candidates(
         self: &Arc<Self>,
         thread_id: ThreadId,

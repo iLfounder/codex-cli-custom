@@ -217,7 +217,11 @@ impl App {
             .account_runtime
             .as_ref()
             .is_some_and(|(epoch, _)| epoch == &snapshot.runtime.instance_epoch);
+        let catalog_changed = self
+            .account_catalog_kind
+            .is_some_and(|catalog_kind| catalog_kind != snapshot.slots.catalog_kind);
         let slots_are_fresh = !same_runtime_epoch
+            || catalog_changed
             || super::account_validation::revision_meets_lower_bound(
                 snapshot.slots.registry_revision,
                 self.account_registry_revision,
@@ -234,6 +238,7 @@ impl App {
             );
         if slots_are_fresh {
             self.account_registry_revision = snapshot.slots.registry_revision;
+            self.account_catalog_kind = Some(snapshot.slots.catalog_kind);
             self.account_slots = snapshot.slots.data;
             self.account_slot_capability = Some(snapshot.slots.multi_account);
         }
