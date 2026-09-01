@@ -85,7 +85,7 @@ snapshot hashing을 async executor 밖으로 옮겼지만 revision·identity 검
 
 ## 적용과 build
 
-정확한 upstream commit에만 15개의 logical patch를 적용한다.
+정확한 upstream commit에만 16개의 logical patch를 적용한다.
 
 ```sh
 git checkout 316795b3cf2a45e90d121d9f46499d4658b2645c
@@ -155,7 +155,7 @@ Workflow는 두 package layout을 검사하고, 양쪽에 동일한 build의 Cod
 
 ## 저장소 구성
 
-- `custom-patches/rust-v0.152.0/`: 현재 15개 logical patch와 digest manifest
+- `custom-patches/rust-v0.152.0/`: 현재 16개 logical patch와 digest manifest
 - `custom-patches/rust-v0.151.0/`: 재현성을 위해 보존한 이전 15개 patch series
 - `custom-patches/rust-v0.149.0/`: 재현성을 위해 보존한 이전 series
 - `custom-patches/rust-v0.148.0/`: 재현성을 위해 보존한 이전 series

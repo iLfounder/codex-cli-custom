@@ -88,7 +88,7 @@ same model/reasoning effort, prewarm setting, proxy/TLS path, and concurrency wh
 
 ## Apply and build
 
-Apply the fifteen logical patches only to the exact upstream commit:
+Apply the sixteen logical patches only to the exact upstream commit:
 
 ```sh
 git checkout 316795b3cf2a45e90d121d9f46499d4658b2645c
@@ -159,7 +159,7 @@ Stop every older TUI and app-server sharing the store. Start the 0.152 build onc
 
 ## Repository layout
 
-- `custom-patches/rust-v0.152.0/`: current fifteen-patch ordered series and digest manifest
+- `custom-patches/rust-v0.152.0/`: current sixteen-patch ordered series and digest manifest
 - `custom-patches/rust-v0.151.0/`: preserved historical fifteen-patch series
 - `custom-patches/rust-v0.149.0/`: preserved historical ordered series
 - `custom-patches/rust-v0.148.0/`: previous series retained for reproducibility
