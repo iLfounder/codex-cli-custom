@@ -8,7 +8,7 @@ An experimental fork of OpenAI Codex for people who keep several accounts and lo
 
 The fork makes account selection, thread ownership, session handoff, and external session control explicit. It also adds typed Goal actions and installable plugin commands while keeping credentials, local paths, and workflow-specific identities private.
 
-> This is an unofficial distribution. The current series targets upstream [`rust-v0.151.0`](https://github.com/openai/codex/releases/tag/rust-v0.151.0), commit `78c290807ce710180111df227df3b7a4fe845452`.
+> This is an unofficial distribution. The current series targets upstream [`rust-v0.152.0`](https://github.com/openai/codex/releases/tag/rust-v0.152.0), commit `316795b3cf2a45e90d121d9f46499d4658b2645c`.
 
 ## What the patch series adds
 
@@ -28,7 +28,7 @@ The fork makes account selection, thread ownership, session handoff, and externa
 | U12 (P020–P021) | Session lifecycle race/interrupt consistency and conflict-aware Goal recovery across accounting-only drift. |
 | U13 (P022–P023) | Final telemetry/compaction and MCP convergence, Codex-owned quota failover/rotation, and invocation readiness handshake. |
 | U14 (P024) | Supervised canonical control plane, account-neutral local UDS, global lifecycle APIs, reconnect-safe clients, and bounded OAuth callback compatibility. |
-| U15 (P025 + reconciliation) | Managed-slot binding before fresh canonical threads, inherited resume/fork bindings, multi-row `FooterBox`/`FooterAdapter`, generated-contract reconciliation, and Windows security hardening. |
+| U15 (P025 + reconciliation) | Managed-slot binding before fresh canonical threads, inherited resume/fork bindings, multi-row `FooterBox`/`FooterAdapter`, multiplexer-aware Windows terminal rendering, bounded post-ready JSONL terminal failures, Runtime Artifact v2 reconciliation, and Windows security hardening. |
 
 The app-server exposes opaque account references and sanitized session state. It never stores external workflow roles, group IDs, or user handles.
 Session-runtime identity keeps only a source kind and the literal `<workspace>` marker; it does not
@@ -91,8 +91,8 @@ same model/reasoning effort, prewarm setting, proxy/TLS path, and concurrency wh
 Apply the fifteen logical patches only to the exact upstream commit:
 
 ```sh
-git checkout 78c290807ce710180111df227df3b7a4fe845452
-/path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD" rust-v0.151.0
+git checkout 316795b3cf2a45e90d121d9f46499d4658b2645c
+/path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD" rust-v0.152.0
 ```
 
 The applier requires a clean tree, verifies every patch digest, applies U01–U15 in order, and
@@ -103,17 +103,17 @@ available by passing their series name explicitly. The script needs a POSIX shel
 Build locally from `codex-rs`:
 
 ```sh
-perl -0pi -e 's/version = "0\.0\.0"/version = "0.151.0"/g' Cargo.lock
+perl -0pi -e 's/version = "0\.0\.0"/version = "0.152.0"/g' Cargo.lock
 cargo build --locked --release -p codex-cli --bin codex
 cargo build --locked --release -p codex-app-server --bin codex-app-server
 cargo build --locked --release -p codex-code-mode-host --bin codex-code-mode-host
 cargo build --locked --release -p codex-responses-api-proxy --bin codex-responses-api-proxy
 CODEX_REPO_ROOT="$(cd .. && pwd)" python3 ../scripts/build_codex_package.py \
-  --target aarch64-apple-darwin --variant codex --package-version 0.151.0 \
+  --target aarch64-apple-darwin --variant codex --package-version 0.152.0 \
   --entrypoint-bin target/release/codex \
   --code-mode-host-bin target/release/codex-code-mode-host
 CODEX_REPO_ROOT="$(cd .. && pwd)" python3 ../scripts/build_codex_package.py \
-  --target aarch64-apple-darwin --variant codex-app-server --package-version 0.151.0 \
+  --target aarch64-apple-darwin --variant codex-app-server --package-version 0.152.0 \
   --entrypoint-bin target/release/codex-app-server \
   --code-mode-host-bin target/release/codex-code-mode-host
 ```
@@ -155,11 +155,12 @@ Code Mode host, and records SHA-256 digests and source-tree provenance before up
 
 ## Upgrading an older custom state store
 
-Stop every older TUI and app-server sharing the store. Start the 0.151 build once with `CODEX_STATE_LEGACY_MIGRATION_CUTOVER=1`, then remove the variable. The migration validates the known legacy schema before adoption and rejects unknown or partial schemas. Do not reopen the migrated store with an older binary.
+Stop every older TUI and app-server sharing the store. Start the 0.152 build once with `CODEX_STATE_LEGACY_MIGRATION_CUTOVER=1`, then remove the variable. The migration validates the known legacy schema before adoption and rejects unknown or partial schemas. Do not reopen the migrated store with an older binary.
 
 ## Repository layout
 
-- `custom-patches/rust-v0.151.0/`: current fifteen-patch ordered series and digest manifest
+- `custom-patches/rust-v0.152.0/`: current fifteen-patch ordered series and digest manifest
+- `custom-patches/rust-v0.151.0/`: preserved historical fifteen-patch series
 - `custom-patches/rust-v0.149.0/`: preserved historical ordered series
 - `custom-patches/rust-v0.148.0/`: previous series retained for reproducibility
 - `custom-patches/apply-series.sh`: clean-tree patch applier

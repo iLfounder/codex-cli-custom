@@ -8,7 +8,7 @@
 
 이 fork는 계정 선택, thread 소유권, session 인계, 외부 session 제어를 명시적인 계약으로 제공한다. Credential과 로컬 경로, 외부 workflow 고유 식별자는 비공개로 유지하면서 typed Goal action과 설치 가능한 plugin command도 추가한다.
 
-> 공식 OpenAI 배포물이 아니다. 현재 series는 upstream [`rust-v0.151.0`](https://github.com/openai/codex/releases/tag/rust-v0.151.0), commit `78c290807ce710180111df227df3b7a4fe845452`을 대상으로 한다.
+> 공식 OpenAI 배포물이 아니다. 현재 series는 upstream [`rust-v0.152.0`](https://github.com/openai/codex/releases/tag/rust-v0.152.0), commit `316795b3cf2a45e90d121d9f46499d4658b2645c`을 대상으로 한다.
 
 ## Patch series가 추가하는 기능
 
@@ -28,7 +28,7 @@
 | U12 (P020–P021) | Session lifecycle race/interrupt 일관성과 accounting-only drift에 대한 충돌 인지형 Goal 복구를 제공한다. |
 | U13 (P022–P023) | Telemetry/compaction/MCP 수렴, Codex 소유 quota failover/rotation, invocation readiness handshake를 제공한다. |
 | U14 (P024) | Supervised canonical control plane, account-neutral UDS, global lifecycle API, reconnect-safe client, bounded OAuth callback을 제공한다. |
-| U15 (P025 + reconciliation) | Fresh canonical thread 전 managed slot binding, resume/fork 상속, 다중 행 `FooterBox`/`FooterAdapter`, generated contract 정합성, Windows 보안 보강을 제공한다. |
+| U15 (P025 + reconciliation) | Fresh canonical thread 전 managed slot binding, resume/fork 상속, 다중 행 `FooterBox`/`FooterAdapter`, multiplexer-aware Windows terminal rendering, bounded post-ready JSONL terminal failure, Runtime Artifact v2 정합성, Windows 보안 보강을 제공한다. |
 
 App-server는 opaque account reference와 sanitize된 session state만 노출한다. 외부 workflow role, group ID, 사용자 handle은 저장하지 않는다.
 Session-runtime identity도 source 종류와 literal `<workspace>` marker만 유지하며, 로컬 파일시스템
@@ -88,8 +88,8 @@ snapshot hashing을 async executor 밖으로 옮겼지만 revision·identity 검
 정확한 upstream commit에만 15개의 logical patch를 적용한다.
 
 ```sh
-git checkout 78c290807ce710180111df227df3b7a4fe845452
-/path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD" rust-v0.151.0
+git checkout 316795b3cf2a45e90d121d9f46499d4658b2645c
+/path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD" rust-v0.152.0
 ```
 
 Applier는 clean tree를 요구하고 각 patch digest를 검증한 뒤 U01–U15를 순서대로 적용하고
@@ -99,17 +99,17 @@ Applier는 clean tree를 요구하고 각 patch digest를 검증한 뒤 U01–U1
 `codex-rs`에서 로컬 build:
 
 ```sh
-perl -0pi -e 's/version = "0\.0\.0"/version = "0.151.0"/g' Cargo.lock
+perl -0pi -e 's/version = "0\.0\.0"/version = "0.152.0"/g' Cargo.lock
 cargo build --locked --release -p codex-cli --bin codex
 cargo build --locked --release -p codex-app-server --bin codex-app-server
 cargo build --locked --release -p codex-code-mode-host --bin codex-code-mode-host
 cargo build --locked --release -p codex-responses-api-proxy --bin codex-responses-api-proxy
 CODEX_REPO_ROOT="$(cd .. && pwd)" python3 ../scripts/build_codex_package.py \
-  --target aarch64-apple-darwin --variant codex --package-version 0.151.0 \
+  --target aarch64-apple-darwin --variant codex --package-version 0.152.0 \
   --entrypoint-bin target/release/codex \
   --code-mode-host-bin target/release/codex-code-mode-host
 CODEX_REPO_ROOT="$(cd .. && pwd)" python3 ../scripts/build_codex_package.py \
-  --target aarch64-apple-darwin --variant codex-app-server --package-version 0.151.0 \
+  --target aarch64-apple-darwin --variant codex-app-server --package-version 0.152.0 \
   --entrypoint-bin target/release/codex-app-server \
   --code-mode-host-bin target/release/codex-code-mode-host
 ```
@@ -126,7 +126,7 @@ set에서 기능을 뺀 것이 아니라 daemon process manager의 platform 경�
 명확한 unsupported-platform 오류를 반환한다.
 
 upstream release tag의 `Cargo.lock`에는 workspace package version이 `0.0.0` placeholder로
-남아 있다. 첫 명령은 GitHub Actions build와 동일하게 이 정확한 placeholder만 `0.151.0`으로
+남아 있다. 첫 명령은 GitHub Actions build와 동일하게 이 정확한 placeholder만 `0.152.0`으로
 정규화한 뒤 Cargo가 locked dependency resolution을 수행하게 한다.
 Package builder는 Python 3.10 이상이 필요하다. 또한 upstream source에 고정된 target별
 ripgrep과 patched zsh resource를 다운로드하고 digest를 검증한다.
@@ -151,11 +151,12 @@ Workflow는 두 package layout을 검사하고, 양쪽에 동일한 build의 Cod
 
 ## 기존 custom state store 업그레이드
 
-같은 store를 공유하는 구버전 TUI와 app-server를 모두 종료한다. 0.151 build를 `CODEX_STATE_LEGACY_MIGRATION_CUTOVER=1`로 한 번만 시작한 뒤 변수를 제거한다. Migration은 알려진 legacy schema를 검증한 후에만 적용하며 unknown 또는 partial schema는 거절한다. Migration이 끝난 store를 구버전 binary로 다시 열지 않는다.
+같은 store를 공유하는 구버전 TUI와 app-server를 모두 종료한다. 0.152 build를 `CODEX_STATE_LEGACY_MIGRATION_CUTOVER=1`로 한 번만 시작한 뒤 변수를 제거한다. Migration은 알려진 legacy schema를 검증한 후에만 적용하며 unknown 또는 partial schema는 거절한다. Migration이 끝난 store를 구버전 binary로 다시 열지 않는다.
 
 ## 저장소 구성
 
-- `custom-patches/rust-v0.151.0/`: 현재 15개 logical patch와 digest manifest
+- `custom-patches/rust-v0.152.0/`: 현재 15개 logical patch와 digest manifest
+- `custom-patches/rust-v0.151.0/`: 재현성을 위해 보존한 이전 15개 patch series
 - `custom-patches/rust-v0.149.0/`: 재현성을 위해 보존한 이전 series
 - `custom-patches/rust-v0.148.0/`: 재현성을 위해 보존한 이전 series
 - `custom-patches/apply-series.sh`: clean-tree patch applier

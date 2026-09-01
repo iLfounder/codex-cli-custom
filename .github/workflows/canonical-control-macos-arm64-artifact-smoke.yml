@@ -64,7 +64,7 @@ jobs:
           test "$(jq -r '.digest' <<<"$artifact")" = "$INPUT_ARTIFACT_DIGEST"
           test "$(jq -r '.expired' <<<"$artifact")" = false
           [[ "$(jq -r '.name' <<<"$artifact")" = \
-            codex-custom-rust-v0.151.0-macos-arm64-* ]]
+            codex-custom-rust-v0.152.0-macos-arm64-* ]]
           {
             echo "artifact_id=$(jq -r '.id' <<<"$artifact")"
             echo "artifact_name=$(jq -r '.name' <<<"$artifact")"
@@ -92,7 +92,7 @@ jobs:
           set -euo pipefail
           test "$(uname -m)" = arm64
           test "$PUBLIC_MAIN_SHA" = "${{ github.event.inputs.public_main_sha }}"
-          grep -Fxq "upstream_commit=78c290807ce710180111df227df3b7a4fe845452" \
+          grep -Fxq "upstream_commit=316795b3cf2a45e90d121d9f46499d4658b2645c" \
             "$DIST/BUILD-METADATA.txt"
           grep -Fxq "source_revision=$PUBLIC_MAIN_SHA" "$DIST/BUILD-METADATA.txt"
           grep -Fxq "build_revision=$PUBLIC_MAIN_SHA" "$DIST/BUILD-METADATA.txt"
@@ -117,7 +117,7 @@ jobs:
           manifest = json.loads((dist / "runtime-artifact-v2.json").read_text(encoding="utf-8"))
           assert manifest["schema"] == "codex-a.runtime-artifact/v2"
           assert manifest["source"] == {
-              "upstreamCommit": "78c290807ce710180111df227df3b7a4fe845452",
+              "upstreamCommit": "316795b3cf2a45e90d121d9f46499d4658b2645c",
               "sourceRevision": os.environ["PUBLIC_MAIN_SHA"],
               "buildRevision": os.environ["PUBLIC_MAIN_SHA"],
               "patchedTree": {"grammar": "git-tree-sha1", "digest": os.environ["PATCHED_TREE"]},
@@ -161,9 +161,9 @@ jobs:
           test -x "$app_server/bin/codex-app-server"
           test -x "$app_server/bin/codex-code-mode-host"
           test -x "$app_server/codex-path/rg"
-          test "$("$primary/bin/codex" --version)" = "codex-cli 0.151.0"
+          test "$("$primary/bin/codex" --version)" = "codex-cli 0.152.0"
           test "$("$app_server/bin/codex-app-server" --version)" = \
-            "codex-app-server 0.151.0"
+            "codex-app-server 0.152.0"
           expected_app_server_sha=$(jq -er '.artifact.appServerSha256' \
             "$DIST/runtime-artifact-v2.json")
           actual_app_server_sha=$(shasum -a 256 \

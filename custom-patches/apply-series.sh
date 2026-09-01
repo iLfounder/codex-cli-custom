@@ -3,8 +3,8 @@ set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # The latest series is the default; pass the historical series name explicitly
-# when reproducing a 0.148/0.149 checkout.
-series_name=${2:-rust-v0.151.0}
+# when reproducing a 0.148/0.149/0.151 checkout.
+series_name=${2:-rust-v0.152.0}
 series_dir="$script_dir/$series_name"
 manifest="$series_dir/series.toml"
 target_repo=${1:-.}
