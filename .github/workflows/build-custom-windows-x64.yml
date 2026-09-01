@@ -105,7 +105,7 @@ jobs:
           set -euo pipefail
           cargo test --locked --target "$TARGET" -p codex-tui scrollback
           cargo test --locked --target "$TARGET" -p codex-tui resize_reflow
-          cargo test --locked --target "$TARGET" -p codex-app-server session_runtime
+          cargo test --locked --target "$TARGET" -p codex-app-server --lib session_runtime
           cargo test --locked --target "$TARGET" -p codex-app-server-transport
 
       - name: Validate provider contract tooling

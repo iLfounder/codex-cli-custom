@@ -183,7 +183,7 @@ jobs:
           cargo test --locked -p codex-app-server-transport
           cargo test --locked -p codex-app-server-daemon
           cargo test --locked -p codex-app-server-client supervised
-          cargo test --locked -p codex-app-server session_runtime
+          cargo test --locked -p codex-app-server --lib session_runtime
           cargo test --locked -p codex-tui scrollback
           cargo test --locked -p codex-tui resize_reflow
 
