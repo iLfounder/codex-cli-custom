@@ -96,6 +96,11 @@ jobs:
       - name: Run focused changed-surface tests
         working-directory: upstream-codex/codex-rs
         shell: bash
+        env:
+          # libtest runs each test on a spawned thread. The Windows runner's
+          # default thread stack is too small for the TUI's deeply nested test
+          # fixtures and aborts otherwise with STATUS_STACK_OVERFLOW.
+          RUST_MIN_STACK: 16777216
         run: |
           set -euo pipefail
           cargo test --locked --target "$TARGET" -p codex-tui scrollback
