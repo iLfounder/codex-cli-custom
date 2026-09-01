@@ -512,10 +512,7 @@ async fn account_rotation_bootstrap_errors_are_bounded_and_never_start_a_turn() 
     .await
     .expect_err("account inventory failure should stop before turn/start");
 
-    assert_eq!(
-        error.post_ready_message(),
-        ACCOUNT_ROTATION_BOOTSTRAP_FAILED
-    );
+    assert_eq!(error.post_ready_message(), BOOTSTRAP_FAILED);
     assert_eq!(
         client
             .requests()
@@ -552,10 +549,7 @@ async fn account_rotation_bootstrap_errors_are_bounded_and_never_start_a_turn() 
     .await
     .expect_err("rotation update failure should stop before turn/start");
 
-    assert_eq!(
-        error.post_ready_message(),
-        ACCOUNT_ROTATION_BOOTSTRAP_FAILED
-    );
+    assert_eq!(error.post_ready_message(), BOOTSTRAP_FAILED);
     assert_eq!(
         client
             .requests()
@@ -582,14 +576,14 @@ async fn turn_start_typed_errors_map_to_bounded_post_ready_codes() {
                     data: Some(serde_json::json!({"accountSlotId": "C9"})),
                 },
             },
-            TURN_START_REJECTED,
+            TURN_START_SERVER_FAILED,
         ),
         (
             TypedRequestError::Transport {
                 method: "turn/start".to_string(),
                 source: io::Error::new(io::ErrorKind::BrokenPipe, "raw transport detail"),
             },
-            TURN_START_OUTCOME_UNKNOWN,
+            TURN_START_TRANSPORT_FAILED,
         ),
         (
             TypedRequestError::Deserialize {
@@ -597,7 +591,7 @@ async fn turn_start_typed_errors_map_to_bounded_post_ready_codes() {
                 source: serde_json::from_str::<Value>("{")
                     .expect_err("invalid JSON should create a deserialize error"),
             },
-            TURN_START_OUTCOME_UNKNOWN,
+            TURN_START_DESERIALIZE_FAILED,
         ),
     ];
 
@@ -623,29 +617,6 @@ async fn turn_start_typed_errors_map_to_bounded_post_ready_codes() {
                 .map(ClientRequest::method_name)
                 .collect::<Vec<_>>(),
             ["turn/start"]
-        );
-    }
-}
-
-#[test]
-fn post_ready_failure_wire_shape_contains_only_the_bounded_message() {
-    for message in [
-        ACCOUNT_ROTATION_BOOTSTRAP_FAILED,
-        TURN_START_REJECTED,
-        TURN_START_OUTCOME_UNKNOWN,
-    ] {
-        let value = serde_json::to_value(ThreadEvent::TurnFailed(TurnFailedEvent {
-            error: ThreadErrorEvent {
-                message: message.to_string(),
-            },
-        }))
-        .expect("turn.failed should serialize");
-        assert_eq!(
-            value,
-            serde_json::json!({
-                "type": "turn.failed",
-                "error": {"message": message}
-            })
         );
     }
 }

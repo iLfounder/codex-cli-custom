@@ -184,9 +184,10 @@ use crate::event_processor::EventProcessor;
 
 const DEFAULT_ANALYTICS_ENABLED: bool = true;
 const EXEC_DEFAULT_LOG_FILTER: &str = "error,opentelemetry_sdk=off,opentelemetry_otlp=off";
-const ACCOUNT_ROTATION_BOOTSTRAP_FAILED: &str = "codex_exec_account_rotation_bootstrap_failed";
-const TURN_START_REJECTED: &str = "codex_exec_turn_start_rejected";
-const TURN_START_OUTCOME_UNKNOWN: &str = "codex_exec_turn_start_outcome_unknown";
+const BOOTSTRAP_FAILED: &str = "codex_exec_bootstrap_failed";
+const TURN_START_SERVER_FAILED: &str = "codex_exec_turn_start_server_failed";
+const TURN_START_TRANSPORT_FAILED: &str = "codex_exec_turn_start_transport_failed";
+const TURN_START_DESERIALIZE_FAILED: &str = "codex_exec_turn_start_deserialize_failed";
 
 enum InitialOperation {
     ForkOnly,
@@ -1032,7 +1033,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
             if handshake_enabled {
                 return Err(post_ready_failure(
                     event_processor.as_mut(),
-                    ACCOUNT_ROTATION_BOOTSTRAP_FAILED,
+                    BOOTSTRAP_FAILED,
                 ));
             }
             return Err(anyhow::Error::msg(err));
@@ -1357,11 +1358,10 @@ enum StartTurnError {
 impl StartTurnError {
     fn post_ready_message(&self) -> &'static str {
         match self {
-            Self::AccountRotationBootstrap(_) => ACCOUNT_ROTATION_BOOTSTRAP_FAILED,
-            Self::TurnStart(TypedRequestError::Server { .. }) => TURN_START_REJECTED,
-            Self::TurnStart(
-                TypedRequestError::Transport { .. } | TypedRequestError::Deserialize { .. },
-            ) => TURN_START_OUTCOME_UNKNOWN,
+            Self::AccountRotationBootstrap(_) => BOOTSTRAP_FAILED,
+            Self::TurnStart(TypedRequestError::Server { .. }) => TURN_START_SERVER_FAILED,
+            Self::TurnStart(TypedRequestError::Transport { .. }) => TURN_START_TRANSPORT_FAILED,
+            Self::TurnStart(TypedRequestError::Deserialize { .. }) => TURN_START_DESERIALIZE_FAILED,
         }
     }
 
