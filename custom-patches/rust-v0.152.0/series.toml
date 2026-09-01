@@ -1,7 +1,7 @@
 schema_version = 1
 applies_to = "rust-v0.152.0"
 base_commit = "316795b3cf2a45e90d121d9f46499d4658b2645c"
-final_tree = "2349aef79a7cbae0b59c06230b2e5768f5737a58"
+final_tree = "07b4cfd871d2e0b705303397be0d4e66af5f5393"
 
 [[patches]]
 number = "U01"
@@ -81,4 +81,4 @@ sha256 = "65243b2899c88a271e4228ef0f38eaad23a53a2a1db251f6e51c46332183738f"
 [[patches]]
 number = "U16"
 file = "0016-U16-preserve-typed-post-ready-failure-terminals.patch"
-sha256 = "163d45d0fc5471044ace24517d69f40c482476d697f3f3e9ab7a11adc21e9d44"
+sha256 = "fd027a5ea7a127a3ed632fa2150d2fa276c6c3fcba34b2c2867fa0a1f11114af"

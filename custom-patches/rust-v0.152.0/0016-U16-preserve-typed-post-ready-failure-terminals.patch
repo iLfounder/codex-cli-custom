@@ -1,31 +1,13 @@
-From 8d704b1e6699583afa7b31dbd71da64f3eb54e81 Mon Sep 17 00:00:00 2001
+From 8de842dcb2ca2e85ce9ea1243084363e6ceb1472 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Wed, 2 Sep 2026 03:35:38 +0900
 Subject: [PATCH] U16: preserve typed post-ready failure terminals
 
 ---
- .../src/event_processor_with_jsonl_output.rs  |  6 +--
- codex-rs/exec/src/lib.rs                      | 18 ++++-----
- codex-rs/exec/src/lib_tests.rs                | 39 +++----------------
- 3 files changed, 16 insertions(+), 47 deletions(-)
+ codex-rs/exec/src/lib.rs       | 18 ++++++++--------
+ codex-rs/exec/src/lib_tests.rs | 39 +++++-----------------------------
+ 2 files changed, 14 insertions(+), 43 deletions(-)
 
-diff --git a/codex-rs/exec/src/event_processor_with_jsonl_output.rs b/codex-rs/exec/src/event_processor_with_jsonl_output.rs
-index 1dc2ffb40d..000c887332 100644
---- a/codex-rs/exec/src/event_processor_with_jsonl_output.rs
-+++ b/codex-rs/exec/src/event_processor_with_jsonl_output.rs
-@@ -659,10 +659,8 @@ impl EventProcessor for EventProcessorWithJsonOutput {
-     }
- 
-     fn print_post_ready_failure(&mut self, message: &'static str) -> std::io::Result<()> {
--        self.emit_and_flush(ThreadEvent::TurnFailed(TurnFailedEvent {
--            error: ThreadErrorEvent {
--                message: message.to_string(),
--            },
-+        self.emit_and_flush(ThreadEvent::Error(ThreadErrorEvent {
-+            message: message.to_string(),
-         }))
-     }
- 
 diff --git a/codex-rs/exec/src/lib.rs b/codex-rs/exec/src/lib.rs
 index 9ac125af9f..48bbe95659 100644
 --- a/codex-rs/exec/src/lib.rs
