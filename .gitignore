@@ -4,5 +4,6 @@
 /upstream-codex/
 /.cargo-target/
 /dist/
+__pycache__/
 /codex-custom-*.tar.gz
 /codex-custom-*.tar.gz.sha256

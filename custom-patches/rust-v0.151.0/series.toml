@@ -1,7 +1,7 @@
 schema_version = 1
 applies_to = "rust-v0.151.0"
 base_commit = "78c290807ce710180111df227df3b7a4fe845452"
-final_tree = "f8e114b2f88162691166bb175eb1f510cf925f6c"
+final_tree = "06b0fd4a6121d0cc3b94b3e2d5c923122f5d6c7b"
 
 [[patches]]
 number = "U01"
@@ -75,5 +75,5 @@ sha256 = "1430da7f86d8a84dfbe1039582393937255ecd183bd277cdc5c1788d52681c48"
 
 [[patches]]
 number = "U15"
-file = "0015-U15-bind-managed-launches-and-finalize-FooterBox-por.patch"
-sha256 = "fb1b776796b6edaa560855e81bdd4ea420ba85133e24ea0e9494d0ecb3ed271c"
+file = "0015-U15-finalize-managed-runtime-and-terminal-compatibil.patch"
+sha256 = "eede57d592d653f13e451d99ab6e1c48c336411b37db8921d4714fda43bc8fde"

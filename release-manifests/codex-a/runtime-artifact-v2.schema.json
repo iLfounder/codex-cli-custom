@@ -1,0 +1,311 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ilfounder/Codex-Cli-Custom/release-manifests/codex-a/runtime-artifact-v2.schema.json",
+  "title": "codex-a.runtime-artifact/v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "runtimeContract",
+    "protocolSurface",
+    "source",
+    "artifact",
+    "supervisor"
+  ],
+  "properties": {
+    "schema": {
+      "const": "codex-a.runtime-artifact/v2"
+    },
+    "runtimeContract": {
+      "const": {
+        "contractId": "ananke-work/codex-app-server-runtime-semantics/v1",
+        "capabilities": [
+          "ananke_session_identity_v1",
+          "ananke_session_control_v1",
+          "ananke_thread_transition_v1"
+        ],
+        "sequenceSemantics": {
+          "id": "nondecreasing-coalesced-v1",
+          "ordering": "nondecreasing",
+          "sameSequenceDistinctSnapshots": true,
+          "sequenceJumpsAllowed": true,
+          "readMayAdvanceWithoutNotification": true,
+          "fullSnapshotNotifications": true,
+          "resyncOn": [
+            "instance_epoch_change",
+            "sequence_regression",
+            "notification_gap",
+            "notification_overflow",
+            "stale_cursor"
+          ]
+        },
+        "sharedRuntime": {
+          "id": "owner-shared-app-server-v1",
+          "topology": "single_instance_single_socket",
+          "executionAuthority": "sessionRuntime.account.current",
+          "attachmentHomeMeaning": "mcp_lease_location",
+          "processReplacementRotates": [
+            "instanceId",
+            "instanceGeneration",
+            "instanceEpoch",
+            "processGeneration"
+          ]
+        },
+        "attachment": {
+          "id": "loaded-thread-mcp-probe-v1",
+          "methods": [
+            "thread/loaded/list",
+            "mcpServer/tool/call"
+          ],
+          "privateProbeTool": "__autoattach_probe",
+          "authority": "consumer_private_until_provider_owned",
+          "coldCallPolicy": "bounded_pending_until_probe_terminal"
+        },
+        "mutationSemantics": {
+          "connection": "persistent_subscriber",
+          "autoRetry": "forbidden",
+          "operation": {
+            "nonterminal": [
+              "accepted",
+              "running"
+            ],
+            "terminal": [
+              "ready",
+              "released",
+              "failed"
+            ]
+          },
+          "transition": {
+            "nonterminal": [
+              "prepared"
+            ],
+            "terminal": [
+              "committed"
+            ]
+          },
+          "goalCas": {
+            "readback": [
+              "goalId",
+              "revision"
+            ],
+            "request": [
+              "expectedGoalId",
+              "expectedRevision"
+            ]
+          }
+        }
+      }
+    },
+    "protocolSurface": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaPath",
+        "schemaSha256",
+        "sourceAnchorsPath",
+        "sourceAnchorsSha256"
+      ],
+      "properties": {
+        "schemaPath": {
+          "const": "codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json"
+        },
+        "schemaSha256": {
+          "$ref": "#/$defs/prefixedSha256"
+        },
+        "sourceAnchorsPath": {
+          "const": "release-manifests/codex-a/runtime-artifact-v2.source-anchors.json"
+        },
+        "sourceAnchorsSha256": {
+          "$ref": "#/$defs/prefixedSha256"
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "upstreamCommit",
+        "sourceRevision",
+        "buildRevision",
+        "patchedTree",
+        "compiledTree",
+        "patchedTreeEqualsCompiledTree"
+      ],
+      "properties": {
+        "upstreamCommit": {
+          "$ref": "#/$defs/gitSha"
+        },
+        "sourceRevision": {
+          "$ref": "#/$defs/gitSha"
+        },
+        "buildRevision": {
+          "$ref": "#/$defs/gitSha"
+        },
+        "patchedTree": {
+          "$ref": "#/$defs/gitTree"
+        },
+        "compiledTree": {
+          "$ref": "#/$defs/gitTree"
+        },
+        "patchedTreeEqualsCompiledTree": {
+          "const": true
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "appServerSha256",
+        "entrypoints"
+      ],
+      "properties": {
+        "target": {
+          "const": "aarch64-apple-darwin"
+        },
+        "appServerSha256": {
+          "$ref": "#/$defs/rawSha256"
+        },
+        "entrypoints": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "appServer",
+            "supervisor"
+          ],
+          "properties": {
+            "appServer": {
+              "const": {
+                "archivePath": "codex-app-server-package-aarch64-apple-darwin.tar.gz",
+                "executablePath": "bin/codex-app-server",
+                "mode": "0755",
+                "argv": []
+              }
+            },
+            "supervisor": {
+              "const": {
+                "archivePath": "codex-package-aarch64-apple-darwin.tar.gz",
+                "executablePath": "bin/codex",
+                "mode": "0755",
+                "argv": [
+                  "app-server",
+                  "daemon",
+                  "supervisor"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "supervisor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contractVersion"
+      ],
+      "properties": {
+        "contractVersion": {
+          "type": "integer",
+          "const": 1
+        }
+      }
+    }
+  },
+  "$defs": {
+    "gitSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "rawSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "prefixedSha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "gitTree": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "grammar",
+        "digest"
+      ],
+      "properties": {
+        "grammar": {
+          "const": "git-tree-sha1"
+        },
+        "digest": {
+          "$ref": "#/$defs/gitSha"
+        }
+      }
+    },
+    "gitBlob": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "grammar",
+        "digest"
+      ],
+      "properties": {
+        "grammar": {
+          "const": "git-blob-sha1"
+        },
+        "digest": {
+          "$ref": "#/$defs/gitSha"
+        }
+      }
+    },
+    "sourceAnchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "blobOid"
+      ],
+      "properties": {
+        "path": {
+          "enum": [
+            "codex-rs/app-server-daemon/src/supervisor.rs",
+            "codex-rs/app-server-protocol/src/protocol/common.rs",
+            "codex-rs/app-server-protocol/src/protocol/v2/mcp.rs",
+            "codex-rs/app-server-protocol/src/protocol/v2/session_runtime.rs",
+            "codex-rs/app-server-protocol/src/protocol/v2/thread.rs",
+            "codex-rs/app-server-transport/src/supervisor.rs",
+            "codex-rs/app-server/src/session_runtime/mod.rs",
+            "codex-rs/app-server/src/session_runtime/operations.rs",
+            "codex-rs/app-server/src/session_runtime/pagination.rs",
+            "codex-rs/app-server/src/session_runtime/snapshot.rs"
+          ]
+        },
+        "blobOid": {
+          "$ref": "#/$defs/gitBlob"
+        }
+      }
+    },
+    "sourceAnchors": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "anchors"
+      ],
+      "properties": {
+        "schema": {
+          "const": "codex-a.runtime-source-anchors/v1"
+        },
+        "anchors": {
+          "type": "array",
+          "minItems": 10,
+          "maxItems": 10,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/sourceAnchor"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,11 +1,121 @@
-From 9521311b6ee43910e0f558ff63e0af856f12fd61 Mon Sep 17 00:00:00 2001
+From 9349c23623f20e9965420ea0a663e9ff9de73e96 Mon Sep 17 00:00:00 2001
 From: Codex Port <codex-port@localhost>
 Date: Tue, 1 Sep 2026 00:47:08 +0900
-Subject: [PATCH] U15: bind managed launches and finalize FooterBox port
+Subject: [PATCH 15/15] U15: finalize managed runtime and terminal
+ compatibility
 
+---
+ codex-rs/Cargo.lock                           |    3 +
+ .../app-server-client/src/supervised_tests.rs |    2 +
+ codex-rs/app-server-daemon/src/supervisor.rs  |    2 +
+ .../src/supervisor_control_tests.rs           |    4 +
+ .../app-server-daemon/src/supervisor_tests.rs |    7 +
+ .../schema/json/ClientRequest.json            |  328 ++-
+ .../schema/json/ServerNotification.json       |    3 +-
+ .../codex_app_server_protocol.schemas.json    | 1862 +++++++++++++++--
+ .../codex_app_server_protocol.v2.schemas.json | 1705 ++++++++++++++-
+ .../v2/AccountSlotChangedNotification.json    |    7 +
+ .../json/v2/AccountSlotListResponse.json      |    7 +
+ .../v2/AccountSlotLoginStartResponse.json     |    7 +
+ .../json/v2/AccountSlotLogoutResponse.json    |    7 +
+ .../v2/SessionRuntimeChangedNotification.json |    1 +
+ .../json/v2/SessionRuntimeListResponse.json   |    1 +
+ .../schema/json/v2/ThreadStartParams.json     |    7 +
+ .../app-server-exports-experimental.json.zst  |  Bin 158155 -> 165477 bytes
+ .../app-server-exports-stable.json.zst        |  Bin 151485 -> 159629 bytes
+ .../schema/typescript/ClientRequest.ts        |    5 +-
+ .../schema/typescript/ServerNotification.ts   |    6 +-
+ .../typescript/ServerNotificationEnvelope.ts  |    6 +-
+ .../typescript/v2/SessionRuntimeIdentity.ts   |    6 +-
+ .../schema/typescript/v2/ThreadStartParams.ts |    6 +-
+ .../schema/typescript/v2/TurnStartParams.ts   |   10 +
+ .../schema/typescript/v2/index.ts             |   36 +
+ .../src/protocol/v2/session_runtime.rs        |    1 +
+ .../src/protocol/v2/thread.rs                 |    4 +
+ codex-rs/app-server-transport/src/lib.rs      |    1 +
+ .../app-server-transport/src/supervisor.rs    |   80 +-
+ .../src/supervisor_tests.rs                   |   27 +-
+ .../src/transport/unix_socket.rs              |   40 +-
+ codex-rs/app-server/README.md                 |    2 +-
+ .../global/directory_tests.rs                 |   17 +-
+ .../account_registry/global/integration.rs    |   14 +
+ .../global/lifecycle_tests.rs                 |    1 +
+ .../src/account_registry/rotation.rs          |   27 +-
+ .../app-server/src/account_registry_tests.rs  |    1 +
+ codex-rs/app-server/src/extensions.rs         |    7 +-
+ codex-rs/app-server/src/legacy_admission.rs   |    4 +
+ codex-rs/app-server/src/mcp_refresh.rs        |    1 +
+ .../thread_goal_processor.rs                  |    8 +-
+ .../request_processors/thread_processor.rs    |    6 +-
+ .../src/request_processors/turn_processor.rs  |    4 +-
+ .../src/session_runtime/pagination.rs         |    5 +-
+ .../src/session_runtime/snapshot.rs           |   36 +-
+ .../src/session_runtime/snapshot_tests.rs     |   14 +
+ .../app-server/src/session_runtime/tests.rs   |   90 +-
+ codex-rs/app-server/src/turn_cost_worker.rs   |   42 +-
+ .../app-server/src/turn_cost_worker_tests.rs  |   20 +-
+ codex-rs/app-server/tests/suite/v2/mod.rs     |    2 +-
+ .../tests/suite/v2/thread_archive.rs          |    4 +-
+ codex-rs/config/src/types.rs                  |   78 +
+ codex-rs/config/src/types_tests.rs            |   34 +
+ codex-rs/core-api/src/lib.rs                  |    3 +
+ codex-rs/core/config.schema.json              |  113 +
+ codex-rs/core/src/config/config_tests.rs      |    3 +
+ codex-rs/core/src/config/mod.rs               |    9 +
+ codex-rs/core/src/session/review.rs           |   73 +-
+ codex-rs/core/src/session/session.rs          |    6 +-
+ codex-rs/core/src/session/turn.rs             |  158 +-
+ codex-rs/core/src/session/turn_context.rs     |   23 +-
+ codex-rs/core/src/session/turn_input.rs       |   27 +-
+ codex-rs/core/src/session/turn_input_tests.rs |   21 +-
+ codex-rs/core/src/tasks/plugin_executable.rs  |    1 +
+ codex-rs/core/src/thread_manager.rs           |   19 +-
+ codex-rs/core/src/thread_manager_tests.rs     |   36 +-
+ codex-rs/core/src/tools/code_mode/mod.rs      |    3 +-
+ .../tests/suite/read_only_auth_refresh.rs     |    1 +
+ codex-rs/ext/goal/src/tool.rs                 |    4 +-
+ codex-rs/login/Cargo.toml                     |    1 +
+ codex-rs/login/src/auth/managed_lifecycle.rs  |   10 +
+ codex-rs/login/src/auth/read_only.rs          |   10 +-
+ codex-rs/login/src/auth/storage.rs            |  124 +-
+ codex-rs/thread-manager-sample/src/main.rs    |    2 +
+ codex-rs/thread-store/src/local/mod.rs        |    7 +-
+ .../src/local/rollout_migration.rs            |    7 +
+ .../local/rollout_migration/ordinal_repair.rs |    1 +
+ codex-rs/tui/src/app.rs                       |    6 +
+ codex-rs/tui/src/app/event_dispatch.rs        |    2 +
+ codex-rs/tui/src/app/startup.rs               |    1 +
+ codex-rs/tui/src/app/test_support.rs          |    1 +
+ codex-rs/tui/src/app/tests.rs                 |    2 +
+ codex-rs/tui/src/app/thread_routing.rs        |    7 +
+ codex-rs/tui/src/app_server_session.rs        |   10 +-
+ codex-rs/tui/src/bottom_pane/chat_composer.rs |  533 +++--
+ codex-rs/tui/src/bottom_pane/footer_box.rs    | 1129 ++++++++++
+ .../tui/src/bottom_pane/footer_box_tests.rs   |  131 ++
+ codex-rs/tui/src/bottom_pane/mod.rs           |   33 +
+ .../tui/src/canonical_launch_projection.rs    |   21 +
+ .../src/canonical_launch_projection_tests.rs  |   13 +
+ codex-rs/tui/src/chatwidget/constructor.rs    |   39 +-
+ codex-rs/tui/src/chatwidget/settings.rs       |    8 +
+ .../src/chatwidget/tests/terminal_title.rs    |    2 +
+ codex-rs/tui/src/launch_overrides.rs          |    2 +-
+ codex-rs/tui/src/lib.rs                       |    6 +-
+ codex-rs/tui/src/resize_reflow_cap.rs         |   97 +-
+ codex-rs/tui/src/startup_orchestration.rs     |   21 +-
+ codex-rs/tui/src/tui/scrollback.rs            |   16 +-
+ codex-rs/tui/src/tui/scrollback_tests.rs      |   54 +-
+ codex-rs/uds/Cargo.toml                       |    1 +
+ codex-rs/uds/src/lib.rs                       |   28 +-
+ codex-rs/utils/home-dir/Cargo.toml            |    9 +
+ codex-rs/utils/home-dir/src/lib.rs            |   58 +-
+ .../utils/home-dir/src/windows_security.rs    |  408 ++++
+ 104 files changed, 7215 insertions(+), 683 deletions(-)
+ create mode 100644 codex-rs/tui/src/bottom_pane/footer_box.rs
+ create mode 100644 codex-rs/tui/src/bottom_pane/footer_box_tests.rs
+ create mode 100644 codex-rs/utils/home-dir/src/windows_security.rs
 
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index 8778fe2ef6168d8796d1f69598614ba7795570c8..67be1c963bb55775c3231ae3868003f75ed0b3fb 100644
+index 8778fe2ef..67be1c963 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
 @@ -3563,6 +3563,7 @@ dependencies = [
@@ -32,8 +142,142 @@ index 8778fe2ef6168d8796d1f69598614ba7795570c8..67be1c963bb55775c3231ae3868003f7
  ]
  
  [[package]]
+diff --git a/codex-rs/app-server-client/src/supervised_tests.rs b/codex-rs/app-server-client/src/supervised_tests.rs
+index d1482da6e..d0e3e1a4b 100644
+--- a/codex-rs/app-server-client/src/supervised_tests.rs
++++ b/codex-rs/app-server-client/src/supervised_tests.rs
+@@ -4,6 +4,7 @@ use codex_app_server_protocol::ClientRequest;
+ use codex_app_server_protocol::JSONRPCMessage;
+ use codex_app_server_protocol::JSONRPCResponse;
+ use codex_app_server_protocol::RequestId;
++use codex_app_server_transport::SUPERVISOR_CONTRACT_VERSION;
+ use codex_app_server_transport::SupervisedAppServerSnapshot;
+ use codex_uds::UnixListener;
+ use futures::SinkExt;
+@@ -274,6 +275,7 @@ fn ready_snapshot(
+     predecessor: Option<AppServerInstanceIdentity>,
+ ) -> SupervisorSnapshot {
+     SupervisorSnapshot {
++        contract_version: SUPERVISOR_CONTRACT_VERSION,
+         snapshot_revision,
+         app_server: Some(SupervisedAppServerSnapshot {
+             process_generation: snapshot_revision + 100,
+diff --git a/codex-rs/app-server-daemon/src/supervisor.rs b/codex-rs/app-server-daemon/src/supervisor.rs
+index 02f86dd7b..b05b598e7 100644
+--- a/codex-rs/app-server-daemon/src/supervisor.rs
++++ b/codex-rs/app-server-daemon/src/supervisor.rs
+@@ -17,6 +17,7 @@ use codex_app_server_transport::ManagedAccountCatalog;
+ use codex_app_server_transport::ManagedAccountId;
+ use codex_app_server_transport::REMOTE_CONTROL_DISABLED_ENV_VAR;
+ use codex_app_server_transport::SUPERVISED_APP_SERVER_IDENTITY_ENV_VAR;
++use codex_app_server_transport::SUPERVISOR_CONTRACT_VERSION;
+ use codex_app_server_transport::SupervisedAppServerSnapshot;
+ use codex_app_server_transport::SupervisedAppServerStatus;
+ use codex_app_server_transport::SupervisorSnapshot;
+@@ -147,6 +148,7 @@ impl SupervisorSeed {
+     fn empty() -> Self {
+         Self {
+             snapshot: SupervisorSnapshot {
++                contract_version: SUPERVISOR_CONTRACT_VERSION,
+                 snapshot_revision: 0,
+                 app_server: None,
+             },
+diff --git a/codex-rs/app-server-daemon/src/supervisor_control_tests.rs b/codex-rs/app-server-daemon/src/supervisor_control_tests.rs
+index 69cea1b41..74dfb96a8 100644
+--- a/codex-rs/app-server-daemon/src/supervisor_control_tests.rs
++++ b/codex-rs/app-server-daemon/src/supervisor_control_tests.rs
+@@ -1,6 +1,7 @@
+ use std::os::unix::fs::PermissionsExt;
+ 
+ use codex_app_server_transport::AppServerInstanceIdentity;
++use codex_app_server_transport::SUPERVISOR_CONTRACT_VERSION;
+ use codex_app_server_transport::SupervisedAppServerSnapshot;
+ use codex_app_server_transport::SupervisedAppServerStatus;
+ use codex_app_server_transport::SupervisorControlErrorCode;
+@@ -32,6 +33,7 @@ fn identity(id: &str, generation: u64) -> AppServerInstanceIdentity {
+ 
+ fn ready_snapshot(instance: AppServerInstanceIdentity, revision: u64) -> SupervisorSnapshot {
+     SupervisorSnapshot {
++        contract_version: SUPERVISOR_CONTRACT_VERSION,
+         snapshot_revision: revision,
+         app_server: Some(SupervisedAppServerSnapshot {
+             process_generation: revision,
+@@ -182,6 +184,7 @@ fn restart_admission_fails_closed_until_exact_instance_is_ready() {
+     let current = identity("11111111-1111-4111-8111-111111111111", 1);
+     let stale = identity("22222222-2222-4222-8222-222222222222", 2);
+     let mut snapshot = SupervisorSnapshot {
++        contract_version: SUPERVISOR_CONTRACT_VERSION,
+         snapshot_revision: 1,
+         app_server: None,
+     };
+@@ -220,6 +223,7 @@ async fn control_server_reclaims_stale_socket_and_rejects_second_owner() {
+     let socket = control_dir.join("supervisor.sock");
+     drop(std::os::unix::net::UnixListener::bind(&socket).expect("bind stale socket"));
+     let snapshot = SupervisorSnapshot {
++        contract_version: SUPERVISOR_CONTRACT_VERSION,
+         snapshot_revision: 1,
+         app_server: None,
+     };
+diff --git a/codex-rs/app-server-daemon/src/supervisor_tests.rs b/codex-rs/app-server-daemon/src/supervisor_tests.rs
+index 86cd6c0bd..77630ec72 100644
+--- a/codex-rs/app-server-daemon/src/supervisor_tests.rs
++++ b/codex-rs/app-server-daemon/src/supervisor_tests.rs
+@@ -3,6 +3,7 @@ use std::process::Stdio;
+ use std::time::Duration;
+ 
+ use codex_app_server_transport::AppServerInstanceIdentity;
++use codex_app_server_transport::SUPERVISOR_CONTRACT_VERSION;
+ use codex_app_server_transport::SupervisedAppServerSnapshot;
+ use codex_app_server_transport::SupervisedAppServerStatus;
+ use codex_app_server_transport::SupervisorSnapshot;
+@@ -42,11 +43,13 @@ async fn snapshot_publication_is_private_revisioned_and_sanitized() {
+         status: SupervisedAppServerStatus::Starting,
+     };
+     let (updates, _snapshots) = tokio::sync::watch::channel(SupervisorSnapshot {
++        contract_version: SUPERVISOR_CONTRACT_VERSION,
+         snapshot_revision: 0,
+         app_server: None,
+     });
+     let mut publisher = SnapshotPublisher {
+         snapshot: SupervisorSnapshot {
++            contract_version: SUPERVISOR_CONTRACT_VERSION,
+             snapshot_revision: 0,
+             app_server: None,
+         },
+@@ -65,6 +68,7 @@ async fn snapshot_publication_is_private_revisioned_and_sanitized() {
+     assert_eq!(
+         actual,
+         SupervisorSnapshot {
++            contract_version: SUPERVISOR_CONTRACT_VERSION,
+             snapshot_revision: 1,
+             app_server: Some(projected),
+         }
+@@ -139,6 +143,7 @@ fn private_snapshot_resumes_all_monotonic_high_water_marks() {
+     let predecessor = identity("11111111-1111-4111-8111-111111111111", 6);
+     let current = identity("22222222-2222-4222-8222-222222222222", 7);
+     let snapshot = SupervisorSnapshot {
++        contract_version: SUPERVISOR_CONTRACT_VERSION,
+         snapshot_revision: 41,
+         app_server: Some(SupervisedAppServerSnapshot {
+             process_generation: 12,
+@@ -168,6 +173,7 @@ fn non_private_or_counterless_snapshot_is_rejected_instead_of_regressing() {
+     let temp = tempfile::tempdir().expect("temp dir");
+     let path = temp.path().join("snapshot.json");
+     let snapshot = SupervisorSnapshot {
++        contract_version: SUPERVISOR_CONTRACT_VERSION,
+         snapshot_revision: 41,
+         app_server: Some(SupervisedAppServerSnapshot {
+             process_generation: 12,
+@@ -187,6 +193,7 @@ fn non_private_or_counterless_snapshot_is_rejected_instead_of_regressing() {
+ 
+     assert!(
+         SupervisorSeed::from_snapshot(SupervisorSnapshot {
++            contract_version: SUPERVISOR_CONTRACT_VERSION,
+             snapshot_revision: 42,
+             app_server: None,
+         })
 diff --git a/codex-rs/app-server-protocol/schema/json/ClientRequest.json b/codex-rs/app-server-protocol/schema/json/ClientRequest.json
-index 49dc9c2b700a9e9a16bde1f80418fc3521bf5628..25f6b091153441543072f3c15e7bdfb1edaff5cc 100644
+index 49dc9c2b7..25f6b0911 100644
 --- a/codex-rs/app-server-protocol/schema/json/ClientRequest.json
 +++ b/codex-rs/app-server-protocol/schema/json/ClientRequest.json
 @@ -943,6 +943,15 @@
@@ -491,7 +735,7 @@ index 49dc9c2b700a9e9a16bde1f80418fc3521bf5628..25f6b091153441543072f3c15e7bdfb1
        "description": "Append raw Responses API items to the thread history without starting a user turn.",
        "properties": {
 diff --git a/codex-rs/app-server-protocol/schema/json/ServerNotification.json b/codex-rs/app-server-protocol/schema/json/ServerNotification.json
-index 1a05d9ba4fb2bb69aab48a9b54d0a3b64228e1cb..247b8cafc11a92451337b281b389488addca1619 100644
+index 1a05d9ba4..247b8cafc 100644
 --- a/codex-rs/app-server-protocol/schema/json/ServerNotification.json
 +++ b/codex-rs/app-server-protocol/schema/json/ServerNotification.json
 @@ -4255,6 +4255,7 @@
@@ -510,7 +754,7 @@ index 1a05d9ba4fb2bb69aab48a9b54d0a3b64228e1cb..247b8cafc11a92451337b281b389488a
 +}
 \ No newline at end of file
 diff --git a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
-index dce69a687b0f6a15cddf258dbde93dae116e58c0..b148b1b1b936ebf0f73c18b84b039dc38cc691ab 100644
+index dce69a687..b148b1b1b 100644
 --- a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
 +++ b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
 @@ -756,6 +756,30 @@
@@ -2875,7 +3119,7 @@ index dce69a687b0f6a15cddf258dbde93dae116e58c0..b148b1b1b936ebf0f73c18b84b039dc3
          "properties": {
            "backwardsCursor": {
 diff --git a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
-index 02ffb0537a880999f80797d0b3688a9780297aa6..b6d1d336098dffe8e4119d8568c07d9927b5f0a9 100644
+index 02ffb0537..b6d1d3360 100644
 --- a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
 +++ b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
 @@ -1157,6 +1157,13 @@
@@ -5006,7 +5250,7 @@ index 02ffb0537a880999f80797d0b3688a9780297aa6..b6d1d336098dffe8e4119d8568c07d99
        "properties": {
          "backwardsCursor": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/AccountSlotChangedNotification.json b/codex-rs/app-server-protocol/schema/json/v2/AccountSlotChangedNotification.json
-index 8dce41fc0c93bc96886579b1591482eec92e044f..eb044b8d364e608bc46b85d4e79996606a3c25e7 100644
+index 8dce41fc0..eb044b8d3 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/AccountSlotChangedNotification.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/AccountSlotChangedNotification.json
 @@ -256,6 +256,13 @@
@@ -5024,7 +5268,7 @@ index 8dce41fc0c93bc96886579b1591482eec92e044f..eb044b8d364e608bc46b85d4e7999660
        ]
      }
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/AccountSlotListResponse.json b/codex-rs/app-server-protocol/schema/json/v2/AccountSlotListResponse.json
-index 4687a81134c5a87d3d8d9084bab5328e06a05fc5..15850b8d5262fd3ad4fa4a6ebf2151e7112a4ed4 100644
+index 4687a8113..15850b8d5 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/AccountSlotListResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/AccountSlotListResponse.json
 @@ -281,6 +281,13 @@
@@ -5042,7 +5286,7 @@ index 4687a81134c5a87d3d8d9084bab5328e06a05fc5..15850b8d5262fd3ad4fa4a6ebf2151e7
        ]
      }
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/AccountSlotLoginStartResponse.json b/codex-rs/app-server-protocol/schema/json/v2/AccountSlotLoginStartResponse.json
-index f98110b5cd9ba23b59c1bd7bb888824bd0483316..19406820eeabbd335b4a9e993e1401359283e056 100644
+index f98110b5c..19406820e 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/AccountSlotLoginStartResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/AccountSlotLoginStartResponse.json
 @@ -312,6 +312,13 @@
@@ -5060,7 +5304,7 @@ index f98110b5cd9ba23b59c1bd7bb888824bd0483316..19406820eeabbd335b4a9e993e140135
        ]
      },
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/AccountSlotLogoutResponse.json b/codex-rs/app-server-protocol/schema/json/v2/AccountSlotLogoutResponse.json
-index ce294e9e2e53244e8b1feac43a6d857ff8a53ac9..5cd9f9eaa1b131d6bc6e82c704b403386579f527 100644
+index ce294e9e2..5cd9f9eaa 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/AccountSlotLogoutResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/AccountSlotLogoutResponse.json
 @@ -256,6 +256,13 @@
@@ -5078,7 +5322,7 @@ index ce294e9e2e53244e8b1feac43a6d857ff8a53ac9..5cd9f9eaa1b131d6bc6e82c704b40338
        ]
      }
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/SessionRuntimeChangedNotification.json b/codex-rs/app-server-protocol/schema/json/v2/SessionRuntimeChangedNotification.json
-index 99f177766674041348a8f996994036cc2c651823..dfaece8a665c98c1eafc7e7565df5d54b7f95519 100644
+index 99f177766..dfaece8a6 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/SessionRuntimeChangedNotification.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/SessionRuntimeChangedNotification.json
 @@ -432,6 +432,7 @@
@@ -5090,7 +5334,7 @@ index 99f177766674041348a8f996994036cc2c651823..dfaece8a665c98c1eafc7e7565df5d54
          },
          "forkedFromId": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/SessionRuntimeListResponse.json b/codex-rs/app-server-protocol/schema/json/v2/SessionRuntimeListResponse.json
-index be80ca1ad81800461af1c7b698e5f06d974a302a..a8125909f775149f3f816028da4845c022f3ca19 100644
+index be80ca1ad..a8125909f 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/SessionRuntimeListResponse.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/SessionRuntimeListResponse.json
 @@ -455,6 +455,7 @@
@@ -5102,7 +5346,7 @@ index be80ca1ad81800461af1c7b698e5f06d974a302a..a8125909f775149f3f816028da4845c0
          },
          "forkedFromId": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/ThreadStartParams.json b/codex-rs/app-server-protocol/schema/json/v2/ThreadStartParams.json
-index 92953ca01aab189ae1f3f90d8c05142ca10d059c..48a841ba5b0c4cc5f7505df52e3c22486a253c36 100644
+index 92953ca01..48a841ba5 100644
 --- a/codex-rs/app-server-protocol/schema/json/v2/ThreadStartParams.json
 +++ b/codex-rs/app-server-protocol/schema/json/v2/ThreadStartParams.json
 @@ -410,6 +410,13 @@
@@ -17347,7 +17591,7 @@ z+XZFqj2N)Q6g@X>nBzb;Oy}bgSDFDS*F>(p2@`inMz8(^KDAeQ&Qx0yMnMzj+jfK!
 M>P!wC*Cet)0TQY(_W%F@
 
 diff --git a/codex-rs/app-server-protocol/schema/typescript/ClientRequest.ts b/codex-rs/app-server-protocol/schema/typescript/ClientRequest.ts
-index e137d1f9464e80ef99aa71e94c3b0fd49c08d2b4..7115cf53d6873f6f76d99926af03164d161e4584 100644
+index e137d1f94..7115cf53d 100644
 --- a/codex-rs/app-server-protocol/schema/typescript/ClientRequest.ts
 +++ b/codex-rs/app-server-protocol/schema/typescript/ClientRequest.ts
 @@ -86,6 +86,7 @@ import type { ThreadGoalClearParams } from "./v2/ThreadGoalClearParams";
@@ -17381,7 +17625,7 @@ index e137d1f9464e80ef99aa71e94c3b0fd49c08d2b4..7115cf53d6873f6f76d99926af03164d
 -export type ClientRequest ={ "method": "initialize", id: RequestId, params: InitializeParams, } | { "method": "thread/start", id: RequestId, params: ThreadStartParams, } | { "method": "thread/resume", id: RequestId, params: ThreadResumeParams, } | { "method": "thread/fork", id: RequestId, params: ThreadForkParams, } | { "method": "thread/archive", id: RequestId, params: ThreadArchiveParams, } | { "method": "thread/delete", id: RequestId, params: ThreadDeleteParams, } | { "method": "thread/unsubscribe", id: RequestId, params: ThreadUnsubscribeParams, } | { "method": "thread/account/switch", id: RequestId, params: ThreadAccountSwitchParams, } | { "method": "thread/account/rotation/read", id: RequestId, params: ThreadAccountRotationReadParams, } | { "method": "thread/account/rotation/update", id: RequestId, params: ThreadAccountRotationUpdateParams, } | { "method": "thread/account/rotation/reset", id: RequestId, params: ThreadAccountRotationResetParams, } | { "method": "thread/relinquish", id: RequestId, params: ThreadRelinquishParams, } | { "method": "thread/name/set", id: RequestId, params: ThreadSetNameParams, } | { "method": "thread/goal/set", id: RequestId, params: ThreadGoalSetParams, } | { "method": "thread/goal/get", id: RequestId, params: ThreadGoalGetParams, } | { "method": "thread/goal/clear", id: RequestId, params: ThreadGoalClearParams, } | { "method": "thread/metadata/update", id: RequestId, params: ThreadMetadataUpdateParams, } | { "method": "thread/section/move", id: RequestId, params: ThreadSectionMoveParams, } | { "method": "thread/unarchive", id: RequestId, params: ThreadUnarchiveParams, } | { "method": "thread/compact/start", id: RequestId, params: ThreadCompactStartParams, } | { "method": "thread/shellCommand", id: RequestId, params: ThreadShellCommandParams, } | { "method": "thread/approveGuardianDeniedAction", id: RequestId, params: ThreadApproveGuardianDeniedActionParams, } | { "method": "thread/rollback", id: RequestId, params: ThreadRollbackParams, } | { "method": "thread/list", id: RequestId, params: ThreadListParams, } | { "method": "threadSection/list", id: RequestId, params: ThreadSectionListParams, } | { "method": "threadSection/create", id: RequestId, params: ThreadSectionCreateParams, } | { "method": "threadSection/update", id: RequestId, params: ThreadSectionUpdateParams, } | { "method": "threadSection/delete", id: RequestId, params: ThreadSectionDeleteParams, } | { "method": "thread/loaded/list", id: RequestId, params: ThreadLoadedListParams, } | { "method": "sessionRuntime/list", id: RequestId, params: SessionRuntimeListParams, } | { "method": "thread/read", id: RequestId, params: ThreadReadParams, } | { "method": "thread/inject_items", id: RequestId, params: ThreadInjectItemsParams, } | { "method": "skills/list", id: RequestId, params: SkillsListParams, } | { "method": "skills/extraRoots/set", id: RequestId, params: SkillsExtraRootsSetParams, } | { "method": "hooks/list", id: RequestId, params: HooksListParams, } | { "method": "marketplace/add", id: RequestId, params: MarketplaceAddParams, } | { "method": "marketplace/remove", id: RequestId, params: MarketplaceRemoveParams, } | { "method": "marketplace/upgrade", id: RequestId, params: MarketplaceUpgradeParams, } | { "method": "plugin/list", id: RequestId, params: PluginListParams, } | { "method": "pluginCommand/list", id: RequestId, params: PluginCommandListParams, } | { "method": "pluginCommand/invoke", id: RequestId, params: PluginCommandInvokeParams, } | { "method": "plugin/installed", id: RequestId, params: PluginInstalledParams, } | { "method": "plugin/read", id: RequestId, params: PluginReadParams, } | { "method": "plugin/skill/read", id: RequestId, params: PluginSkillReadParams, } | { "method": "plugin/share/save", id: RequestId, params: PluginShareSaveParams, } | { "method": "plugin/share/updateTargets", id: RequestId, params: PluginShareUpdateTargetsParams, } | { "method": "plugin/share/list", id: RequestId, params: PluginShareListParams, } | { "method": "plugin/share/checkout", id: RequestId, params: PluginShareCheckoutParams, } | { "method": "plugin/share/delete", id: RequestId, params: PluginShareDeleteParams, } | { "method": "app/read", id: RequestId, params: AppsReadParams, } | { "method": "app/list", id: RequestId, params: AppsListParams, } | { "method": "app/installed", id: RequestId, params: AppsInstalledParams, } | { "method": "fs/readFile", id: RequestId, params: FsReadFileParams, } | { "method": "fs/writeFile", id: RequestId, params: FsWriteFileParams, } | { "method": "fs/createDirectory", id: RequestId, params: FsCreateDirectoryParams, } | { "method": "fs/getMetadata", id: RequestId, params: FsGetMetadataParams, } | { "method": "fs/readDirectory", id: RequestId, params: FsReadDirectoryParams, } | { "method": "fs/remove", id: RequestId, params: FsRemoveParams, } | { "method": "fs/copy", id: RequestId, params: FsCopyParams, } | { "method": "fs/watch", id: RequestId, params: FsWatchParams, } | { "method": "fs/unwatch", id: RequestId, params: FsUnwatchParams, } | { "method": "skills/config/write", id: RequestId, params: SkillsConfigWriteParams, } | { "method": "plugin/install", id: RequestId, params: PluginInstallParams, } | { "method": "plugin/uninstall", id: RequestId, params: PluginUninstallParams, } | { "method": "turn/start", id: RequestId, params: TurnStartParams, } | { "method": "thread/presentation/append", id: RequestId, params: ThreadPresentationAppendParams, } | { "method": "turn/steer", id: RequestId, params: TurnSteerParams, } | { "method": "turn/interrupt", id: RequestId, params: TurnInterruptParams, } | { "method": "review/start", id: RequestId, params: ReviewStartParams, } | { "method": "model/list", id: RequestId, params: ModelListParams, } | { "method": "modelProvider/capabilities/read", id: RequestId, params: ModelProviderCapabilitiesReadParams, } | { "method": "experimentalFeature/list", id: RequestId, params: ExperimentalFeatureListParams, } | { "method": "permissionProfile/list", id: RequestId, params: PermissionProfileListParams, } | { "method": "experimentalFeature/enablement/set", id: RequestId, params: ExperimentalFeatureEnablementSetParams, } | { "method": "mcpServer/oauth/login", id: RequestId, params: McpServerOauthLoginParams, } | { "method": "config/mcpServer/reload", id: RequestId, params: undefined, } | { "method": "mcpServerStatus/list", id: RequestId, params: ListMcpServerStatusParams, } | { "method": "mcpServer/resource/read", id: RequestId, params: McpResourceReadParams, } | { "method": "mcpServer/tool/call", id: RequestId, params: McpServerToolCallParams, } | { "method": "windowsSandbox/setupStart", id: RequestId, params: WindowsSandboxSetupStartParams, } | { "method": "windowsSandbox/readiness", id: RequestId, params: undefined, } | { "method": "accountSlot/list", id: RequestId, params: AccountSlotListParams, } | { "method": "accountSlot/rateLimits/read", id: RequestId, params: AccountSlotRateLimitsReadParams, } | { "method": "accountSlot/login/start", id: RequestId, params: AccountSlotLoginStartParams, } | { "method": "accountSlot/logout", id: RequestId, params: AccountSlotLogoutParams, } | { "method": "accountRotation/read", id: RequestId, params: undefined, } | { "method": "accountRotation/update", id: RequestId, params: AccountRotationUpdateParams, } | { "method": "account/login/start", id: RequestId, params: LoginAccountParams, } | { "method": "account/login/cancel", id: RequestId, params: CancelLoginAccountParams, } | { "method": "account/logout", id: RequestId, params: undefined, } | { "method": "account/rateLimits/read", id: RequestId, params?: GetAccountRateLimitsParams | undefined, } | { "method": "account/rateLimitResetCredit/consume", id: RequestId, params: ConsumeAccountRateLimitResetCreditParams, } | { "method": "account/usage/read", id: RequestId, params?: GetAccountTokenUsageParams | undefined, } | { "method": "account/workspaceMessages/read", id: RequestId, params: undefined, } | { "method": "account/sendAddCreditsNudgeEmail", id: RequestId, params: SendAddCreditsNudgeEmailParams, } | { "method": "feedback/upload", id: RequestId, params: FeedbackUploadParams, } | { "method": "command/exec", id: RequestId, params: CommandExecParams, } | { "method": "command/exec/write", id: RequestId, params: CommandExecWriteParams, } | { "method": "command/exec/terminate", id: RequestId, params: CommandExecTerminateParams, } | { "method": "command/exec/resize", id: RequestId, params: CommandExecResizeParams, } | { "method": "config/read", id: RequestId, params: ConfigReadParams, } | { "method": "externalAgentConfig/detect", id: RequestId, params: ExternalAgentConfigDetectParams, } | { "method": "externalAgentConfig/import", id: RequestId, params: ExternalAgentConfigImportParams, } | { "method": "externalAgentConfig/import/recordHistory", id: RequestId, params: ExternalAgentConfigImportHistoryRecordParams, } | { "method": "externalAgentConfig/import/readHistories", id: RequestId, params: undefined, } | { "method": "config/value/write", id: RequestId, params: ConfigValueWriteParams, } | { "method": "config/batchWrite", id: RequestId, params: ConfigBatchWriteParams, } | { "method": "configRequirements/read", id: RequestId, params: undefined, } | { "method": "account/read", id: RequestId, params: GetAccountParams, } | { "method": "getConversationSummary", id: RequestId, params: GetConversationSummaryParams, } | { "method": "gitDiffToRemote", id: RequestId, params: GitDiffToRemoteParams, } | { "method": "getAuthStatus", id: RequestId, params: GetAuthStatusParams, } | { "method": "fuzzyFileSearch", id: RequestId, params: FuzzyFileSearchParams, };
 +export type ClientRequest ={ "method": "initialize", id: RequestId, params: InitializeParams, } | { "method": "thread/start", id: RequestId, params: ThreadStartParams, } | { "method": "thread/resume", id: RequestId, params: ThreadResumeParams, } | { "method": "thread/fork", id: RequestId, params: ThreadForkParams, } | { "method": "thread/archive", id: RequestId, params: ThreadArchiveParams, } | { "method": "thread/delete", id: RequestId, params: ThreadDeleteParams, } | { "method": "thread/unsubscribe", id: RequestId, params: ThreadUnsubscribeParams, } | { "method": "thread/account/switch", id: RequestId, params: ThreadAccountSwitchParams, } | { "method": "thread/account/rotation/read", id: RequestId, params: ThreadAccountRotationReadParams, } | { "method": "thread/account/rotation/update", id: RequestId, params: ThreadAccountRotationUpdateParams, } | { "method": "thread/account/rotation/reset", id: RequestId, params: ThreadAccountRotationResetParams, } | { "method": "thread/relinquish", id: RequestId, params: ThreadRelinquishParams, } | { "method": "thread/name/set", id: RequestId, params: ThreadSetNameParams, } | { "method": "thread/goal/set", id: RequestId, params: ThreadGoalSetParams, } | { "method": "thread/goal/get", id: RequestId, params: ThreadGoalGetParams, } | { "method": "thread/goal/clear", id: RequestId, params: ThreadGoalClearParams, } | { "method": "thread/metadata/update", id: RequestId, params: ThreadMetadataUpdateParams, } | { "method": "thread/section/move", id: RequestId, params: ThreadSectionMoveParams, } | { "method": "thread/unarchive", id: RequestId, params: ThreadUnarchiveParams, } | { "method": "thread/compact/start", id: RequestId, params: ThreadCompactStartParams, } | { "method": "thread/shellCommand", id: RequestId, params: ThreadShellCommandParams, } | { "method": "thread/approveGuardianDeniedAction", id: RequestId, params: ThreadApproveGuardianDeniedActionParams, } | { "method": "thread/rollback", id: RequestId, params: ThreadRollbackParams, } | { "method": "thread/revert", id: RequestId, params: ThreadRevertParams, } | { "method": "thread/list", id: RequestId, params: ThreadListParams, } | { "method": "threadSection/list", id: RequestId, params: ThreadSectionListParams, } | { "method": "threadSection/create", id: RequestId, params: ThreadSectionCreateParams, } | { "method": "threadSection/update", id: RequestId, params: ThreadSectionUpdateParams, } | { "method": "threadSection/delete", id: RequestId, params: ThreadSectionDeleteParams, } | { "method": "thread/loaded/list", id: RequestId, params: ThreadLoadedListParams, } | { "method": "sessionRuntime/list", id: RequestId, params: SessionRuntimeListParams, } | { "method": "thread/read", id: RequestId, params: ThreadReadParams, } | { "method": "thread/turns/list", id: RequestId, params: ThreadTurnsListParams, } | { "method": "thread/items/list", id: RequestId, params: ThreadItemsListParams, } | { "method": "thread/inject_items", id: RequestId, params: ThreadInjectItemsParams, } | { "method": "skills/list", id: RequestId, params: SkillsListParams, } | { "method": "skills/extraRoots/set", id: RequestId, params: SkillsExtraRootsSetParams, } | { "method": "hooks/list", id: RequestId, params: HooksListParams, } | { "method": "marketplace/add", id: RequestId, params: MarketplaceAddParams, } | { "method": "marketplace/remove", id: RequestId, params: MarketplaceRemoveParams, } | { "method": "marketplace/upgrade", id: RequestId, params: MarketplaceUpgradeParams, } | { "method": "plugin/list", id: RequestId, params: PluginListParams, } | { "method": "pluginCommand/list", id: RequestId, params: PluginCommandListParams, } | { "method": "pluginCommand/invoke", id: RequestId, params: PluginCommandInvokeParams, } | { "method": "plugin/installed", id: RequestId, params: PluginInstalledParams, } | { "method": "plugin/read", id: RequestId, params: PluginReadParams, } | { "method": "plugin/skill/read", id: RequestId, params: PluginSkillReadParams, } | { "method": "plugin/share/save", id: RequestId, params: PluginShareSaveParams, } | { "method": "plugin/share/updateTargets", id: RequestId, params: PluginShareUpdateTargetsParams, } | { "method": "plugin/share/list", id: RequestId, params: PluginShareListParams, } | { "method": "plugin/share/checkout", id: RequestId, params: PluginShareCheckoutParams, } | { "method": "plugin/share/delete", id: RequestId, params: PluginShareDeleteParams, } | { "method": "app/read", id: RequestId, params: AppsReadParams, } | { "method": "app/list", id: RequestId, params: AppsListParams, } | { "method": "app/installed", id: RequestId, params: AppsInstalledParams, } | { "method": "fs/readFile", id: RequestId, params: FsReadFileParams, } | { "method": "fs/writeFile", id: RequestId, params: FsWriteFileParams, } | { "method": "fs/createDirectory", id: RequestId, params: FsCreateDirectoryParams, } | { "method": "fs/getMetadata", id: RequestId, params: FsGetMetadataParams, } | { "method": "fs/readDirectory", id: RequestId, params: FsReadDirectoryParams, } | { "method": "fs/remove", id: RequestId, params: FsRemoveParams, } | { "method": "fs/copy", id: RequestId, params: FsCopyParams, } | { "method": "fs/watch", id: RequestId, params: FsWatchParams, } | { "method": "fs/unwatch", id: RequestId, params: FsUnwatchParams, } | { "method": "skills/config/write", id: RequestId, params: SkillsConfigWriteParams, } | { "method": "plugin/install", id: RequestId, params: PluginInstallParams, } | { "method": "plugin/uninstall", id: RequestId, params: PluginUninstallParams, } | { "method": "turn/start", id: RequestId, params: TurnStartParams, } | { "method": "thread/presentation/append", id: RequestId, params: ThreadPresentationAppendParams, } | { "method": "turn/steer", id: RequestId, params: TurnSteerParams, } | { "method": "turn/interrupt", id: RequestId, params: TurnInterruptParams, } | { "method": "review/start", id: RequestId, params: ReviewStartParams, } | { "method": "model/list", id: RequestId, params: ModelListParams, } | { "method": "modelProvider/capabilities/read", id: RequestId, params: ModelProviderCapabilitiesReadParams, } | { "method": "experimentalFeature/list", id: RequestId, params: ExperimentalFeatureListParams, } | { "method": "permissionProfile/list", id: RequestId, params: PermissionProfileListParams, } | { "method": "experimentalFeature/enablement/set", id: RequestId, params: ExperimentalFeatureEnablementSetParams, } | { "method": "mcpServer/oauth/login", id: RequestId, params: McpServerOauthLoginParams, } | { "method": "config/mcpServer/reload", id: RequestId, params: undefined, } | { "method": "mcpServerStatus/list", id: RequestId, params: ListMcpServerStatusParams, } | { "method": "mcpServer/resource/read", id: RequestId, params: McpResourceReadParams, } | { "method": "mcpServer/tool/call", id: RequestId, params: McpServerToolCallParams, } | { "method": "windowsSandbox/setupStart", id: RequestId, params: WindowsSandboxSetupStartParams, } | { "method": "windowsSandbox/readiness", id: RequestId, params: undefined, } | { "method": "accountSlot/list", id: RequestId, params: AccountSlotListParams, } | { "method": "accountSlot/rateLimits/read", id: RequestId, params: AccountSlotRateLimitsReadParams, } | { "method": "accountSlot/login/start", id: RequestId, params: AccountSlotLoginStartParams, } | { "method": "accountSlot/logout", id: RequestId, params: AccountSlotLogoutParams, } | { "method": "accountRotation/read", id: RequestId, params: undefined, } | { "method": "accountRotation/update", id: RequestId, params: AccountRotationUpdateParams, } | { "method": "account/login/start", id: RequestId, params: LoginAccountParams, } | { "method": "account/login/cancel", id: RequestId, params: CancelLoginAccountParams, } | { "method": "account/logout", id: RequestId, params: undefined, } | { "method": "account/rateLimits/read", id: RequestId, params?: GetAccountRateLimitsParams | undefined, } | { "method": "account/rateLimitResetCredit/consume", id: RequestId, params: ConsumeAccountRateLimitResetCreditParams, } | { "method": "account/usage/read", id: RequestId, params?: GetAccountTokenUsageParams | undefined, } | { "method": "account/workspaceMessages/read", id: RequestId, params: undefined, } | { "method": "account/sendAddCreditsNudgeEmail", id: RequestId, params: SendAddCreditsNudgeEmailParams, } | { "method": "feedback/upload", id: RequestId, params: FeedbackUploadParams, } | { "method": "command/exec", id: RequestId, params: CommandExecParams, } | { "method": "command/exec/write", id: RequestId, params: CommandExecWriteParams, } | { "method": "command/exec/terminate", id: RequestId, params: CommandExecTerminateParams, } | { "method": "command/exec/resize", id: RequestId, params: CommandExecResizeParams, } | { "method": "config/read", id: RequestId, params: ConfigReadParams, } | { "method": "externalAgentConfig/detect", id: RequestId, params: ExternalAgentConfigDetectParams, } | { "method": "externalAgentConfig/import", id: RequestId, params: ExternalAgentConfigImportParams, } | { "method": "externalAgentConfig/import/recordHistory", id: RequestId, params: ExternalAgentConfigImportHistoryRecordParams, } | { "method": "externalAgentConfig/import/readHistories", id: RequestId, params: undefined, } | { "method": "config/value/write", id: RequestId, params: ConfigValueWriteParams, } | { "method": "config/batchWrite", id: RequestId, params: ConfigBatchWriteParams, } | { "method": "configRequirements/read", id: RequestId, params: undefined, } | { "method": "account/read", id: RequestId, params: GetAccountParams, } | { "method": "getConversationSummary", id: RequestId, params: GetConversationSummaryParams, } | { "method": "gitDiffToRemote", id: RequestId, params: GitDiffToRemoteParams, } | { "method": "getAuthStatus", id: RequestId, params: GetAuthStatusParams, } | { "method": "fuzzyFileSearch", id: RequestId, params: FuzzyFileSearchParams, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/ServerNotification.ts b/codex-rs/app-server-protocol/schema/typescript/ServerNotification.ts
-index f43b0081f8c0e94d4c0fb7697b393bb7ee1f0974..b4855ef2323f4838cc0d18ee19dcb3e737c54b4b 100644
+index f43b0081f..b4855ef23 100644
 --- a/codex-rs/app-server-protocol/schema/typescript/ServerNotification.ts
 +++ b/codex-rs/app-server-protocol/schema/typescript/ServerNotification.ts
 @@ -30,6 +30,7 @@ import type { ItemCompletedNotification } from "./v2/ItemCompletedNotification";
@@ -17409,7 +17653,7 @@ index f43b0081f8c0e94d4c0fb7697b393bb7ee1f0974..b4855ef2323f4838cc0d18ee19dcb3e7
 -export type ServerNotification = { "method": "error", "params": ErrorNotification } | { "method": "thread/started", "params": ThreadStartedNotification } | { "method": "thread/status/changed", "params": ThreadStatusChangedNotification } | { "method": "thread/archived", "params": ThreadArchivedNotification } | { "method": "thread/deleted", "params": ThreadDeletedNotification } | { "method": "thread/unarchived", "params": ThreadUnarchivedNotification } | { "method": "thread/closed", "params": ThreadClosedNotification } | { "method": "thread/reverted", "params": ThreadRevertedNotification } | { "method": "skills/changed", "params": SkillsChangedNotification } | { "method": "thread/name/updated", "params": ThreadNameUpdatedNotification } | { "method": "thread/goal/updated", "params": ThreadGoalUpdatedNotification } | { "method": "thread/goal/cleared", "params": ThreadGoalClearedNotification } | { "method": "thread/transitioned", "params": ThreadTransitionedNotification } | { "method": "thread/queue/changed", "params": ThreadQueueChangedNotification } | { "method": "project/changed", "params": ProjectChangedNotification } | { "method": "thread/project/updated", "params": ThreadProjectUpdatedNotification } | { "method": "thread/environment/connected", "params": EnvironmentConnectionNotification } | { "method": "thread/environment/disconnected", "params": EnvironmentConnectionNotification } | { "method": "thread/settings/updated", "params": ThreadSettingsUpdatedNotification } | { "method": "thread/tokenUsage/updated", "params": ThreadTokenUsageUpdatedNotification } | { "method": "turn/started", "params": TurnStartedNotification } | { "method": "hook/started", "params": HookStartedNotification } | { "method": "turn/completed", "params": TurnCompletedNotification } | { "method": "hook/completed", "params": HookCompletedNotification } | { "method": "turn/diff/updated", "params": TurnDiffUpdatedNotification } | { "method": "turn/plan/updated", "params": TurnPlanUpdatedNotification } | { "method": "item/started", "params": ItemStartedNotification } | { "method": "item/autoApprovalReview/started", "params": ItemGuardianApprovalReviewStartedNotification } | { "method": "item/autoApprovalReview/completed", "params": ItemGuardianApprovalReviewCompletedNotification } | { "method": "autoApprovalReview/strictReviewRequired", "params": StrictReviewRequiredNotification } | { "method": "item/completed", "params": ItemCompletedNotification } | { "method": "rawResponseItem/completed", "params": RawResponseItemCompletedNotification } | { "method": "rawResponse/completed", "params": RawResponseCompletedNotification } | { "method": "item/agentMessage/delta", "params": AgentMessageDeltaNotification } | { "method": "item/plan/delta", "params": PlanDeltaNotification } | { "method": "command/exec/outputDelta", "params": CommandExecOutputDeltaNotification } | { "method": "process/outputDelta", "params": ProcessOutputDeltaNotification } | { "method": "process/exited", "params": ProcessExitedNotification } | { "method": "item/commandExecution/outputDelta", "params": CommandExecutionOutputDeltaNotification } | { "method": "item/commandExecution/terminalInteraction", "params": TerminalInteractionNotification } | { "method": "item/fileChange/outputDelta", "params": FileChangeOutputDeltaNotification } | { "method": "item/fileChange/patchUpdated", "params": FileChangePatchUpdatedNotification } | { "method": "serverRequest/resolved", "params": ServerRequestResolvedNotification } | { "method": "item/mcpToolCall/progress", "params": McpToolCallProgressNotification } | { "method": "mcpServer/oauthLogin/completed", "params": McpServerOauthLoginCompletedNotification } | { "method": "mcpServer/startupStatus/updated", "params": McpServerStatusUpdatedNotification } | { "method": "mcpServer/startupCompleted", "params": McpServerStartupCompletedNotification } | { "method": "account/updated", "params": AccountUpdatedNotification } | { "method": "account/rateLimits/updated", "params": AccountRateLimitsUpdatedNotification } | { "method": "accountSlot/changed", "params": AccountSlotChangedNotification } | { "method": "accountSlot/inventoryChanged", "params": AccountSlotInventoryChangedNotification } | { "method": "accountRotation/changed", "params": AccountRotationChangedNotification } | { "method": "sessionRuntime/changed", "params": SessionRuntimeChangedNotification } | { "method": "sessionRuntime/operation/updated", "params": SessionRuntimeOperationUpdatedNotification } | { "method": "thread/presentation/appended", "params": ThreadPresentationAppendedNotification } | { "method": "app/list/updated", "params": AppListUpdatedNotification } | { "method": "remoteControl/status/changed", "params": RemoteControlStatusChangedNotification } | { "method": "externalAgentConfig/import/progress", "params": ExternalAgentConfigImportProgressNotification } | { "method": "externalAgentConfig/import/completed", "params": ExternalAgentConfigImportCompletedNotification } | { "method": "fs/changed", "params": FsChangedNotification } | { "method": "item/reasoning/summaryTextDelta", "params": ReasoningSummaryTextDeltaNotification } | { "method": "item/reasoning/summaryPartAdded", "params": ReasoningSummaryPartAddedNotification } | { "method": "item/reasoning/textDelta", "params": ReasoningTextDeltaNotification } | { "method": "thread/compacted", "params": ContextCompactedNotification } | { "method": "model/rerouted", "params": ModelReroutedNotification } | { "method": "model/verification", "params": ModelVerificationNotification } | { "method": "turn/moderationMetadata", "params": TurnModerationMetadataNotification } | { "method": "model/safetyBuffering/updated", "params": ModelSafetyBufferingUpdatedNotification } | { "method": "warning", "params": WarningNotification } | { "method": "guardianWarning", "params": GuardianWarningNotification } | { "method": "deprecationNotice", "params": DeprecationNoticeNotification } | { "method": "configWarning", "params": ConfigWarningNotification } | { "method": "fuzzyFileSearch/sessionUpdated", "params": FuzzyFileSearchSessionUpdatedNotification } | { "method": "fuzzyFileSearch/sessionCompleted", "params": FuzzyFileSearchSessionCompletedNotification } | { "method": "thread/realtime/started", "params": ThreadRealtimeStartedNotification } | { "method": "thread/realtime/itemAdded", "params": ThreadRealtimeItemAddedNotification } | { "method": "thread/realtime/transcript/delta", "params": ThreadRealtimeTranscriptDeltaNotification } | { "method": "thread/realtime/transcript/done", "params": ThreadRealtimeTranscriptDoneNotification } | { "method": "thread/realtime/outputAudio/delta", "params": ThreadRealtimeOutputAudioDeltaNotification } | { "method": "thread/realtime/sdp", "params": ThreadRealtimeSdpNotification } | { "method": "thread/realtime/error", "params": ThreadRealtimeErrorNotification } | { "method": "thread/realtime/closed", "params": ThreadRealtimeClosedNotification } | { "method": "windows/worldWritableWarning", "params": WindowsWorldWritableWarningNotification } | { "method": "windowsSandbox/setupCompleted", "params": WindowsSandboxSetupCompletedNotification } | { "method": "account/login/completed", "params": AccountLoginCompletedNotification };
 +export type ServerNotification = { "method": "error", "params": ErrorNotification } | { "method": "thread/started", "params": ThreadStartedNotification } | { "method": "thread/status/changed", "params": ThreadStatusChangedNotification } | { "method": "thread/archived", "params": ThreadArchivedNotification } | { "method": "thread/deleted", "params": ThreadDeletedNotification } | { "method": "thread/unarchived", "params": ThreadUnarchivedNotification } | { "method": "thread/closed", "params": ThreadClosedNotification } | { "method": "thread/reverted", "params": ThreadRevertedNotification } | { "method": "skills/changed", "params": SkillsChangedNotification } | { "method": "thread/name/updated", "params": ThreadNameUpdatedNotification } | { "method": "thread/goal/updated", "params": ThreadGoalUpdatedNotification } | { "method": "thread/goal/cleared", "params": ThreadGoalClearedNotification } | { "method": "thread/transitioned", "params": ThreadTransitionedNotification } | { "method": "thread/queue/changed", "params": ThreadQueueChangedNotification } | { "method": "project/changed", "params": ProjectChangedNotification } | { "method": "thread/project/updated", "params": ThreadProjectUpdatedNotification } | { "method": "thread/environment/connected", "params": EnvironmentConnectionNotification } | { "method": "thread/environment/disconnected", "params": EnvironmentConnectionNotification } | { "method": "thread/settings/updated", "params": ThreadSettingsUpdatedNotification } | { "method": "thread/tokenUsage/updated", "params": ThreadTokenUsageUpdatedNotification } | { "method": "turn/started", "params": TurnStartedNotification } | { "method": "hook/started", "params": HookStartedNotification } | { "method": "turn/completed", "params": TurnCompletedNotification } | { "method": "hook/completed", "params": HookCompletedNotification } | { "method": "turn/diff/updated", "params": TurnDiffUpdatedNotification } | { "method": "turn/plan/updated", "params": TurnPlanUpdatedNotification } | { "method": "item/started", "params": ItemStartedNotification } | { "method": "item/autoApprovalReview/started", "params": ItemGuardianApprovalReviewStartedNotification } | { "method": "item/autoApprovalReview/completed", "params": ItemGuardianApprovalReviewCompletedNotification } | { "method": "autoApprovalReview/strictReviewRequired", "params": StrictReviewRequiredNotification } | { "method": "item/completed", "params": ItemCompletedNotification } | { "method": "rawResponseItem/completed", "params": RawResponseItemCompletedNotification } | { "method": "rawResponse/completed", "params": RawResponseCompletedNotification } | { "method": "item/agentMessage/delta", "params": AgentMessageDeltaNotification } | { "method": "item/plan/delta", "params": PlanDeltaNotification } | { "method": "command/exec/outputDelta", "params": CommandExecOutputDeltaNotification } | { "method": "process/outputDelta", "params": ProcessOutputDeltaNotification } | { "method": "process/exited", "params": ProcessExitedNotification } | { "method": "item/commandExecution/outputDelta", "params": CommandExecutionOutputDeltaNotification } | { "method": "item/commandExecution/terminalInteraction", "params": TerminalInteractionNotification } | { "method": "item/fileChange/outputDelta", "params": FileChangeOutputDeltaNotification } | { "method": "item/fileChange/patchUpdated", "params": FileChangePatchUpdatedNotification } | { "method": "serverRequest/resolved", "params": ServerRequestResolvedNotification } | { "method": "item/mcpToolCall/progress", "params": McpToolCallProgressNotification } | { "method": "mcpServer/oauthLogin/completed", "params": McpServerOauthLoginCompletedNotification } | { "method": "mcpServer/startupStatus/updated", "params": McpServerStatusUpdatedNotification } | { "method": "mcpServer/event/stream/notification", "params": McpServerEventStreamNotification } | { "method": "mcpServer/startupCompleted", "params": McpServerStartupCompletedNotification } | { "method": "account/updated", "params": AccountUpdatedNotification } | { "method": "account/rateLimits/updated", "params": AccountRateLimitsUpdatedNotification } | { "method": "accountSlot/changed", "params": AccountSlotChangedNotification } | { "method": "accountSlot/inventoryChanged", "params": AccountSlotInventoryChangedNotification } | { "method": "accountRotation/changed", "params": AccountRotationChangedNotification } | { "method": "sessionRuntime/changed", "params": SessionRuntimeChangedNotification } | { "method": "sessionRuntime/operation/updated", "params": SessionRuntimeOperationUpdatedNotification } | { "method": "thread/presentation/appended", "params": ThreadPresentationAppendedNotification } | { "method": "app/list/updated", "params": AppListUpdatedNotification } | { "method": "remoteControl/status/changed", "params": RemoteControlStatusChangedNotification } | { "method": "externalAgentConfig/import/progress", "params": ExternalAgentConfigImportProgressNotification } | { "method": "externalAgentConfig/import/completed", "params": ExternalAgentConfigImportCompletedNotification } | { "method": "fs/changed", "params": FsChangedNotification } | { "method": "item/reasoning/summaryTextDelta", "params": ReasoningSummaryTextDeltaNotification } | { "method": "item/reasoning/summaryPartAdded", "params": ReasoningSummaryPartAddedNotification } | { "method": "item/reasoning/textDelta", "params": ReasoningTextDeltaNotification } | { "method": "thread/compacted", "params": ContextCompactedNotification } | { "method": "model/rerouted", "params": ModelReroutedNotification } | { "method": "model/verification", "params": ModelVerificationNotification } | { "method": "turn/moderationMetadata", "params": TurnModerationMetadataNotification } | { "method": "model/safetyBuffering/updated", "params": ModelSafetyBufferingUpdatedNotification } | { "method": "warning", "params": WarningNotification } | { "method": "guardianWarning", "params": GuardianWarningNotification } | { "method": "deprecationNotice", "params": DeprecationNoticeNotification } | { "method": "configWarning", "params": ConfigWarningNotification } | { "method": "fuzzyFileSearch/sessionUpdated", "params": FuzzyFileSearchSessionUpdatedNotification } | { "method": "fuzzyFileSearch/sessionCompleted", "params": FuzzyFileSearchSessionCompletedNotification } | { "method": "thread/realtime/started", "params": ThreadRealtimeStartedNotification } | { "method": "thread/realtime/itemAdded", "params": ThreadRealtimeItemAddedNotification } | { "method": "thread/realtime/item/started", "params": ThreadRealtimeItemStartedNotification } | { "method": "thread/realtime/item/transcript/delta", "params": ThreadRealtimeItemTranscriptDeltaNotification } | { "method": "thread/realtime/item/completed", "params": ThreadRealtimeItemCompletedNotification } | { "method": "thread/realtime/transcript/delta", "params": ThreadRealtimeTranscriptDeltaNotification } | { "method": "thread/realtime/transcript/done", "params": ThreadRealtimeTranscriptDoneNotification } | { "method": "thread/realtime/outputAudio/delta", "params": ThreadRealtimeOutputAudioDeltaNotification } | { "method": "thread/realtime/sdp", "params": ThreadRealtimeSdpNotification } | { "method": "thread/realtime/error", "params": ThreadRealtimeErrorNotification } | { "method": "thread/realtime/closed", "params": ThreadRealtimeClosedNotification } | { "method": "windows/worldWritableWarning", "params": WindowsWorldWritableWarningNotification } | { "method": "windowsSandbox/setupCompleted", "params": WindowsSandboxSetupCompletedNotification } | { "method": "account/login/completed", "params": AccountLoginCompletedNotification };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/ServerNotificationEnvelope.ts b/codex-rs/app-server-protocol/schema/typescript/ServerNotificationEnvelope.ts
-index 8d60fa99c02c29f724ee84031e5db88b97f04f18..052ef3ce07741c040986e21ab8a13d2808c8f7e6 100644
+index 8d60fa99c..052ef3ce0 100644
 --- a/codex-rs/app-server-protocol/schema/typescript/ServerNotificationEnvelope.ts
 +++ b/codex-rs/app-server-protocol/schema/typescript/ServerNotificationEnvelope.ts
 @@ -30,6 +30,7 @@ import type { ItemCompletedNotification } from "./v2/ItemCompletedNotification";
@@ -17437,7 +17681,7 @@ index 8d60fa99c02c29f724ee84031e5db88b97f04f18..052ef3ce07741c040986e21ab8a13d28
 -emittedAtMs?: number, } & ({ "method": "error", "params": ErrorNotification } | { "method": "thread/started", "params": ThreadStartedNotification } | { "method": "thread/status/changed", "params": ThreadStatusChangedNotification } | { "method": "thread/archived", "params": ThreadArchivedNotification } | { "method": "thread/deleted", "params": ThreadDeletedNotification } | { "method": "thread/unarchived", "params": ThreadUnarchivedNotification } | { "method": "thread/closed", "params": ThreadClosedNotification } | { "method": "thread/reverted", "params": ThreadRevertedNotification } | { "method": "skills/changed", "params": SkillsChangedNotification } | { "method": "thread/name/updated", "params": ThreadNameUpdatedNotification } | { "method": "thread/goal/updated", "params": ThreadGoalUpdatedNotification } | { "method": "thread/goal/cleared", "params": ThreadGoalClearedNotification } | { "method": "thread/transitioned", "params": ThreadTransitionedNotification } | { "method": "thread/queue/changed", "params": ThreadQueueChangedNotification } | { "method": "project/changed", "params": ProjectChangedNotification } | { "method": "thread/project/updated", "params": ThreadProjectUpdatedNotification } | { "method": "thread/environment/connected", "params": EnvironmentConnectionNotification } | { "method": "thread/environment/disconnected", "params": EnvironmentConnectionNotification } | { "method": "thread/settings/updated", "params": ThreadSettingsUpdatedNotification } | { "method": "thread/tokenUsage/updated", "params": ThreadTokenUsageUpdatedNotification } | { "method": "turn/started", "params": TurnStartedNotification } | { "method": "hook/started", "params": HookStartedNotification } | { "method": "turn/completed", "params": TurnCompletedNotification } | { "method": "hook/completed", "params": HookCompletedNotification } | { "method": "turn/diff/updated", "params": TurnDiffUpdatedNotification } | { "method": "turn/plan/updated", "params": TurnPlanUpdatedNotification } | { "method": "item/started", "params": ItemStartedNotification } | { "method": "item/autoApprovalReview/started", "params": ItemGuardianApprovalReviewStartedNotification } | { "method": "item/autoApprovalReview/completed", "params": ItemGuardianApprovalReviewCompletedNotification } | { "method": "autoApprovalReview/strictReviewRequired", "params": StrictReviewRequiredNotification } | { "method": "item/completed", "params": ItemCompletedNotification } | { "method": "rawResponseItem/completed", "params": RawResponseItemCompletedNotification } | { "method": "rawResponse/completed", "params": RawResponseCompletedNotification } | { "method": "item/agentMessage/delta", "params": AgentMessageDeltaNotification } | { "method": "item/plan/delta", "params": PlanDeltaNotification } | { "method": "command/exec/outputDelta", "params": CommandExecOutputDeltaNotification } | { "method": "process/outputDelta", "params": ProcessOutputDeltaNotification } | { "method": "process/exited", "params": ProcessExitedNotification } | { "method": "item/commandExecution/outputDelta", "params": CommandExecutionOutputDeltaNotification } | { "method": "item/commandExecution/terminalInteraction", "params": TerminalInteractionNotification } | { "method": "item/fileChange/outputDelta", "params": FileChangeOutputDeltaNotification } | { "method": "item/fileChange/patchUpdated", "params": FileChangePatchUpdatedNotification } | { "method": "serverRequest/resolved", "params": ServerRequestResolvedNotification } | { "method": "item/mcpToolCall/progress", "params": McpToolCallProgressNotification } | { "method": "mcpServer/oauthLogin/completed", "params": McpServerOauthLoginCompletedNotification } | { "method": "mcpServer/startupStatus/updated", "params": McpServerStatusUpdatedNotification } | { "method": "mcpServer/startupCompleted", "params": McpServerStartupCompletedNotification } | { "method": "account/updated", "params": AccountUpdatedNotification } | { "method": "account/rateLimits/updated", "params": AccountRateLimitsUpdatedNotification } | { "method": "accountSlot/changed", "params": AccountSlotChangedNotification } | { "method": "accountSlot/inventoryChanged", "params": AccountSlotInventoryChangedNotification } | { "method": "accountRotation/changed", "params": AccountRotationChangedNotification } | { "method": "sessionRuntime/changed", "params": SessionRuntimeChangedNotification } | { "method": "sessionRuntime/operation/updated", "params": SessionRuntimeOperationUpdatedNotification } | { "method": "thread/presentation/appended", "params": ThreadPresentationAppendedNotification } | { "method": "app/list/updated", "params": AppListUpdatedNotification } | { "method": "remoteControl/status/changed", "params": RemoteControlStatusChangedNotification } | { "method": "externalAgentConfig/import/progress", "params": ExternalAgentConfigImportProgressNotification } | { "method": "externalAgentConfig/import/completed", "params": ExternalAgentConfigImportCompletedNotification } | { "method": "fs/changed", "params": FsChangedNotification } | { "method": "item/reasoning/summaryTextDelta", "params": ReasoningSummaryTextDeltaNotification } | { "method": "item/reasoning/summaryPartAdded", "params": ReasoningSummaryPartAddedNotification } | { "method": "item/reasoning/textDelta", "params": ReasoningTextDeltaNotification } | { "method": "thread/compacted", "params": ContextCompactedNotification } | { "method": "model/rerouted", "params": ModelReroutedNotification } | { "method": "model/verification", "params": ModelVerificationNotification } | { "method": "turn/moderationMetadata", "params": TurnModerationMetadataNotification } | { "method": "model/safetyBuffering/updated", "params": ModelSafetyBufferingUpdatedNotification } | { "method": "warning", "params": WarningNotification } | { "method": "guardianWarning", "params": GuardianWarningNotification } | { "method": "deprecationNotice", "params": DeprecationNoticeNotification } | { "method": "configWarning", "params": ConfigWarningNotification } | { "method": "fuzzyFileSearch/sessionUpdated", "params": FuzzyFileSearchSessionUpdatedNotification } | { "method": "fuzzyFileSearch/sessionCompleted", "params": FuzzyFileSearchSessionCompletedNotification } | { "method": "thread/realtime/started", "params": ThreadRealtimeStartedNotification } | { "method": "thread/realtime/itemAdded", "params": ThreadRealtimeItemAddedNotification } | { "method": "thread/realtime/transcript/delta", "params": ThreadRealtimeTranscriptDeltaNotification } | { "method": "thread/realtime/transcript/done", "params": ThreadRealtimeTranscriptDoneNotification } | { "method": "thread/realtime/outputAudio/delta", "params": ThreadRealtimeOutputAudioDeltaNotification } | { "method": "thread/realtime/sdp", "params": ThreadRealtimeSdpNotification } | { "method": "thread/realtime/error", "params": ThreadRealtimeErrorNotification } | { "method": "thread/realtime/closed", "params": ThreadRealtimeClosedNotification } | { "method": "windows/worldWritableWarning", "params": WindowsWorldWritableWarningNotification } | { "method": "windowsSandbox/setupCompleted", "params": WindowsSandboxSetupCompletedNotification } | { "method": "account/login/completed", "params": AccountLoginCompletedNotification });
 +emittedAtMs?: number, } & ({ "method": "error", "params": ErrorNotification } | { "method": "thread/started", "params": ThreadStartedNotification } | { "method": "thread/status/changed", "params": ThreadStatusChangedNotification } | { "method": "thread/archived", "params": ThreadArchivedNotification } | { "method": "thread/deleted", "params": ThreadDeletedNotification } | { "method": "thread/unarchived", "params": ThreadUnarchivedNotification } | { "method": "thread/closed", "params": ThreadClosedNotification } | { "method": "thread/reverted", "params": ThreadRevertedNotification } | { "method": "skills/changed", "params": SkillsChangedNotification } | { "method": "thread/name/updated", "params": ThreadNameUpdatedNotification } | { "method": "thread/goal/updated", "params": ThreadGoalUpdatedNotification } | { "method": "thread/goal/cleared", "params": ThreadGoalClearedNotification } | { "method": "thread/transitioned", "params": ThreadTransitionedNotification } | { "method": "thread/queue/changed", "params": ThreadQueueChangedNotification } | { "method": "project/changed", "params": ProjectChangedNotification } | { "method": "thread/project/updated", "params": ThreadProjectUpdatedNotification } | { "method": "thread/environment/connected", "params": EnvironmentConnectionNotification } | { "method": "thread/environment/disconnected", "params": EnvironmentConnectionNotification } | { "method": "thread/settings/updated", "params": ThreadSettingsUpdatedNotification } | { "method": "thread/tokenUsage/updated", "params": ThreadTokenUsageUpdatedNotification } | { "method": "turn/started", "params": TurnStartedNotification } | { "method": "hook/started", "params": HookStartedNotification } | { "method": "turn/completed", "params": TurnCompletedNotification } | { "method": "hook/completed", "params": HookCompletedNotification } | { "method": "turn/diff/updated", "params": TurnDiffUpdatedNotification } | { "method": "turn/plan/updated", "params": TurnPlanUpdatedNotification } | { "method": "item/started", "params": ItemStartedNotification } | { "method": "item/autoApprovalReview/started", "params": ItemGuardianApprovalReviewStartedNotification } | { "method": "item/autoApprovalReview/completed", "params": ItemGuardianApprovalReviewCompletedNotification } | { "method": "autoApprovalReview/strictReviewRequired", "params": StrictReviewRequiredNotification } | { "method": "item/completed", "params": ItemCompletedNotification } | { "method": "rawResponseItem/completed", "params": RawResponseItemCompletedNotification } | { "method": "rawResponse/completed", "params": RawResponseCompletedNotification } | { "method": "item/agentMessage/delta", "params": AgentMessageDeltaNotification } | { "method": "item/plan/delta", "params": PlanDeltaNotification } | { "method": "command/exec/outputDelta", "params": CommandExecOutputDeltaNotification } | { "method": "process/outputDelta", "params": ProcessOutputDeltaNotification } | { "method": "process/exited", "params": ProcessExitedNotification } | { "method": "item/commandExecution/outputDelta", "params": CommandExecutionOutputDeltaNotification } | { "method": "item/commandExecution/terminalInteraction", "params": TerminalInteractionNotification } | { "method": "item/fileChange/outputDelta", "params": FileChangeOutputDeltaNotification } | { "method": "item/fileChange/patchUpdated", "params": FileChangePatchUpdatedNotification } | { "method": "serverRequest/resolved", "params": ServerRequestResolvedNotification } | { "method": "item/mcpToolCall/progress", "params": McpToolCallProgressNotification } | { "method": "mcpServer/oauthLogin/completed", "params": McpServerOauthLoginCompletedNotification } | { "method": "mcpServer/startupStatus/updated", "params": McpServerStatusUpdatedNotification } | { "method": "mcpServer/event/stream/notification", "params": McpServerEventStreamNotification } | { "method": "mcpServer/startupCompleted", "params": McpServerStartupCompletedNotification } | { "method": "account/updated", "params": AccountUpdatedNotification } | { "method": "account/rateLimits/updated", "params": AccountRateLimitsUpdatedNotification } | { "method": "accountSlot/changed", "params": AccountSlotChangedNotification } | { "method": "accountSlot/inventoryChanged", "params": AccountSlotInventoryChangedNotification } | { "method": "accountRotation/changed", "params": AccountRotationChangedNotification } | { "method": "sessionRuntime/changed", "params": SessionRuntimeChangedNotification } | { "method": "sessionRuntime/operation/updated", "params": SessionRuntimeOperationUpdatedNotification } | { "method": "thread/presentation/appended", "params": ThreadPresentationAppendedNotification } | { "method": "app/list/updated", "params": AppListUpdatedNotification } | { "method": "remoteControl/status/changed", "params": RemoteControlStatusChangedNotification } | { "method": "externalAgentConfig/import/progress", "params": ExternalAgentConfigImportProgressNotification } | { "method": "externalAgentConfig/import/completed", "params": ExternalAgentConfigImportCompletedNotification } | { "method": "fs/changed", "params": FsChangedNotification } | { "method": "item/reasoning/summaryTextDelta", "params": ReasoningSummaryTextDeltaNotification } | { "method": "item/reasoning/summaryPartAdded", "params": ReasoningSummaryPartAddedNotification } | { "method": "item/reasoning/textDelta", "params": ReasoningTextDeltaNotification } | { "method": "thread/compacted", "params": ContextCompactedNotification } | { "method": "model/rerouted", "params": ModelReroutedNotification } | { "method": "model/verification", "params": ModelVerificationNotification } | { "method": "turn/moderationMetadata", "params": TurnModerationMetadataNotification } | { "method": "model/safetyBuffering/updated", "params": ModelSafetyBufferingUpdatedNotification } | { "method": "warning", "params": WarningNotification } | { "method": "guardianWarning", "params": GuardianWarningNotification } | { "method": "deprecationNotice", "params": DeprecationNoticeNotification } | { "method": "configWarning", "params": ConfigWarningNotification } | { "method": "fuzzyFileSearch/sessionUpdated", "params": FuzzyFileSearchSessionUpdatedNotification } | { "method": "fuzzyFileSearch/sessionCompleted", "params": FuzzyFileSearchSessionCompletedNotification } | { "method": "thread/realtime/started", "params": ThreadRealtimeStartedNotification } | { "method": "thread/realtime/itemAdded", "params": ThreadRealtimeItemAddedNotification } | { "method": "thread/realtime/item/started", "params": ThreadRealtimeItemStartedNotification } | { "method": "thread/realtime/item/transcript/delta", "params": ThreadRealtimeItemTranscriptDeltaNotification } | { "method": "thread/realtime/item/completed", "params": ThreadRealtimeItemCompletedNotification } | { "method": "thread/realtime/transcript/delta", "params": ThreadRealtimeTranscriptDeltaNotification } | { "method": "thread/realtime/transcript/done", "params": ThreadRealtimeTranscriptDoneNotification } | { "method": "thread/realtime/outputAudio/delta", "params": ThreadRealtimeOutputAudioDeltaNotification } | { "method": "thread/realtime/sdp", "params": ThreadRealtimeSdpNotification } | { "method": "thread/realtime/error", "params": ThreadRealtimeErrorNotification } | { "method": "thread/realtime/closed", "params": ThreadRealtimeClosedNotification } | { "method": "windows/worldWritableWarning", "params": WindowsWorldWritableWarningNotification } | { "method": "windowsSandbox/setupCompleted", "params": WindowsSandboxSetupCompletedNotification } | { "method": "account/login/completed", "params": AccountLoginCompletedNotification });
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeIdentity.ts b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeIdentity.ts
-index 4033aa8302c29146f43659cac7eb5fff871392b2..cc220006ac62e92803e8d002f06a312de687b2e0 100644
+index 4033aa830..cc220006a 100644
 --- a/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeIdentity.ts
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/SessionRuntimeIdentity.ts
 @@ -11,7 +11,11 @@ export type SessionRuntimeIdentity = { sessionId: string, forkedFromId: string |
@@ -17454,7 +17698,7 @@ index 4033aa8302c29146f43659cac7eb5fff871392b2..cc220006ac62e92803e8d002f06a312d
   * Effective next-turn settings when the thread is loaded and they are available.
   */
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/ThreadStartParams.ts b/codex-rs/app-server-protocol/schema/typescript/v2/ThreadStartParams.ts
-index 30509ef6cb31216d0bbd319ae52e39139e0e8776..f86b9538b8afb05464135f4ea09205cacb72468c 100644
+index 30509ef6c..f86b9538b 100644
 --- a/codex-rs/app-server-protocol/schema/typescript/v2/ThreadStartParams.ts
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/ThreadStartParams.ts
 @@ -9,7 +9,11 @@ import type { SandboxMode } from "./SandboxMode";
@@ -17471,7 +17715,7 @@ index 30509ef6cb31216d0bbd319ae52e39139e0e8776..f86b9538b8afb05464135f4ea09205ca
   * and subsequent turns.
   */
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/TurnStartParams.ts b/codex-rs/app-server-protocol/schema/typescript/v2/TurnStartParams.ts
-index f895c545a8194474bca93675702ede578721a5de..70009dde29759054fde2f154fadbb1a84f7e39f8 100644
+index f895c545a..70009dde2 100644
 --- a/codex-rs/app-server-protocol/schema/typescript/v2/TurnStartParams.ts
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/TurnStartParams.ts
 @@ -9,12 +9,17 @@ import type { ApprovalsReviewer } from "./ApprovalsReviewer";
@@ -17505,7 +17749,7 @@ index f895c545a8194474bca93675702ede578721a5de..70009dde29759054fde2f154fadbb1a8
   */
  effort?: ReasoningEffort | null, /**
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/index.ts b/codex-rs/app-server-protocol/schema/typescript/v2/index.ts
-index 99bd62f3dc27c4e136caa04ecc513fdf85be1941..de9e81307f5bee3be66fa1dad1b52cbc7befa484 100644
+index 99bd62f3d..de9e81307 100644
 --- a/codex-rs/app-server-protocol/schema/typescript/v2/index.ts
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/index.ts
 @@ -41,6 +41,7 @@ export type { AdditionalNetworkPermissions } from "./AdditionalNetworkPermission
@@ -17661,7 +17905,7 @@ index 99bd62f3dc27c4e136caa04ecc513fdf85be1941..de9e81307f5bee3be66fa1dad1b52cbc
  export type { UserInput } from "./UserInput";
  export type { WarningNotification } from "./WarningNotification";
 diff --git a/codex-rs/app-server-protocol/src/protocol/v2/session_runtime.rs b/codex-rs/app-server-protocol/src/protocol/v2/session_runtime.rs
-index 79feed696464328095d18634672bd85e58b4a553..d02a12150898c626cc18ffb2a86443f3dfea5377 100644
+index 79feed696..d02a12150 100644
 --- a/codex-rs/app-server-protocol/src/protocol/v2/session_runtime.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/v2/session_runtime.rs
 @@ -111,6 +111,7 @@ pub struct SessionRuntimeIdentity {
@@ -17673,7 +17917,7 @@ index 79feed696464328095d18634672bd85e58b4a553..d02a12150898c626cc18ffb2a86443f3
      pub git_info: Option<GitInfo>,
      /// Effective next-turn settings when the thread is loaded and they are available.
 diff --git a/codex-rs/app-server-protocol/src/protocol/v2/thread.rs b/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
-index 8357fb133ccbbaa90acbd1793ef77c49beccaaaf..5a8e6b8a31e2bc9b3c88c45f48c3a35ca0826774 100644
+index 8357fb133..5a8e6b8a3 100644
 --- a/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
 @@ -65,6 +65,10 @@ pub struct ThreadStartParams {
@@ -17687,8 +17931,20 @@ index 8357fb133ccbbaa90acbd1793ef77c49beccaaaf..5a8e6b8a31e2bc9b3c88c45f48c3a35c
      #[ts(optional = nullable)]
      pub model: Option<String>,
      #[ts(optional = nullable)]
+diff --git a/codex-rs/app-server-transport/src/lib.rs b/codex-rs/app-server-transport/src/lib.rs
+index d94b1e79e..f998ca0f8 100644
+--- a/codex-rs/app-server-transport/src/lib.rs
++++ b/codex-rs/app-server-transport/src/lib.rs
+@@ -15,6 +15,7 @@ pub use outgoing_message::QueuedOutgoingMessage;
+ pub use supervisor::AppServerInstanceIdentity;
+ pub use supervisor::CanonicalControlPaths;
+ pub use supervisor::SUPERVISED_APP_SERVER_IDENTITY_ENV_VAR;
++pub use supervisor::SUPERVISOR_CONTRACT_VERSION;
+ pub use supervisor::SupervisedAppServerSnapshot;
+ pub use supervisor::SupervisedAppServerStatus;
+ pub use supervisor::SupervisorControlError;
 diff --git a/codex-rs/app-server-transport/src/supervisor.rs b/codex-rs/app-server-transport/src/supervisor.rs
-index b46a88c7059ea8f1901d12e22fd24d1797cd48b3..fda1398073db42d230200c5edfba6283232f8a9d 100644
+index b46a88c70..b9e3e5389 100644
 --- a/codex-rs/app-server-transport/src/supervisor.rs
 +++ b/codex-rs/app-server-transport/src/supervisor.rs
 @@ -9,7 +9,11 @@ use std::os::unix::fs::MetadataExt;
@@ -17703,7 +17959,21 @@ index b46a88c7059ea8f1901d12e22fd24d1797cd48b3..fda1398073db42d230200c5edfba6283
  use serde::Deserialize;
  use serde::Serialize;
  use uuid::Uuid;
-@@ -145,8 +149,32 @@ pub async fn app_server_socket_is_owner_private(path: &Path) -> io::Result<bool>
+@@ -22,8 +26,13 @@ const SUPERVISOR_SOCKET_FILE_NAME: &str = "supervisor.sock";
+ const SUPERVISOR_SNAPSHOT_FILE_NAME: &str = "supervisor-snapshot.json";
+ const SUPERVISED_APP_SERVER_READY_FILE_NAME: &str = "app-server-ready.json";
+ 
++pub const SUPERVISOR_CONTRACT_VERSION: u32 = 1;
+ pub const SUPERVISED_APP_SERVER_IDENTITY_ENV_VAR: &str = "CODEX_SUPERVISED_APP_SERVER_IDENTITY";
+ 
++fn default_supervisor_contract_version() -> u32 {
++    SUPERVISOR_CONTRACT_VERSION
++}
++
+ /// Fixed owner-local paths shared by the supervisor and all numbered Codex
+ /// account processes.
+ #[derive(Clone, Debug, Eq, PartialEq)]
+@@ -145,8 +154,32 @@ pub async fn app_server_socket_is_owner_private(path: &Path) -> io::Result<bool>
  
      #[cfg(not(unix))]
      {
@@ -17738,7 +18008,16 @@ index b46a88c7059ea8f1901d12e22fd24d1797cd48b3..fda1398073db42d230200c5edfba6283
      }
  }
  
-@@ -295,6 +323,11 @@ async fn write_supervised_ready_identity(
+@@ -182,6 +215,8 @@ pub struct SupervisedAppServerSnapshot {
+ #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+ #[serde(rename_all = "camelCase")]
+ pub struct SupervisorSnapshot {
++    #[serde(default = "default_supervisor_contract_version")]
++    pub contract_version: u32,
+     pub snapshot_revision: u64,
+     pub app_server: Option<SupervisedAppServerSnapshot>,
+ }
+@@ -295,6 +330,11 @@ async fn write_supervised_ready_identity(
  
      let temp_path = path.as_path().with_extension("json.tmp");
      let _ = tokio::fs::remove_file(&temp_path).await;
@@ -17750,7 +18029,7 @@ index b46a88c7059ea8f1901d12e22fd24d1797cd48b3..fda1398073db42d230200c5edfba6283
      let mut options = tokio::fs::OpenOptions::new();
      options.create_new(true).write(true);
      #[cfg(unix)]
-@@ -302,10 +335,14 @@ async fn write_supervised_ready_identity(
+@@ -302,10 +342,14 @@ async fn write_supervised_ready_identity(
          options.mode(0o600);
      }
      let mut file = options.open(&temp_path).await?;
@@ -17765,7 +18044,7 @@ index b46a88c7059ea8f1901d12e22fd24d1797cd48b3..fda1398073db42d230200c5edfba6283
      Ok(SupervisedReadyFileGuard { path })
  }
  
-@@ -313,6 +350,38 @@ async fn ready_proof_matches_at(
+@@ -313,6 +357,38 @@ async fn ready_proof_matches_at(
      path: &Path,
      expected: AppServerInstanceIdentity,
  ) -> io::Result<bool> {
@@ -17805,7 +18084,7 @@ index b46a88c7059ea8f1901d12e22fd24d1797cd48b3..fda1398073db42d230200c5edfba6283
          Ok(contents) => Ok(serde_json::from_slice(&contents).ok() == Some(expected)),
          Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
 diff --git a/codex-rs/app-server-transport/src/supervisor_tests.rs b/codex-rs/app-server-transport/src/supervisor_tests.rs
-index 8519defb53be370f99fb52f99ff3b1ef24f69847..8f21027a92d84130d8a4ff8ab991de7cb6de34f4 100644
+index 8519defb5..25fe77a20 100644
 --- a/codex-rs/app-server-transport/src/supervisor_tests.rs
 +++ b/codex-rs/app-server-transport/src/supervisor_tests.rs
 @@ -1,3 +1,4 @@
@@ -17813,7 +18092,15 @@ index 8519defb53be370f99fb52f99ff3b1ef24f69847..8f21027a92d84130d8a4ff8ab991de7c
  use codex_utils_absolute_path::AbsolutePathBuf;
  use pretty_assertions::assert_eq;
  use serde_json::json;
-@@ -16,9 +17,13 @@ use super::SupervisorControlMessage;
+@@ -5,6 +6,7 @@ use uuid::Uuid;
+ 
+ use super::AppServerInstanceIdentity;
+ use super::CanonicalControlPaths;
++use super::SUPERVISOR_CONTRACT_VERSION;
+ use super::SupervisedAppServerSnapshot;
+ use super::SupervisedAppServerStatus;
+ use super::SupervisorControlError;
+@@ -16,9 +18,13 @@ use super::SupervisorControlMessage;
  use super::SupervisorControlRequest;
  use super::SupervisorControlResponse;
  use super::SupervisorSnapshot;
@@ -17827,7 +18114,50 @@ index 8519defb53be370f99fb52f99ff3b1ef24f69847..8f21027a92d84130d8a4ff8ab991de7c
  use super::write_supervised_ready_identity;
  
  #[test]
-@@ -209,10 +214,9 @@ fn supervisor_control_wire_is_bounded_to_snapshot_and_exact_restart() {
+@@ -105,6 +111,7 @@ fn supervisor_snapshot_keeps_revision_domains_separate() {
+         generation: 7,
+     };
+     let snapshot = SupervisorSnapshot {
++        contract_version: SUPERVISOR_CONTRACT_VERSION,
+         snapshot_revision: 19,
+         app_server: Some(SupervisedAppServerSnapshot {
+             process_generation: 11,
+@@ -117,6 +124,7 @@ fn supervisor_snapshot_keeps_revision_domains_separate() {
+     assert_eq!(
+         serde_json::to_value(&snapshot).expect("serialize snapshot"),
+         json!({
++            "contractVersion": 1,
+             "snapshotRevision": 19,
+             "appServer": {
+                 "processGeneration": 11,
+@@ -141,6 +149,18 @@ fn supervisor_snapshot_keeps_revision_domains_separate() {
+     );
+ }
+ 
++#[test]
++fn supervisor_snapshot_defaults_legacy_contract_version_and_emits_numeric_version() {
++    let legacy: SupervisorSnapshot =
++        serde_json::from_str(r#"{"snapshotRevision":19,"appServer":null}"#)
++            .expect("deserialize legacy snapshot");
++    assert_eq!(legacy.contract_version, SUPERVISOR_CONTRACT_VERSION);
++
++    let encoded = serde_json::to_value(legacy).expect("serialize current snapshot");
++    assert_eq!(encoded["contractVersion"], json!(1));
++    assert!(encoded["contractVersion"].is_number());
++}
++
+ #[test]
+ fn supervisor_control_wire_is_bounded_to_snapshot_and_exact_restart() {
+     let instance = AppServerInstanceIdentity {
+@@ -149,6 +169,7 @@ fn supervisor_control_wire_is_bounded_to_snapshot_and_exact_restart() {
+         generation: 7,
+     };
+     let snapshot = SupervisorSnapshot {
++        contract_version: SUPERVISOR_CONTRACT_VERSION,
+         snapshot_revision: 19,
+         app_server: Some(SupervisedAppServerSnapshot {
+             process_generation: 11,
+@@ -209,10 +230,9 @@ fn supervisor_control_wire_is_bounded_to_snapshot_and_exact_restart() {
      );
  }
  
@@ -17839,7 +18169,7 @@ index 8519defb53be370f99fb52f99ff3b1ef24f69847..8f21027a92d84130d8a4ff8ab991de7c
      let temp = tempfile::tempdir().expect("temp dir");
      let path = temp.path().join("app-server-ready.json");
      let absolute = AbsolutePathBuf::from_absolute_path(&path).expect("absolute proof path");
-@@ -233,6 +237,8 @@ async fn ready_proof_is_private_and_removed_with_its_guard() {
+@@ -233,6 +253,8 @@ async fn ready_proof_is_private_and_removed_with_its_guard() {
          .expect("deserialize proof"),
          identity
      );
@@ -17848,7 +18178,7 @@ index 8519defb53be370f99fb52f99ff3b1ef24f69847..8f21027a92d84130d8a4ff8ab991de7c
      assert_eq!(
          tokio::fs::metadata(&path)
              .await
-@@ -247,6 +253,7 @@ async fn ready_proof_is_private_and_removed_with_its_guard() {
+@@ -247,6 +269,7 @@ async fn ready_proof_is_private_and_removed_with_its_guard() {
      assert!(!path.exists());
  }
  
@@ -17857,7 +18187,7 @@ index 8519defb53be370f99fb52f99ff3b1ef24f69847..8f21027a92d84130d8a4ff8ab991de7c
  async fn readiness_rejects_missing_and_stale_proofs() {
      let temp = tempfile::tempdir().expect("temp dir");
 diff --git a/codex-rs/app-server-transport/src/transport/unix_socket.rs b/codex-rs/app-server-transport/src/transport/unix_socket.rs
-index 09ae66a77ec012855af114e42b13d3828db2bbed..2edba897c8b62b61979119204a914dc3b0d1b6e2 100644
+index 09ae66a77..2edba897c 100644
 --- a/codex-rs/app-server-transport/src/transport/unix_socket.rs
 +++ b/codex-rs/app-server-transport/src/transport/unix_socket.rs
 @@ -3,6 +3,9 @@ use std::io::ErrorKind;
@@ -17923,7 +18253,7 @@ index 09ae66a77ec012855af114e42b13d3828db2bbed..2edba897c8b62b61979119204a914dc3
  }
  
 diff --git a/codex-rs/app-server/README.md b/codex-rs/app-server/README.md
-index b6e75aacd12f7e4deda61821e049ffaed03db7e9..2f7da5c362cc807924316c0af6e2833f22992383 100644
+index b6e75aacd..2f7da5c36 100644
 --- a/codex-rs/app-server/README.md
 +++ b/codex-rs/app-server/README.md
 @@ -161,7 +161,7 @@ Example with notification opt-out:
@@ -17936,7 +18266,7 @@ index b6e75aacd12f7e4deda61821e049ffaed03db7e9..2f7da5c362cc807924316c0af6e2833f
  - `thread/fork` — fork an existing thread into a new thread id by copying the stored history; pass an optional `lastTurnId` to copy history only through that turn, inclusive, and drop later turns from the fork. An in-progress `lastTurnId` boundary is rejected. Experimental `beforeTurnId` instead copies history strictly before the referenced turn, including when that turn is in progress, and cannot be combined with `lastTurnId`. If both boundaries are null while the source thread is mid-turn, the fork records the same interruption marker as `turn/interrupt` instead of inheriting an unmarked partial turn suffix. The returned `thread.forkedFromId` points at the source thread when known. Accepts `ephemeral: true` for an in-memory temporary fork, emits `thread/started` (including the current `thread.status`), and auto-subscribes you to turn/item events for the new thread. Experimental clients can pass `excludeTurns: true` when they plan to page fork history via `thread/turns/list` instead of receiving the full turn array immediately, or `deferGoalContinuation: true` to carry the source thread's current goal into the fork and run an explicit turn before automatic continuation resumes. Deferred goal continuation is persisted until that turn starts and cannot be combined with `ephemeral: true`. Accepts the same permission override rules as `thread/start`.
  - `thread/start`, `thread/resume`, and `thread/fork` responses include the legacy `sandbox` compatibility projection. `instructionSources` lists loaded instruction files using each source environment's native absolute path syntax, including files loaded from remote environments. Experimental clients can read `runtimeWorkspaceRoots` for the thread-scoped runtime roots and `activePermissionProfile` for the named or implicit built-in profile identity/provenance when known. Their deprecated experimental `multiAgentMode` field, and the corresponding thread setting, always report `explicitRequestOnly`; Ultra reasoning effort is the source of proactive multi-agent behavior.
 diff --git a/codex-rs/app-server/src/account_registry/global/directory_tests.rs b/codex-rs/app-server/src/account_registry/global/directory_tests.rs
-index 6e91ce66e372831193d1cc9bcaf625add317787d..7282b5c855eb0ae2757b971fd015e34d5e039b0d 100644
+index 6e91ce66e..7282b5c85 100644
 --- a/codex-rs/app-server/src/account_registry/global/directory_tests.rs
 +++ b/codex-rs/app-server/src/account_registry/global/directory_tests.rs
 @@ -17,12 +17,19 @@ fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
@@ -17965,7 +18295,7 @@ index 6e91ce66e372831193d1cc9bcaf625add317787d..7282b5c855eb0ae2757b971fd015e34d
  }
  
 diff --git a/codex-rs/app-server/src/account_registry/global/integration.rs b/codex-rs/app-server/src/account_registry/global/integration.rs
-index 2533cf6c3ec3dcd0a935e503d242aaefd6f161ba..5c35a76f9f49005196877f5c9dfb6b444e90dde3 100644
+index 2533cf6c3..5c35a76f9 100644
 --- a/codex-rs/app-server/src/account_registry/global/integration.rs
 +++ b/codex-rs/app-server/src/account_registry/global/integration.rs
 @@ -200,6 +200,20 @@ impl AccountRegistry {
@@ -17990,7 +18320,7 @@ index 2533cf6c3ec3dcd0a935e503d242aaefd6f161ba..5c35a76f9f49005196877f5c9dfb6b44
              CodexErr::InvalidRequest(format!("execution account `{account_id}` is unavailable"))
          })?;
 diff --git a/codex-rs/app-server/src/account_registry/global/lifecycle_tests.rs b/codex-rs/app-server/src/account_registry/global/lifecycle_tests.rs
-index 8a1381f708b5436749691304e1d9bd5a3920a52b..5fdbf65e157ebad6382a22c1fb83971d51e1c692 100644
+index 8a1381f70..5fdbf65e1 100644
 --- a/codex-rs/app-server/src/account_registry/global/lifecycle_tests.rs
 +++ b/codex-rs/app-server/src/account_registry/global/lifecycle_tests.rs
 @@ -168,6 +168,7 @@ fn write_auth(home: &Path, account_id: &str, token: &str) {
@@ -18002,7 +18332,7 @@ index 8a1381f708b5436749691304e1d9bd5a3920a52b..5fdbf65e157ebad6382a22c1fb83971d
          AuthCredentialsStoreMode::File,
          AuthKeyringBackendKind::default(),
 diff --git a/codex-rs/app-server/src/account_registry/rotation.rs b/codex-rs/app-server/src/account_registry/rotation.rs
-index bae88d4cedc3b4da1fc9bcaea42303a3b7b81cee..ff2b075d7744637abf5218866e1889afdc0f32e9 100644
+index bae88d4ce..ff2b075d7 100644
 --- a/codex-rs/app-server/src/account_registry/rotation.rs
 +++ b/codex-rs/app-server/src/account_registry/rotation.rs
 @@ -16,6 +16,8 @@ use codex_protocol::ThreadId;
@@ -18047,7 +18377,7 @@ index bae88d4cedc3b4da1fc9bcaea42303a3b7b81cee..ff2b075d7744637abf5218866e1889af
                      account_id,
                      ready: true,
 diff --git a/codex-rs/app-server/src/account_registry_tests.rs b/codex-rs/app-server/src/account_registry_tests.rs
-index d339e17fa352e6a8d0bdd12019ef12e641315e7a..50941dbc040946309c725c068c8f4baa13897ef9 100644
+index d339e17fa..50941dbc0 100644
 --- a/codex-rs/app-server/src/account_registry_tests.rs
 +++ b/codex-rs/app-server/src/account_registry_tests.rs
 @@ -198,6 +198,7 @@ fn persist_chatgpt_auth(auth_home: &Path, account_identity: &str) {
@@ -18059,7 +18389,7 @@ index d339e17fa352e6a8d0bdd12019ef12e641315e7a..50941dbc040946309c725c068c8f4baa
          AuthCredentialsStoreMode::File,
          AuthKeyringBackendKind::default(),
 diff --git a/codex-rs/app-server/src/extensions.rs b/codex-rs/app-server/src/extensions.rs
-index a7e5e5b92c2827b6859bb64e1e30e99f8e6f4ec5..026513545fc869856a10432417125e2d3341cbf3 100644
+index a7e5e5b92..026513545 100644
 --- a/codex-rs/app-server/src/extensions.rs
 +++ b/codex-rs/app-server/src/extensions.rs
 @@ -93,7 +93,12 @@ where
@@ -18077,7 +18407,7 @@ index a7e5e5b92c2827b6859bb64e1e30e99f8e6f4ec5..026513545fc869856a10432417125e2d
      codex_mcp_extension::install(&mut builder);
      codex_mcp_extension::install_executor_plugins(&mut builder, environment_manager);
 diff --git a/codex-rs/app-server/src/legacy_admission.rs b/codex-rs/app-server/src/legacy_admission.rs
-index 85bd40ad352a9e878b602ce13cdb13dce0ddcc77..0ec05c101a34fd3a7ba0666d04a7dd09db6bf10d 100644
+index 85bd40ad3..0ec05c101 100644
 --- a/codex-rs/app-server/src/legacy_admission.rs
 +++ b/codex-rs/app-server/src/legacy_admission.rs
 @@ -332,6 +332,7 @@ fn request_admission(request: &ClientRequest) -> RequestAdmission {
@@ -18106,7 +18436,7 @@ index 85bd40ad352a9e878b602ce13cdb13dce0ddcc77..0ec05c101a34fd3a7ba0666d04a7dd09
          | ClientRequest::WindowsSandboxSetupStart { .. }
          | ClientRequest::AccountSlotLoginStart { .. }
 diff --git a/codex-rs/app-server/src/mcp_refresh.rs b/codex-rs/app-server/src/mcp_refresh.rs
-index f5226ba246180c60f72d9697c4ce61bf35e0a1a5..148ea6a568a7a3340021b8d4f080c2b6539af6a8 100644
+index f5226ba24..148ea6a56 100644
 --- a/codex-rs/app-server/src/mcp_refresh.rs
 +++ b/codex-rs/app-server/src/mcp_refresh.rs
 @@ -330,6 +330,7 @@ enabled = false
@@ -18118,7 +18448,7 @@ index f5226ba246180c60f72d9697c4ce61bf35e0a1a5..148ea6a568a7a3340021b8d4f080c2b6
                          analytics_events_client: codex_analytics::AnalyticsEventsClient::disabled(),
                          thread_manager: thread_manager.clone(),
 diff --git a/codex-rs/app-server/src/request_processors/thread_goal_processor.rs b/codex-rs/app-server/src/request_processors/thread_goal_processor.rs
-index 2cc45ff53396c68f82187e60d9dd348bad5d1ce4..100fc748277cfbcdba3e35fd0fd4793612bd9876 100644
+index 2cc45ff53..100fc7482 100644
 --- a/codex-rs/app-server/src/request_processors/thread_goal_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_goal_processor.rs
 @@ -424,7 +424,9 @@ impl ThreadGoalRequestProcessor {
@@ -18144,7 +18474,7 @@ index 2cc45ff53396c68f82187e60d9dd348bad5d1ce4..100fc748277cfbcdba3e35fd0fd47936
              .await?;
          let listener_command_tx = self.goal_listener_command_tx(thread_id).await;
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index 017e19926d727bf63a0736420bd5ceafca89dbfc..a1e1cf2a1181464242ccc00e73da42db34bfcbc9 100644
+index 017e19926..a1e1cf2a1 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
 @@ -1685,6 +1685,7 @@ impl ThreadRequestProcessor {
@@ -18189,7 +18519,7 @@ index 017e19926d727bf63a0736420bd5ceafca89dbfc..a1e1cf2a1181464242ccc00e73da42db
                  )),
              };
 diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
-index 20eefcab138b74dcbeb2939dd02804c3990691b1..5f5f81cc105a8b0746f06770cd05bf88366e24b0 100644
+index 20eefcab1..5f5f81cc1 100644
 --- a/codex-rs/app-server/src/request_processors/turn_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
 @@ -10,12 +10,12 @@ use codex_protocol::models::FunctionCallOutputContentItem;
@@ -18207,8 +18537,29 @@ index 20eefcab138b74dcbeb2939dd02804c3990691b1..5f5f81cc105a8b0746f06770cd05bf88
  use codex_skills::system_cache_root_dir;
  
  use crate::image_url::REMOTE_IMAGE_URL_ERROR;
+diff --git a/codex-rs/app-server/src/session_runtime/pagination.rs b/codex-rs/app-server/src/session_runtime/pagination.rs
+index f93f18593..d0efcbc63 100644
+--- a/codex-rs/app-server/src/session_runtime/pagination.rs
++++ b/codex-rs/app-server/src/session_runtime/pagination.rs
+@@ -19,6 +19,7 @@ use crate::error_code::invalid_params;
+ 
+ const DEFAULT_LIMIT: usize = 50;
+ const MAX_LIMIT: usize = 100;
++const STALE_CURSOR_REASON: &str = "session_runtime_snapshot_stale";
+ 
+ #[derive(Default)]
+ pub(super) struct SnapshotCache {
+@@ -249,5 +250,7 @@ fn decode_cursor(cursor: &str) -> Result<RuntimeCursor, JSONRPCErrorError> {
+ }
+ 
+ pub(super) fn stale_cursor() -> JSONRPCErrorError {
+-    invalid_params("sessionRuntime/list cursor is stale; restart pagination")
++    let mut error = invalid_params("sessionRuntime/list cursor is stale; restart pagination");
++    error.data = Some(serde_json::json!({"reason": STALE_CURSOR_REASON}));
++    error
+ }
 diff --git a/codex-rs/app-server/src/session_runtime/snapshot.rs b/codex-rs/app-server/src/session_runtime/snapshot.rs
-index 523c162753eaf6ee561f87f96305423d421126ef..c4503d680011b6bf7398d1403c2c9dc3fb9adb29 100644
+index 523c16275..c4503d680 100644
 --- a/codex-rs/app-server/src/session_runtime/snapshot.rs
 +++ b/codex-rs/app-server/src/session_runtime/snapshot.rs
 @@ -454,12 +454,14 @@ impl RuntimeRecord {
@@ -18276,7 +18627,7 @@ index 523c162753eaf6ee561f87f96305423d421126ef..c4503d680011b6bf7398d1403c2c9dc3
 +    label.to_string()
 +}
 diff --git a/codex-rs/app-server/src/session_runtime/snapshot_tests.rs b/codex-rs/app-server/src/session_runtime/snapshot_tests.rs
-index 59a06e7dae1b710c95921b5eb6088aa6e1eb4d05..0cb507f1e58e00f6a78f16af405326567c999133 100644
+index 59a06e7da..0cb507f1e 100644
 --- a/codex-rs/app-server/src/session_runtime/snapshot_tests.rs
 +++ b/codex-rs/app-server/src/session_runtime/snapshot_tests.rs
 @@ -1,7 +1,11 @@
@@ -18305,8 +18656,131 @@ index 59a06e7dae1b710c95921b5eb6088aa6e1eb4d05..0cb507f1e58e00f6a78f16af40532656
 +        "custom"
 +    );
 +}
+diff --git a/codex-rs/app-server/src/session_runtime/tests.rs b/codex-rs/app-server/src/session_runtime/tests.rs
+index 0d14bf877..98c8e44e0 100644
+--- a/codex-rs/app-server/src/session_runtime/tests.rs
++++ b/codex-rs/app-server/src/session_runtime/tests.rs
+@@ -2,6 +2,9 @@ use std::collections::HashMap;
+ use std::collections::HashSet;
+ use std::collections::VecDeque;
+ 
++use base64::Engine;
++use base64::engine::general_purpose::URL_SAFE_NO_PAD;
++use codex_app_server_protocol::JSONRPCErrorError;
+ use codex_app_server_protocol::SessionRuntimeAccountBinding;
+ use codex_app_server_protocol::SessionRuntimeAccountSwitchState;
+ use codex_app_server_protocol::SessionRuntimeIdentity;
+@@ -18,6 +21,7 @@ use codex_app_server_protocol::SessionRuntimeWriterState;
+ use codex_app_server_protocol::ThreadStatus;
+ use codex_protocol::ThreadId;
+ use pretty_assertions::assert_eq;
++use serde_json::json;
+ 
+ use super::EngineState;
+ use super::RuntimeActivity;
+@@ -163,6 +167,24 @@ fn materialize_plan(plan: &super::pagination::PagePlan) -> Vec<SessionRuntimeSna
+         .collect()
+ }
+ 
++fn assert_stale_cursor(error: JSONRPCErrorError) {
++    assert_eq!(error.code, -32602);
++    assert_eq!(
++        error.message,
++        "sessionRuntime/list cursor is stale; restart pagination"
++    );
++    assert_eq!(
++        error.data,
++        Some(json!({"reason": "session_runtime_snapshot_stale"}))
++    );
++}
++
++fn assert_invalid_cursor(error: JSONRPCErrorError) {
++    assert_eq!(error.code, -32602);
++    assert_eq!(error.message, "sessionRuntime/list cursor is invalid");
++    assert_eq!(error.data, None);
++}
++
+ #[test]
+ fn pagination_cursor_is_stable_and_restarts_after_sequence_change() {
+     let thread_ids = (0..3).map(|_index| ThreadId::new()).collect::<Vec<_>>();
+@@ -192,10 +214,72 @@ fn pagination_cursor_is_stable_and_restarts_after_sequence_change() {
+ 
+     assert_eq!(first.data.len(), 1);
+     assert_eq!(second.data.len(), 1);
+-    assert!(cache.plan(Some(&cursor), "epoch-a", 8, 11, 1).is_err());
+-    assert!(cache.plan(Some(&cursor), "epoch-b", 7, 11, 1).is_err());
++    assert_stale_cursor(
++        cache
++            .plan(Some(&cursor), "epoch-a", 8, 11, 1)
++            .err()
++            .expect("sequence mismatch must be stale"),
++    );
++    assert_stale_cursor(
++        cache
++            .plan(Some(&cursor), "epoch-a", 7, 12, 1)
++            .err()
++            .expect("source generation mismatch must be stale"),
++    );
++    assert_stale_cursor(
++        cache
++            .plan(Some(&cursor), "epoch-b", 7, 11, 1)
++            .err()
++            .expect("instance epoch mismatch must be stale"),
++    );
++    assert_invalid_cursor(
++        cache
++            .plan(Some("not-base64!"), "epoch-a", 7, 11, 1)
++            .err()
++            .expect("malformed base64 cursor must be invalid"),
++    );
++    let malformed_json_cursor = URL_SAFE_NO_PAD.encode(b"{");
++    assert_invalid_cursor(
++        cache
++            .plan(Some(&malformed_json_cursor), "epoch-a", 7, 11, 1)
++            .err()
++            .expect("malformed JSON cursor must be invalid"),
++    );
+     cache.replace(7, 11, inventory(&[ThreadId::new()]));
+-    assert!(cache.plan(Some(&cursor), "epoch-a", 7, 11, 1).is_err());
++    assert_stale_cursor(
++        cache
++            .plan(Some(&cursor), "epoch-a", 7, 11, 1)
++            .err()
++            .expect("replacement snapshot ID mismatch must be stale"),
++    );
++
++    let mut commit_cache = SnapshotCache::default();
++    commit_cache.replace(7, 11, inventory(&thread_ids));
++    let commit_plan = commit_cache
++        .plan(None, "epoch-a", 7, 11, 1)
++        .expect("plan before runtime source change");
++    let commit_snapshots = materialize_plan(&commit_plan);
++    commit_cache.replace(8, 12, inventory(&thread_ids));
++    assert_stale_cursor(
++        commit_cache
++            .commit(&commit_plan, commit_snapshots)
++            .expect_err("runtime source change during materialization must be stale"),
++    );
++
++    let mut response_cache = SnapshotCache::default();
++    response_cache.replace(7, 11, inventory(&thread_ids));
++    let response_plan = response_cache
++        .plan(None, "epoch-a", 7, 11, 1)
++        .expect("plan before response replacement");
++    response_cache
++        .commit(&response_plan, materialize_plan(&response_plan))
++        .expect("commit before response replacement");
++    response_cache.replace(7, 11, inventory(&thread_ids));
++    assert_stale_cursor(
++        response_cache
++            .response(&response_plan, "epoch-a", 1, Vec::new())
++            .expect_err("replacement before response must be stale"),
++    );
+ }
+ 
+ #[test]
 diff --git a/codex-rs/app-server/src/turn_cost_worker.rs b/codex-rs/app-server/src/turn_cost_worker.rs
-index bbec0f7a4f34a1733e267407b7743e4b172c04bd..9d47a3a1c7a23b72ead5900fde869d22577de296 100644
+index bbec0f7a4..9d47a3a1c 100644
 --- a/codex-rs/app-server/src/turn_cost_worker.rs
 +++ b/codex-rs/app-server/src/turn_cost_worker.rs
 @@ -367,7 +367,8 @@ impl WorkerRuntime {
@@ -18366,7 +18840,7 @@ index bbec0f7a4f34a1733e267407b7743e4b172c04bd..9d47a3a1c7a23b72ead5900fde869d22
              .into_iter()
              .map(|cost| (cost.turn_id.clone(), cost))
 diff --git a/codex-rs/app-server/src/turn_cost_worker_tests.rs b/codex-rs/app-server/src/turn_cost_worker_tests.rs
-index a698798a74c7ee7608414c6d54599e55afef9c6d..6e18f13da6404983ae7a314e3161d8e898713c63 100644
+index a698798a7..6e18f13da 100644
 --- a/codex-rs/app-server/src/turn_cost_worker_tests.rs
 +++ b/codex-rs/app-server/src/turn_cost_worker_tests.rs
 @@ -96,14 +96,22 @@ async fn handle_observes_only_matching_model_provider() {
@@ -18399,7 +18873,7 @@ index a698798a74c7ee7608414c6d54599e55afef9c6d..6e18f13da6404983ae7a314e3161d8e8
      assert_eq!(observation.thread_id, thread_id);
      assert_eq!(observation.turn_id, "turn-1");
 diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
-index 8ac023582ad91feb4f50bca9332387bba6ac78df..be7aa953a0e3764fe2e872e482a79f5f697d2b8f 100644
+index 8ac023582..be7aa953a 100644
 --- a/codex-rs/app-server/tests/suite/v2/mod.rs
 +++ b/codex-rs/app-server/tests/suite/v2/mod.rs
 @@ -127,8 +127,8 @@ mod thread_timeline;
@@ -18413,7 +18887,7 @@ index 8ac023582ad91feb4f50bca9332387bba6ac78df..be7aa953a0e3764fe2e872e482a79f5f
  mod turn_start_zsh_fork;
  mod turn_steer;
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_archive.rs b/codex-rs/app-server/tests/suite/v2/thread_archive.rs
-index df2b7200c75341716c74bfeaa0aa0a6174965076..14435f3fbfa36fffd8ce3fdebf10dc952389e814 100644
+index df2b7200c..14435f3fb 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_archive.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_archive.rs
 @@ -12,10 +12,10 @@ use codex_app_server_protocol::ThreadArchiveParams;
@@ -18430,7 +18904,7 @@ index df2b7200c75341716c74bfeaa0aa0a6174965076..14435f3fbfa36fffd8ce3fdebf10dc95
  use codex_app_server_protocol::ThreadResumeResponse;
  use codex_app_server_protocol::ThreadSource;
 diff --git a/codex-rs/config/src/types.rs b/codex-rs/config/src/types.rs
-index 4e01557be56f37cc36636995b0b9fad26862ce75..e62fce5a0562940997a28b3692685a3787b25b9a 100644
+index 4e01557be..e62fce5a0 100644
 --- a/codex-rs/config/src/types.rs
 +++ b/codex-rs/config/src/types.rs
 @@ -689,6 +689,80 @@ pub struct ModelAvailabilityNuxConfig {
@@ -18526,7 +19000,7 @@ index 4e01557be56f37cc36636995b0b9fad26862ce75..e62fce5a0562940997a28b3692685a37
      /// Defaults to `true`.
      #[serde(default = "default_true")]
 diff --git a/codex-rs/config/src/types_tests.rs b/codex-rs/config/src/types_tests.rs
-index 2c3f69d9867ef65c2aa9058000b897f5c071f549..01a6113e4a29472b159af194da90284bae1fa2dd 100644
+index 2c3f69d98..01a6113e4 100644
 --- a/codex-rs/config/src/types_tests.rs
 +++ b/codex-rs/config/src/types_tests.rs
 @@ -1,6 +1,40 @@
@@ -18571,7 +19045,7 @@ index 2c3f69d9867ef65c2aa9058000b897f5c071f549..01a6113e4a29472b159af194da90284b
  fn deserialize_skill_config_with_name_selector() {
      let cfg: SkillConfig = toml::from_str(
 diff --git a/codex-rs/core-api/src/lib.rs b/codex-rs/core-api/src/lib.rs
-index e4222183860c138fdd60ce54aa927c069d153cf6..fc5237867c69978e1a1d9cbd99a83f9c2efa1c20 100644
+index e42221838..fc5237867 100644
 --- a/codex-rs/core-api/src/lib.rs
 +++ b/codex-rs/core-api/src/lib.rs
 @@ -21,6 +21,9 @@ pub use codex_config::types::OAuthCredentialsStoreMode;
@@ -18585,7 +19059,7 @@ index e4222183860c138fdd60ce54aa927c069d153cf6..fc5237867c69978e1a1d9cbd99a83f9c
  pub use codex_config::types::TuiNotificationSettings;
  pub use codex_config::types::TuiPetAnchor;
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index 19484e26f1b60cef6c26de59f959c7eddc33d9c5..848946bc8ece1577daffe8ae9b38a2df1dfcd21e 100644
+index 19484e26f..848946bc8 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
 @@ -3713,6 +3713,21 @@
@@ -18716,7 +19190,7 @@ index 19484e26f1b60cef6c26de59f959c7eddc33d9c5..848946bc8ece1577daffe8ae9b38a2df
        "additionalProperties": false,
        "description": "Global keybindings. These are used when a context does not define an override.",
 diff --git a/codex-rs/core/src/config/config_tests.rs b/codex-rs/core/src/config/config_tests.rs
-index 3a4554456f03b4cfc5e66854fe80234b2808883e..e2a5b3a308ea3b0c168c831782bb8ce598048165 100644
+index 3a4554456..e2a5b3a30 100644
 --- a/codex-rs/core/src/config/config_tests.rs
 +++ b/codex-rs/core/src/config/config_tests.rs
 @@ -65,6 +65,7 @@ use codex_config::types::SkillsConfig;
@@ -18744,7 +19218,7 @@ index 3a4554456f03b4cfc5e66854fe80234b2808883e..e2a5b3a308ea3b0c168c831782bb8ce5
              show_tooltips: true,
              vim_mode_default: false,
 diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
-index 96da2f76f87d4c3164e4b0fe8f1ed718a294acca..98c64474b632039bf5d0772f893a772a722c846f 100644
+index 96da2f76f..98c64474b 100644
 --- a/codex-rs/core/src/config/mod.rs
 +++ b/codex-rs/core/src/config/mod.rs
 @@ -51,6 +51,7 @@ use codex_config::types::SessionPickerViewMode;
@@ -18778,7 +19252,7 @@ index 96da2f76f87d4c3164e4b0fe8f1ed718a294acca..98c64474b632039bf5d0772f893a772a
              show_tooltips: cfg.tui.as_ref().map(|t| t.show_tooltips).unwrap_or(true),
              model_availability_nux: cfg
 diff --git a/codex-rs/core/src/session/review.rs b/codex-rs/core/src/session/review.rs
-index 1e20e5eb88fe25d1d18f67933c9c8abfa8f774b1..b95bf3e85c16b671d9345223fc8a57a2b52682d3 100644
+index 1e20e5eb8..b95bf3e85 100644
 --- a/codex-rs/core/src/session/review.rs
 +++ b/codex-rs/core/src/session/review.rs
 @@ -1,4 +1,6 @@
@@ -18969,7 +19443,7 @@ index 1e20e5eb88fe25d1d18f67933c9c8abfa8f774b1..b95bf3e85c16b671d9345223fc8a57a2
      // Announce entering review mode so UIs can switch modes.
      let item = TurnItem::EnteredReviewMode(EnteredReviewModeItem {
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
-index 94d90f4ea8f76661780d653bdb902aaacd62014a..2b0ccba3767babaa6fdb60c5ef3d2b19746b7860 100644
+index 94d90f4ea..2b0ccba37 100644
 --- a/codex-rs/core/src/session/session.rs
 +++ b/codex-rs/core/src/session/session.rs
 @@ -803,7 +803,11 @@ impl Session {
@@ -18986,7 +19460,7 @@ index 94d90f4ea8f76661780d653bdb902aaacd62014a..2b0ccba3767babaa6fdb60c5ef3d2b19
                  !matches!(feature.as_str(), "system" | "title") && !feature.starts_with("ambient")
              }
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 1b26ff9916e1c5be74da8fe85137f44ea79af644..0697b7efb6fb4c7eb69befd3479945dd2e4c4882 100644
+index 1b26ff991..0697b7efb 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -1,5 +1,6 @@
@@ -19446,7 +19920,7 @@ index 1b26ff9916e1c5be74da8fe85137f44ea79af644..0697b7efb6fb4c7eb69befd3479945dd
                  )
                  .await;
 diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
-index 57cd35ede5a90af3c48a53181c764c5a740227ca..85097fc9f90ac57551a343b98c57821b1a3f2d27 100644
+index 57cd35ede..85097fc9f 100644
 --- a/codex-rs/core/src/session/turn_context.rs
 +++ b/codex-rs/core/src/session/turn_context.rs
 @@ -736,6 +736,10 @@ impl Session {
@@ -19508,7 +19982,7 @@ index 57cd35ede5a90af3c48a53181c764c5a740227ca..85097fc9f90ac57551a343b98c57821b
              session_configuration.provider.clone(),
              &session_configuration,
 diff --git a/codex-rs/core/src/session/turn_input.rs b/codex-rs/core/src/session/turn_input.rs
-index f15129b165ef1ac02ba453421202d99e6c943c8b..587f409b6bb74932428e2e3d6069372f58dac1e7 100644
+index f15129b16..587f409b6 100644
 --- a/codex-rs/core/src/session/turn_input.rs
 +++ b/codex-rs/core/src/session/turn_input.rs
 @@ -630,11 +630,7 @@ async fn start_or_steer(
@@ -19565,7 +20039,7 @@ index f15129b165ef1ac02ba453421202d99e6c943c8b..587f409b6bb74932428e2e3d6069372f
      }
      Ok(TurnInputSubmission::Started {
 diff --git a/codex-rs/core/src/session/turn_input_tests.rs b/codex-rs/core/src/session/turn_input_tests.rs
-index 198ed76208aa773e70926f83bfc90b7450cea52f..634485ce00d0e5153b4a601dee7606a13e0469ff 100644
+index 198ed7620..634485ce0 100644
 --- a/codex-rs/core/src/session/turn_input_tests.rs
 +++ b/codex-rs/core/src/session/turn_input_tests.rs
 @@ -1,6 +1,5 @@
@@ -19662,7 +20136,7 @@ index 198ed76208aa773e70926f83bfc90b7450cea52f..634485ce00d0e5153b4a601dee7606a1
      let Err(error) = result else {
          panic!("commit-time constraint failure must return InvalidRequest");
 diff --git a/codex-rs/core/src/tasks/plugin_executable.rs b/codex-rs/core/src/tasks/plugin_executable.rs
-index 6c2166cf5ed939ab97465c7fcb8e6c9bce9d2ea5..d1ae6eeb102bf2123af52c265d3483f04edb1f4a 100644
+index 6c2166cf5..d1ae6eeb1 100644
 --- a/codex-rs/core/src/tasks/plugin_executable.rs
 +++ b/codex-rs/core/src/tasks/plugin_executable.rs
 @@ -155,6 +155,7 @@ async fn execute_plugin_executable(
@@ -19674,7 +20148,7 @@ index 6c2166cf5ed939ab97465c7fcb8e6c9bce9d2ea5..d1ae6eeb102bf2123af52c265d3483f0
      );
      let request = ExecCommandRequest {
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index aa69208af47687bbbdb6750547e0085d530ef7c1..fa5c10647c4d0cc6629f571d146a014a6ad23f3c 100644
+index aa69208af..fa5c10647 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -242,6 +242,9 @@ pub struct ThreadManager {
@@ -19739,7 +20213,7 @@ index aa69208af47687bbbdb6750547e0085d530ef7c1..fa5c10647c4d0cc6629f571d146a014a
              self.execution_account_resolver
                  .initial_binding_for_new_thread()
 diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
-index ef6987d0c13160e1ed13836412dd5de9b77eaef2..7d94498092901aede7204d1bfd2c79ce0dfaf833 100644
+index ef6987d0c..7d9449809 100644
 --- a/codex-rs/core/src/thread_manager_tests.rs
 +++ b/codex-rs/core/src/thread_manager_tests.rs
 @@ -82,8 +82,24 @@ impl ExecutionAccountResolver for InitialBindingExecutionAccountResolver {
@@ -19813,7 +20287,7 @@ index ef6987d0c13160e1ed13836412dd5de9b77eaef2..7d94498092901aede7204d1bfd2c79ce
          .thread
          .shutdown_and_wait()
 diff --git a/codex-rs/core/src/tools/code_mode/mod.rs b/codex-rs/core/src/tools/code_mode/mod.rs
-index 4037ee2ccc3486143cf54e746ec987f0eb425d35..c19530cd788c24e3cd4e935937bf39cef04f312b 100644
+index 4037ee2cc..c19530cd7 100644
 --- a/codex-rs/core/src/tools/code_mode/mod.rs
 +++ b/codex-rs/core/src/tools/code_mode/mod.rs
 @@ -381,7 +381,8 @@ fn submit_nested_tool(
@@ -19827,7 +20301,7 @@ index 4037ee2ccc3486143cf54e746ec987f0eb425d35..c19530cd788c24e3cd4e935937bf39ce
          call,
          ToolCallSource::CodeMode {
 diff --git a/codex-rs/core/tests/suite/read_only_auth_refresh.rs b/codex-rs/core/tests/suite/read_only_auth_refresh.rs
-index 2eaf8224e1ebd13bcf2e0762459e53aef2a78ffd..f47bcbadee90225afdab57e25946a1d1603e8592 100644
+index 2eaf8224e..f47bcbade 100644
 --- a/codex-rs/core/tests/suite/read_only_auth_refresh.rs
 +++ b/codex-rs/core/tests/suite/read_only_auth_refresh.rs
 @@ -103,6 +103,7 @@ fn write_auth(auth_home: &Path, access_token: &str) -> std::io::Result<()> {
@@ -19839,7 +20313,7 @@ index 2eaf8224e1ebd13bcf2e0762459e53aef2a78ffd..f47bcbadee90225afdab57e25946a1d1
          AuthCredentialsStoreMode::File,
          AuthKeyringBackendKind::default(),
 diff --git a/codex-rs/ext/goal/src/tool.rs b/codex-rs/ext/goal/src/tool.rs
-index 7c3cdc5d04ecfb7675c18b529b64649eb294b65f..ff0794183c304c9e63ba81624e66f9183e5ec496 100644
+index 7c3cdc5d0..ff0794183 100644
 --- a/codex-rs/ext/goal/src/tool.rs
 +++ b/codex-rs/ext/goal/src/tool.rs
 @@ -357,7 +357,7 @@ impl GoalToolExecutor {
@@ -19861,7 +20335,7 @@ index 7c3cdc5d04ecfb7675c18b529b64649eb294b65f..ff0794183c304c9e63ba81624e66f918
          let args: ReplaceGoalArgs = parse_arguments(invocation.function_arguments()?)?;
          let outcome = self
 diff --git a/codex-rs/login/Cargo.toml b/codex-rs/login/Cargo.toml
-index 2971dec6c1a81cb80379477333371bba6e8fbece..1333551499ef5136287c911acfcf070ed2cae0ed 100644
+index 2971dec6c..133355149 100644
 --- a/codex-rs/login/Cargo.toml
 +++ b/codex-rs/login/Cargo.toml
 @@ -20,6 +20,7 @@ codex-protocol = { workspace = true }
@@ -19873,7 +20347,7 @@ index 2971dec6c1a81cb80379477333371bba6e8fbece..1333551499ef5136287c911acfcf070e
  http = { workspace = true }
  once_cell = { workspace = true }
 diff --git a/codex-rs/login/src/auth/managed_lifecycle.rs b/codex-rs/login/src/auth/managed_lifecycle.rs
-index b471dad2778366dc401b5f8781f7d8859e3fc834..6e1c0a55e8e89ce96257ce1d8a441deffb31bcea 100644
+index b471dad27..6e1c0a55e 100644
 --- a/codex-rs/login/src/auth/managed_lifecycle.rs
 +++ b/codex-rs/login/src/auth/managed_lifecycle.rs
 @@ -142,13 +142,18 @@ impl ManagedAuthStaging {
@@ -19908,7 +20382,7 @@ index b471dad2778366dc401b5f8781f7d8859e3fc834..6e1c0a55e8e89ce96257ce1d8a441def
              target_home,
              staging_home,
 diff --git a/codex-rs/login/src/auth/read_only.rs b/codex-rs/login/src/auth/read_only.rs
-index 40da8d4f430fd9060ca45c9fed136109a17be8f1..240773a3404b9504cb386659999b0f0e6d8aeb9e 100644
+index 40da8d4f4..240773a34 100644
 --- a/codex-rs/login/src/auth/read_only.rs
 +++ b/codex-rs/login/src/auth/read_only.rs
 @@ -14,7 +14,15 @@ pub(super) struct LoadedAuth {
@@ -19929,7 +20403,7 @@ index 40da8d4f430fd9060ca45c9fed136109a17be8f1..240773a3404b9504cb386659999b0f0e
              auth: None,
              credential_revision: None,
 diff --git a/codex-rs/login/src/auth/storage.rs b/codex-rs/login/src/auth/storage.rs
-index 98705c32926983082b375f8b077601a07a362213..604e728c9e8913a6d9b126111d202cfa4d4c76a7 100644
+index 98705c329..604e728c9 100644
 --- a/codex-rs/login/src/auth/storage.rs
 +++ b/codex-rs/login/src/auth/storage.rs
 @@ -14,6 +14,8 @@ use std::io::Write;
@@ -20139,7 +20613,7 @@ index 98705c32926983082b375f8b077601a07a362213..604e728c9e8913a6d9b126111d202cfa
          })();
          if result.is_err() {
 diff --git a/codex-rs/thread-manager-sample/src/main.rs b/codex-rs/thread-manager-sample/src/main.rs
-index e252df7181455b29ad68e7f9e528ecacfc8a015f..88a6fb6909958082caa805c754c70c0feffa493b 100644
+index e252df718..88a6fb690 100644
 --- a/codex-rs/thread-manager-sample/src/main.rs
 +++ b/codex-rs/thread-manager-sample/src/main.rs
 @@ -51,6 +51,7 @@ use codex_core_api::TerminalResizeReflowConfig;
@@ -20159,7 +20633,7 @@ index e252df7181455b29ad68e7f9e528ecacfc8a015f..88a6fb6909958082caa805c754c70c0f
          show_tooltips: true,
          model_availability_nux: ModelAvailabilityNuxConfig::default(),
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index 1ede59d0ee31301db3450b87637cd2941abaa3ce..e552b1ffe8f9b6103ee8fd6c71a0c5cc747f38aa 100644
+index 1ede59d0e..e552b1ffe 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
 @@ -111,7 +111,6 @@ use crate::ThreadStore;
@@ -20191,7 +20665,7 @@ index 1ede59d0ee31301db3450b87637cd2941abaa3ce..e552b1ffe8f9b6103ee8fd6c71a0c5cc
              .map_err(|err| ThreadStoreError::Internal {
                  message: format!("failed to open execution account binding store: {err}"),
 diff --git a/codex-rs/thread-store/src/local/rollout_migration.rs b/codex-rs/thread-store/src/local/rollout_migration.rs
-index 4763b266fb4dbf4db9714eb8f81eb82b9f97e062..b469ffa25e53f8c4d36795714c509266168a1c74 100644
+index 4763b266f..b469ffa25 100644
 --- a/codex-rs/thread-store/src/local/rollout_migration.rs
 +++ b/codex-rs/thread-store/src/local/rollout_migration.rs
 @@ -463,6 +463,13 @@ impl LocalThreadStore {
@@ -20209,7 +20683,7 @@ index 4763b266fb4dbf4db9714eb8f81eb82b9f97e062..b469ffa25e53f8c4d36795714c509266
          };
          let thread_id = metadata.meta.id;
 diff --git a/codex-rs/thread-store/src/local/rollout_migration/ordinal_repair.rs b/codex-rs/thread-store/src/local/rollout_migration/ordinal_repair.rs
-index a6d825e6dc9c1d4064a86bdb07d8e25cdb4188e7..211b38aaa9e78a7ff2b134f06b5e441d01a80f45 100644
+index a6d825e6d..211b38aaa 100644
 --- a/codex-rs/thread-store/src/local/rollout_migration/ordinal_repair.rs
 +++ b/codex-rs/thread-store/src/local/rollout_migration/ordinal_repair.rs
 @@ -115,6 +115,7 @@ impl OrdinalInspection {
@@ -20221,7 +20695,7 @@ index a6d825e6dc9c1d4064a86bdb07d8e25cdb4188e7..211b38aaa9e78a7ff2b134f06b5e441d
              message: None,
              history_mode: Some(self.history_mode),
 diff --git a/codex-rs/tui/src/app.rs b/codex-rs/tui/src/app.rs
-index 7fe77c855eed14d56213523e342f0f94de9a422f..b86379a50c94172af7a8c676ff30004fbfa4a621 100644
+index 7fe77c855..b86379a50 100644
 --- a/codex-rs/tui/src/app.rs
 +++ b/codex-rs/tui/src/app.rs
 @@ -610,6 +610,12 @@ pub(crate) struct App {
@@ -20238,7 +20712,7 @@ index 7fe77c855eed14d56213523e342f0f94de9a422f..b86379a50c94172af7a8c676ff30004f
      shutdown_lookup_in_flight: bool,
      shutdown_force_exit_armed: bool,
 diff --git a/codex-rs/tui/src/app/event_dispatch.rs b/codex-rs/tui/src/app/event_dispatch.rs
-index 1209c80ebd2bd85af06ccee511fc7afcddef0172..f9fb2ae738120113c4feccc6243cbe2515c17e40 100644
+index 1209c80eb..f9fb2ae73 100644
 --- a/codex-rs/tui/src/app/event_dispatch.rs
 +++ b/codex-rs/tui/src/app/event_dispatch.rs
 @@ -19,6 +19,8 @@ use codex_app_server_protocol::ThreadGoalStatus;
@@ -20251,7 +20725,7 @@ index 1209c80ebd2bd85af06ccee511fc7afcddef0172..f9fb2ae738120113c4feccc6243cbe25
      pub(super) async fn handle_event(
          &mut self,
 diff --git a/codex-rs/tui/src/app/startup.rs b/codex-rs/tui/src/app/startup.rs
-index 52e0a12d5a5ffb06879ee7acae239456c6c40ec9..50898385f4c8c63193a48afe000b985e8fba5d35 100644
+index 52e0a12d5..50898385f 100644
 --- a/codex-rs/tui/src/app/startup.rs
 +++ b/codex-rs/tui/src/app/startup.rs
 @@ -516,6 +516,7 @@ See the Codex keymap documentation for supported actions and examples."
@@ -20263,7 +20737,7 @@ index 52e0a12d5a5ffb06879ee7acae239456c6c40ec9..50898385f4c8c63193a48afe000b985e
              shutdown_lookup_in_flight: false,
              shutdown_force_exit_armed: false,
 diff --git a/codex-rs/tui/src/app/test_support.rs b/codex-rs/tui/src/app/test_support.rs
-index 3fe2bd856f8f77273ba6d0d7f6df133198b9fe0e..9796ca574fc69d5e7de252f4c1f9e0738eaeafc2 100644
+index 3fe2bd856..9796ca574 100644
 --- a/codex-rs/tui/src/app/test_support.rs
 +++ b/codex-rs/tui/src/app/test_support.rs
 @@ -67,6 +67,7 @@ pub(super) async fn make_test_app_with_channels() -> (
@@ -20275,7 +20749,7 @@ index 3fe2bd856f8f77273ba6d0d7f6df133198b9fe0e..9796ca574fc69d5e7de252f4c1f9e073
          shutdown_lookup_in_flight: false,
          shutdown_force_exit_armed: false,
 diff --git a/codex-rs/tui/src/app/tests.rs b/codex-rs/tui/src/app/tests.rs
-index edb570cd5ebbf7a34b419ce7e043f76e229e51a5..b1c4f6d9d9df79551d7c7977a95557d25153fcb9 100644
+index edb570cd5..b1c4f6d9d 100644
 --- a/codex-rs/tui/src/app/tests.rs
 +++ b/codex-rs/tui/src/app/tests.rs
 @@ -5490,6 +5490,7 @@ async fn make_test_app() -> App {
@@ -20295,7 +20769,7 @@ index edb570cd5ebbf7a34b419ce7e043f76e229e51a5..b1c4f6d9d9df79551d7c7977a95557d2
              shutdown_lookup_in_flight: false,
              shutdown_force_exit_armed: false,
 diff --git a/codex-rs/tui/src/app/thread_routing.rs b/codex-rs/tui/src/app/thread_routing.rs
-index 4ad10331f072204e892b1cf53c078178ca316d46..3becfadc34a5ef6168e6921d1549ec5daa9e1f35 100644
+index 4ad10331f..3becfadc3 100644
 --- a/codex-rs/tui/src/app/thread_routing.rs
 +++ b/codex-rs/tui/src/app/thread_routing.rs
 @@ -1561,6 +1561,7 @@ impl App {
@@ -20320,7 +20794,7 @@ index 4ad10331f072204e892b1cf53c078178ca316d46..3becfadc34a5ef6168e6921d1549ec5d
              && let Some((closed_thread_id, primary_thread_id)) =
                  self.active_non_primary_shutdown_target(notification.as_ref())
 diff --git a/codex-rs/tui/src/app_server_session.rs b/codex-rs/tui/src/app_server_session.rs
-index ccbdff42c5e2eeb0f2620363764fed4e26dfac28..2dc538760adcc5b11cbaf30bcfee80c28ec82865 100644
+index ccbdff42c..2dc538760 100644
 --- a/codex-rs/tui/src/app_server_session.rs
 +++ b/codex-rs/tui/src/app_server_session.rs
 @@ -14,9 +14,9 @@ pub(crate) use history::thread_items_page_params;
@@ -20358,7 +20832,7 @@ index ccbdff42c5e2eeb0f2620363764fed4e26dfac28..2dc538760adcc5b11cbaf30bcfee80c2
              self.pending_thread_transition = None;
          } else {
 diff --git a/codex-rs/tui/src/bottom_pane/chat_composer.rs b/codex-rs/tui/src/bottom_pane/chat_composer.rs
-index 28fa1151bafc26af87234d7a6c2411892f6cb499..92a21408a27711345c4def43cd3259d08f0f54eb 100644
+index 28fa1151b..92a21408a 100644
 --- a/codex-rs/tui/src/bottom_pane/chat_composer.rs
 +++ b/codex-rs/tui/src/bottom_pane/chat_composer.rs
 @@ -250,11 +250,16 @@ use super::footer::render_footer_from_props;
@@ -20996,7 +21470,7 @@ index 28fa1151bafc26af87234d7a6c2411892f6cb499..92a21408a27711345c4def43cd3259d0
              }
 diff --git a/codex-rs/tui/src/bottom_pane/footer_box.rs b/codex-rs/tui/src/bottom_pane/footer_box.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..6f3d0f4bdbeb1ab71c33e495bc56f7ca94c21181
+index 000000000..6f3d0f4bd
 --- /dev/null
 +++ b/codex-rs/tui/src/bottom_pane/footer_box.rs
 @@ -0,0 +1,1129 @@
@@ -22131,7 +22605,7 @@ index 0000000000000000000000000000000000000000..6f3d0f4bdbeb1ab71c33e495bc56f7ca
 +mod tests;
 diff --git a/codex-rs/tui/src/bottom_pane/footer_box_tests.rs b/codex-rs/tui/src/bottom_pane/footer_box_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..1b5901c6d018ad49b65d83be200b633a5ab0c412
+index 000000000..1b5901c6d
 --- /dev/null
 +++ b/codex-rs/tui/src/bottom_pane/footer_box_tests.rs
 @@ -0,0 +1,131 @@
@@ -22267,7 +22741,7 @@ index 0000000000000000000000000000000000000000..1b5901c6d018ad49b65d83be200b633a
 +    }
 +}
 diff --git a/codex-rs/tui/src/bottom_pane/mod.rs b/codex-rs/tui/src/bottom_pane/mod.rs
-index 6664b90729af7dfe881070c12b143184eb0e829a..29f492ff426912d0013f76ff55ca43702835611f 100644
+index 6664b9072..29f492ff4 100644
 --- a/codex-rs/tui/src/bottom_pane/mod.rs
 +++ b/codex-rs/tui/src/bottom_pane/mod.rs
 @@ -109,6 +109,7 @@ mod effort_status_line;
@@ -22325,7 +22799,7 @@ index 6664b90729af7dfe881070c12b143184eb0e829a..29f492ff426912d0013f76ff55ca4370
          self.composer.set_skill_mentions(skills);
          self.request_redraw();
 diff --git a/codex-rs/tui/src/canonical_launch_projection.rs b/codex-rs/tui/src/canonical_launch_projection.rs
-index 3a4d2453072c9b60de420c23f2a3445b3ecc38ce..5f5ccbd2f1e1547cbedb6922b4a67997e17e3fdd 100644
+index 3a4d24530..5f5ccbd2f 100644
 --- a/codex-rs/tui/src/canonical_launch_projection.rs
 +++ b/codex-rs/tui/src/canonical_launch_projection.rs
 @@ -12,6 +12,7 @@ use crate::legacy_core::config::Config;
@@ -22380,7 +22854,7 @@ index 3a4d2453072c9b60de420c23f2a3445b3ecc38ce..5f5ccbd2f1e1547cbedb6922b4a67997
              &mut params.model,
              &mut params.model_provider,
 diff --git a/codex-rs/tui/src/canonical_launch_projection_tests.rs b/codex-rs/tui/src/canonical_launch_projection_tests.rs
-index 1a232fcc2a4188773267e60a4a0accbbd2aa5d1d..9f8fb7d3cf871b4757677471cd27fe9fde9e8ff7 100644
+index 1a232fcc2..9f8fb7d3c 100644
 --- a/codex-rs/tui/src/canonical_launch_projection_tests.rs
 +++ b/codex-rs/tui/src/canonical_launch_projection_tests.rs
 @@ -169,6 +169,19 @@ fn oss_projection_keeps_only_provider_and_raw_reasoning_proof() {
@@ -22404,7 +22878,7 @@ index 1a232fcc2a4188773267e60a4a0accbbd2aa5d1d..9f8fb7d3cf871b4757677471cd27fe9f
  fn oss_requires_built_in_provider_and_raw_reasoning_visibility() {
      let projection = CanonicalLaunchProjection {
 diff --git a/codex-rs/tui/src/chatwidget/constructor.rs b/codex-rs/tui/src/chatwidget/constructor.rs
-index 493c0d4d34d6cc1725c4288700eef3b8ecbd7224..cc842867956eb58b54f94155524c22075822cdfb 100644
+index 493c0d4d3..cc8428679 100644
 --- a/codex-rs/tui/src/chatwidget/constructor.rs
 +++ b/codex-rs/tui/src/chatwidget/constructor.rs
 @@ -1,5 +1,9 @@
@@ -22474,7 +22948,7 @@ index 493c0d4d34d6cc1725c4288700eef3b8ecbd7224..cc842867956eb58b54f94155524c2207
          if let Some(keymap) = runtime_keymap {
              widget.bottom_pane.set_keymap_bindings(&keymap);
 diff --git a/codex-rs/tui/src/chatwidget/settings.rs b/codex-rs/tui/src/chatwidget/settings.rs
-index 71d5ecb244458b16356a4e4073e512cd764376c9..a39a208364dde8f9aee80ffadbc7ced21c93b67f 100644
+index 71d5ecb24..a39a20836 100644
 --- a/codex-rs/tui/src/chatwidget/settings.rs
 +++ b/codex-rs/tui/src/chatwidget/settings.rs
 @@ -242,6 +242,14 @@ impl ChatWidget {
@@ -22493,7 +22967,7 @@ index 71d5ecb244458b16356a4e4073e512cd764376c9..a39a208364dde8f9aee80ffadbc7ced2
              .set_connectors_enabled(self.connectors_enabled());
          self.refresh_connector_mentions(/*force_refresh*/ false);
 diff --git a/codex-rs/tui/src/chatwidget/tests/terminal_title.rs b/codex-rs/tui/src/chatwidget/tests/terminal_title.rs
-index 0d7d089001daf75a46c5b8b0b5fedec6c68c84a4..eb0ad22b4394dfde477f469df97aff2f26afb1b4 100644
+index 0d7d08900..eb0ad22b4 100644
 --- a/codex-rs/tui/src/chatwidget/tests/terminal_title.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/terminal_title.rs
 @@ -21,6 +21,8 @@ async fn goal_clock_refresh_redraws_only_when_elapsed_label_changes() {
@@ -22506,7 +22980,7 @@ index 0d7d089001daf75a46c5b8b0b5fedec6c68c84a4..eb0ad22b4394dfde477f469df97aff2f
          status: AppThreadGoalStatus::Active,
          token_budget: None,
 diff --git a/codex-rs/tui/src/launch_overrides.rs b/codex-rs/tui/src/launch_overrides.rs
-index cc924d2637fa115df59fcc721d98881f7d6f96fe..fbd377606284149a362115cbaef3f77d5266ac3a 100644
+index cc924d263..fbd377606 100644
 --- a/codex-rs/tui/src/launch_overrides.rs
 +++ b/codex-rs/tui/src/launch_overrides.rs
 @@ -105,7 +105,7 @@ pub fn classify_current_launch(
@@ -22519,7 +22993,7 @@ index cc924d2637fa115df59fcc721d98881f7d6f96fe..fbd377606284149a362115cbaef3f77d
          .map(|value| {
              value.into_string().map_err(|_| {
 diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
-index d87a86a66c6ec70db4cfaa5e2821d4f7ae38d49a..f60effb1d79b737725d7d072784249b04779751b 100644
+index d87a86a66..f60effb1d 100644
 --- a/codex-rs/tui/src/lib.rs
 +++ b/codex-rs/tui/src/lib.rs
 @@ -2110,6 +2110,7 @@ mod tests {
@@ -22549,8 +23023,196 @@ index d87a86a66c6ec70db4cfaa5e2821d4f7ae38d49a..f60effb1d79b737725d7d072784249b0
          };
          assert!(uses_remote_workspace_or_environment(
              &local_daemon,
+diff --git a/codex-rs/tui/src/resize_reflow_cap.rs b/codex-rs/tui/src/resize_reflow_cap.rs
+index 4dd9ffb19..3de88b244 100644
+--- a/codex-rs/tui/src/resize_reflow_cap.rs
++++ b/codex-rs/tui/src/resize_reflow_cap.rs
+@@ -9,6 +9,7 @@
+ //! make interactive resize feel worse without giving the user more usable history.
+ 
+ use codex_config::types::DEFAULT_TERMINAL_RESIZE_REFLOW_FALLBACK_MAX_ROWS;
++use codex_terminal_detection::Multiplexer;
+ use codex_terminal_detection::TerminalInfo;
+ use codex_terminal_detection::TerminalName;
+ use codex_terminal_detection::terminal_info;
+@@ -31,6 +32,7 @@ pub(crate) fn resize_reflow_max_rows(config: TerminalResizeReflowConfig) -> Opti
+         config,
+         &terminal_info(),
+         crate::tui::running_in_vscode_terminal(),
++        std::env::var_os("WT_SESSION").is_some(),
+     )
+ }
+ 
+@@ -38,11 +40,13 @@ fn resize_reflow_max_rows_for(
+     config: TerminalResizeReflowConfig,
+     terminal: &TerminalInfo,
+     running_in_vscode_terminal: bool,
++    wt_session_present: bool,
+ ) -> Option<usize> {
+     match config.max_rows {
+         TerminalResizeReflowMaxRows::Auto => Some(auto_resize_reflow_max_rows(
+-            terminal.name,
++            terminal,
+             running_in_vscode_terminal,
++            wt_session_present,
+         )),
+         TerminalResizeReflowMaxRows::Disabled => None,
+         TerminalResizeReflowMaxRows::Limit(max_rows) => Some(max_rows),
+@@ -50,14 +54,18 @@ fn resize_reflow_max_rows_for(
+ }
+ 
+ fn auto_resize_reflow_max_rows(
+-    terminal_name: TerminalName,
++    terminal: &TerminalInfo,
+     running_in_vscode_terminal: bool,
++    wt_session_present: bool,
+ ) -> usize {
+     if running_in_vscode_terminal {
+         return VSCODE_RESIZE_REFLOW_MAX_ROWS;
+     }
++    if (terminal.name == TerminalName::WindowsTerminal || wt_session_present) && is_tmux(terminal) {
++        return DEFAULT_TERMINAL_RESIZE_REFLOW_FALLBACK_MAX_ROWS;
++    }
+ 
+-    match terminal_name {
++    match terminal.name {
+         TerminalName::VsCode => VSCODE_RESIZE_REFLOW_MAX_ROWS,
+         TerminalName::WindowsTerminal => WINDOWS_TERMINAL_RESIZE_REFLOW_MAX_ROWS,
+         TerminalName::WezTerm => WEZTERM_RESIZE_REFLOW_MAX_ROWS,
+@@ -75,10 +83,16 @@ fn auto_resize_reflow_max_rows(
+     }
+ }
+ 
++fn is_tmux(terminal: &TerminalInfo) -> bool {
++    matches!(
++        terminal.multiplexer.as_ref(),
++        Some(Multiplexer::Tmux { .. })
++    )
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+-    use codex_terminal_detection::Multiplexer;
+ 
+     fn test_terminal(name: TerminalName) -> TerminalInfo {
+         TerminalInfo {
+@@ -111,10 +125,11 @@ mod tests {
+         ];
+ 
+         for (terminal_name, expected_max_rows) in cases {
++            let terminal = test_terminal(terminal_name);
+             assert_eq!(
+                 auto_resize_reflow_max_rows(
+-                    terminal_name,
+-                    /*running_in_vscode_terminal*/ false
++                    &terminal, /*running_in_vscode_terminal*/ false,
++                    /*wt_session_present*/ false,
+                 ),
+                 expected_max_rows
+             );
+@@ -125,8 +140,9 @@ mod tests {
+     fn auto_resize_reflow_max_rows_prefers_vscode_probe() {
+         assert_eq!(
+             auto_resize_reflow_max_rows(
+-                TerminalName::WindowsTerminal,
+-                /*running_in_vscode_terminal*/ true
++                &test_terminal(TerminalName::WindowsTerminal),
++                /*running_in_vscode_terminal*/ true,
++                /*wt_session_present*/ false,
+             ),
+             VSCODE_RESIZE_REFLOW_MAX_ROWS
+         );
+@@ -141,7 +157,8 @@ mod tests {
+ 
+         assert_eq!(
+             resize_reflow_max_rows_for(
+-                config, &terminal, /*running_in_vscode_terminal*/ false
++                config, &terminal, /*running_in_vscode_terminal*/ false,
++                /*wt_session_present*/ false,
+             ),
+             Some(42)
+         );
+@@ -156,7 +173,8 @@ mod tests {
+ 
+         assert_eq!(
+             resize_reflow_max_rows_for(
+-                config, &terminal, /*running_in_vscode_terminal*/ false
++                config, &terminal, /*running_in_vscode_terminal*/ false,
++                /*wt_session_present*/ false,
+             ),
+             None
+         );
+@@ -175,9 +193,66 @@ mod tests {
+ 
+         assert_eq!(
+             resize_reflow_max_rows_for(
+-                config, &terminal, /*running_in_vscode_terminal*/ false
++                config, &terminal, /*running_in_vscode_terminal*/ false,
++                /*wt_session_present*/ false,
+             ),
+             Some(DEFAULT_TERMINAL_RESIZE_REFLOW_FALLBACK_MAX_ROWS)
+         );
+     }
++
++    #[test]
++    fn windows_terminal_tmux_uses_fallback_without_changing_other_terminal_policies() {
++        let cases = [
++            (
++                TerminalName::WindowsTerminal,
++                None,
++                false,
++                WINDOWS_TERMINAL_RESIZE_REFLOW_MAX_ROWS,
++            ),
++            (
++                TerminalName::WindowsTerminal,
++                Some(Multiplexer::Tmux { version: None }),
++                false,
++                DEFAULT_TERMINAL_RESIZE_REFLOW_FALLBACK_MAX_ROWS,
++            ),
++            (
++                TerminalName::Unknown,
++                Some(Multiplexer::Tmux { version: None }),
++                true,
++                DEFAULT_TERMINAL_RESIZE_REFLOW_FALLBACK_MAX_ROWS,
++            ),
++            (
++                TerminalName::AppleTerminal,
++                Some(Multiplexer::Tmux { version: None }),
++                false,
++                DEFAULT_TERMINAL_RESIZE_REFLOW_FALLBACK_MAX_ROWS,
++            ),
++            (
++                TerminalName::WezTerm,
++                Some(Multiplexer::Tmux { version: None }),
++                false,
++                WEZTERM_RESIZE_REFLOW_MAX_ROWS,
++            ),
++            (
++                TerminalName::WindowsTerminal,
++                Some(Multiplexer::Zellij { version: None }),
++                true,
++                WINDOWS_TERMINAL_RESIZE_REFLOW_MAX_ROWS,
++            ),
++        ];
++
++        for (name, multiplexer, wt_session_present, expected_max_rows) in cases {
++            let mut terminal = test_terminal(name);
++            terminal.multiplexer = multiplexer;
++            assert_eq!(
++                resize_reflow_max_rows_for(
++                    TerminalResizeReflowConfig::default(),
++                    &terminal,
++                    /*running_in_vscode_terminal*/ false,
++                    wt_session_present,
++                ),
++                Some(expected_max_rows)
++            );
++        }
++    }
+ }
 diff --git a/codex-rs/tui/src/startup_orchestration.rs b/codex-rs/tui/src/startup_orchestration.rs
-index c3dd6b7004ae2fdfdfcfa16ad244d2da123b86a9..219327cf118be51defdf5cd499fab68572234a69 100644
+index c3dd6b700..219327cf1 100644
 --- a/codex-rs/tui/src/startup_orchestration.rs
 +++ b/codex-rs/tui/src/startup_orchestration.rs
 @@ -89,7 +89,7 @@ pub(super) async fn run_main_inner(
@@ -22588,8 +23250,129 @@ index c3dd6b7004ae2fdfdfcfa16ad244d2da123b86a9..219327cf118be51defdf5cd499fab685
      if cli.embedded && (explicit_remote_endpoint.is_some() || workload_identity_selected) {
          return Err(std::io::Error::new(
              std::io::ErrorKind::InvalidInput,
+diff --git a/codex-rs/tui/src/tui/scrollback.rs b/codex-rs/tui/src/tui/scrollback.rs
+index cd2654870..a2413f2dd 100644
+--- a/codex-rs/tui/src/tui/scrollback.rs
++++ b/codex-rs/tui/src/tui/scrollback.rs
+@@ -3,6 +3,7 @@
+ use crate::custom_terminal::Terminal;
+ use crate::insert_history::HistoryLineWrapPolicy;
+ use crate::insert_history::InsertHistoryMode;
++use codex_terminal_detection::Multiplexer;
+ use codex_terminal_detection::TerminalInfo;
+ use codex_terminal_detection::TerminalName;
+ use crossterm::cursor::MoveTo;
+@@ -23,10 +24,14 @@ pub(super) enum ScrollbackStrategy {
+ 
+ impl ScrollbackStrategy {
+     pub(super) fn detect(terminal: &TerminalInfo) -> Self {
++        Self::detect_for(terminal, std::env::var_os("WT_SESSION").is_some())
++    }
++
++    pub(super) fn detect_for(terminal: &TerminalInfo, wt_session_present: bool) -> Self {
+         if terminal.is_zellij() {
+             Self::Zellij
+-        } else if terminal.name == TerminalName::WindowsTerminal
+-            || std::env::var_os("WT_SESSION").is_some()
++        } else if (terminal.name == TerminalName::WindowsTerminal || wt_session_present)
++            && !is_tmux(terminal)
+         {
+             Self::FullScreen
+         } else {
+@@ -79,6 +84,13 @@ impl ScrollbackStrategy {
+     }
+ }
+ 
++fn is_tmux(terminal: &TerminalInfo) -> bool {
++    matches!(
++        terminal.multiplexer.as_ref(),
++        Some(Multiplexer::Tmux { .. })
++    )
++}
++
+ #[cfg(test)]
+ #[path = "scrollback_tests.rs"]
+ mod tests;
+diff --git a/codex-rs/tui/src/tui/scrollback_tests.rs b/codex-rs/tui/src/tui/scrollback_tests.rs
+index e55bbd7a6..0eb4618a0 100644
+--- a/codex-rs/tui/src/tui/scrollback_tests.rs
++++ b/codex-rs/tui/src/tui/scrollback_tests.rs
+@@ -16,15 +16,15 @@ use ratatui::layout::Size;
+ use ratatui::text::Line;
+ 
+ #[test]
+-fn windows_terminal_uses_full_screen_unless_zellij_is_active() {
+-    let mut terminal = TerminalInfo {
++fn windows_terminal_signals_use_full_screen_only_without_tmux() {
++    let direct = TerminalInfo {
+         name: TerminalName::WindowsTerminal,
+         term_program: None,
+         version: None,
+         term: None,
+         multiplexer: None,
+     };
+-    let mut strategy = ScrollbackStrategy::detect(&terminal);
++    let strategy = ScrollbackStrategy::detect_for(&direct, /*wt_session_present*/ false);
+ 
+     assert_eq!(
+         [
+@@ -34,9 +34,51 @@ fn windows_terminal_uses_full_screen_unless_zellij_is_active() {
+         [InsertHistoryMode::FullScreen, InsertHistoryMode::FullScreen]
+     );
+ 
+-    terminal.multiplexer = Some(Multiplexer::Zellij { version: None });
+-    strategy = ScrollbackStrategy::detect(&terminal);
+-    assert_eq!(strategy, ScrollbackStrategy::Zellij);
++    let cases = [
++        (
++            TerminalName::WindowsTerminal,
++            Some(Multiplexer::Tmux { version: None }),
++            false,
++            ScrollbackStrategy::Standard,
++        ),
++        (
++            TerminalName::Unknown,
++            Some(Multiplexer::Tmux { version: None }),
++            true,
++            ScrollbackStrategy::Standard,
++        ),
++        (
++            TerminalName::AppleTerminal,
++            Some(Multiplexer::Tmux { version: None }),
++            false,
++            ScrollbackStrategy::Standard,
++        ),
++        (
++            TerminalName::WezTerm,
++            Some(Multiplexer::Tmux { version: None }),
++            false,
++            ScrollbackStrategy::Standard,
++        ),
++        (
++            TerminalName::WindowsTerminal,
++            Some(Multiplexer::Zellij { version: None }),
++            true,
++            ScrollbackStrategy::Zellij,
++        ),
++    ];
++    for (name, multiplexer, wt_session_present, expected) in cases {
++        let terminal = TerminalInfo {
++            name,
++            term_program: None,
++            version: None,
++            term: None,
++            multiplexer,
++        };
++        assert_eq!(
++            ScrollbackStrategy::detect_for(&terminal, wt_session_present),
++            expected
++        );
++    }
+ }
+ 
+ #[test]
 diff --git a/codex-rs/uds/Cargo.toml b/codex-rs/uds/Cargo.toml
-index 3477924772b97e245a6d25793a4da95e9eba918f..048f72c79f2686e7806a1fc94cca5d44a400797b 100644
+index 347792477..048f72c79 100644
 --- a/codex-rs/uds/Cargo.toml
 +++ b/codex-rs/uds/Cargo.toml
 @@ -14,6 +14,7 @@ workspace = true
@@ -22601,7 +23384,7 @@ index 3477924772b97e245a6d25793a4da95e9eba918f..048f72c79f2686e7806a1fc94cca5d44
  [target.'cfg(windows)'.dependencies]
  async-io = { workspace = true }
 diff --git a/codex-rs/uds/src/lib.rs b/codex-rs/uds/src/lib.rs
-index bb6dd31bfcc0fe9365046d2b5668320044e15608..284c2a9ab3030286dd65b8b3ce704d8a0d9090b4 100644
+index bb6dd31bf..284c2a9ab 100644
 --- a/codex-rs/uds/src/lib.rs
 +++ b/codex-rs/uds/src/lib.rs
 @@ -185,7 +185,33 @@ mod platform {
@@ -22640,7 +23423,7 @@ index bb6dd31bfcc0fe9365046d2b5668320044e15608..284c2a9ab3030286dd65b8b3ce704d8a
  
      pub(super) struct Listener(Async<WindowsUnixListener>);
 diff --git a/codex-rs/utils/home-dir/Cargo.toml b/codex-rs/utils/home-dir/Cargo.toml
-index 2d2de0230e38004d562b8ab5546888cd5da74851..19868c3481e0caf963a6857657ad0310003988b3 100644
+index 2d2de0230..19868c348 100644
 --- a/codex-rs/utils/home-dir/Cargo.toml
 +++ b/codex-rs/utils/home-dir/Cargo.toml
 @@ -11,6 +11,15 @@ workspace = true
@@ -22660,7 +23443,7 @@ index 2d2de0230e38004d562b8ab5546888cd5da74851..19868c3481e0caf963a6857657ad0310
  pretty_assertions = { workspace = true }
  tempfile = { workspace = true }
 diff --git a/codex-rs/utils/home-dir/src/lib.rs b/codex-rs/utils/home-dir/src/lib.rs
-index f73bedd0005efbf4043bd238fb1e247e280ed25f..c77496155f2ad94b4a41b6667d6fb7a3dab1c82d 100644
+index f73bedd00..c77496155 100644
 --- a/codex-rs/utils/home-dir/src/lib.rs
 +++ b/codex-rs/utils/home-dir/src/lib.rs
 @@ -9,10 +9,20 @@ use std::path::Component;
@@ -22763,7 +23546,7 @@ index f73bedd0005efbf4043bd238fb1e247e280ed25f..c77496155f2ad94b4a41b6667d6fb7a3
      }
 diff --git a/codex-rs/utils/home-dir/src/windows_security.rs b/codex-rs/utils/home-dir/src/windows_security.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..d8d4fb4c696436a24aacb65841b72e2d86fb795e
+index 000000000..d8d4fb4c6
 --- /dev/null
 +++ b/codex-rs/utils/home-dir/src/windows_security.rs
 @@ -0,0 +1,408 @@

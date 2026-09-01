@@ -3,19 +3,51 @@
 import hashlib
 import json
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
+REPOSITORY_ROOT = ROOT.parents[1]
 MANIFEST_PATH = ROOT / "runtime-artifact-v1.json"
 SCHEMA_PATH = ROOT / "runtime-artifact-v1.schema.json"
 CHECKSUM_PATH = ROOT / "SHA256SUMS"
+FROZEN_FILE_SHA256 = {
+    MANIFEST_PATH.name: "6bbc8606e737463eebb56960fb1bd302dc6b6f1dbd299f7d62f65d91f62a40f0",
+    SCHEMA_PATH.name: "daa5dc24d96aafefe69b2785aea4666e4034b99f25b56ec235ef98d34a962e2f",
+}
 
 
 def load_json(path: Path):
     with path.open(encoding="utf-8") as source:
         return json.load(source)
+
+
+def repository_blob_bytes(path: Path, revision=None):
+    relative = path.relative_to(REPOSITORY_ROOT).as_posix()
+    if revision is None:
+        object_id = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(REPOSITORY_ROOT),
+                "hash-object",
+                f"--path={relative}",
+                str(path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        object_name = object_id
+    else:
+        object_name = f"{revision}:{relative}"
+    return subprocess.run(
+        ["git", "-C", str(REPOSITORY_ROOT), "cat-file", "blob", object_name],
+        check=True,
+        capture_output=True,
+    ).stdout
 
 
 def resolve_ref(root, ref):
@@ -183,14 +215,19 @@ class RuntimeArtifactManifestTest(unittest.TestCase):
 
     def test_frozen_files_match_checksum_receipt(self):
         lines = CHECKSUM_PATH.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(
-            [line.split("  ", 1)[1] for line in lines],
-            [MANIFEST_PATH.name, SCHEMA_PATH.name],
-        )
+        entries = {}
         for line in lines:
             expected, name = line.split("  ", 1)
-            actual = hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
-            self.assertEqual(actual, expected)
+            self.assertNotIn(name, entries)
+            entries[name] = expected
+        for name, frozen_digest in FROZEN_FILE_SHA256.items():
+            self.assertEqual(entries.get(name), frozen_digest)
+            current = hashlib.sha256(repository_blob_bytes(ROOT / name)).hexdigest()
+            committed = hashlib.sha256(
+                repository_blob_bytes(ROOT / name, revision="HEAD")
+            ).hexdigest()
+            self.assertEqual(current, frozen_digest)
+            self.assertEqual(committed, frozen_digest)
 
 
 if __name__ == "__main__":

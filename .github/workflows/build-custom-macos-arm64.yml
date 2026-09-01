@@ -29,7 +29,7 @@ jobs:
       SCCACHE_IDLE_TIMEOUT: "0"
       SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
       SOURCE_COMMIT: 78c290807ce710180111df227df3b7a4fe845452
-      PATCH_TREE: f8e114b2f88162691166bb175eb1f510cf925f6c
+      PATCH_TREE: 06b0fd4a6121d0cc3b94b3e2d5c923122f5d6c7b
 
     steps:
       - name: Check out patch repository
@@ -105,9 +105,24 @@ jobs:
           compiled_lock_sha256=$(shasum -a 256 Cargo.lock | awk '{print $1}')
           git -C .. add codex-rs/Cargo.lock
           compiled_tree=$(git -C .. write-tree)
+          test "$compiled_tree" = "$PATCH_TREE"
           printf 'compiled_lock_sha256=%s\n' "$compiled_lock_sha256" >> "$GITHUB_OUTPUT"
           printf 'COMPILED_LOCK_SHA256=%s\n' "$compiled_lock_sha256" >> "$GITHUB_ENV"
           printf 'COMPILED_TREE=%s\n' "$compiled_tree" >> "$GITHUB_ENV"
+
+      - name: Validate frozen provider contract and source anchors
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 release-manifests/codex-a/test_runtime_artifact_v1.py
+          python3 release-manifests/codex-a/test_runtime_artifact_v2.py
+          generated_anchors="$RUNNER_TEMP/runtime-artifact-v2.source-anchors.json"
+          python3 release-manifests/codex-a/build_runtime_artifact_v2.py anchors \
+            --source-repository "$GITHUB_WORKSPACE/upstream-codex" \
+            --compiled-tree "$COMPILED_TREE" \
+            --output "$generated_anchors"
+          cmp "$generated_anchors" \
+            release-manifests/codex-a/runtime-artifact-v2.source-anchors.json
 
       - name: Cache Cargo downloads
         id: cargo_downloads
@@ -159,11 +174,24 @@ jobs:
                   github_env.write(f"{name}={value}\n")
           PY
 
+      - name: Run focused runtime and terminal tests
+        working-directory: upstream-codex/codex-rs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p codex-app-server-protocol
+          cargo test --locked -p codex-app-server-transport
+          cargo test --locked -p codex-app-server-daemon
+          cargo test --locked -p codex-app-server-client supervised
+          cargo test --locked -p codex-app-server session_runtime
+          cargo test --locked -p codex-tui scrollback
+          cargo test --locked -p codex-tui resize_reflow
+
       - name: Compute exact build identity
         id: build_identity
         shell: bash
         env:
-          BUILD_RECIPE_ID: macos15-arm64-release-v2
+          BUILD_RECIPE_ID: macos15-arm64-release-v3
         run: |
           set -euo pipefail
           identity_dir="$RUNNER_TEMP/codex-build-identity"
@@ -191,12 +219,19 @@ jobs:
             shasum -a 256 upstream-codex/scripts/build_codex_package.py
             shasum -a 256 LICENSE NOTICE
             shasum -a 256 .github/workflows/build-custom-macos-arm64.yml
+            shasum -a 256 custom-patches/rust-v0.151.0/series.toml
+            shasum -a 256 release-manifests/codex-a/build_runtime_artifact_v2.py
+            shasum -a 256 release-manifests/codex-a/test_runtime_artifact_v2.py
+            shasum -a 256 release-manifests/codex-a/runtime-semantics-v1.json
+            shasum -a 256 release-manifests/codex-a/runtime-artifact-v2.schema.json
+            shasum -a 256 release-manifests/codex-a/runtime-artifact-v2.source-anchors.json
           } > "$identity_dir/package-inputs.txt"
           package_inputs_sha256=$(shasum -a 256 "$identity_dir/package-inputs.txt" | awk '{print $1}')
 
           {
             printf 'schema=1\n'
             printf 'build_recipe_id=%s\n' "$BUILD_RECIPE_ID"
+            printf 'source_revision=%s\n' "$GITHUB_SHA"
             printf 'compiled_tree=%s\n' "$COMPILED_TREE"
             printf 'compiled_cargo_lock_sha256=%s\n' "$COMPILED_LOCK_SHA256"
             printf 'toolchain_sha256=%s\n' "$toolchain_sha256"
@@ -323,7 +358,10 @@ jobs:
             SHA256SUMS \
             codex-app-server-package-aarch64-apple-darwin.tar.gz \
             codex-package-aarch64-apple-darwin.tar.gz \
-            codex-responses-api-proxy | LC_ALL=C sort)
+            codex-responses-api-proxy \
+            runtime-artifact-v2.json \
+            runtime-artifact-v2.protocol-schema.json \
+            runtime-artifact-v2.source-anchors.json | LC_ALL=C sort)
           actual_files=$(find "$unpacked_dir" -mindepth 1 -maxdepth 1 \
             -exec basename {} \; | LC_ALL=C sort)
 
@@ -333,6 +371,10 @@ jobs:
             || ! (cd "$unpacked_dir" && shasum -a 256 -c SHA256SUMS >/dev/null) \
             || ! grep -Fxq "build_id=$BUILD_ID" "$unpacked_dir/BUILD-METADATA.txt" \
             || ! grep -Fxq "build_recipe_id=$BUILD_RECIPE_ID" "$unpacked_dir/BUILD-METADATA.txt" \
+            || ! grep -Fxq "upstream_commit=$SOURCE_COMMIT" "$unpacked_dir/BUILD-METADATA.txt" \
+            || ! grep -Fxq "source_revision=$GITHUB_SHA" "$unpacked_dir/BUILD-METADATA.txt" \
+            || ! grep -Fxq "build_revision=$GITHUB_SHA" "$unpacked_dir/BUILD-METADATA.txt" \
+            || ! grep -Fxq "patched_tree=$PATCH_TREE" "$unpacked_dir/BUILD-METADATA.txt" \
             || ! grep -Fxq "compiled_tree=$COMPILED_TREE" "$unpacked_dir/BUILD-METADATA.txt" \
             || ! grep -Fxq "compiled_cargo_lock_sha256=$COMPILED_LOCK_SHA256" "$unpacked_dir/BUILD-METADATA.txt" \
             || ! grep -Fxq "toolchain_sha256=$BUILD_TOOLCHAIN_SHA256" "$unpacked_dir/BUILD-METADATA.txt" \
@@ -387,6 +429,27 @@ jobs:
           PY
           then
             verified=false
+          fi
+          if [[ "$verified" == true ]] && ! python3 \
+            release-manifests/codex-a/test_runtime_artifact_v2.py \
+            --source-root "$GITHUB_WORKSPACE/upstream-codex" \
+            --manifest "$unpacked_dir/runtime-artifact-v2.json" \
+            --app-server-executable "$verify_app_server/bin/codex-app-server"; then
+            verified=false
+          fi
+          if [[ "$verified" == true ]]; then
+            manifest_schema_sha=$(jq -er '.protocolSurface.schemaSha256' \
+              "$unpacked_dir/runtime-artifact-v2.json")
+            manifest_anchor_sha=$(jq -er '.protocolSurface.sourceAnchorsSha256' \
+              "$unpacked_dir/runtime-artifact-v2.json")
+            actual_schema_sha="sha256:$(shasum -a 256 \
+              "$unpacked_dir/runtime-artifact-v2.protocol-schema.json" | awk '{print $1}')"
+            actual_anchor_sha="sha256:$(shasum -a 256 \
+              "$unpacked_dir/runtime-artifact-v2.source-anchors.json" | awk '{print $1}')"
+            if [[ "$manifest_schema_sha" != "$actual_schema_sha" ]] \
+              || [[ "$manifest_anchor_sha" != "$actual_anchor_sha" ]]; then
+              verified=false
+            fi
           fi
 
           if [[ "$verified" != true ]]; then
@@ -484,6 +547,8 @@ jobs:
           chmod 0755 dist/codex-responses-api-proxy
           {
             printf 'upstream_commit=%s\n' "$SOURCE_COMMIT"
+            printf 'source_revision=%s\n' "$GITHUB_SHA"
+            printf 'build_revision=%s\n' "$GITHUB_SHA"
             printf 'patched_tree=%s\n' "$PATCH_TREE"
             printf 'compiled_tree=%s\n' "$COMPILED_TREE"
             printf 'compiled_cargo_lock_sha256=%s\n' "$COMPILED_LOCK_SHA256"
@@ -542,12 +607,33 @@ jobs:
                   "pathDir": "codex-path",
               }
           PY
+          cp release-manifests/codex-a/runtime-artifact-v2.source-anchors.json \
+            dist/runtime-artifact-v2.source-anchors.json
+          python3 release-manifests/codex-a/build_runtime_artifact_v2.py manifest \
+            --source-repository "$GITHUB_WORKSPACE/upstream-codex" \
+            --series-manifest custom-patches/rust-v0.151.0/series.toml \
+            --upstream-commit "$SOURCE_COMMIT" \
+            --source-revision "$GITHUB_SHA" \
+            --build-revision "$GITHUB_SHA" \
+            --patched-tree "$PATCH_TREE" \
+            --compiled-tree "$COMPILED_TREE" \
+            --app-server-executable "$app_server_dir/bin/codex-app-server" \
+            --expected-anchors release-manifests/codex-a/runtime-artifact-v2.source-anchors.json \
+            --output dist/runtime-artifact-v2.json \
+            --protocol-schema-output dist/runtime-artifact-v2.protocol-schema.json
+          python3 release-manifests/codex-a/test_runtime_artifact_v2.py \
+            --source-root "$GITHUB_WORKSPACE/upstream-codex" \
+            --manifest dist/runtime-artifact-v2.json \
+            --app-server-executable "$app_server_dir/bin/codex-app-server"
           (
             cd dist
             shasum -a 256 \
               codex-package-aarch64-apple-darwin.tar.gz \
               codex-app-server-package-aarch64-apple-darwin.tar.gz \
               codex-responses-api-proxy \
+              runtime-artifact-v2.json \
+              runtime-artifact-v2.protocol-schema.json \
+              runtime-artifact-v2.source-anchors.json \
               BUILD-METADATA.txt LICENSE NOTICE > SHA256SUMS
           )
           file \

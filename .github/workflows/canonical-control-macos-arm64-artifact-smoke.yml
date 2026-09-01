@@ -1,4 +1,4 @@
-name: Canonical control U15 macOS arm64 artifact smoke
+name: Runtime artifact v2 macOS arm64 smoke
 
 on:
   workflow_dispatch:
@@ -94,11 +94,57 @@ jobs:
           test "$PUBLIC_MAIN_SHA" = "${{ github.event.inputs.public_main_sha }}"
           grep -Fxq "upstream_commit=78c290807ce710180111df227df3b7a4fe845452" \
             "$DIST/BUILD-METADATA.txt"
+          grep -Fxq "source_revision=$PUBLIC_MAIN_SHA" "$DIST/BUILD-METADATA.txt"
+          grep -Fxq "build_revision=$PUBLIC_MAIN_SHA" "$DIST/BUILD-METADATA.txt"
           grep -Fxq "patched_tree=$PATCHED_TREE" "$DIST/BUILD-METADATA.txt"
           compiled_tree=$(sed -n 's/^compiled_tree=//p' "$DIST/BUILD-METADATA.txt")
           [[ "$compiled_tree" =~ ^[0-9a-f]{40}$ ]]
+          test "$compiled_tree" = "$PATCHED_TREE"
           test -f "$DIST/codex-package-aarch64-apple-darwin.tar.gz"
           test -f "$DIST/codex-app-server-package-aarch64-apple-darwin.tar.gz"
+          test -f "$DIST/runtime-artifact-v2.json"
+          test -f "$DIST/runtime-artifact-v2.protocol-schema.json"
+          test -f "$DIST/runtime-artifact-v2.source-anchors.json"
+          (cd "$DIST" && shasum -a 256 -c SHA256SUMS)
+          DIST="$DIST" PUBLIC_MAIN_SHA="$PUBLIC_MAIN_SHA" PATCHED_TREE="$PATCHED_TREE" \
+            python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          dist = Path(os.environ["DIST"])
+          manifest = json.loads((dist / "runtime-artifact-v2.json").read_text(encoding="utf-8"))
+          assert manifest["schema"] == "codex-a.runtime-artifact/v2"
+          assert manifest["source"] == {
+              "upstreamCommit": "78c290807ce710180111df227df3b7a4fe845452",
+              "sourceRevision": os.environ["PUBLIC_MAIN_SHA"],
+              "buildRevision": os.environ["PUBLIC_MAIN_SHA"],
+              "patchedTree": {"grammar": "git-tree-sha1", "digest": os.environ["PATCHED_TREE"]},
+              "compiledTree": {"grammar": "git-tree-sha1", "digest": os.environ["PATCHED_TREE"]},
+              "patchedTreeEqualsCompiledTree": True,
+          }
+          assert manifest["protocolSurface"]["schemaPath"] == (
+              "codex-rs/app-server-protocol/schema/json/"
+              "codex_app_server_protocol.v2.schemas.json"
+          )
+          assert manifest["protocolSurface"]["sourceAnchorsPath"] == (
+              "release-manifests/codex-a/runtime-artifact-v2.source-anchors.json"
+          )
+          assert manifest["supervisor"] == {"contractVersion": 1}
+          assert manifest["artifact"]["target"] == "aarch64-apple-darwin"
+          assert "__autoattach_probe" not in manifest["protocolSurface"].get("methods", [])
+
+          def digest(path):
+              return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+          assert manifest["protocolSurface"]["schemaSha256"] == digest(
+              dist / "runtime-artifact-v2.protocol-schema.json"
+          )
+          assert manifest["protocolSurface"]["sourceAnchorsSha256"] == digest(
+              dist / "runtime-artifact-v2.source-anchors.json"
+          )
+          PY
           # download-artifact restores loose files as 0644. The tarballs preserve
           # their executable modes, while this standalone binary needs its mode
           # restored explicitly after the immutable artifact digest is checked.
@@ -118,6 +164,11 @@ jobs:
           test "$("$primary/bin/codex" --version)" = "codex-cli 0.151.0"
           test "$("$app_server/bin/codex-app-server" --version)" = \
             "codex-app-server 0.151.0"
+          expected_app_server_sha=$(jq -er '.artifact.appServerSha256' \
+            "$DIST/runtime-artifact-v2.json")
+          actual_app_server_sha=$(shasum -a 256 \
+            "$app_server/bin/codex-app-server" | awk '{print $1}')
+          test "$actual_app_server_sha" = "$expected_app_server_sha"
 
       - name: Smoke packaged invocation readiness before prompt
         shell: bash
@@ -306,38 +357,6 @@ jobs:
           import socket
           import struct
 
-          client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-          client.connect(os.environ["SUPERVISOR_SOCKET"])
-          stream = client.makefile("rwb", buffering=0)
-
-          def request(payload, request_id):
-              stream.write(json.dumps(payload, separators=(",", ":")).encode() + b"\n")
-              while True:
-                  line = stream.readline()
-                  assert line, "supervisor closed before response"
-                  message = json.loads(line)
-                  if message.get("id") == request_id:
-                      return message
-
-          first = request({"id": 1, "method": "snapshot/read"}, 1)["snapshot"]
-          identity = first["appServer"]["instance"]
-          restarted = request(
-              {"id": 2, "method": "appServer/restart", "expectedInstance": identity},
-              2,
-          )["snapshot"]
-          stale = request(
-              {"id": 3, "method": "appServer/restart", "expectedInstance": identity},
-              3,
-          )
-          assert restarted["appServer"]["status"] == "ready"
-          assert restarted["snapshotRevision"] > first["snapshotRevision"]
-          assert restarted["appServer"]["processGeneration"] > first["appServer"]["processGeneration"]
-          assert restarted["appServer"]["instance"]["generation"] > identity["generation"]
-          assert stale["error"]["code"] == "staleInstance"
-          encoded = json.dumps(restarted).lower()
-          for forbidden in ("credential", "token", "socketpath", "pid"):
-              assert forbidden not in encoded
-
           class WebSocket:
               def __init__(self, client, buffered=b""):
                   self.client = client
@@ -390,58 +409,135 @@ jobs:
                       assert opcode == 0x1, f"unexpected websocket opcode {opcode}"
                       return json.loads(payload)
 
-          app_client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-          app_client.connect(os.environ["APP_SERVER_SOCKET"])
-          websocket_key = base64.b64encode(os.urandom(16)).decode()
-          upgrade = (
-              "GET / HTTP/1.1\r\n"
-              "Host: localhost\r\n"
-              "Upgrade: websocket\r\n"
-              "Connection: Upgrade\r\n"
-              f"Sec-WebSocket-Key: {websocket_key}\r\n"
-              "Sec-WebSocket-Version: 13\r\n\r\n"
-          ).encode()
-          app_client.sendall(upgrade)
-          response = b""
-          while b"\r\n\r\n" not in response:
-              chunk = app_client.recv(4096)
-              assert chunk, "app-server closed during websocket upgrade"
-              response += chunk
-          headers, buffered = response.split(b"\r\n\r\n", 1)
-          lines = headers.decode("ascii").split("\r\n")
-          assert lines[0].startswith("HTTP/1.1 101 ")
-          response_headers = {
-              key.lower(): value.strip()
-              for key, value in (line.split(":", 1) for line in lines[1:])
-          }
-          expected_accept = base64.b64encode(
-              hashlib.sha1(
-                  (websocket_key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()
-              ).digest()
-          ).decode()
-          assert response_headers["sec-websocket-accept"] == expected_accept
-          app_stream = WebSocket(app_client, buffered)
-
-          def app_request(payload, request_id):
+          def app_request(app_stream, payload, request_id):
               app_stream.send_json(payload)
               while True:
                   message = app_stream.read_json()
                   if message.get("id") == request_id:
                       return message
 
-          initialized = app_request(
-              {
-                  "id": 10,
-                  "method": "initialize",
-                  "params": {
-                      "clientInfo": {"name": "artifact-smoke", "version": "0.1.0"},
+          def open_app_connection(initialize_id):
+              app_client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+              app_client.connect(os.environ["APP_SERVER_SOCKET"])
+              websocket_key = base64.b64encode(os.urandom(16)).decode()
+              upgrade = (
+                  "GET / HTTP/1.1\r\n"
+                  "Host: localhost\r\n"
+                  "Upgrade: websocket\r\n"
+                  "Connection: Upgrade\r\n"
+                  f"Sec-WebSocket-Key: {websocket_key}\r\n"
+                  "Sec-WebSocket-Version: 13\r\n\r\n"
+              ).encode()
+              app_client.sendall(upgrade)
+              response = b""
+              while b"\r\n\r\n" not in response:
+                  chunk = app_client.recv(4096)
+                  assert chunk, "app-server closed during websocket upgrade"
+                  response += chunk
+              headers, buffered = response.split(b"\r\n\r\n", 1)
+              lines = headers.decode("ascii").split("\r\n")
+              assert lines[0].startswith("HTTP/1.1 101 ")
+              response_headers = {
+                  key.lower(): value.strip()
+                  for key, value in (line.split(":", 1) for line in lines[1:])
+              }
+              expected_accept = base64.b64encode(
+                  hashlib.sha1(
+                      (websocket_key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()
+                  ).digest()
+              ).decode()
+              assert response_headers["sec-websocket-accept"] == expected_accept
+              app_stream = WebSocket(app_client, buffered)
+              initialized = app_request(
+                  app_stream,
+                  {
+                      "id": initialize_id,
+                      "method": "initialize",
+                      "params": {
+                          "clientInfo": {"name": "artifact-smoke", "version": "0.1.0"},
+                      },
                   },
-              },
-              10,
+                  initialize_id,
+              )
+              assert "result" in initialized
+              app_stream.send_json({"method": "initialized"})
+              return app_client, app_stream
+
+          def runtime_read(app_stream, request_id):
+              response = app_request(
+                  app_stream,
+                  {
+                      "id": request_id,
+                      "method": "sessionRuntime/list",
+                      "params": {"cursor": None, "limit": 10, "threadId": None},
+                  },
+                  request_id,
+              )
+              runtime = response["result"]
+              capabilities = {item["name"]: item for item in runtime["capabilities"]}
+              assert "__autoattach_probe" not in capabilities
+              for name in (
+                  "ananke_session_identity_v1",
+                  "ananke_session_control_v1",
+                  "ananke_thread_transition_v1",
+              ):
+                  assert capabilities[name]["available"] is True, capabilities[name]
+              assert runtime["instanceEpoch"]
+              return runtime
+
+          client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+          client.connect(os.environ["SUPERVISOR_SOCKET"])
+          stream = client.makefile("rwb", buffering=0)
+
+          def request(payload, request_id):
+              stream.write(json.dumps(payload, separators=(",", ":")).encode() + b"\n")
+              while True:
+                  line = stream.readline()
+                  assert line, "supervisor closed before response"
+                  message = json.loads(line)
+                  if message.get("id") == request_id:
+                      return message
+
+          first = request({"id": 1, "method": "snapshot/read"}, 1)["snapshot"]
+          assert first["contractVersion"] == 1
+          assert first["appServer"]["status"] == "ready"
+          identity = first["appServer"]["instance"]
+          first_app_client, first_app_stream = open_app_connection(10)
+          first_runtime = runtime_read(first_app_stream, 11)
+          first_epoch = first_runtime["instanceEpoch"]
+          first_app_client.close()
+
+          restarted = request(
+              {"id": 2, "method": "appServer/restart", "expectedInstance": identity},
+              2,
+          )["snapshot"]
+          stale = request(
+              {"id": 3, "method": "appServer/restart", "expectedInstance": identity},
+              3,
           )
-          assert "result" in initialized
-          app_stream.send_json({"method": "initialized"})
-          rotation = app_request({"id": 11, "method": "accountRotation/read"}, 11)
+          assert restarted["contractVersion"] == 1
+          assert restarted["appServer"]["status"] == "ready"
+          assert restarted["snapshotRevision"] > first["snapshotRevision"]
+          assert restarted["appServer"]["processGeneration"] > first["appServer"]["processGeneration"]
+          assert restarted["appServer"]["instance"]["generation"] > identity["generation"]
+          assert restarted["appServer"]["instance"]["instanceId"] != identity["instanceId"]
+          assert stale["error"]["code"] == "staleInstance"
+          encoded = json.dumps(restarted).lower()
+          for forbidden in ("credential", "token", "socketpath", "pid"):
+              assert forbidden not in encoded
+
+          app_client, app_stream = open_app_connection(20)
+          second_runtime = runtime_read(app_stream, 21)
+          second_epoch = second_runtime["instanceEpoch"]
+          assert second_epoch != first_epoch
+          rotation = app_request(
+              app_stream,
+              {
+                  "id": 22,
+                  "method": "accountRotation/read",
+              },
+              22,
+          )
           assert rotation.get("result") == {"rotation": None}
 
           with open(os.environ["INVOCATION_READY_RESULT"], encoding="utf-8") as ready_result:
@@ -457,8 +553,14 @@ jobs:
                       "buildArtifactDigest": os.environ["BUILD_ARTIFACT_DIGEST"],
                       "smokeHarnessCommit": os.environ["SMOKE_HARNESS_SHA"],
                       "supervisorReady": True,
+                      "supervisorContractVersion": 1,
                       "exactRestart": True,
                       "staleRestartRejected": True,
+                      "instanceIdRotated": True,
+                      "instanceGenerationRotated": True,
+                      "instanceEpochRotated": True,
+                      "processGenerationRotated": True,
+                      "sessionRuntimeCapabilitiesAvailable": True,
                       "managedPackageEntrypoint": True,
                       "canonicalAppServerRpc": True,
                       "globalRotationRead": True,
@@ -562,6 +664,9 @@ jobs:
               codex-package-aarch64-apple-darwin.tar.gz \
               codex-app-server-package-aarch64-apple-darwin.tar.gz \
               codex-responses-api-proxy \
+              runtime-artifact-v2.json \
+              runtime-artifact-v2.protocol-schema.json \
+              runtime-artifact-v2.source-anchors.json \
               BUILD-METADATA.txt LICENSE NOTICE \
               INVOCATION-READY.json SMOKE-RESULT.json > SHA256SUMS
             shasum -a 256 -c SHA256SUMS
