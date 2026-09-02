@@ -1,0 +1,2016 @@
+From 28f64f277f6b7f46b3e4e8ebfbc1418cec8c6b0a Mon Sep 17 00:00:00 2001
+From: patch-verifier <patch-verifier@localhost>
+Date: Thu, 3 Sep 2026 02:15:26 +0900
+Subject: [PATCH] feat: wire U19 footer and exec contracts
+
+---
+ .../src/event_processor_with_jsonl_output.rs  |  12 +-
+ ...event_processor_with_jsonl_output_tests.rs |  16 ++
+ codex-rs/tui/src/app.rs                       |   2 +
+ codex-rs/tui/src/app/account_controls.rs      |  50 +++--
+ codex-rs/tui/src/app/account_picker.rs        |  76 ++++---
+ codex-rs/tui/src/app/account_picker_tests.rs  | 139 ++++++++++--
+ codex-rs/tui/src/app/account_rotation.rs      |  64 +++++-
+ .../tui/src/app/account_rotation_tests.rs     |  41 ++++
+ codex-rs/tui/src/app/account_validation.rs    |  62 ++++--
+ .../tui/src/app/account_validation_tests.rs   |  86 +++++++-
+ codex-rs/tui/src/app/app_server_events.rs     |  51 +++--
+ codex-rs/tui/src/app/config_persistence.rs    |  39 ++++
+ codex-rs/tui/src/app/event_dispatch.rs        |  10 +-
+ codex-rs/tui/src/app/footer_projection.rs     | 130 ++++++++++++
+ .../tui/src/app/footer_projection_tests.rs    | 199 ++++++++++++++++++
+ codex-rs/tui/src/app/session_lifecycle.rs     |  37 +++-
+ codex-rs/tui/src/app/startup.rs               |   1 +
+ codex-rs/tui/src/app/test_support.rs          |  53 +++++
+ codex-rs/tui/src/app/tests.rs                 |   2 +
+ codex-rs/tui/src/app_event.rs                 |   2 +
+ codex-rs/tui/src/bottom_pane/chat_composer.rs |   6 +
+ codex-rs/tui/src/bottom_pane/footer_box.rs    |  22 ++
+ .../tui/src/bottom_pane/footer_box_tests.rs   |  58 +++++
+ .../tui/src/bottom_pane/footer_projection.rs  |  16 ++
+ codex-rs/tui/src/bottom_pane/mod.rs           |   8 +
+ ...ox__tests__visible_runtime_projection.snap |  17 ++
+ codex-rs/tui/src/chatwidget.rs                |   1 +
+ codex-rs/tui/src/chatwidget/settings.rs       |   7 +
+ .../tui/src/chatwidget/status_controls.rs     |   5 +
+ 29 files changed, 1100 insertions(+), 112 deletions(-)
+ create mode 100644 codex-rs/tui/src/app/footer_projection.rs
+ create mode 100644 codex-rs/tui/src/app/footer_projection_tests.rs
+ create mode 100644 codex-rs/tui/src/bottom_pane/footer_projection.rs
+ create mode 100644 codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__footer_box__tests__visible_runtime_projection.snap
+
+diff --git a/codex-rs/exec/src/event_processor_with_jsonl_output.rs b/codex-rs/exec/src/event_processor_with_jsonl_output.rs
+index 52aaa72155..151aa176be 100644
+--- a/codex-rs/exec/src/event_processor_with_jsonl_output.rs
++++ b/codex-rs/exec/src/event_processor_with_jsonl_output.rs
+@@ -83,6 +83,12 @@ pub struct CollectedThreadEvents {
+     pub status: CodexStatus,
+ }
+ 
++fn post_ready_failure_event(message: &'static str) -> ThreadEvent {
++    ThreadEvent::Error(ThreadErrorEvent {
++        message: message.to_string(),
++    })
++}
++
+ impl EventProcessorWithJsonOutput {
+     pub fn new(last_message_path: Option<PathBuf>) -> Self {
+         Self {
+@@ -667,11 +673,7 @@ impl EventProcessor for EventProcessorWithJsonOutput {
+     }
+ 
+     fn print_post_ready_failure(&mut self, message: &'static str) -> std::io::Result<()> {
+-        self.emit_and_flush(ThreadEvent::TurnFailed(TurnFailedEvent {
+-            error: ThreadErrorEvent {
+-                message: message.to_string(),
+-            },
+-        }))
++        self.emit_and_flush(post_ready_failure_event(message))
+     }
+ 
+     fn print_config_summary(
+diff --git a/codex-rs/exec/src/event_processor_with_jsonl_output_tests.rs b/codex-rs/exec/src/event_processor_with_jsonl_output_tests.rs
+index dabd4f1764..2d0ab62a9a 100644
+--- a/codex-rs/exec/src/event_processor_with_jsonl_output_tests.rs
++++ b/codex-rs/exec/src/event_processor_with_jsonl_output_tests.rs
+@@ -123,6 +123,22 @@ fn response_stream_disconnect_turn_failure_uses_safe_code() {
+     );
+ }
+ 
++#[test]
++fn post_ready_failures_use_the_exact_top_level_error_wire() {
++    for message in [
++        "codex_exec_bootstrap_failed",
++        "codex_exec_turn_start_server_failed",
++        "codex_exec_turn_start_transport_failed",
++        "codex_exec_turn_start_deserialize_failed",
++    ] {
++        assert_eq!(
++            serde_json::to_value(post_ready_failure_event(message))
++                .expect("serialize post-ready failure"),
++            json!({"type": "error", "message": message})
++        );
++    }
++}
++
+ #[test]
+ fn runtime_warning_emits_a_non_fatal_error_item() {
+     let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
+diff --git a/codex-rs/tui/src/app.rs b/codex-rs/tui/src/app.rs
+index 5f270cd9cd..73dddec536 100644
+--- a/codex-rs/tui/src/app.rs
++++ b/codex-rs/tui/src/app.rs
+@@ -230,6 +230,7 @@ mod dynamic_thread_controls;
+ mod event_dispatch;
+ mod exit_summary;
+ mod file_change_approvals;
++mod footer_projection;
+ mod history_pagination;
+ mod history_ui;
+ mod input;
+@@ -625,6 +626,7 @@ pub(crate) struct App {
+     account_catalog_kind: Option<AccountSlotCatalogKind>,
+     account_slot_capability: Option<AccountSlotCapability>,
+     account_registry_revision: u64,
++    account_inventory_epoch: Option<String>,
+     account_runtime: Option<(String, SessionRuntimeSnapshot)>,
+     account_rotation_available: bool,
+     account_rotation_request_generation: u64,
+diff --git a/codex-rs/tui/src/app/account_controls.rs b/codex-rs/tui/src/app/account_controls.rs
+index 4adc6bb736..a68a5b1695 100644
+--- a/codex-rs/tui/src/app/account_controls.rs
++++ b/codex-rs/tui/src/app/account_controls.rs
+@@ -3,6 +3,7 @@
+ use super::account_picker::AccountControlIntent;
+ use super::account_picker::AccountPickerSnapshot;
+ use super::account_picker::PendingAccountControl;
++use super::account_validation::RuntimeRevisionIdentity;
+ use super::account_validation::revision_meets_lower_bound;
+ use super::account_validation::runtime_revision_meets_lower_bound;
+ use super::*;
+@@ -15,6 +16,7 @@ use codex_app_server_protocol::AccountSlotAction;
+ use codex_app_server_protocol::AccountSlotLogoutParams;
+ use codex_app_server_protocol::AccountSlotLogoutResponse;
+ use codex_app_server_protocol::AccountSlotStatus;
++use codex_app_server_protocol::SESSION_RUNTIME_ACCOUNT_ROTATION_CAPABILITY;
+ use codex_app_server_protocol::SessionRuntimeAccountSwitchState;
+ use codex_app_server_protocol::SessionRuntimeAction;
+ use codex_app_server_protocol::SessionRuntimeOperation;
+@@ -77,36 +79,56 @@ impl App {
+                 return;
+             }
+         };
++        let candidate_epoch = snapshot.runtime.instance_epoch.as_str();
++        let inventory_epoch_changed =
++            self.account_inventory_epoch.as_deref() != Some(candidate_epoch);
+         let catalog_changed = self
+             .account_catalog_kind
+             .is_some_and(|catalog_kind| catalog_kind != snapshot.slots.catalog_kind);
+-        if (!catalog_changed
+-            && !revision_meets_lower_bound(
+-                snapshot.slots.registry_revision,
+-                self.account_registry_revision,
+-            ))
+-            || !runtime_revision_meets_lower_bound(
++        let runtime_is_fresh = snapshot.runtime.snapshot.thread_id == thread_id.to_string()
++            && runtime_revision_meets_lower_bound(
+                 self.account_runtime
+                     .as_ref()
+-                    .map(|(epoch, runtime)| (epoch.as_str(), runtime.state_revision)),
+-                (
+-                    snapshot.runtime.instance_epoch.as_str(),
+-                    snapshot.runtime.snapshot.state_revision,
+-                ),
+-            )
++                    .map(|(epoch, runtime)| RuntimeRevisionIdentity {
++                        instance_epoch: epoch,
++                        thread_id: &runtime.thread_id,
++                        state_revision: runtime.state_revision,
++                    }),
++                RuntimeRevisionIdentity {
++                    instance_epoch: candidate_epoch,
++                    thread_id: &snapshot.runtime.snapshot.thread_id,
++                    state_revision: snapshot.runtime.snapshot.state_revision,
++                },
++            );
++        if !runtime_is_fresh
++            || (!inventory_epoch_changed
++                && !catalog_changed
++                && !revision_meets_lower_bound(
++                    snapshot.slots.registry_revision,
++                    self.account_registry_revision,
++                ))
+         {
+             self.chat_widget.add_error_message(
+                 "Account state changed before the request. Select the action again.".to_string(),
+             );
+             return;
+         }
++        let rotation_available = snapshot.runtime.capabilities.iter().any(|capability| {
++            capability.name == SESSION_RUNTIME_ACCOUNT_ROTATION_CAPABILITY && capability.available
++        });
++        let instance_epoch = snapshot.runtime.instance_epoch;
++        let mut runtime = snapshot.runtime.snapshot;
++        if !rotation_available {
++            runtime.account.rotation = None;
++        }
++        self.account_inventory_epoch = Some(instance_epoch.clone());
+         self.account_registry_revision = snapshot.slots.registry_revision;
+         self.account_catalog_kind = Some(snapshot.slots.catalog_kind);
+         self.account_slots = snapshot.slots.data;
+         self.account_slot_capability = Some(snapshot.slots.multi_account);
+-        let instance_epoch = snapshot.runtime.instance_epoch;
+-        let runtime = snapshot.runtime.snapshot;
++        self.account_rotation_available = rotation_available;
+         self.account_runtime = Some((instance_epoch.clone(), runtime.clone()));
++        self.sync_footer_runtime_projection();
+         match intent {
+             AccountControlIntent::Login { slot_id, method } => {
+                 self.start_account_login(app_server, thread_id, instance_epoch, slot_id, method);
+diff --git a/codex-rs/tui/src/app/account_picker.rs b/codex-rs/tui/src/app/account_picker.rs
+index 390f1c3025..74050064c1 100644
+--- a/codex-rs/tui/src/app/account_picker.rs
++++ b/codex-rs/tui/src/app/account_picker.rs
+@@ -1,6 +1,7 @@
+ //! Account-slot picker and exact-thread account controls.
+ 
+ use super::account_picker_view::ACCOUNT_PICKER_VIEW_ID;
++use super::account_validation::RuntimeRevisionIdentity;
+ use super::*;
+ use crate::app_server_session::AccountSlotsSnapshot;
+ use crate::app_server_session::ThreadRuntimeSnapshot;
+@@ -203,39 +204,45 @@ impl App {
+     }
+ 
+     fn apply_account_snapshot(&mut self, mut snapshot: AccountPickerSnapshot) -> bool {
+-        let rotation_available = snapshot.runtime.capabilities.iter().any(|capability| {
+-            capability.name == SESSION_RUNTIME_ACCOUNT_ROTATION_CAPABILITY && capability.available
+-        });
+-        self.account_rotation_available = rotation_available;
+-        if !rotation_available {
+-            snapshot.runtime.snapshot.account.rotation = None;
+-            if let Some((_, runtime)) = self.account_runtime.as_mut() {
+-                runtime.account.rotation = None;
+-            }
++        let displayed_thread_id = self
++            .current_displayed_thread_id()
++            .map(|thread_id| thread_id.to_string());
++        let candidate_epoch = snapshot.runtime.instance_epoch.as_str();
++        let runtime_is_fresh = displayed_thread_id.as_deref()
++            == Some(snapshot.runtime.snapshot.thread_id.as_str())
++            && super::account_validation::runtime_revision_meets_lower_bound(
++                self.account_runtime
++                    .as_ref()
++                    .map(|(epoch, runtime)| RuntimeRevisionIdentity {
++                        instance_epoch: epoch,
++                        thread_id: &runtime.thread_id,
++                        state_revision: runtime.state_revision,
++                    }),
++                RuntimeRevisionIdentity {
++                    instance_epoch: candidate_epoch,
++                    thread_id: &snapshot.runtime.snapshot.thread_id,
++                    state_revision: snapshot.runtime.snapshot.state_revision,
++                },
++            );
++        let inventory_epoch_changed =
++            self.account_inventory_epoch.as_deref() != Some(candidate_epoch);
++        if runtime_is_fresh && inventory_epoch_changed {
++            self.account_slots.clear();
++            self.account_registry_revision = 0;
++            self.account_catalog_kind = None;
++            self.account_slot_capability = None;
++            self.account_rotation_available = false;
++            self.account_inventory_epoch = Some(candidate_epoch.to_string());
+         }
+-        let same_runtime_epoch = self
+-            .account_runtime
+-            .as_ref()
+-            .is_some_and(|(epoch, _)| epoch == &snapshot.runtime.instance_epoch);
+         let catalog_changed = self
+             .account_catalog_kind
+             .is_some_and(|catalog_kind| catalog_kind != snapshot.slots.catalog_kind);
+-        let slots_are_fresh = !same_runtime_epoch
+-            || catalog_changed
+-            || super::account_validation::revision_meets_lower_bound(
+-                snapshot.slots.registry_revision,
+-                self.account_registry_revision,
+-            );
+-        let runtime_is_fresh = !same_runtime_epoch
+-            || super::account_validation::runtime_revision_meets_lower_bound(
+-                self.account_runtime
+-                    .as_ref()
+-                    .map(|(epoch, runtime)| (epoch.as_str(), runtime.state_revision)),
+-                (
+-                    snapshot.runtime.instance_epoch.as_str(),
+-                    snapshot.runtime.snapshot.state_revision,
+-                ),
+-            );
++        let slots_are_fresh = (!inventory_epoch_changed || runtime_is_fresh)
++            && (catalog_changed
++                || super::account_validation::revision_meets_lower_bound(
++                    snapshot.slots.registry_revision,
++                    self.account_registry_revision,
++                ));
+         if slots_are_fresh {
+             self.account_registry_revision = snapshot.slots.registry_revision;
+             self.account_catalog_kind = Some(snapshot.slots.catalog_kind);
+@@ -243,9 +250,20 @@ impl App {
+             self.account_slot_capability = Some(snapshot.slots.multi_account);
+         }
+         if runtime_is_fresh {
++            let rotation_available = snapshot.runtime.capabilities.iter().any(|capability| {
++                capability.name == SESSION_RUNTIME_ACCOUNT_ROTATION_CAPABILITY
++                    && capability.available
++            });
++            if !rotation_available {
++                snapshot.runtime.snapshot.account.rotation = None;
++            }
++            self.account_rotation_available = rotation_available;
+             self.account_runtime =
+                 Some((snapshot.runtime.instance_epoch, snapshot.runtime.snapshot));
+         }
++        if slots_are_fresh || runtime_is_fresh {
++            self.sync_footer_runtime_projection();
++        }
+         let snapshot_is_fresh = slots_are_fresh && runtime_is_fresh;
+         if snapshot_is_fresh
+             && self
+diff --git a/codex-rs/tui/src/app/account_picker_tests.rs b/codex-rs/tui/src/app/account_picker_tests.rs
+index 644b8d3640..00304004f2 100644
+--- a/codex-rs/tui/src/app/account_picker_tests.rs
++++ b/codex-rs/tui/src/app/account_picker_tests.rs
+@@ -7,6 +7,7 @@ use codex_app_server_protocol::AccountSlotSnapshot;
+ use codex_app_server_protocol::AccountSlotStatus;
+ use codex_app_server_protocol::SESSION_RUNTIME_ACCOUNT_ROTATION_CAPABILITY;
+ use codex_app_server_protocol::SessionRuntimeAccountBinding;
++use codex_app_server_protocol::SessionRuntimeAccountRef;
+ use codex_app_server_protocol::SessionRuntimeAccountSwitchState;
+ use codex_app_server_protocol::SessionRuntimeCapability;
+ use codex_app_server_protocol::SessionRuntimeIdentity;
+@@ -22,6 +23,8 @@ use codex_app_server_protocol::ThreadAccountRotationSnapshot;
+ use codex_app_server_protocol::ThreadAccountRotationSource;
+ use pretty_assertions::assert_eq;
+ 
++const THREAD_ID: &str = "00000000-0000-0000-0000-000000000001";
++
+ fn runtime_snapshot(thread_id: &str, state_revision: u64) -> SessionRuntimeSnapshot {
+     SessionRuntimeSnapshot {
+         thread_id: thread_id.to_string(),
+@@ -74,8 +77,13 @@ fn runtime_snapshot(thread_id: &str, state_revision: u64) -> SessionRuntimeSnaps
+     }
+ }
+ 
++fn display_snapshot_thread(app: &mut App) {
++    app.active_thread_id = Some(ThreadId::from_string(THREAD_ID).expect("valid thread id"));
++}
++
+ fn picker_snapshot(
+     epoch: &str,
++    thread_id: &str,
+     registry_revision: u64,
+     state_revision: u64,
+ ) -> AccountPickerSnapshot {
+@@ -91,7 +99,7 @@ fn picker_snapshot(
+         },
+         runtime: ThreadRuntimeSnapshot {
+             instance_epoch: epoch.to_string(),
+-            snapshot: runtime_snapshot("thread-1", state_revision),
++            snapshot: runtime_snapshot(thread_id, state_revision),
+             capabilities: Vec::new(),
+         },
+     }
+@@ -119,7 +127,8 @@ fn listed_account(account_slot_id: &str, account_number: u32) -> AccountSlotSnap
+ #[tokio::test]
+ async fn account_snapshot_preserves_the_authoritative_catalog_domain() {
+     let mut app = make_test_app().await;
+-    let mut snapshot = picker_snapshot("epoch-a", 1, 1);
++    display_snapshot_thread(&mut app);
++    let mut snapshot = picker_snapshot("epoch-a", THREAD_ID, 1, 1);
+     snapshot.slots.data = vec![
+         listed_account("default", 1),
+         listed_account("C1", 1),
+@@ -140,10 +149,12 @@ async fn account_snapshot_preserves_the_authoritative_catalog_domain() {
+ #[tokio::test]
+ async fn authoritative_catalog_domain_change_resets_the_revision_comparison() {
+     let mut app = make_test_app().await;
++    display_snapshot_thread(&mut app);
+     app.account_catalog_kind = Some(AccountSlotCatalogKind::Legacy);
+     app.account_registry_revision = 50;
+-    app.account_runtime = Some(("epoch-a".to_string(), runtime_snapshot("thread-1", 1)));
+-    let mut global = picker_snapshot("epoch-a", 1, 1);
++    app.account_inventory_epoch = Some("epoch-a".to_string());
++    app.account_runtime = Some(("epoch-a".to_string(), runtime_snapshot(THREAD_ID, 1)));
++    let mut global = picker_snapshot("epoch-a", THREAD_ID, 1, 1);
+     global.slots.data = vec![listed_account("C1", 1)];
+ 
+     assert_eq!(app.apply_account_snapshot(global), true);
+@@ -152,7 +163,7 @@ async fn authoritative_catalog_domain_change_resets_the_revision_comparison() {
+         (Some(AccountSlotCatalogKind::Global), 1)
+     );
+ 
+-    let mut legacy = picker_snapshot("epoch-a", 70, 1);
++    let mut legacy = picker_snapshot("epoch-a", THREAD_ID, 70, 1);
+     legacy.slots.catalog_kind = AccountSlotCatalogKind::Legacy;
+     legacy.slots.registry_revision = 0;
+     legacy.slots.data = vec![listed_account("default", 1)];
+@@ -166,11 +177,13 @@ async fn authoritative_catalog_domain_change_resets_the_revision_comparison() {
+ #[tokio::test]
+ async fn new_runtime_epoch_accepts_authoritative_revision_reset() {
+     let mut app = make_test_app().await;
++    display_snapshot_thread(&mut app);
+     app.account_registry_revision = 20;
+-    app.account_runtime = Some(("epoch-a".to_string(), runtime_snapshot("thread-1", 20)));
++    app.account_inventory_epoch = Some("epoch-a".to_string());
++    app.account_runtime = Some(("epoch-a".to_string(), runtime_snapshot(THREAD_ID, 20)));
+ 
+     assert_eq!(
+-        app.apply_account_snapshot(picker_snapshot("epoch-b", 1, 1)),
++        app.apply_account_snapshot(picker_snapshot("epoch-b", THREAD_ID, 0, 1)),
+         true
+     );
+     assert_eq!(
+@@ -180,31 +193,41 @@ async fn new_runtime_epoch_accepts_authoritative_revision_reset() {
+                 .as_ref()
+                 .map(|(epoch, runtime)| (epoch.as_str(), runtime.state_revision)),
+         ),
+-        (1, Some(("epoch-b", 1)))
++        (0, Some(("epoch-b", 1)))
+     );
++    assert_eq!(app.account_inventory_epoch.as_deref(), Some("epoch-b"));
+ }
+ 
+ #[tokio::test]
+ async fn same_runtime_epoch_rejects_revision_regression() {
+     let mut app = make_test_app().await;
++    display_snapshot_thread(&mut app);
+     app.account_registry_revision = 20;
+-    app.account_runtime = Some(("epoch-a".to_string(), runtime_snapshot("thread-1", 20)));
++    app.account_inventory_epoch = Some("epoch-a".to_string());
++    app.account_runtime = Some(("epoch-a".to_string(), runtime_snapshot(THREAD_ID, 20)));
+ 
+     assert_eq!(
+-        app.apply_account_snapshot(picker_snapshot("epoch-a", 19, 19)),
++        app.apply_account_snapshot(picker_snapshot("epoch-a", THREAD_ID, 19, 19)),
+         false
+     );
+     assert_eq!(app.account_registry_revision, 20);
++
++    app.account_slots.clear();
++    app.account_slot_capability = None;
++    assert!(app.apply_account_snapshot(picker_snapshot("epoch-a", THREAD_ID, 20, 20,)));
++    assert!(app.account_slot_capability.is_some());
+ }
+ 
+ #[tokio::test]
+ async fn same_runtime_epoch_merges_each_fresh_projection_independently() {
+     let mut app = make_test_app().await;
++    display_snapshot_thread(&mut app);
+     app.account_registry_revision = 20;
+-    app.account_runtime = Some(("epoch-a".to_string(), runtime_snapshot("thread-1", 20)));
++    app.account_inventory_epoch = Some("epoch-a".to_string());
++    app.account_runtime = Some(("epoch-a".to_string(), runtime_snapshot(THREAD_ID, 20)));
+ 
+     assert_eq!(
+-        app.apply_account_snapshot(picker_snapshot("epoch-a", 19, 21)),
++        app.apply_account_snapshot(picker_snapshot("epoch-a", THREAD_ID, 19, 21)),
+         false
+     );
+     assert_eq!(
+@@ -218,6 +241,93 @@ async fn same_runtime_epoch_merges_each_fresh_projection_independently() {
+     );
+ }
+ 
++#[tokio::test]
++async fn fresh_slots_do_not_accept_stale_runtime_capability_or_rotation() {
++    let mut app = make_test_app().await;
++    display_snapshot_thread(&mut app);
++    let accepted_rotation = ThreadAccountRotationSnapshot {
++        mode: ThreadAccountRotationMode::Fixed,
++        fixed_account_slot_id: Some("C1".to_string()),
++        automatic_account_slot_ids: Vec::new(),
++        revision: 5,
++        last_committed_account_slot_id: Some("C1".to_string()),
++        source: ThreadAccountRotationSource::Override,
++        global_profile_revision: Some(5),
++    };
++    let mut accepted_runtime = runtime_snapshot(THREAD_ID, 20);
++    accepted_runtime.account.current = Some(SessionRuntimeAccountRef {
++        account_slot_id: "C1".to_string(),
++        execution_generation: 1,
++    });
++    accepted_runtime.account.rotation = Some(accepted_rotation.clone());
++    app.account_inventory_epoch = Some("epoch-a".to_string());
++    app.account_registry_revision = 20;
++    app.account_slot_capability = Some(AccountSlotCapability {
++        available: true,
++        deny_reason: None,
++    });
++    app.account_rotation_available = true;
++    app.account_runtime = Some(("epoch-a".to_string(), accepted_runtime));
++
++    let mut partial = picker_snapshot("epoch-a", THREAD_ID, 21, 19);
++    partial.slots.data = vec![listed_account("C1", 1)];
++    partial.runtime.snapshot.account.rotation = Some(ThreadAccountRotationSnapshot {
++        mode: ThreadAccountRotationMode::RoundRobin,
++        revision: 99,
++        ..accepted_rotation.clone()
++    });
++    partial.runtime.capabilities = Vec::new();
++
++    assert!(!app.apply_account_snapshot(partial));
++    assert_eq!(app.account_registry_revision, 21);
++    assert_eq!(app.account_slots.len(), 1);
++    assert!(app.account_rotation_available);
++    assert_eq!(app.account_rotation_snapshot(), Some(&accepted_rotation));
++    assert_eq!(
++        crate::app::footer_projection::project_footer_runtime(
++            Some(THREAD_ID),
++            app.account_runtime.as_ref().map(|(_, runtime)| runtime),
++            app.account_slot_capability.as_ref(),
++            &app.account_slots,
++        )
++        .managed_slot_id
++        .as_deref(),
++        Some("C1")
++    );
++}
++
++#[tokio::test]
++async fn same_epoch_thread_change_preserves_inventory_and_rejects_foreign_slots() {
++    const THREAD_B: &str = "00000000-0000-0000-0000-000000000002";
++    let mut app = make_test_app().await;
++    display_snapshot_thread(&mut app);
++    app.account_inventory_epoch = Some("epoch-a".to_string());
++    app.account_registry_revision = 100;
++    app.account_slot_capability = Some(AccountSlotCapability {
++        available: true,
++        deny_reason: None,
++    });
++    app.account_runtime = Some(("epoch-a".to_string(), runtime_snapshot(THREAD_ID, 100)));
++
++    app.active_thread_id = Some(ThreadId::from_string(THREAD_B).expect("valid thread id"));
++    assert!(!app.apply_account_snapshot(picker_snapshot("epoch-a", THREAD_B, 1, 1,)));
++    assert_eq!(app.account_inventory_epoch.as_deref(), Some("epoch-a"));
++    assert_eq!(app.account_registry_revision, 100);
++    assert_eq!(
++        app.account_runtime.as_ref().map(|(epoch, runtime)| (
++            epoch.as_str(),
++            runtime.thread_id.as_str(),
++            runtime.state_revision,
++        )),
++        Some(("epoch-a", THREAD_B, 1))
++    );
++
++    let rejected = picker_snapshot("epoch-c", THREAD_ID, 50, 2);
++    assert!(!app.apply_account_snapshot(rejected));
++    assert_eq!(app.account_inventory_epoch.as_deref(), Some("epoch-a"));
++    assert_eq!(app.account_registry_revision, 100);
++}
++
+ #[tokio::test]
+ async fn rotation_is_exposed_only_with_the_matching_available_capability() {
+     let rotation = ThreadAccountRotationSnapshot {
+@@ -230,12 +340,13 @@ async fn rotation_is_exposed_only_with_the_matching_available_capability() {
+         global_profile_revision: None,
+     };
+     let mut app = make_test_app().await;
+-    let mut hidden = picker_snapshot("epoch-a", 1, 1);
++    display_snapshot_thread(&mut app);
++    let mut hidden = picker_snapshot("epoch-a", THREAD_ID, 1, 1);
+     hidden.runtime.snapshot.account.rotation = Some(rotation.clone());
+     assert_eq!(app.apply_account_snapshot(hidden), true);
+     assert_eq!(app.account_rotation_snapshot(), None);
+ 
+-    let mut visible = picker_snapshot("epoch-b", 1, 1);
++    let mut visible = picker_snapshot("epoch-b", THREAD_ID, 1, 1);
+     visible.runtime.snapshot.account.rotation = Some(rotation.clone());
+     visible.runtime.capabilities = vec![SessionRuntimeCapability {
+         name: SESSION_RUNTIME_ACCOUNT_ROTATION_CAPABILITY.to_string(),
+diff --git a/codex-rs/tui/src/app/account_rotation.rs b/codex-rs/tui/src/app/account_rotation.rs
+index 4d9ac0f216..196da3b2f0 100644
+--- a/codex-rs/tui/src/app/account_rotation.rs
++++ b/codex-rs/tui/src/app/account_rotation.rs
+@@ -19,6 +19,20 @@ pub(crate) enum AccountRotationEdit {
+ }
+ 
+ impl App {
++    fn account_rotation_response_is_current(
++        &self,
++        thread_id: ThreadId,
++        instance_epoch: &str,
++    ) -> bool {
++        self.current_displayed_thread_id() == Some(thread_id)
++            && self
++                .account_runtime
++                .as_ref()
++                .is_some_and(|(epoch, runtime)| {
++                    epoch == instance_epoch && runtime.thread_id == thread_id.to_string()
++                })
++    }
++
+     pub(super) fn account_rotation_snapshot(&self) -> Option<&ThreadAccountRotationSnapshot> {
+         if !self.account_rotation_available {
+             return None;
+@@ -32,12 +46,20 @@ impl App {
+         let Some(thread_id) = self.current_displayed_thread_id() else {
+             return;
+         };
+-        if self.account_rotation_snapshot().is_none() {
++        let Some((instance_epoch, runtime)) = self
++            .account_runtime
++            .as_ref()
++            .filter(|(_, runtime)| runtime.thread_id == thread_id.to_string())
++        else {
++            return;
++        };
++        if !self.account_rotation_available || runtime.account.rotation.is_none() {
+             self.chat_widget.add_error_message(
+                 "Account rotation is unavailable for this app-server.".to_string(),
+             );
+             return;
+         }
++        let instance_epoch = instance_epoch.clone();
+         self.account_rotation_request_generation =
+             self.account_rotation_request_generation.saturating_add(1);
+         let request_generation = self.account_rotation_request_generation;
+@@ -51,6 +73,7 @@ impl App {
+                 .map_err(|error| error.to_string());
+             app_event_tx.send(AppEvent::AccountRotationLoaded {
+                 thread_id,
++                instance_epoch,
+                 request_generation,
+                 result,
+             });
+@@ -60,17 +83,20 @@ impl App {
+     pub(super) fn handle_account_rotation_loaded(
+         &mut self,
+         thread_id: ThreadId,
++        instance_epoch: String,
+         request_generation: u64,
+         result: Result<codex_app_server_protocol::ThreadAccountRotationReadResponse, String>,
+     ) {
+         if request_generation != self.account_rotation_request_generation
+-            || self.current_displayed_thread_id() != Some(thread_id)
++            || !self.account_rotation_response_is_current(thread_id, &instance_epoch)
+         {
+             return;
+         }
+         match result {
+             Ok(response) => {
+-                self.apply_account_rotation(thread_id, response.rotation);
++                if self.apply_account_rotation(thread_id, response.rotation) {
++                    self.sync_footer_runtime_projection();
++                }
+                 self.replace_account_rotation_view_if_present();
+             }
+             Err(error) => {
+@@ -89,12 +115,24 @@ impl App {
+         let Some(thread_id) = self.current_displayed_thread_id() else {
+             return;
+         };
+-        let Some(rotation) = self.account_rotation_snapshot().cloned() else {
++        let Some((instance_epoch, runtime)) = self
++            .account_runtime
++            .as_ref()
++            .filter(|(_, runtime)| runtime.thread_id == thread_id.to_string())
++        else {
++            return;
++        };
++        let Some(rotation) = self
++            .account_rotation_available
++            .then_some(runtime.account.rotation.clone())
++            .flatten()
++        else {
+             self.chat_widget.add_error_message(
+                 "Account rotation is unavailable for this app-server.".to_string(),
+             );
+             return;
+         };
++        let instance_epoch = instance_epoch.clone();
+         let expected_rotation_revision = rotation.revision;
+         let mut mode = rotation.mode;
+         let mut fixed_account_slot_id = rotation.fixed_account_slot_id;
+@@ -128,6 +166,7 @@ impl App {
+                 .map_err(|error| error.to_string());
+             app_event_tx.send(AppEvent::AccountRotationUpdated {
+                 thread_id,
++                instance_epoch,
+                 expected_rotation_revision,
+                 result,
+             });
+@@ -138,15 +177,19 @@ impl App {
+         &mut self,
+         app_server: &AppServerSession,
+         thread_id: ThreadId,
++        instance_epoch: String,
+         expected_rotation_revision: u64,
+         result: Result<ThreadAccountRotationUpdateResponse, String>,
+     ) {
+-        if self.current_displayed_thread_id() != Some(thread_id) {
++        if !self.account_rotation_response_is_current(thread_id, &instance_epoch) {
+             return;
+         }
+         match result {
+             Ok(response) => {
+-                self.apply_account_rotation(thread_id, response.rotation);
++                if !self.apply_account_rotation(thread_id, response.rotation) {
++                    return;
++                }
++                self.sync_footer_runtime_projection();
+                 let selected_slot_id = self.selected_account_slot_id();
+                 self.replace_open_account_views(selected_slot_id.as_deref());
+                 self.chat_widget
+@@ -165,12 +208,12 @@ impl App {
+         &mut self,
+         thread_id: ThreadId,
+         rotation: ThreadAccountRotationSnapshot,
+-    ) {
++    ) -> bool {
+         if !self.account_rotation_available {
+-            return;
++            return false;
+         }
+         let Some((_, runtime)) = self.account_runtime.as_mut() else {
+-            return;
++            return false;
+         };
+         if runtime.thread_id != thread_id.to_string()
+             || runtime
+@@ -179,9 +222,10 @@ impl App {
+                 .as_ref()
+                 .is_some_and(|current| current.revision > rotation.revision)
+         {
+-            return;
++            return false;
+         }
+         runtime.account.rotation = Some(rotation);
++        true
+     }
+ }
+ 
+diff --git a/codex-rs/tui/src/app/account_rotation_tests.rs b/codex-rs/tui/src/app/account_rotation_tests.rs
+index d7d58378fc..2b35164f0e 100644
+--- a/codex-rs/tui/src/app/account_rotation_tests.rs
++++ b/codex-rs/tui/src/app/account_rotation_tests.rs
+@@ -1,7 +1,13 @@
+ use super::edited_automatic_membership;
++use crate::app::test_support::make_test_app;
++use crate::app::test_support::test_session_runtime;
+ use codex_app_server_protocol::AccountSlotHealth;
+ use codex_app_server_protocol::AccountSlotSnapshot;
+ use codex_app_server_protocol::AccountSlotStatus;
++use codex_app_server_protocol::ThreadAccountRotationMode;
++use codex_app_server_protocol::ThreadAccountRotationSnapshot;
++use codex_app_server_protocol::ThreadAccountRotationSource;
++use codex_protocol::ThreadId;
+ use pretty_assertions::assert_eq;
+ 
+ fn global_slot(number: u32) -> AccountSlotSnapshot {
+@@ -37,3 +43,38 @@ fn automatic_membership_edit_converges_to_the_visible_global_account_set() {
+         Vec::<String>::new()
+     );
+ }
++
++#[tokio::test]
++async fn rotation_responses_require_the_current_epoch_and_preserve_monotonic_revision() {
++    let mut app = make_test_app().await;
++    let thread_id = ThreadId::new();
++    app.active_thread_id = Some(thread_id);
++    app.account_rotation_available = true;
++    let mut runtime = test_session_runtime(&thread_id.to_string(), 5);
++    runtime.account.rotation = Some(ThreadAccountRotationSnapshot {
++        mode: ThreadAccountRotationMode::Fixed,
++        fixed_account_slot_id: Some("C1".to_string()),
++        automatic_account_slot_ids: Vec::new(),
++        revision: 5,
++        last_committed_account_slot_id: Some("C1".to_string()),
++        source: ThreadAccountRotationSource::Override,
++        global_profile_revision: Some(5),
++    });
++    app.account_runtime = Some(("epoch-new".to_string(), runtime));
++
++    assert!(!app.account_rotation_response_is_current(thread_id, "epoch-old"));
++    assert!(app.account_rotation_response_is_current(thread_id, "epoch-new"));
++    let mut response = app.account_rotation_snapshot().expect("rotation").clone();
++    response.revision = 4;
++    assert!(!app.apply_account_rotation(thread_id, response.clone()));
++    assert_eq!(
++        app.account_rotation_snapshot().map(|state| state.revision),
++        Some(5)
++    );
++    response.revision = 6;
++    assert!(app.apply_account_rotation(thread_id, response));
++    assert_eq!(
++        app.account_rotation_snapshot().map(|state| state.revision),
++        Some(6)
++    );
++}
+diff --git a/codex-rs/tui/src/app/account_validation.rs b/codex-rs/tui/src/app/account_validation.rs
+index 218063f9c8..752142daba 100644
+--- a/codex-rs/tui/src/app/account_validation.rs
++++ b/codex-rs/tui/src/app/account_validation.rs
+@@ -12,12 +12,21 @@ pub(super) fn revision_meets_lower_bound(actual: u64, minimum: u64) -> bool {
+     actual >= minimum
+ }
+ 
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(super) struct RuntimeRevisionIdentity<'a> {
++    pub(super) instance_epoch: &'a str,
++    pub(super) thread_id: &'a str,
++    pub(super) state_revision: u64,
++}
++
+ pub(super) fn runtime_revision_meets_lower_bound(
+-    current: Option<(&str, u64)>,
+-    candidate: (&str, u64),
++    current: Option<RuntimeRevisionIdentity<'_>>,
++    candidate: RuntimeRevisionIdentity<'_>,
+ ) -> bool {
+-    current.is_none_or(|(current_epoch, current_revision)| {
+-        current_epoch != candidate.0 || revision_meets_lower_bound(candidate.1, current_revision)
++    current.is_none_or(|current| {
++        current.instance_epoch != candidate.instance_epoch
++            || current.thread_id != candidate.thread_id
++            || revision_meets_lower_bound(candidate.state_revision, current.state_revision)
+     })
+ }
+ 
+@@ -128,22 +137,31 @@ impl App {
+         &mut self,
+         instance_epoch: String,
+         mut snapshot: SessionRuntimeSnapshot,
+-    ) {
++    ) -> bool {
+         if !self.account_rotation_available {
+             snapshot.account.rotation = None;
+         }
+-        if self
++        let accepted = self
+             .current_displayed_thread_id()
+             .is_some_and(|thread_id| snapshot.thread_id == thread_id.to_string())
+             && runtime_revision_meets_lower_bound(
+                 self.account_runtime
+                     .as_ref()
+-                    .map(|(epoch, runtime)| (epoch.as_str(), runtime.state_revision)),
+-                (instance_epoch.as_str(), snapshot.state_revision),
+-            )
+-        {
++                    .map(|(epoch, runtime)| RuntimeRevisionIdentity {
++                        instance_epoch: epoch,
++                        thread_id: &runtime.thread_id,
++                        state_revision: runtime.state_revision,
++                    }),
++                RuntimeRevisionIdentity {
++                    instance_epoch: &instance_epoch,
++                    thread_id: &snapshot.thread_id,
++                    state_revision: snapshot.state_revision,
++                },
++            );
++        if accepted {
+             self.account_runtime = Some((instance_epoch, snapshot));
+         }
++        accepted
+     }
+ 
+     pub(super) fn handle_account_slot_changed(
+@@ -162,13 +180,19 @@ impl App {
+         {
+             return AccountSlotUpdateDisposition::Stale;
+         }
+-        let selected_slot_id = self.selected_account_slot_id();
+         if registry_revision <= self.account_registry_revision {
+             return AccountSlotUpdateDisposition::Stale;
+         }
+-        if registry_revision != self.account_registry_revision.saturating_add(1)
++        let selected_slot_id = self.selected_account_slot_id();
++        if self.account_slot_capability.is_none()
++            || registry_revision != self.account_registry_revision.saturating_add(1)
+             || slot.registry_revision != registry_revision
+         {
++            self.account_registry_revision = self.account_registry_revision.max(registry_revision);
++            self.account_slots.clear();
++            self.account_slot_capability = None;
++            self.sync_footer_runtime_projection();
++            self.replace_open_account_views(selected_slot_id.as_deref());
+             return AccountSlotUpdateDisposition::Gap;
+         }
+         self.account_registry_revision = registry_revision;
+@@ -186,9 +210,23 @@ impl App {
+                 .cmp(&right.account_number)
+                 .then_with(|| left.account_slot_id.cmp(&right.account_slot_id))
+         });
++        self.sync_footer_runtime_projection();
+         self.replace_open_account_views(selected_slot_id.as_deref());
+         AccountSlotUpdateDisposition::Successor
+     }
++
++    pub(super) fn handle_account_slot_inventory_changed(&mut self, registry_revision: u64) -> bool {
++        if registry_revision <= self.account_registry_revision {
++            return false;
++        }
++        let selected_slot_id = self.selected_account_slot_id();
++        self.account_registry_revision = registry_revision;
++        self.account_slots.clear();
++        self.account_slot_capability = None;
++        self.sync_footer_runtime_projection();
++        self.replace_open_account_views(selected_slot_id.as_deref());
++        true
++    }
+ }
+ 
+ #[cfg(test)]
+diff --git a/codex-rs/tui/src/app/account_validation_tests.rs b/codex-rs/tui/src/app/account_validation_tests.rs
+index 59eca2fc9b..00e8f72ea4 100644
+--- a/codex-rs/tui/src/app/account_validation_tests.rs
++++ b/codex-rs/tui/src/app/account_validation_tests.rs
+@@ -1,7 +1,9 @@
+ use super::AccountSlotUpdateDisposition;
++use super::RuntimeRevisionIdentity;
+ use super::revision_meets_lower_bound;
+ use super::runtime_revision_meets_lower_bound;
+ use crate::app::test_support::make_test_app;
++use codex_app_server_protocol::AccountSlotCapability;
+ use codex_app_server_protocol::AccountSlotCatalogKind;
+ use codex_app_server_protocol::AccountSlotHealth;
+ use codex_app_server_protocol::AccountSlotSnapshot;
+@@ -21,16 +23,46 @@ fn authoritative_revision_may_match_or_advance_but_not_regress() {
+ 
+ #[test]
+ fn runtime_revision_may_restart_with_a_new_epoch_but_not_regress_within_an_epoch() {
++    let identity = |instance_epoch, thread_id, state_revision| RuntimeRevisionIdentity {
++        instance_epoch,
++        thread_id,
++        state_revision,
++    };
+     assert_eq!(
+         (
+-            runtime_revision_meets_lower_bound(Some(("epoch-a", 10)), ("epoch-a", 10)),
+-            runtime_revision_meets_lower_bound(Some(("epoch-a", 10)), ("epoch-a", 12)),
+-            runtime_revision_meets_lower_bound(Some(("epoch-a", 10)), ("epoch-a", 9)),
+-            runtime_revision_meets_lower_bound(Some(("epoch-a", 10)), ("epoch-b", 1)),
++            runtime_revision_meets_lower_bound(
++                Some(identity("epoch-a", "thread-a", 10)),
++                identity("epoch-a", "thread-a", 10),
++            ),
++            runtime_revision_meets_lower_bound(
++                Some(identity("epoch-a", "thread-a", 10)),
++                identity("epoch-a", "thread-a", 12),
++            ),
++            runtime_revision_meets_lower_bound(
++                Some(identity("epoch-a", "thread-a", 10)),
++                identity("epoch-a", "thread-a", 9),
++            ),
++            runtime_revision_meets_lower_bound(
++                Some(identity("epoch-a", "thread-a", 10)),
++                identity("epoch-a", "thread-b", 1),
++            ),
++            runtime_revision_meets_lower_bound(
++                Some(identity("epoch-a", "thread-a", 10)),
++                identity("epoch-b", "thread-a", 1),
++            ),
+         ),
+-        (true, true, false, true)
++        (true, true, false, true, true)
+     );
+ }
++
++fn authoritative_inventory(app: &mut crate::app::App, revision: u64) {
++    app.account_inventory_epoch = Some("epoch-a".to_string());
++    app.account_registry_revision = revision;
++    app.account_slot_capability = Some(AccountSlotCapability {
++        available: true,
++        deny_reason: None,
++    });
++}
+ fn snapshot(revision: u64, label: &str) -> AccountSlotSnapshot {
+     AccountSlotSnapshot {
+         account_slot_id: "C2".to_string(),
+@@ -54,7 +86,7 @@ fn snapshot(revision: u64, label: &str) -> AccountSlotSnapshot {
+ async fn legacy_slot_update_cannot_advance_global_revision_or_block_a_canonical_successor() {
+     let mut app = make_test_app().await;
+     app.account_catalog_kind = Some(AccountSlotCatalogKind::Global);
+-    app.account_registry_revision = 5;
++    authoritative_inventory(&mut app, 5);
+     app.account_slots = vec![snapshot(5, "global")];
+     let mut legacy = snapshot(99, "legacy");
+     legacy.account_slot_id = "default".to_string();
+@@ -84,7 +116,7 @@ async fn legacy_slot_update_cannot_advance_global_revision_or_block_a_canonical_
+ async fn legacy_catalog_accepts_legacy_slot_successors() {
+     let mut app = make_test_app().await;
+     app.account_catalog_kind = Some(AccountSlotCatalogKind::Legacy);
+-    app.account_registry_revision = 5;
++    authoritative_inventory(&mut app, 5);
+     let mut original = snapshot(5, "original");
+     original.account_slot_id = "default".to_string();
+     app.account_slots = vec![original];
+@@ -103,7 +135,7 @@ async fn legacy_catalog_accepts_legacy_slot_successors() {
+ #[tokio::test]
+ async fn slot_updates_apply_only_exact_successors_without_reopening_closed_ui() {
+     let mut app = make_test_app().await;
+-    app.account_registry_revision = 5;
++    authoritative_inventory(&mut app, 5);
+     app.account_slots = vec![snapshot(5, "original")];
+     let stale = app.handle_account_slot_changed(5, snapshot(5, "stale"));
+     let successor = app.handle_account_slot_changed(6, snapshot(6, "successor"));
+@@ -114,16 +146,48 @@ async fn slot_updates_apply_only_exact_successors_without_reopening_closed_ui()
+             successor,
+             gap,
+             app.account_registry_revision,
+-            app.account_slots[0].label.as_str(),
++            app.account_slots.is_empty(),
++            app.account_slot_capability.is_none(),
+             app.chat_widget.no_modal_or_popup_active(),
+         ),
+         (
+             AccountSlotUpdateDisposition::Stale,
+             AccountSlotUpdateDisposition::Successor,
+             AccountSlotUpdateDisposition::Gap,
+-            6,
+-            "successor",
++            8,
++            true,
++            true,
+             true,
+         )
+     );
+ }
++
++#[tokio::test]
++async fn invalid_inventory_cannot_be_rebuilt_by_point_updates() {
++    let mut app = make_test_app().await;
++    authoritative_inventory(&mut app, 5);
++    app.account_slots = vec![snapshot(5, "original")];
++
++    assert_eq!(
++        app.handle_account_slot_changed(7, snapshot(7, "gap")),
++        AccountSlotUpdateDisposition::Gap
++    );
++    assert_eq!(
++        app.handle_account_slot_changed(8, snapshot(8, "point-after-gap")),
++        AccountSlotUpdateDisposition::Gap
++    );
++    assert_eq!(
++        (
++            app.account_registry_revision,
++            app.account_slots.is_empty(),
++            app.account_slot_capability.is_none(),
++        ),
++        (8, true, true)
++    );
++
++    assert!(app.handle_account_slot_inventory_changed(10));
++    assert!(!app.handle_account_slot_inventory_changed(10));
++    assert_eq!(app.account_registry_revision, 10);
++    assert!(app.account_slots.is_empty());
++    assert!(app.account_slot_capability.is_none());
++}
+diff --git a/codex-rs/tui/src/app/app_server_events.rs b/codex-rs/tui/src/app/app_server_events.rs
+index a82b37a27a..93583b4942 100644
+--- a/codex-rs/tui/src/app/app_server_events.rs
++++ b/codex-rs/tui/src/app/app_server_events.rs
+@@ -149,21 +149,33 @@ impl App {
+             }
+             ServerNotification::SessionRuntimeChanged(update) => {
+                 let selected_slot_id = self.selected_account_slot_id();
+-                let account_epoch_changed = self
+-                    .account_runtime
+-                    .as_ref()
+-                    .is_some_and(|(epoch, _)| epoch != &update.instance_epoch);
+                 let previous_rate_limit_subject = self.current_rate_limit_request_subject();
+                 let previous_plugin_command_subject = self.current_plugin_command_catalog_subject();
++                if !self.handle_account_runtime_changed(
++                    update.instance_epoch.clone(),
++                    update.snapshot.clone(),
++                ) {
++                    return;
++                }
++                let inventory_epoch_changed =
++                    self.account_inventory_epoch.as_deref() != Some(update.instance_epoch.as_str());
++                if inventory_epoch_changed {
++                    self.account_slots.clear();
++                    self.account_registry_revision = 0;
++                    self.account_catalog_kind = None;
++                    self.account_slot_capability = None;
++                    self.account_rotation_available = false;
++                    self.account_inventory_epoch = Some(update.instance_epoch.clone());
++                    if let Some((_, runtime)) = self.account_runtime.as_mut() {
++                        runtime.account.rotation = None;
++                    }
++                }
+                 self.observe_plugin_command_runtime(
+                     update.instance_epoch.clone(),
+                     &update.snapshot,
+                 );
+-                self.handle_account_runtime_changed(
+-                    update.instance_epoch.clone(),
+-                    update.snapshot.clone(),
+-                );
+-                if account_epoch_changed {
++                self.sync_footer_runtime_projection();
++                if inventory_epoch_changed {
+                     self.refresh_account_state(app_server_client);
+                 } else {
+                     self.replace_open_account_views(selected_slot_id.as_deref());
+@@ -184,15 +196,21 @@ impl App {
+                 }
+             }
+             ServerNotification::AccountSlotChanged(update) => {
+-                if self.handle_account_slot_changed(update.registry_revision, update.slot.clone())
+-                    == AccountSlotUpdateDisposition::Gap
++                match self
++                    .handle_account_slot_changed(update.registry_revision, update.slot.clone())
+                 {
+-                    self.refresh_account_state(app_server_client);
++                    AccountSlotUpdateDisposition::Gap => {
++                        self.refresh_account_state(app_server_client);
++                    }
++                    AccountSlotUpdateDisposition::Stale
++                    | AccountSlotUpdateDisposition::Successor => {}
+                 }
+                 return;
+             }
+-            ServerNotification::AccountSlotInventoryChanged(_) => {
+-                self.refresh_account_state(app_server_client);
++            ServerNotification::AccountSlotInventoryChanged(update) => {
++                if self.handle_account_slot_inventory_changed(update.registry_revision) {
++                    self.refresh_account_state(app_server_client);
++                }
+                 return;
+             }
+             ServerNotification::AccountLoginCompleted(_) => {
+@@ -345,6 +363,11 @@ impl App {
+                         .is_some_and(AuthMode::has_chatgpt_account),
+                     has_codex_backend_auth,
+                 );
++                self.account_slots.clear();
++                self.account_slot_capability = None;
++                self.account_runtime = None;
++                self.account_rotation_available = false;
++                self.sync_footer_runtime_projection();
+                 self.refresh_account_state(app_server_client);
+                 return;
+             }
+diff --git a/codex-rs/tui/src/app/config_persistence.rs b/codex-rs/tui/src/app/config_persistence.rs
+index 2b01c7a010..65d45eee8e 100644
+--- a/codex-rs/tui/src/app/config_persistence.rs
++++ b/codex-rs/tui/src/app/config_persistence.rs
+@@ -238,6 +238,8 @@ impl App {
+             .await?;
+         self.apply_runtime_policy_overrides(&mut config);
+         self.config = config;
++        self.chat_widget
++            .set_footer_config(self.config.tui_footer.clone());
+         self.chat_widget.sync_plugin_mentions_config(&self.config);
+         Ok(())
+     }
+@@ -1619,6 +1621,43 @@ terminal_resize_reflow_max_rows = 9000
+         Ok(())
+     }
+ 
++    #[tokio::test]
++    async fn refresh_in_memory_config_from_disk_updates_the_live_footer_renderer() -> Result<()> {
++        let mut app = make_test_app().await;
++        let codex_home = tempdir()?;
++        app.config.codex_home = codex_home.path().to_path_buf().abs();
++        app.config.tui_footer.enabled = false;
++        app.chat_widget
++            .set_footer_config(app.config.tui_footer.clone());
++        app.chat_widget.set_footer_runtime_projection(
++            crate::bottom_pane::FooterRuntimeProjection {
++                session_id: Some("session-1".to_string()),
++                ..Default::default()
++            },
++        );
++        let disabled_height = app.chat_widget.desired_height(80);
++        std::fs::write(
++            codex_home.path().join("config.toml"),
++            r#"
++[tui.footer]
++enabled = true
++max_rows = 2
++border = "rounded"
++adapter_ids = ["session"]
++"#,
++        )?;
++
++        app.refresh_in_memory_config_from_disk().await?;
++
++        assert!(app.config.tui_footer.enabled);
++        assert_eq!(
++            app.chat_widget.config_ref().tui_footer,
++            app.config.tui_footer
++        );
++        assert!(app.chat_widget.desired_height(80) > disabled_height);
++        Ok(())
++    }
++
+     #[tokio::test]
+     async fn overridden_disabled_guardian_does_not_apply_auto_review_companions() -> Result<()> {
+         let mut app = make_test_app().await;
+diff --git a/codex-rs/tui/src/app/event_dispatch.rs b/codex-rs/tui/src/app/event_dispatch.rs
+index f68176ebd9..4c922c129f 100644
+--- a/codex-rs/tui/src/app/event_dispatch.rs
++++ b/codex-rs/tui/src/app/event_dispatch.rs
+@@ -69,19 +69,27 @@ impl App {
+             AppEvent::OpenAccountRotation => self.open_account_rotation_editor(app_server),
+             AppEvent::AccountRotationLoaded {
+                 thread_id,
++                instance_epoch,
++                request_generation,
++                result,
++            } => self.handle_account_rotation_loaded(
++                thread_id,
++                instance_epoch,
+                 request_generation,
+                 result,
+-            } => self.handle_account_rotation_loaded(thread_id, request_generation, result),
++            ),
+             AppEvent::EditAccountRotation { edit } => {
+                 self.edit_account_rotation(app_server, edit)
+             }
+             AppEvent::AccountRotationUpdated {
+                 thread_id,
++                instance_epoch,
+                 expected_rotation_revision,
+                 result,
+             } => self.handle_account_rotation_updated(
+                 app_server,
+                 thread_id,
++                instance_epoch,
+                 expected_rotation_revision,
+                 result,
+             ),
+diff --git a/codex-rs/tui/src/app/footer_projection.rs b/codex-rs/tui/src/app/footer_projection.rs
+new file mode 100644
+index 0000000000..09b2bbfe06
+--- /dev/null
++++ b/codex-rs/tui/src/app/footer_projection.rs
+@@ -0,0 +1,130 @@
++//! Pure projection of accepted account/runtime state into display-safe footer values.
++
++use super::App;
++use crate::bottom_pane::FooterRuntimeProjection;
++use codex_app_server_protocol::AccountSlotCapability;
++use codex_app_server_protocol::AccountSlotHealth;
++use codex_app_server_protocol::AccountSlotSnapshot;
++use codex_app_server_protocol::SessionRuntimeAccountSwitchState;
++use codex_app_server_protocol::SessionRuntimeLifecycleState;
++use codex_app_server_protocol::SessionRuntimeSnapshot;
++use codex_app_server_protocol::ThreadAccountRotationMode;
++
++pub(super) fn project_footer_runtime(
++    displayed_thread_id: Option<&str>,
++    runtime: Option<&SessionRuntimeSnapshot>,
++    slot_capability: Option<&AccountSlotCapability>,
++    slots: &[AccountSlotSnapshot],
++) -> FooterRuntimeProjection {
++    let Some(runtime) = runtime.filter(|runtime| {
++        displayed_thread_id.is_some_and(|thread_id| runtime.thread_id == thread_id)
++    }) else {
++        return FooterRuntimeProjection::default();
++    };
++
++    let mut projection = FooterRuntimeProjection {
++        session_id: Some(runtime.identity.session_id.clone()),
++        thread_id: Some(runtime.thread_id.clone()),
++        thread_name: runtime.identity.name.clone(),
++        runtime_state: Some(
++            match runtime.lifecycle.state {
++                SessionRuntimeLifecycleState::NotLoaded => "not loaded",
++                SessionRuntimeLifecycleState::Loaded => "loaded",
++                SessionRuntimeLifecycleState::Idle => "idle",
++                SessionRuntimeLifecycleState::Active => "active",
++                SessionRuntimeLifecycleState::Closing => "closing",
++            }
++            .to_string(),
++        ),
++        rotation_state: Some(
++            match runtime
++                .account
++                .rotation
++                .as_ref()
++                .map(|rotation| rotation.mode)
++            {
++                Some(ThreadAccountRotationMode::Fixed) => "fixed · switch ",
++                Some(ThreadAccountRotationMode::QuotaAware) => "quota aware · switch ",
++                Some(ThreadAccountRotationMode::RoundRobin) => "round robin · switch ",
++                Some(ThreadAccountRotationMode::ExhaustThenNext) => "exhaust then next · switch ",
++                None => "switch ",
++            }
++            .to_string()
++                + match runtime.account.switch_state {
++                    SessionRuntimeAccountSwitchState::Stable => "stable",
++                    SessionRuntimeAccountSwitchState::Preparing => "preparing",
++                    SessionRuntimeAccountSwitchState::Switching => "switching",
++                    SessionRuntimeAccountSwitchState::Unbound => "unbound",
++                    SessionRuntimeAccountSwitchState::Degraded => "degraded",
++                },
++        ),
++        ..FooterRuntimeProjection::default()
++    };
++
++    let Some(current) = runtime.account.current.as_ref() else {
++        return projection;
++    };
++    let Some(slot) = slot_capability.and_then(|_| {
++        slots
++            .iter()
++            .find(|slot| slot.account_slot_id == current.account_slot_id)
++    }) else {
++        return projection;
++    };
++
++    projection.managed_slot_label = Some(slot.account_number.to_string());
++    projection.managed_slot_id = Some(slot.account_slot_id.clone());
++    projection.managed_slot_health = Some(
++        match slot.health {
++            AccountSlotHealth::Healthy => "healthy",
++            AccountSlotHealth::Degraded => "degraded",
++            AccountSlotHealth::Unavailable => "unavailable",
++        }
++        .to_string(),
++    );
++    projection.managed_slot_quota = slot.quota.as_ref().and_then(|quota| {
++        let meters = quota
++            .meters
++            .iter()
++            .map(|meter| {
++                format!(
++                    "{} {}%",
++                    meter.label.as_deref().unwrap_or(&meter.id),
++                    meter.remaining_percent
++                )
++            })
++            .collect::<Vec<_>>();
++        (!meters.is_empty()).then(|| meters.join(", "))
++    });
++    projection
++}
++
++impl App {
++    pub(super) fn sync_footer_runtime_projection(&mut self) {
++        let Some(displayed_thread_id) = self.current_displayed_thread_id() else {
++            self.chat_widget
++                .set_footer_runtime_projection(FooterRuntimeProjection::default());
++            return;
++        };
++        self.sync_footer_runtime_projection_for_thread(displayed_thread_id);
++    }
++
++    pub(super) fn sync_footer_runtime_projection_for_thread(
++        &mut self,
++        displayed_thread_id: codex_protocol::ThreadId,
++    ) {
++        let displayed_thread_id = displayed_thread_id.to_string();
++        let runtime = self.account_runtime.as_ref().map(|(_, runtime)| runtime);
++        let projection = project_footer_runtime(
++            Some(&displayed_thread_id),
++            runtime,
++            self.account_slot_capability.as_ref(),
++            &self.account_slots,
++        );
++        self.chat_widget.set_footer_runtime_projection(projection);
++    }
++}
++
++#[cfg(test)]
++#[path = "footer_projection_tests.rs"]
++mod tests;
+diff --git a/codex-rs/tui/src/app/footer_projection_tests.rs b/codex-rs/tui/src/app/footer_projection_tests.rs
+new file mode 100644
+index 0000000000..4d96703931
+--- /dev/null
++++ b/codex-rs/tui/src/app/footer_projection_tests.rs
+@@ -0,0 +1,199 @@
++use super::project_footer_runtime;
++use crate::app::account_validation::AccountSlotUpdateDisposition;
++use crate::app::test_support::make_test_app;
++use crate::app::test_support::test_session_runtime;
++use crate::chatwidget::tests::make_chatwidget_manual_with_sender;
++use codex_app_server_protocol::AccountSlotCapability;
++use codex_app_server_protocol::AccountSlotHealth;
++use codex_app_server_protocol::AccountSlotQuotaMeter;
++use codex_app_server_protocol::AccountSlotQuotaSnapshot;
++use codex_app_server_protocol::AccountSlotSnapshot;
++use codex_app_server_protocol::AccountSlotStatus;
++use codex_app_server_protocol::SessionRuntimeAccountRef;
++use codex_app_server_protocol::SessionRuntimeSnapshot;
++use codex_app_server_protocol::ThreadAccountRotationMode;
++use codex_app_server_protocol::ThreadAccountRotationReadResponse;
++use codex_app_server_protocol::ThreadAccountRotationSnapshot;
++use codex_app_server_protocol::ThreadAccountRotationSource;
++use codex_protocol::ThreadId;
++use pretty_assertions::assert_eq;
++
++const THREAD_ID: &str = "00000000-0000-0000-0000-000000000001";
++
++fn rotation(revision: u64) -> ThreadAccountRotationSnapshot {
++    ThreadAccountRotationSnapshot {
++        mode: ThreadAccountRotationMode::QuotaAware,
++        fixed_account_slot_id: None,
++        automatic_account_slot_ids: vec!["C1".to_string(), "C2".to_string()],
++        revision,
++        last_committed_account_slot_id: Some("C1".to_string()),
++        source: ThreadAccountRotationSource::Global,
++        global_profile_revision: Some(revision),
++    }
++}
++
++fn runtime(revision: u64, slot_id: &str) -> SessionRuntimeSnapshot {
++    let mut runtime = test_session_runtime(THREAD_ID, revision);
++    runtime.account.current = Some(SessionRuntimeAccountRef {
++        account_slot_id: slot_id.to_string(),
++        execution_generation: revision,
++    });
++    runtime.account.rotation = Some(rotation(revision));
++    runtime
++}
++
++fn slot(number: u32, revision: u64) -> AccountSlotSnapshot {
++    AccountSlotSnapshot {
++        account_slot_id: format!("C{number}"),
++        account_number: number,
++        label: format!("private-account-label-{number}"),
++        is_default: number == 1,
++        status: AccountSlotStatus::Ready,
++        health: AccountSlotHealth::Healthy,
++        quota: Some(AccountSlotQuotaSnapshot {
++            meters: vec![AccountSlotQuotaMeter {
++                id: "weekly".to_string(),
++                label: Some("Week".to_string()),
++                remaining_percent: 70 - number,
++                resets_at: None,
++            }],
++            observed_at: 0,
++            stale_at: 1,
++        }),
++        auth_mode: None,
++        attempt_generation: 1,
++        registry_revision: revision,
++        active_login_operation_id: None,
++        error_code: None,
++        actions: Vec::new(),
++        updated_at: 0,
++    }
++}
++
++fn capability() -> AccountSlotCapability {
++    AccountSlotCapability {
++        available: false,
++        deny_reason: Some("not display-safe".to_string()),
++    }
++}
++
++#[tokio::test]
++async fn accepted_c2_state_is_unchanged_by_stale_c1_events() {
++    let mut app = make_test_app().await;
++    app.active_thread_id = Some(ThreadId::from_string(THREAD_ID).expect("valid thread id"));
++    app.account_inventory_epoch = Some("epoch-a".to_string());
++    app.account_registry_revision = 1;
++    app.account_slot_capability = Some(capability());
++    app.account_slots = vec![slot(1, 1)];
++    app.account_rotation_available = true;
++    assert!(app.handle_account_runtime_changed("epoch-a".to_string(), runtime(1, "C1")));
++
++    assert_eq!(
++        app.handle_account_slot_changed(2, slot(2, 2)),
++        AccountSlotUpdateDisposition::Successor
++    );
++    assert!(app.handle_account_runtime_changed("epoch-a".to_string(), runtime(2, "C2")));
++    let accepted = project_footer_runtime(
++        Some(THREAD_ID),
++        app.account_runtime.as_ref().map(|(_, runtime)| runtime),
++        app.account_slot_capability.as_ref(),
++        &app.account_slots,
++    );
++    assert_eq!(
++        (
++            accepted.managed_slot_label.as_deref(),
++            accepted.managed_slot_id.as_deref(),
++            accepted.managed_slot_health.as_deref(),
++            accepted.managed_slot_quota.as_deref(),
++        ),
++        (Some("2"), Some("C2"), Some("healthy"), Some("Week 68%"))
++    );
++    let mismatched = project_footer_runtime(
++        Some(THREAD_ID),
++        Some(&runtime(2, "C3")),
++        app.account_slot_capability.as_ref(),
++        &app.account_slots,
++    );
++    assert_eq!(
++        (
++            mismatched.managed_slot_label,
++            mismatched.managed_slot_id,
++            mismatched.managed_slot_health,
++            mismatched.managed_slot_quota,
++        ),
++        (None, None, None, None)
++    );
++    assert!(
++        project_footer_runtime(
++            Some(THREAD_ID),
++            app.account_runtime.as_ref().map(|(_, runtime)| runtime),
++            None,
++            &app.account_slots,
++        )
++        .managed_slot_id
++        .is_none()
++    );
++
++    assert!(!app.handle_account_runtime_changed("epoch-a".to_string(), runtime(1, "C1")));
++    assert_eq!(
++        app.handle_account_slot_changed(1, slot(1, 1)),
++        AccountSlotUpdateDisposition::Stale
++    );
++    app.account_rotation_request_generation = 7;
++    app.handle_account_rotation_loaded(
++        ThreadId::from_string(THREAD_ID).expect("valid thread id"),
++        "epoch-old".to_string(),
++        7,
++        Ok(ThreadAccountRotationReadResponse {
++            rotation: rotation(99),
++        }),
++    );
++    app.handle_account_rotation_loaded(
++        ThreadId::from_string(THREAD_ID).expect("valid thread id"),
++        "epoch-old".to_string(),
++        7,
++        Err("delayed failure".to_string()),
++    );
++    let after_stale = project_footer_runtime(
++        Some(THREAD_ID),
++        app.account_runtime.as_ref().map(|(_, runtime)| runtime),
++        app.account_slot_capability.as_ref(),
++        &app.account_slots,
++    );
++
++    assert_eq!(accepted, after_stale);
++    assert_eq!(after_stale.managed_slot_id.as_deref(), Some("C2"));
++}
++
++#[tokio::test]
++async fn widget_replacement_retains_only_the_exact_displayed_thread_runtime() {
++    let mut app = make_test_app().await;
++    let thread_a = ThreadId::from_string(THREAD_ID).expect("valid thread id");
++    let thread_b = ThreadId::new();
++    app.active_thread_id = Some(thread_a);
++    app.account_inventory_epoch = Some("epoch-a".to_string());
++    app.account_registry_revision = 100;
++    app.account_runtime = Some(("epoch-a".to_string(), runtime(100, "C1")));
++    let initial_request_generation = app.account_request_generation;
++
++    let (same_thread_widget, _, _, _) = make_chatwidget_manual_with_sender().await;
++    app.replace_chat_widget_for_thread(same_thread_widget, thread_a);
++    assert_eq!(
++        app.account_runtime
++            .as_ref()
++            .map(|(_, runtime)| runtime.state_revision),
++        Some(100)
++    );
++    assert!(app.account_request_generation > initial_request_generation);
++
++    let (other_thread_widget, _, _, _) = make_chatwidget_manual_with_sender().await;
++    app.replace_chat_widget_for_thread(other_thread_widget, thread_b);
++    assert!(app.account_runtime.is_none());
++    assert_eq!(app.account_inventory_epoch.as_deref(), Some("epoch-a"));
++    assert_eq!(app.account_registry_revision, 100);
++
++    app.active_thread_id = Some(thread_b);
++    let mut thread_b_runtime = runtime(1, "C2");
++    thread_b_runtime.thread_id = thread_b.to_string();
++    assert!(app.handle_account_runtime_changed("epoch-a".to_string(), thread_b_runtime));
++}
+diff --git a/codex-rs/tui/src/app/session_lifecycle.rs b/codex-rs/tui/src/app/session_lifecycle.rs
+index 9b55af9cab..74b132f433 100644
+--- a/codex-rs/tui/src/app/session_lifecycle.rs
++++ b/codex-rs/tui/src/app/session_lifecycle.rs
+@@ -509,8 +509,26 @@ impl App {
+     /// Thread switches reconstruct the `ChatWidget`, which loses the `collab_agent_metadata` map.
+     /// This helper copies every known nickname/role from `AgentNavigationState` into the
+     /// replacement widget so that replayed collab items render agent names immediately.
+-    pub(super) fn replace_chat_widget(&mut self, mut chat_widget: ChatWidget) {
++    pub(super) fn replace_chat_widget(&mut self, chat_widget: ChatWidget) {
++        let displayed_thread_id = self.current_displayed_thread_id();
++        self.replace_chat_widget_for_displayed_thread(chat_widget, displayed_thread_id);
++    }
++
++    pub(super) fn replace_chat_widget_for_thread(
++        &mut self,
++        chat_widget: ChatWidget,
++        displayed_thread_id: ThreadId,
++    ) {
++        self.replace_chat_widget_for_displayed_thread(chat_widget, Some(displayed_thread_id));
++    }
++
++    fn replace_chat_widget_for_displayed_thread(
++        &mut self,
++        mut chat_widget: ChatWidget,
++        displayed_thread_id: Option<ThreadId>,
++    ) {
+         self.commit_animation = None;
++        self.account_request_generation = self.account_request_generation.saturating_add(1);
+         // Transfer the last-written terminal title to the replacement widget
+         // so it knows what OSC title is currently displayed. Without this, the
+         // new widget would redundantly clear and rewrite the same title, causing
+@@ -529,6 +547,18 @@ impl App {
+             );
+         }
+         self.chat_widget = chat_widget;
++        if !self.account_runtime.as_ref().is_some_and(|(_, runtime)| {
++            displayed_thread_id
++                .as_ref()
++                .is_some_and(|thread_id| runtime.thread_id == thread_id.to_string())
++        }) {
++            self.account_runtime = None;
++        }
++        if let Some(displayed_thread_id) = displayed_thread_id {
++            self.sync_footer_runtime_projection_for_thread(displayed_thread_id);
++        } else {
++            self.sync_footer_runtime_projection();
++        }
+         self.sync_active_agent_label();
+     }
+ 
+@@ -999,7 +1029,10 @@ impl App {
+             self.config.clone(),
+             initial_user_message,
+         );
+-        self.replace_chat_widget(ChatWidget::new_with_app_event(init));
++        self.replace_chat_widget_for_thread(
++            ChatWidget::new_with_app_event(init),
++            started.session.thread_id,
++        );
+         self.chat_widget
+             .set_task_mentions_enabled(started.task_tools_available);
+         self.chat_widget
+diff --git a/codex-rs/tui/src/app/startup.rs b/codex-rs/tui/src/app/startup.rs
+index aa3607ed1d..ed20fa2c65 100644
+--- a/codex-rs/tui/src/app/startup.rs
++++ b/codex-rs/tui/src/app/startup.rs
+@@ -524,6 +524,7 @@ See the Codex keymap documentation for supported actions and examples."
+             account_catalog_kind: None,
+             account_slot_capability: None,
+             account_registry_revision: 0,
++            account_inventory_epoch: None,
+             account_runtime: None,
+             account_rotation_available: false,
+             account_rotation_request_generation: 0,
+diff --git a/codex-rs/tui/src/app/test_support.rs b/codex-rs/tui/src/app/test_support.rs
+index b9edfc522c..f527d1c617 100644
+--- a/codex-rs/tui/src/app/test_support.rs
++++ b/codex-rs/tui/src/app/test_support.rs
+@@ -14,6 +14,58 @@ pub(super) async fn make_test_app() -> App {
+     app
+ }
+ 
++pub(super) fn test_session_runtime(thread_id: &str, revision: u64) -> SessionRuntimeSnapshot {
++    SessionRuntimeSnapshot {
++        thread_id: thread_id.to_string(),
++        state_revision: revision,
++        identity: codex_app_server_protocol::SessionRuntimeIdentity {
++            session_id: "session-1".to_string(),
++            forked_from_id: None,
++            parent_thread_id: None,
++            name: Some("focused work".to_string()),
++            source: "test".to_string(),
++            cwd: "<workspace>".to_string(),
++            git_info: None,
++            settings: None,
++        },
++        lifecycle: codex_app_server_protocol::SessionRuntimeLifecycle {
++            state: codex_app_server_protocol::SessionRuntimeLifecycleState::Idle,
++            active_turn_id: None,
++            waiting_on: Vec::new(),
++            subscriber_count: 1,
++            client_incarnations: Vec::new(),
++            last_activity_at: None,
++            unload_at: None,
++        },
++        writer: codex_app_server_protocol::SessionRuntimeWriter {
++            state: codex_app_server_protocol::SessionRuntimeWriterState::None,
++            store_id: None,
++            writer_generation: None,
++            deny_reason: None,
++        },
++        persistence: codex_app_server_protocol::SessionRuntimePersistence {
++            jsonl: None,
++            sqlite: None,
++            lag: None,
++            flush_health: codex_app_server_protocol::SessionRuntimePersistenceHealth::Unknown,
++            materialize_health: codex_app_server_protocol::SessionRuntimePersistenceHealth::Unknown,
++            flushed_at: None,
++            materialized_at: None,
++            deny_reason: None,
++        },
++        account: codex_app_server_protocol::SessionRuntimeAccountBinding {
++            current: None,
++            active_turn: None,
++            rotation: None,
++            switch_state: codex_app_server_protocol::SessionRuntimeAccountSwitchState::Stable,
++            switch_target_slot_id: None,
++            deny_reason: None,
++        },
++        actions: Vec::new(),
++        continuity: Default::default(),
++    }
++}
++
+ pub(super) async fn make_test_app_with_channels() -> (
+     App,
+     tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+@@ -75,6 +127,7 @@ pub(super) async fn make_test_app_with_channels() -> (
+         account_catalog_kind: None,
+         account_slot_capability: None,
+         account_registry_revision: 0,
++        account_inventory_epoch: None,
+         account_runtime: None,
+         account_rotation_available: false,
+         account_rotation_request_generation: 0,
+diff --git a/codex-rs/tui/src/app/tests.rs b/codex-rs/tui/src/app/tests.rs
+index 0a834fea0f..baedeb118e 100644
+--- a/codex-rs/tui/src/app/tests.rs
++++ b/codex-rs/tui/src/app/tests.rs
+@@ -5504,6 +5504,7 @@ async fn make_test_app() -> App {
+         account_catalog_kind: None,
+         account_slot_capability: None,
+         account_registry_revision: 0,
++        account_inventory_epoch: None,
+         account_runtime: None,
+         account_rotation_available: false,
+         account_rotation_request_generation: 0,
+@@ -5602,6 +5603,7 @@ async fn make_test_app_with_channels() -> (
+             account_catalog_kind: None,
+             account_slot_capability: None,
+             account_registry_revision: 0,
++            account_inventory_epoch: None,
+             account_runtime: None,
+             account_rotation_available: false,
+             account_rotation_request_generation: 0,
+diff --git a/codex-rs/tui/src/app_event.rs b/codex-rs/tui/src/app_event.rs
+index 79d34b4e74..f80f579669 100644
+--- a/codex-rs/tui/src/app_event.rs
++++ b/codex-rs/tui/src/app_event.rs
+@@ -291,6 +291,7 @@ pub(crate) enum AppEvent {
+     OpenAccountRotation,
+     AccountRotationLoaded {
+         thread_id: ThreadId,
++        instance_epoch: String,
+         request_generation: u64,
+         result: Result<ThreadAccountRotationReadResponse, String>,
+     },
+@@ -299,6 +300,7 @@ pub(crate) enum AppEvent {
+     },
+     AccountRotationUpdated {
+         thread_id: ThreadId,
++        instance_epoch: String,
+         expected_rotation_revision: u64,
+         result: Result<ThreadAccountRotationUpdateResponse, String>,
+     },
+diff --git a/codex-rs/tui/src/bottom_pane/chat_composer.rs b/codex-rs/tui/src/bottom_pane/chat_composer.rs
+index 9f016f8636..8f2ba5e253 100644
+--- a/codex-rs/tui/src/bottom_pane/chat_composer.rs
++++ b/codex-rs/tui/src/bottom_pane/chat_composer.rs
+@@ -263,6 +263,7 @@ use super::footer_box::FooterBox;
+ use super::footer_box::FooterBoxConfig;
+ use super::footer_box::FooterBoxLayout;
+ use super::footer_box::FooterSnapshot;
++use super::footer_projection::FooterRuntimeProjection;
+ use super::mentions_v2::MentionV2Popup;
+ use super::mentions_v2::MentionV2Selection;
+ use super::paste_burst::CharDecision;
+@@ -1522,6 +1523,11 @@ impl ChatComposer {
+         self.footer_box.set_snapshot(snapshot);
+     }
+ 
++    /// Update only runtime-owned display-safe fields in the semantic footer snapshot.
++    pub(crate) fn set_footer_runtime_projection(&mut self, projection: FooterRuntimeProjection) {
++        self.footer_box.set_runtime_projection(projection);
++    }
++
+     /// Update only the display-safe account projection in the footer snapshot.
+     pub(crate) fn set_footer_account(&mut self, email: Option<String>, plan: Option<String>) {
+         self.footer_box.set_account(email, plan);
+diff --git a/codex-rs/tui/src/bottom_pane/footer_box.rs b/codex-rs/tui/src/bottom_pane/footer_box.rs
+index 6f3d0f4bdb..2f982bb258 100644
+--- a/codex-rs/tui/src/bottom_pane/footer_box.rs
++++ b/codex-rs/tui/src/bottom_pane/footer_box.rs
+@@ -24,6 +24,8 @@ use ratatui::widgets::Widget;
+ use std::collections::BTreeMap;
+ use std::sync::Arc;
+ 
++use super::footer_projection::FooterRuntimeProjection;
++
+ /// Adapter IDs understood by the footer registry.
+ pub(crate) const OFFICIAL_STATUSLINE_ADAPTER_ID: &str = "official-statusline";
+ pub(crate) const ACCOUNT_ADAPTER_ID: &str = "account";
+@@ -206,6 +208,21 @@ impl FooterSnapshot {
+         self
+     }
+ 
++    /// Replace runtime-owned fields while retaining primary account and official status values.
++    pub(crate) fn with_runtime_projection(mut self, projection: FooterRuntimeProjection) -> Self {
++        self.managed_slot_label = projection.managed_slot_label;
++        self.managed_slot_id = projection.managed_slot_id;
++        self.managed_slot_health = projection.managed_slot_health;
++        self.managed_slot_quota = projection.managed_slot_quota;
++        self.session_id = projection.session_id;
++        self.session_name = projection.session_name;
++        self.thread_id = projection.thread_id;
++        self.thread_name = projection.thread_name;
++        self.runtime_state = projection.runtime_state;
++        self.rotation_state = projection.rotation_state;
++        self.sanitized()
++    }
++
+     /// Set bounded debug text for the opt-in debug adapter.
+     pub(crate) fn with_debug(mut self, debug: Option<String>) -> Self {
+         self.debug = sanitize_optional(debug);
+@@ -587,6 +604,11 @@ impl FooterBox {
+         self.snapshot = snapshot.sanitized();
+     }
+ 
++    /// Synchronize runtime-owned fields without replacing account or official status values.
++    pub(crate) fn set_runtime_projection(&mut self, projection: FooterRuntimeProjection) {
++        self.snapshot = self.snapshot.clone().with_runtime_projection(projection);
++    }
++
+     /// Synchronize the official statusline projection without replacing account/session data.
+     pub(crate) fn set_status_line(&mut self, line: Option<&Line<'_>>) {
+         self.set_snapshot(self.snapshot.clone().with_status_line(line));
+diff --git a/codex-rs/tui/src/bottom_pane/footer_box_tests.rs b/codex-rs/tui/src/bottom_pane/footer_box_tests.rs
+index 1b5901c6d0..af9b0083f6 100644
+--- a/codex-rs/tui/src/bottom_pane/footer_box_tests.rs
++++ b/codex-rs/tui/src/bottom_pane/footer_box_tests.rs
+@@ -1,5 +1,6 @@
+ use super::*;
+ 
++use pretty_assertions::assert_eq;
+ use ratatui::buffer::Buffer;
+ use ratatui::layout::Rect;
+ 
+@@ -129,3 +130,60 @@ fn narrow_bordered_measurement_uses_the_same_borderless_fallback_as_layout() {
+         assert_eq!(layout.content_area.width, measured.content_width);
+     }
+ }
++
++#[test]
++fn runtime_projection_preserves_existing_fields_and_renders() {
++    let config = FooterBoxConfig {
++        enabled: true,
++        max_rows: 8,
++        border: FooterBorderStyle::Rounded,
++        layout: FooterLayoutStyle::Stacked,
++        adapter_ids: DEFAULT_ADAPTER_IDS.map(str::to_string).to_vec(),
++    };
++    let snapshot = FooterSnapshot::new()
++        .with_official_status(vec![FooterStatusValue::new("Status", "ready").unwrap()])
++        .with_account(
++            Some("user@example.test".to_string()),
++            Some("Plus".to_string()),
++        );
++    let mut footer = FooterBox::with_snapshot(config, snapshot);
++    footer.set_runtime_projection(FooterRuntimeProjection {
++        managed_slot_label: Some("2".to_string()),
++        managed_slot_id: Some("C2".to_string()),
++        managed_slot_health: Some("healthy".to_string()),
++        managed_slot_quota: Some("Week 68%".to_string()),
++        session_id: Some("session-1".to_string()),
++        session_name: None,
++        thread_id: Some("thread-1".to_string()),
++        thread_name: Some("focused work".to_string()),
++        runtime_state: Some("idle".to_string()),
++        rotation_state: Some("quota aware · switch stable".to_string()),
++    });
++    assert_eq!(
++        (
++            footer.snapshot().official_status.clone(),
++            footer.snapshot().primary_account_email.as_deref(),
++            footer.snapshot().primary_account_plan.as_deref(),
++        ),
++        (
++            vec![FooterStatusValue::new("Status", "ready").unwrap()],
++            Some("user@example.test"),
++            Some("Plus"),
++        )
++    );
++    let area = Rect::new(0, 0, 72, footer.desired_height(72));
++    let mut buffer = Buffer::empty(area);
++    footer.render(area, &mut buffer);
++    let rendered = (0..area.height)
++        .map(|y| {
++            (0..area.width)
++                .map(|x| buffer[(x, y)].symbol())
++                .collect::<String>()
++                .trim_end()
++                .to_string()
++        })
++        .collect::<Vec<_>>()
++        .join("\n");
++
++    insta::assert_snapshot!("visible_runtime_projection", rendered);
++}
+diff --git a/codex-rs/tui/src/bottom_pane/footer_projection.rs b/codex-rs/tui/src/bottom_pane/footer_projection.rs
+new file mode 100644
+index 0000000000..5b920fc608
+--- /dev/null
++++ b/codex-rs/tui/src/bottom_pane/footer_projection.rs
+@@ -0,0 +1,16 @@
++//! Display-safe runtime values projected into the semantic footer.
++
++/// Runtime-owned footer fields updated atomically by the app state owner.
++#[derive(Clone, Debug, Default, PartialEq, Eq)]
++pub(crate) struct FooterRuntimeProjection {
++    pub(crate) managed_slot_label: Option<String>,
++    pub(crate) managed_slot_id: Option<String>,
++    pub(crate) managed_slot_health: Option<String>,
++    pub(crate) managed_slot_quota: Option<String>,
++    pub(crate) session_id: Option<String>,
++    pub(crate) session_name: Option<String>,
++    pub(crate) thread_id: Option<String>,
++    pub(crate) thread_name: Option<String>,
++    pub(crate) runtime_state: Option<String>,
++    pub(crate) rotation_state: Option<String>,
++}
+diff --git a/codex-rs/tui/src/bottom_pane/mod.rs b/codex-rs/tui/src/bottom_pane/mod.rs
+index 7f4d27191d..0ac28e868e 100644
+--- a/codex-rs/tui/src/bottom_pane/mod.rs
++++ b/codex-rs/tui/src/bottom_pane/mod.rs
+@@ -115,6 +115,7 @@ mod experimental_features_view;
+ mod file_search_popup;
+ mod footer;
+ mod footer_box;
++mod footer_projection;
+ mod list_selection_view;
+ mod memories_settings_view;
+ mod mentions_v2;
+@@ -128,6 +129,7 @@ pub(crate) use footer::GoalStatusIndicator;
+ pub(crate) use footer::goal_status_indicator_line;
+ pub(crate) use footer_box::FooterBoxConfig;
+ pub(crate) use footer_box::FooterSnapshot;
++pub(crate) use footer_projection::FooterRuntimeProjection;
+ pub(crate) use list_selection_view::ColumnWidthMode;
+ pub(crate) use list_selection_view::ListSelectionView;
+ pub(crate) use list_selection_view::OnSelectionChangedCallback;
+@@ -359,6 +361,12 @@ impl BottomPane {
+         self.request_redraw();
+     }
+ 
++    /// Update only runtime-owned display-safe fields in the semantic footer snapshot.
++    pub(crate) fn set_footer_runtime_projection(&mut self, projection: FooterRuntimeProjection) {
++        self.composer.set_footer_runtime_projection(projection);
++        self.request_redraw();
++    }
++
+     /// Update only display-safe account fields in the semantic footer snapshot.
+     pub(crate) fn set_footer_account(&mut self, email: Option<String>, plan: Option<String>) {
+         self.composer.set_footer_account(email, plan);
+diff --git a/codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__footer_box__tests__visible_runtime_projection.snap b/codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__footer_box__tests__visible_runtime_projection.snap
+new file mode 100644
+index 0000000000..fc934fbf5e
+--- /dev/null
++++ b/codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__footer_box__tests__visible_runtime_projection.snap
+@@ -0,0 +1,17 @@
++---
++source: tui/src/bottom_pane/footer_box_tests.rs
++assertion_line: 188
++expression: rendered
++---
++╭──────────────────────────────────────────────────────────────────────╮
++│                                                                      │
++│ Status: ready                                                        │
++│ Account user@example.test · Plan Plus                                │
++│ Slot 2 · id C2                                               healthy │
++│ id session-1                                                         │
++│                                                       quota Week 68% │
++│ Thread focused work · id thread-1                                    │
++│ Runtime idle                                                         │
++│ Rotation quota aware · switch stable                                 │
++│                                                                      │
++╰──────────────────────────────────────────────────────────────────────╯
+diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
+index 71dbd4e864..c52c5fbc9c 100644
+--- a/codex-rs/tui/src/chatwidget.rs
++++ b/codex-rs/tui/src/chatwidget.rs
+@@ -281,6 +281,7 @@ use crate::bottom_pane::DOUBLE_PRESS_QUIT_SHORTCUT_ENABLED;
+ use crate::bottom_pane::ExecApprovalRequest;
+ use crate::bottom_pane::ExperimentalFeatureItem;
+ use crate::bottom_pane::ExperimentalFeaturesView;
++use crate::bottom_pane::FooterRuntimeProjection;
+ use crate::bottom_pane::GoalStatusIndicator;
+ use crate::bottom_pane::HistoryEntry;
+ use crate::bottom_pane::InputResult;
+diff --git a/codex-rs/tui/src/chatwidget/settings.rs b/codex-rs/tui/src/chatwidget/settings.rs
+index 2dde2d28fb..fc70b3a962 100644
+--- a/codex-rs/tui/src/chatwidget/settings.rs
++++ b/codex-rs/tui/src/chatwidget/settings.rs
+@@ -267,6 +267,13 @@ impl ChatWidget {
+         self.config.tui_theme = theme;
+     }
+ 
++    /// Apply footer config to both the widget's config copy and the live renderer.
++    pub(crate) fn set_footer_config(&mut self, config: codex_config::types::TuiFooter) {
++        self.bottom_pane
++            .set_footer_config(crate::bottom_pane::FooterBoxConfig::from(&config));
++        self.config.tui_footer = config;
++    }
++
+     /// Set the model in the widget's config copy and stored collaboration mode.
+     pub(crate) fn set_model(&mut self, model: &str) {
+         self.current_collaboration_mode = self.current_collaboration_mode.with_updates(
+diff --git a/codex-rs/tui/src/chatwidget/status_controls.rs b/codex-rs/tui/src/chatwidget/status_controls.rs
+index 8ebdf0fab8..8eb2061238 100644
+--- a/codex-rs/tui/src/chatwidget/status_controls.rs
++++ b/codex-rs/tui/src/chatwidget/status_controls.rs
+@@ -85,6 +85,11 @@ impl ChatWidget {
+         self.bottom_pane.set_active_agent_label(active_agent_label);
+     }
+ 
++    /// Replace the accepted runtime projection without disturbing account or status-line fields.
++    pub(crate) fn set_footer_runtime_projection(&mut self, projection: FooterRuntimeProjection) {
++        self.bottom_pane.set_footer_runtime_projection(projection);
++    }
++
+     /// Recomputes footer status-line content from config and current runtime state.
+     ///
+     /// This method is the status-line orchestrator: it parses configured item identifiers,

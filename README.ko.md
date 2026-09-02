@@ -29,6 +29,10 @@
 | U13 (P022–P023) | Telemetry/compaction/MCP 수렴, Codex 소유 quota failover/rotation, invocation readiness handshake를 제공한다. |
 | U14 (P024) | Supervised canonical control plane, account-neutral UDS, global lifecycle API, reconnect-safe client, bounded OAuth callback을 제공한다. |
 | U15 (P025 + reconciliation) | Fresh canonical thread 전 managed slot binding, resume/fork 상속, 다중 행 `FooterBox`/`FooterAdapter`, multiplexer-aware Windows terminal rendering, bounded post-ready JSONL terminal failure, Runtime Artifact v2 정합성, Windows 보안 보강을 제공한다. |
+| U16 | `codex exec --json` bootstrap·`turn/start` post-ready 실패를 typed bounded code로 분류한다. |
+| U17 | Credential identity를 노출하지 않고 shared owner root를 canonical default account에 binding한다. |
+| U18 | Admitted-turn response stream disconnect를 outcome-unknown/no-replay `turn.failed`로 보존한다. |
+| U19 | App가 수락한 runtime/inventory state를 semantic footer에 production wiring하고 기존 top-level post-ready JSONL error wire를 복원한다. |
 
 App-server는 opaque account reference와 sanitize된 session state만 노출한다. 외부 workflow role, group ID, 사용자 handle은 저장하지 않는다.
 Session-runtime identity도 source 종류와 literal `<workspace>` marker만 유지하며, 로컬 파일시스템
@@ -57,6 +61,10 @@ TUI는 upstream `tui.status_line` 계약을 유지하면서 선택 가능한 다
 추가한다. `FooterAdapter`는 표시 전용 행을 공급하므로 account/plan label, session/runtime
 상태, quota, rotation, debug 정보를 조합할 수 있고 credential 접근이나 I/O는 수행하지
 않는다. 알 수 없는 adapter ID는 무시하며 managed account는 opaque slot ID로 표시한다.
+U19는 accepted runtime의 current slot이 현재 authoritative sanitized inventory와 정확히
+일치할 때만 managed account number, slot ID, health, quota를 투영한다. Epoch·revision·thread
+fence를 통과하지 못한 값은 비우고, config reload는 기존 account와 official-status-line
+projection을 보존하면서 live footer 설정을 갱신한다.
 
 ```toml
 [tui.footer]
@@ -68,6 +76,17 @@ adapter_ids = ["official-statusline", "account", "session", "quota"]
 ```
 
 Footer를 끄면 native status line만 그대로 사용한다.
+
+## `codex exec --json` terminal error
+
+`invocation.ready`가 실제 emit된 뒤 pre-semantic bootstrap 또는 `turn/start`가 실패하면
+top-level `{"type":"error","message":"..."}` event 하나만 emit하고 flush한다. Bounded
+message는 `codex_exec_bootstrap_failed`, `codex_exec_turn_start_server_failed`,
+`codex_exec_turn_start_transport_failed`, `codex_exec_turn_start_deserialize_failed`다.
+Bootstrap/server 실패는 non-admitting이 확정되며 transport/deserialization 결과는 unknown이므로
+자동 replay하지 않는다. 이는 admitted-turn response stream disconnect를
+`codex_exec_response_stream_disconnected` message의 `turn.failed`로 유지하는 U18
+outcome-unknown/no-replay 계약과 구분된다.
 
 ## Quota-aware 지연과 capacity
 
@@ -85,14 +104,14 @@ snapshot hashing을 async executor 밖으로 옮겼지만 revision·identity 검
 
 ## 적용과 build
 
-정확한 upstream commit에만 16개의 logical patch를 적용한다.
+정확한 upstream commit에만 19개의 logical patch를 적용한다.
 
 ```sh
 git checkout 316795b3cf2a45e90d121d9f46499d4658b2645c
 /path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD" rust-v0.152.0
 ```
 
-Applier는 clean tree를 요구하고 각 patch digest를 검증한 뒤 U01–U15를 순서대로 적용하고
+Applier는 clean tree를 요구하고 각 patch digest를 검증한 뒤 U01–U19를 순서대로 적용하고
 최종 Git tree를 확인한다. 과거 `rust-v0.149.0`, `rust-v0.148.0` series는 이름을 명시해
 재현할 수 있다. POSIX shell, Git, `sed`, `awk`, `shasum` 또는 `sha256sum`이 필요하다.
 
@@ -155,12 +174,13 @@ Workflow는 두 package layout을 검사하고, 양쪽에 동일한 build의 Cod
 
 ## 저장소 구성
 
-- `custom-patches/rust-v0.152.0/`: 현재 16개 logical patch와 digest manifest
+- `custom-patches/rust-v0.152.0/`: 현재 19개 logical patch와 digest manifest
 - `custom-patches/rust-v0.151.0/`: 재현성을 위해 보존한 이전 15개 patch series
 - `custom-patches/rust-v0.149.0/`: 재현성을 위해 보존한 이전 series
 - `custom-patches/rust-v0.148.0/`: 재현성을 위해 보존한 이전 series
 - `custom-patches/apply-series.sh`: clean-tree patch applier
 - `.github/workflows/build-custom-macos-arm64.yml`: 수동 macOS arm64 build
+- `.github/workflows/build-custom-windows-x64.yml`: 수동 Windows x64 build
 
 ## License
 
