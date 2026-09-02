@@ -189,6 +189,14 @@ jobs:
           cargo test --locked -p codex-tui scrollback
           cargo test --locked -p codex-tui resize_reflow
 
+      - name: Reclaim focused-test build space
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -d "$CARGO_TARGET_DIR/debug" ]]; then
+            find "$CARGO_TARGET_DIR/debug" -depth -delete
+          fi
+
       - name: Compute exact build identity
         id: build_identity
         shell: bash
