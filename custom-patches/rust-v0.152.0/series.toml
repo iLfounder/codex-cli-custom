@@ -1,7 +1,7 @@
 schema_version = 1
 applies_to = "rust-v0.152.0"
 base_commit = "316795b3cf2a45e90d121d9f46499d4658b2645c"
-final_tree = "bef2d1522086130c7156a1ce68c6cc0ae24021cf"
+final_tree = "472b3064736ec925ba3a6b62e326b0b77defc6f9"
 
 [[patches]]
 number = "U01"
@@ -87,3 +87,8 @@ sha256 = "fd027a5ea7a127a3ed632fa2150d2fa276c6c3fcba34b2c2867fa0a1f11114af"
 number = "U17"
 file = "0017-U17-bind-shared-owner-root-to-default-account.patch"
 sha256 = "b7749cecbb9be833bb0d7fe576dd79df0148826cc3ef55367783aec40353a8e6"
+
+[[patches]]
+number = "U18"
+file = "0018-U18-preserve-response-stream-disconnect-outcome.patch"
+sha256 = "b8ea6fc378f247c48f61b81313575e1a4f20b1ef16220a076ee75e811645ca20"
