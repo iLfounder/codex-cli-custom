@@ -482,6 +482,9 @@ impl CodexErr {
                     http_status_code: self.http_status_code_value(),
                 }
             }
+            CodexErrorDetails::Stream(_) => CodexErrorInfo::ResponseStreamDisconnected {
+                http_status_code: None,
+            },
             CodexErrorDetails::RefreshTokenFailed(_) => CodexErrorInfo::Unauthorized,
             CodexErrorDetails::SessionConfiguredNotFirstEvent
             | CodexErrorDetails::InternalServerError

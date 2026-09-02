@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+use codex_app_server_protocol::CodexErrorInfo;
 use codex_app_server_protocol::CollabAgentTool;
 use codex_app_server_protocol::CollabAgentToolCallStatus;
 use codex_app_server_protocol::CommandExecutionStatus;
@@ -593,11 +594,18 @@ impl EventProcessorWithJsonOutput {
                             .turn
                             .error
                             .map(|error| ThreadErrorEvent {
-                                message: match error.additional_details {
-                                    Some(details) if !details.is_empty() => {
-                                        format!("{} ({details})", error.message)
+                                message: if matches!(
+                                    error.codex_error_info.as_ref(),
+                                    Some(CodexErrorInfo::ResponseStreamDisconnected { .. })
+                                ) {
+                                    "codex_exec_response_stream_disconnected".to_string()
+                                } else {
+                                    match error.additional_details {
+                                        Some(details) if !details.is_empty() => {
+                                            format!("{} ({details})", error.message)
+                                        }
+                                        _ => error.message,
                                     }
-                                    _ => error.message,
                                 },
                             })
                             .or_else(|| self.last_critical_error.clone())

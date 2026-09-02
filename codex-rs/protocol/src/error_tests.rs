@@ -214,6 +214,17 @@ fn server_overloaded_maps_to_protocol() {
 }
 
 #[test]
+fn stream_error_maps_to_response_stream_disconnected() {
+    let err = CodexErr::Stream("private transport detail".to_string());
+    assert_eq!(
+        err.to_codex_protocol_error(),
+        CodexErrorInfo::ResponseStreamDisconnected {
+            http_status_code: None,
+        }
+    );
+}
+
+#[test]
 fn sandbox_denied_uses_aggregated_output_when_stderr_empty() {
     let output = ExecToolCallOutput {
         exit_code: 77,
