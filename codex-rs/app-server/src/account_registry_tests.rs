@@ -428,15 +428,17 @@ async fn registry_add_remove_and_remap_emit_monotonic_inventory_notifications() 
 }
 
 #[tokio::test]
-async fn registered_global_inventory_survives_missing_token_manager_rows() {
+async fn registered_global_inventory_survives_owner_shared_process_home() {
     let user_home = tempdir().unwrap();
-    let process_home = tempdir().unwrap();
+    let process_home = user_home.path().join(".codex");
+    std::fs::create_dir(&process_home).unwrap();
+    let first_home = tempdir().unwrap();
     let second_home = tempdir().unwrap();
-    let mut registry = registry_for_home(process_home.path()).await;
+    let mut registry = registry_for_home(&process_home).await;
     registry.global_directory_user_home = Some(user_home.path().to_path_buf());
     write_global_registry(
         user_home.path(),
-        &[(1, process_home.path()), (2, second_home.path())],
+        &[(1, first_home.path()), (2, second_home.path())],
     );
     registry.global_catalog.replace(Vec::new()).unwrap();
 

@@ -36,7 +36,19 @@ impl GlobalAccountDirectory {
             .collect::<BTreeMap<_, _>>();
         let process_account_id = catalog
             .account_for_home(process_home)
-            .and_then(|account_id| AccountId::parse(&account_id.to_string()));
+            .and_then(|account_id| AccountId::parse(&account_id.to_string()))
+            .or_else(|| {
+                let process_home = std::fs::canonicalize(process_home).ok()?;
+                let default_home = std::fs::canonicalize(user_home.join(".codex")).ok()?;
+                if process_home != default_home {
+                    return None;
+                }
+                catalog.entries().find_map(|(account_id, _)| {
+                    (account_id.number() == 1)
+                        .then(|| AccountId::parse(&account_id.to_string()))
+                        .flatten()
+                })
+            });
         Self {
             homes,
             process_account_id,
