@@ -24,6 +24,8 @@ use ratatui::widgets::Widget;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use super::footer_projection::FooterRuntimeProjection;
+
 /// Adapter IDs understood by the footer registry.
 pub(crate) const OFFICIAL_STATUSLINE_ADAPTER_ID: &str = "official-statusline";
 pub(crate) const ACCOUNT_ADAPTER_ID: &str = "account";
@@ -204,6 +206,21 @@ impl FooterSnapshot {
         self.runtime_state = sanitize_optional(runtime_state);
         self.rotation_state = sanitize_optional(rotation_state);
         self
+    }
+
+    /// Replace runtime-owned fields while retaining primary account and official status values.
+    pub(crate) fn with_runtime_projection(mut self, projection: FooterRuntimeProjection) -> Self {
+        self.managed_slot_label = projection.managed_slot_label;
+        self.managed_slot_id = projection.managed_slot_id;
+        self.managed_slot_health = projection.managed_slot_health;
+        self.managed_slot_quota = projection.managed_slot_quota;
+        self.session_id = projection.session_id;
+        self.session_name = projection.session_name;
+        self.thread_id = projection.thread_id;
+        self.thread_name = projection.thread_name;
+        self.runtime_state = projection.runtime_state;
+        self.rotation_state = projection.rotation_state;
+        self.sanitized()
     }
 
     /// Set bounded debug text for the opt-in debug adapter.
@@ -585,6 +602,11 @@ impl FooterBox {
 
     pub(crate) fn set_snapshot(&mut self, snapshot: FooterSnapshot) {
         self.snapshot = snapshot.sanitized();
+    }
+
+    /// Synchronize runtime-owned fields without replacing account or official status values.
+    pub(crate) fn set_runtime_projection(&mut self, projection: FooterRuntimeProjection) {
+        self.snapshot = self.snapshot.clone().with_runtime_projection(projection);
     }
 
     /// Synchronize the official statusline projection without replacing account/session data.

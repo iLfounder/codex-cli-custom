@@ -542,8 +542,26 @@ impl App {
     /// Thread switches reconstruct the `ChatWidget`, which loses the `collab_agent_metadata` map.
     /// This helper copies every known nickname/role from `AgentNavigationState` into the
     /// replacement widget so that replayed collab items render agent names immediately.
-    pub(super) fn replace_chat_widget(&mut self, mut chat_widget: ChatWidget) {
+    pub(super) fn replace_chat_widget(&mut self, chat_widget: ChatWidget) {
+        let displayed_thread_id = self.current_displayed_thread_id();
+        self.replace_chat_widget_for_displayed_thread(chat_widget, displayed_thread_id);
+    }
+
+    pub(super) fn replace_chat_widget_for_thread(
+        &mut self,
+        chat_widget: ChatWidget,
+        displayed_thread_id: ThreadId,
+    ) {
+        self.replace_chat_widget_for_displayed_thread(chat_widget, Some(displayed_thread_id));
+    }
+
+    fn replace_chat_widget_for_displayed_thread(
+        &mut self,
+        mut chat_widget: ChatWidget,
+        displayed_thread_id: Option<ThreadId>,
+    ) {
         self.commit_animation = None;
+        self.account_request_generation = self.account_request_generation.saturating_add(1);
         // Transfer the last-written terminal title to the replacement widget
         // so it knows what OSC title is currently displayed. Without this, the
         // new widget would redundantly clear and rewrite the same title, causing
@@ -566,6 +584,18 @@ impl App {
             );
         }
         self.chat_widget = chat_widget;
+        if !self.account_runtime.as_ref().is_some_and(|(_, runtime)| {
+            displayed_thread_id
+                .as_ref()
+                .is_some_and(|thread_id| runtime.thread_id == thread_id.to_string())
+        }) {
+            self.account_runtime = None;
+        }
+        if let Some(displayed_thread_id) = displayed_thread_id {
+            self.sync_footer_runtime_projection_for_thread(displayed_thread_id);
+        } else {
+            self.sync_footer_runtime_projection();
+        }
         self.sync_active_agent_label();
     }
 
@@ -1077,7 +1107,10 @@ impl App {
             self.config.clone(),
             initial_user_message,
         );
-        self.replace_chat_widget(ChatWidget::new_with_app_event(init));
+        self.replace_chat_widget_for_thread(
+            ChatWidget::new_with_app_event(init),
+            started.session.thread_id,
+        );
         self.chat_widget
             .set_task_mentions_enabled(started.task_tools_available);
         self.chat_widget

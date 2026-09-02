@@ -274,6 +274,7 @@ use super::footer_box::FooterBox;
 use super::footer_box::FooterBoxConfig;
 use super::footer_box::FooterBoxLayout;
 use super::footer_box::FooterSnapshot;
+use super::footer_projection::FooterRuntimeProjection;
 use super::mentions_v2::MentionV2Popup;
 use super::mentions_v2::MentionV2Selection;
 use super::paste_burst::CharDecision;
@@ -1545,6 +1546,11 @@ impl ChatComposer {
     /// Replace the immutable semantic footer snapshot consumed by adapters.
     pub(crate) fn set_footer_snapshot(&mut self, snapshot: FooterSnapshot) {
         self.footer_box.set_snapshot(snapshot);
+    }
+
+    /// Update only runtime-owned display-safe fields in the semantic footer snapshot.
+    pub(crate) fn set_footer_runtime_projection(&mut self, projection: FooterRuntimeProjection) {
+        self.footer_box.set_runtime_projection(projection);
     }
 
     /// Update only the display-safe account projection in the footer snapshot.

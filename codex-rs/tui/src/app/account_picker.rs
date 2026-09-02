@@ -1,6 +1,7 @@
 //! Account-slot picker and exact-thread account controls.
 
 use super::account_picker_view::ACCOUNT_PICKER_VIEW_ID;
+use super::account_validation::RuntimeRevisionIdentity;
 use super::*;
 use crate::app_server_session::AccountSlotsSnapshot;
 use crate::app_server_session::ThreadRuntimeSnapshot;
@@ -203,39 +204,45 @@ impl App {
     }
 
     fn apply_account_snapshot(&mut self, mut snapshot: AccountPickerSnapshot) -> bool {
-        let rotation_available = snapshot.runtime.capabilities.iter().any(|capability| {
-            capability.name == SESSION_RUNTIME_ACCOUNT_ROTATION_CAPABILITY && capability.available
-        });
-        self.account_rotation_available = rotation_available;
-        if !rotation_available {
-            snapshot.runtime.snapshot.account.rotation = None;
-            if let Some((_, runtime)) = self.account_runtime.as_mut() {
-                runtime.account.rotation = None;
-            }
+        let displayed_thread_id = self
+            .current_displayed_thread_id()
+            .map(|thread_id| thread_id.to_string());
+        let candidate_epoch = snapshot.runtime.instance_epoch.as_str();
+        let runtime_is_fresh = displayed_thread_id.as_deref()
+            == Some(snapshot.runtime.snapshot.thread_id.as_str())
+            && super::account_validation::runtime_revision_meets_lower_bound(
+                self.account_runtime
+                    .as_ref()
+                    .map(|(epoch, runtime)| RuntimeRevisionIdentity {
+                        instance_epoch: epoch,
+                        thread_id: &runtime.thread_id,
+                        state_revision: runtime.state_revision,
+                    }),
+                RuntimeRevisionIdentity {
+                    instance_epoch: candidate_epoch,
+                    thread_id: &snapshot.runtime.snapshot.thread_id,
+                    state_revision: snapshot.runtime.snapshot.state_revision,
+                },
+            );
+        let inventory_epoch_changed =
+            self.account_inventory_epoch.as_deref() != Some(candidate_epoch);
+        if runtime_is_fresh && inventory_epoch_changed {
+            self.account_slots.clear();
+            self.account_registry_revision = 0;
+            self.account_catalog_kind = None;
+            self.account_slot_capability = None;
+            self.account_rotation_available = false;
+            self.account_inventory_epoch = Some(candidate_epoch.to_string());
         }
-        let same_runtime_epoch = self
-            .account_runtime
-            .as_ref()
-            .is_some_and(|(epoch, _)| epoch == &snapshot.runtime.instance_epoch);
         let catalog_changed = self
             .account_catalog_kind
             .is_some_and(|catalog_kind| catalog_kind != snapshot.slots.catalog_kind);
-        let slots_are_fresh = !same_runtime_epoch
-            || catalog_changed
-            || super::account_validation::revision_meets_lower_bound(
-                snapshot.slots.registry_revision,
-                self.account_registry_revision,
-            );
-        let runtime_is_fresh = !same_runtime_epoch
-            || super::account_validation::runtime_revision_meets_lower_bound(
-                self.account_runtime
-                    .as_ref()
-                    .map(|(epoch, runtime)| (epoch.as_str(), runtime.state_revision)),
-                (
-                    snapshot.runtime.instance_epoch.as_str(),
-                    snapshot.runtime.snapshot.state_revision,
-                ),
-            );
+        let slots_are_fresh = (!inventory_epoch_changed || runtime_is_fresh)
+            && (catalog_changed
+                || super::account_validation::revision_meets_lower_bound(
+                    snapshot.slots.registry_revision,
+                    self.account_registry_revision,
+                ));
         if slots_are_fresh {
             self.account_registry_revision = snapshot.slots.registry_revision;
             self.account_catalog_kind = Some(snapshot.slots.catalog_kind);
@@ -243,8 +250,19 @@ impl App {
             self.account_slot_capability = Some(snapshot.slots.multi_account);
         }
         if runtime_is_fresh {
+            let rotation_available = snapshot.runtime.capabilities.iter().any(|capability| {
+                capability.name == SESSION_RUNTIME_ACCOUNT_ROTATION_CAPABILITY
+                    && capability.available
+            });
+            if !rotation_available {
+                snapshot.runtime.snapshot.account.rotation = None;
+            }
+            self.account_rotation_available = rotation_available;
             self.account_runtime =
                 Some((snapshot.runtime.instance_epoch, snapshot.runtime.snapshot));
+        }
+        if slots_are_fresh || runtime_is_fresh {
+            self.sync_footer_runtime_projection();
         }
         let snapshot_is_fresh = slots_are_fresh && runtime_is_fresh;
         if snapshot_is_fresh

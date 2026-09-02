@@ -231,6 +231,7 @@ mod dynamic_thread_controls;
 mod event_dispatch;
 mod exit_summary;
 mod file_change_approvals;
+mod footer_projection;
 mod history_pagination;
 mod history_ui;
 mod input;
@@ -624,6 +625,7 @@ pub(crate) struct App {
     account_catalog_kind: Option<AccountSlotCatalogKind>,
     account_slot_capability: Option<AccountSlotCapability>,
     account_registry_revision: u64,
+    account_inventory_epoch: Option<String>,
     account_runtime: Option<(String, SessionRuntimeSnapshot)>,
     account_rotation_available: bool,
     account_rotation_request_generation: u64,

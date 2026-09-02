@@ -1,5 +1,6 @@
 use super::*;
 
+use pretty_assertions::assert_eq;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
@@ -128,4 +129,61 @@ fn narrow_bordered_measurement_uses_the_same_borderless_fallback_as_layout() {
         assert_eq!(layout.rows.len() as u16, measured.rows);
         assert_eq!(layout.content_area.width, measured.content_width);
     }
+}
+
+#[test]
+fn runtime_projection_preserves_existing_fields_and_renders() {
+    let config = FooterBoxConfig {
+        enabled: true,
+        max_rows: 8,
+        border: FooterBorderStyle::Rounded,
+        layout: FooterLayoutStyle::Stacked,
+        adapter_ids: DEFAULT_ADAPTER_IDS.map(str::to_string).to_vec(),
+    };
+    let snapshot = FooterSnapshot::new()
+        .with_official_status(vec![FooterStatusValue::new("Status", "ready").unwrap()])
+        .with_account(
+            Some("user@example.test".to_string()),
+            Some("Plus".to_string()),
+        );
+    let mut footer = FooterBox::with_snapshot(config, snapshot);
+    footer.set_runtime_projection(FooterRuntimeProjection {
+        managed_slot_label: Some("2".to_string()),
+        managed_slot_id: Some("C2".to_string()),
+        managed_slot_health: Some("healthy".to_string()),
+        managed_slot_quota: Some("Week 68%".to_string()),
+        session_id: Some("session-1".to_string()),
+        session_name: None,
+        thread_id: Some("thread-1".to_string()),
+        thread_name: Some("focused work".to_string()),
+        runtime_state: Some("idle".to_string()),
+        rotation_state: Some("quota aware · switch stable".to_string()),
+    });
+    assert_eq!(
+        (
+            footer.snapshot().official_status.clone(),
+            footer.snapshot().primary_account_email.as_deref(),
+            footer.snapshot().primary_account_plan.as_deref(),
+        ),
+        (
+            vec![FooterStatusValue::new("Status", "ready").unwrap()],
+            Some("user@example.test"),
+            Some("Plus"),
+        )
+    );
+    let area = Rect::new(0, 0, 72, footer.desired_height(72));
+    let mut buffer = Buffer::empty(area);
+    footer.render(area, &mut buffer);
+    let rendered = (0..area.height)
+        .map(|y| {
+            (0..area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    insta::assert_snapshot!("visible_runtime_projection", rendered);
 }

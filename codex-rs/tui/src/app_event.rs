@@ -297,6 +297,7 @@ pub(crate) enum AppEvent {
     OpenAccountRotation,
     AccountRotationLoaded {
         thread_id: ThreadId,
+        instance_epoch: String,
         request_generation: u64,
         result: Result<ThreadAccountRotationReadResponse, String>,
     },
@@ -305,6 +306,7 @@ pub(crate) enum AppEvent {
     },
     AccountRotationUpdated {
         thread_id: ThreadId,
+        instance_epoch: String,
         expected_rotation_revision: u64,
         result: Result<ThreadAccountRotationUpdateResponse, String>,
     },

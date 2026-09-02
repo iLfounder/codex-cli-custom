@@ -125,6 +125,22 @@ fn response_stream_disconnect_turn_failure_uses_safe_code() {
 }
 
 #[test]
+fn post_ready_failures_use_the_exact_top_level_error_wire() {
+    for message in [
+        "codex_exec_bootstrap_failed",
+        "codex_exec_turn_start_server_failed",
+        "codex_exec_turn_start_transport_failed",
+        "codex_exec_turn_start_deserialize_failed",
+    ] {
+        assert_eq!(
+            serde_json::to_value(post_ready_failure_event(message))
+                .expect("serialize post-ready failure"),
+            json!({"type": "error", "message": message})
+        );
+    }
+}
+
+#[test]
 fn runtime_warning_emits_a_non_fatal_error_item() {
     let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
 

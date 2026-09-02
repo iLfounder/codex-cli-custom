@@ -152,21 +152,33 @@ impl App {
             }
             ServerNotification::SessionRuntimeChanged(update) => {
                 let selected_slot_id = self.selected_account_slot_id();
-                let account_epoch_changed = self
-                    .account_runtime
-                    .as_ref()
-                    .is_some_and(|(epoch, _)| epoch != &update.instance_epoch);
                 let previous_rate_limit_subject = self.current_rate_limit_request_subject();
                 let previous_plugin_command_subject = self.current_plugin_command_catalog_subject();
+                if !self.handle_account_runtime_changed(
+                    update.instance_epoch.clone(),
+                    update.snapshot.clone(),
+                ) {
+                    return;
+                }
+                let inventory_epoch_changed =
+                    self.account_inventory_epoch.as_deref() != Some(update.instance_epoch.as_str());
+                if inventory_epoch_changed {
+                    self.account_slots.clear();
+                    self.account_registry_revision = 0;
+                    self.account_catalog_kind = None;
+                    self.account_slot_capability = None;
+                    self.account_rotation_available = false;
+                    self.account_inventory_epoch = Some(update.instance_epoch.clone());
+                    if let Some((_, runtime)) = self.account_runtime.as_mut() {
+                        runtime.account.rotation = None;
+                    }
+                }
                 self.observe_plugin_command_runtime(
                     update.instance_epoch.clone(),
                     &update.snapshot,
                 );
-                self.handle_account_runtime_changed(
-                    update.instance_epoch.clone(),
-                    update.snapshot.clone(),
-                );
-                if account_epoch_changed {
+                self.sync_footer_runtime_projection();
+                if inventory_epoch_changed {
                     self.refresh_account_state(app_server_client);
                 } else {
                     self.replace_open_account_views(selected_slot_id.as_deref());
@@ -187,15 +199,21 @@ impl App {
                 }
             }
             ServerNotification::AccountSlotChanged(update) => {
-                if self.handle_account_slot_changed(update.registry_revision, update.slot.clone())
-                    == AccountSlotUpdateDisposition::Gap
+                match self
+                    .handle_account_slot_changed(update.registry_revision, update.slot.clone())
                 {
-                    self.refresh_account_state(app_server_client);
+                    AccountSlotUpdateDisposition::Gap => {
+                        self.refresh_account_state(app_server_client);
+                    }
+                    AccountSlotUpdateDisposition::Stale
+                    | AccountSlotUpdateDisposition::Successor => {}
                 }
                 return;
             }
-            ServerNotification::AccountSlotInventoryChanged(_) => {
-                self.refresh_account_state(app_server_client);
+            ServerNotification::AccountSlotInventoryChanged(update) => {
+                if self.handle_account_slot_inventory_changed(update.registry_revision) {
+                    self.refresh_account_state(app_server_client);
+                }
                 return;
             }
             ServerNotification::AccountLoginCompleted(_) => {
@@ -350,6 +368,11 @@ impl App {
                         .is_some_and(AuthMode::has_chatgpt_account),
                     has_codex_backend_auth,
                 );
+                self.account_slots.clear();
+                self.account_slot_capability = None;
+                self.account_runtime = None;
+                self.account_rotation_available = false;
+                self.sync_footer_runtime_projection();
                 self.refresh_account_state(app_server_client);
                 return;
             }

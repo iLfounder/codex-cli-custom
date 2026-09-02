@@ -83,6 +83,12 @@ pub struct CollectedThreadEvents {
     pub status: CodexStatus,
 }
 
+fn post_ready_failure_event(message: &'static str) -> ThreadEvent {
+    ThreadEvent::Error(ThreadErrorEvent {
+        message: message.to_string(),
+    })
+}
+
 impl EventProcessorWithJsonOutput {
     pub fn new(last_message_path: Option<PathBuf>) -> Self {
         Self {
@@ -667,11 +673,7 @@ impl EventProcessor for EventProcessorWithJsonOutput {
     }
 
     fn print_post_ready_failure(&mut self, message: &'static str) -> std::io::Result<()> {
-        self.emit_and_flush(ThreadEvent::TurnFailed(TurnFailedEvent {
-            error: ThreadErrorEvent {
-                message: message.to_string(),
-            },
-        }))
+        self.emit_and_flush(post_ready_failure_event(message))
     }
 
     fn print_config_summary(

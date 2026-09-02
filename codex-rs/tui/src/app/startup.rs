@@ -528,6 +528,7 @@ See the Codex keymap documentation for supported actions and examples."
             account_catalog_kind: None,
             account_slot_capability: None,
             account_registry_revision: 0,
+            account_inventory_epoch: None,
             account_runtime: None,
             account_rotation_available: false,
             account_rotation_request_generation: 0,

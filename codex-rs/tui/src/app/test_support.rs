@@ -14,6 +14,58 @@ pub(super) async fn make_test_app() -> App {
     app
 }
 
+pub(super) fn test_session_runtime(thread_id: &str, revision: u64) -> SessionRuntimeSnapshot {
+    SessionRuntimeSnapshot {
+        thread_id: thread_id.to_string(),
+        state_revision: revision,
+        identity: codex_app_server_protocol::SessionRuntimeIdentity {
+            session_id: "session-1".to_string(),
+            forked_from_id: None,
+            parent_thread_id: None,
+            name: Some("focused work".to_string()),
+            source: "test".to_string(),
+            cwd: "<workspace>".to_string(),
+            git_info: None,
+            settings: None,
+        },
+        lifecycle: codex_app_server_protocol::SessionRuntimeLifecycle {
+            state: codex_app_server_protocol::SessionRuntimeLifecycleState::Idle,
+            active_turn_id: None,
+            waiting_on: Vec::new(),
+            subscriber_count: 1,
+            client_incarnations: Vec::new(),
+            last_activity_at: None,
+            unload_at: None,
+        },
+        writer: codex_app_server_protocol::SessionRuntimeWriter {
+            state: codex_app_server_protocol::SessionRuntimeWriterState::None,
+            store_id: None,
+            writer_generation: None,
+            deny_reason: None,
+        },
+        persistence: codex_app_server_protocol::SessionRuntimePersistence {
+            jsonl: None,
+            sqlite: None,
+            lag: None,
+            flush_health: codex_app_server_protocol::SessionRuntimePersistenceHealth::Unknown,
+            materialize_health: codex_app_server_protocol::SessionRuntimePersistenceHealth::Unknown,
+            flushed_at: None,
+            materialized_at: None,
+            deny_reason: None,
+        },
+        account: codex_app_server_protocol::SessionRuntimeAccountBinding {
+            current: None,
+            active_turn: None,
+            rotation: None,
+            switch_state: codex_app_server_protocol::SessionRuntimeAccountSwitchState::Stable,
+            switch_target_slot_id: None,
+            deny_reason: None,
+        },
+        actions: Vec::new(),
+        continuity: Default::default(),
+    }
+}
+
 pub(super) async fn make_test_app_with_channels() -> (
     App,
     tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
@@ -76,6 +128,7 @@ pub(super) async fn make_test_app_with_channels() -> (
         account_catalog_kind: None,
         account_slot_capability: None,
         account_registry_revision: 0,
+        account_inventory_epoch: None,
         account_runtime: None,
         account_rotation_available: false,
         account_rotation_request_generation: 0,

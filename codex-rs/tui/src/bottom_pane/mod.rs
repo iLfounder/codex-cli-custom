@@ -116,6 +116,7 @@ mod experimental_features_view;
 mod file_search_popup;
 mod footer;
 mod footer_box;
+mod footer_projection;
 mod list_selection_view;
 mod memories_settings_view;
 mod mentions_v2;
@@ -129,6 +130,7 @@ pub(crate) use footer::GoalStatusIndicator;
 pub(crate) use footer::goal_status_indicator_line;
 pub(crate) use footer_box::FooterBoxConfig;
 pub(crate) use footer_box::FooterSnapshot;
+pub(crate) use footer_projection::FooterRuntimeProjection;
 pub(crate) use list_selection_view::ColumnWidthMode;
 pub(crate) use list_selection_view::ListSelectionView;
 pub(crate) use list_selection_view::OnSelectionChangedCallback;
@@ -363,6 +365,12 @@ impl BottomPane {
     /// Replace the immutable semantic footer snapshot and request a redraw.
     pub(crate) fn set_footer_snapshot(&mut self, snapshot: FooterSnapshot) {
         self.composer.set_footer_snapshot(snapshot);
+        self.request_redraw();
+    }
+
+    /// Update only runtime-owned display-safe fields in the semantic footer snapshot.
+    pub(crate) fn set_footer_runtime_projection(&mut self, projection: FooterRuntimeProjection) {
+        self.composer.set_footer_runtime_projection(projection);
         self.request_redraw();
     }
 

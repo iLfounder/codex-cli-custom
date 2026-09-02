@@ -7,6 +7,7 @@ use codex_app_server_protocol::AccountSlotSnapshot;
 use codex_app_server_protocol::AccountSlotStatus;
 use codex_app_server_protocol::SESSION_RUNTIME_ACCOUNT_ROTATION_CAPABILITY;
 use codex_app_server_protocol::SessionRuntimeAccountBinding;
+use codex_app_server_protocol::SessionRuntimeAccountRef;
 use codex_app_server_protocol::SessionRuntimeAccountSwitchState;
 use codex_app_server_protocol::SessionRuntimeCapability;
 use codex_app_server_protocol::SessionRuntimeIdentity;
@@ -21,6 +22,8 @@ use codex_app_server_protocol::ThreadAccountRotationMode;
 use codex_app_server_protocol::ThreadAccountRotationSnapshot;
 use codex_app_server_protocol::ThreadAccountRotationSource;
 use pretty_assertions::assert_eq;
+
+const THREAD_ID: &str = "00000000-0000-0000-0000-000000000001";
 
 fn runtime_snapshot(thread_id: &str, state_revision: u64) -> SessionRuntimeSnapshot {
     SessionRuntimeSnapshot {
@@ -74,8 +77,13 @@ fn runtime_snapshot(thread_id: &str, state_revision: u64) -> SessionRuntimeSnaps
     }
 }
 
+fn display_snapshot_thread(app: &mut App) {
+    app.active_thread_id = Some(ThreadId::from_string(THREAD_ID).expect("valid thread id"));
+}
+
 fn picker_snapshot(
     epoch: &str,
+    thread_id: &str,
     registry_revision: u64,
     state_revision: u64,
 ) -> AccountPickerSnapshot {
@@ -91,7 +99,7 @@ fn picker_snapshot(
         },
         runtime: ThreadRuntimeSnapshot {
             instance_epoch: epoch.to_string(),
-            snapshot: runtime_snapshot("thread-1", state_revision),
+            snapshot: runtime_snapshot(thread_id, state_revision),
             capabilities: Vec::new(),
         },
     }
@@ -119,7 +127,8 @@ fn listed_account(account_slot_id: &str, account_number: u32) -> AccountSlotSnap
 #[tokio::test]
 async fn account_snapshot_preserves_the_authoritative_catalog_domain() {
     let mut app = make_test_app().await;
-    let mut snapshot = picker_snapshot("epoch-a", 1, 1);
+    display_snapshot_thread(&mut app);
+    let mut snapshot = picker_snapshot("epoch-a", THREAD_ID, 1, 1);
     snapshot.slots.data = vec![
         listed_account("default", 1),
         listed_account("C1", 1),
@@ -140,10 +149,12 @@ async fn account_snapshot_preserves_the_authoritative_catalog_domain() {
 #[tokio::test]
 async fn authoritative_catalog_domain_change_resets_the_revision_comparison() {
     let mut app = make_test_app().await;
+    display_snapshot_thread(&mut app);
     app.account_catalog_kind = Some(AccountSlotCatalogKind::Legacy);
     app.account_registry_revision = 50;
-    app.account_runtime = Some(("epoch-a".to_string(), runtime_snapshot("thread-1", 1)));
-    let mut global = picker_snapshot("epoch-a", 1, 1);
+    app.account_inventory_epoch = Some("epoch-a".to_string());
+    app.account_runtime = Some(("epoch-a".to_string(), runtime_snapshot(THREAD_ID, 1)));
+    let mut global = picker_snapshot("epoch-a", THREAD_ID, 1, 1);
     global.slots.data = vec![listed_account("C1", 1)];
 
     assert_eq!(app.apply_account_snapshot(global), true);
@@ -152,7 +163,7 @@ async fn authoritative_catalog_domain_change_resets_the_revision_comparison() {
         (Some(AccountSlotCatalogKind::Global), 1)
     );
 
-    let mut legacy = picker_snapshot("epoch-a", 70, 1);
+    let mut legacy = picker_snapshot("epoch-a", THREAD_ID, 70, 1);
     legacy.slots.catalog_kind = AccountSlotCatalogKind::Legacy;
     legacy.slots.registry_revision = 0;
     legacy.slots.data = vec![listed_account("default", 1)];
@@ -166,11 +177,13 @@ async fn authoritative_catalog_domain_change_resets_the_revision_comparison() {
 #[tokio::test]
 async fn new_runtime_epoch_accepts_authoritative_revision_reset() {
     let mut app = make_test_app().await;
+    display_snapshot_thread(&mut app);
     app.account_registry_revision = 20;
-    app.account_runtime = Some(("epoch-a".to_string(), runtime_snapshot("thread-1", 20)));
+    app.account_inventory_epoch = Some("epoch-a".to_string());
+    app.account_runtime = Some(("epoch-a".to_string(), runtime_snapshot(THREAD_ID, 20)));
 
     assert_eq!(
-        app.apply_account_snapshot(picker_snapshot("epoch-b", 1, 1)),
+        app.apply_account_snapshot(picker_snapshot("epoch-b", THREAD_ID, 0, 1)),
         true
     );
     assert_eq!(
@@ -180,31 +193,41 @@ async fn new_runtime_epoch_accepts_authoritative_revision_reset() {
                 .as_ref()
                 .map(|(epoch, runtime)| (epoch.as_str(), runtime.state_revision)),
         ),
-        (1, Some(("epoch-b", 1)))
+        (0, Some(("epoch-b", 1)))
     );
+    assert_eq!(app.account_inventory_epoch.as_deref(), Some("epoch-b"));
 }
 
 #[tokio::test]
 async fn same_runtime_epoch_rejects_revision_regression() {
     let mut app = make_test_app().await;
+    display_snapshot_thread(&mut app);
     app.account_registry_revision = 20;
-    app.account_runtime = Some(("epoch-a".to_string(), runtime_snapshot("thread-1", 20)));
+    app.account_inventory_epoch = Some("epoch-a".to_string());
+    app.account_runtime = Some(("epoch-a".to_string(), runtime_snapshot(THREAD_ID, 20)));
 
     assert_eq!(
-        app.apply_account_snapshot(picker_snapshot("epoch-a", 19, 19)),
+        app.apply_account_snapshot(picker_snapshot("epoch-a", THREAD_ID, 19, 19)),
         false
     );
     assert_eq!(app.account_registry_revision, 20);
+
+    app.account_slots.clear();
+    app.account_slot_capability = None;
+    assert!(app.apply_account_snapshot(picker_snapshot("epoch-a", THREAD_ID, 20, 20,)));
+    assert!(app.account_slot_capability.is_some());
 }
 
 #[tokio::test]
 async fn same_runtime_epoch_merges_each_fresh_projection_independently() {
     let mut app = make_test_app().await;
+    display_snapshot_thread(&mut app);
     app.account_registry_revision = 20;
-    app.account_runtime = Some(("epoch-a".to_string(), runtime_snapshot("thread-1", 20)));
+    app.account_inventory_epoch = Some("epoch-a".to_string());
+    app.account_runtime = Some(("epoch-a".to_string(), runtime_snapshot(THREAD_ID, 20)));
 
     assert_eq!(
-        app.apply_account_snapshot(picker_snapshot("epoch-a", 19, 21)),
+        app.apply_account_snapshot(picker_snapshot("epoch-a", THREAD_ID, 19, 21)),
         false
     );
     assert_eq!(
@@ -219,6 +242,93 @@ async fn same_runtime_epoch_merges_each_fresh_projection_independently() {
 }
 
 #[tokio::test]
+async fn fresh_slots_do_not_accept_stale_runtime_capability_or_rotation() {
+    let mut app = make_test_app().await;
+    display_snapshot_thread(&mut app);
+    let accepted_rotation = ThreadAccountRotationSnapshot {
+        mode: ThreadAccountRotationMode::Fixed,
+        fixed_account_slot_id: Some("C1".to_string()),
+        automatic_account_slot_ids: Vec::new(),
+        revision: 5,
+        last_committed_account_slot_id: Some("C1".to_string()),
+        source: ThreadAccountRotationSource::Override,
+        global_profile_revision: Some(5),
+    };
+    let mut accepted_runtime = runtime_snapshot(THREAD_ID, 20);
+    accepted_runtime.account.current = Some(SessionRuntimeAccountRef {
+        account_slot_id: "C1".to_string(),
+        execution_generation: 1,
+    });
+    accepted_runtime.account.rotation = Some(accepted_rotation.clone());
+    app.account_inventory_epoch = Some("epoch-a".to_string());
+    app.account_registry_revision = 20;
+    app.account_slot_capability = Some(AccountSlotCapability {
+        available: true,
+        deny_reason: None,
+    });
+    app.account_rotation_available = true;
+    app.account_runtime = Some(("epoch-a".to_string(), accepted_runtime));
+
+    let mut partial = picker_snapshot("epoch-a", THREAD_ID, 21, 19);
+    partial.slots.data = vec![listed_account("C1", 1)];
+    partial.runtime.snapshot.account.rotation = Some(ThreadAccountRotationSnapshot {
+        mode: ThreadAccountRotationMode::RoundRobin,
+        revision: 99,
+        ..accepted_rotation.clone()
+    });
+    partial.runtime.capabilities = Vec::new();
+
+    assert!(!app.apply_account_snapshot(partial));
+    assert_eq!(app.account_registry_revision, 21);
+    assert_eq!(app.account_slots.len(), 1);
+    assert!(app.account_rotation_available);
+    assert_eq!(app.account_rotation_snapshot(), Some(&accepted_rotation));
+    assert_eq!(
+        crate::app::footer_projection::project_footer_runtime(
+            Some(THREAD_ID),
+            app.account_runtime.as_ref().map(|(_, runtime)| runtime),
+            app.account_slot_capability.as_ref(),
+            &app.account_slots,
+        )
+        .managed_slot_id
+        .as_deref(),
+        Some("C1")
+    );
+}
+
+#[tokio::test]
+async fn same_epoch_thread_change_preserves_inventory_and_rejects_foreign_slots() {
+    const THREAD_B: &str = "00000000-0000-0000-0000-000000000002";
+    let mut app = make_test_app().await;
+    display_snapshot_thread(&mut app);
+    app.account_inventory_epoch = Some("epoch-a".to_string());
+    app.account_registry_revision = 100;
+    app.account_slot_capability = Some(AccountSlotCapability {
+        available: true,
+        deny_reason: None,
+    });
+    app.account_runtime = Some(("epoch-a".to_string(), runtime_snapshot(THREAD_ID, 100)));
+
+    app.active_thread_id = Some(ThreadId::from_string(THREAD_B).expect("valid thread id"));
+    assert!(!app.apply_account_snapshot(picker_snapshot("epoch-a", THREAD_B, 1, 1,)));
+    assert_eq!(app.account_inventory_epoch.as_deref(), Some("epoch-a"));
+    assert_eq!(app.account_registry_revision, 100);
+    assert_eq!(
+        app.account_runtime.as_ref().map(|(epoch, runtime)| (
+            epoch.as_str(),
+            runtime.thread_id.as_str(),
+            runtime.state_revision,
+        )),
+        Some(("epoch-a", THREAD_B, 1))
+    );
+
+    let rejected = picker_snapshot("epoch-c", THREAD_ID, 50, 2);
+    assert!(!app.apply_account_snapshot(rejected));
+    assert_eq!(app.account_inventory_epoch.as_deref(), Some("epoch-a"));
+    assert_eq!(app.account_registry_revision, 100);
+}
+
+#[tokio::test]
 async fn rotation_is_exposed_only_with_the_matching_available_capability() {
     let rotation = ThreadAccountRotationSnapshot {
         mode: ThreadAccountRotationMode::Fixed,
@@ -230,12 +340,13 @@ async fn rotation_is_exposed_only_with_the_matching_available_capability() {
         global_profile_revision: None,
     };
     let mut app = make_test_app().await;
-    let mut hidden = picker_snapshot("epoch-a", 1, 1);
+    display_snapshot_thread(&mut app);
+    let mut hidden = picker_snapshot("epoch-a", THREAD_ID, 1, 1);
     hidden.runtime.snapshot.account.rotation = Some(rotation.clone());
     assert_eq!(app.apply_account_snapshot(hidden), true);
     assert_eq!(app.account_rotation_snapshot(), None);
 
-    let mut visible = picker_snapshot("epoch-b", 1, 1);
+    let mut visible = picker_snapshot("epoch-b", THREAD_ID, 1, 1);
     visible.runtime.snapshot.account.rotation = Some(rotation.clone());
     visible.runtime.capabilities = vec![SessionRuntimeCapability {
         name: SESSION_RUNTIME_ACCOUNT_ROTATION_CAPABILITY.to_string(),

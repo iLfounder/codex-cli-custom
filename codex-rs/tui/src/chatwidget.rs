@@ -281,6 +281,7 @@ use crate::bottom_pane::DOUBLE_PRESS_QUIT_SHORTCUT_ENABLED;
 use crate::bottom_pane::ExecApprovalRequest;
 use crate::bottom_pane::ExperimentalFeatureItem;
 use crate::bottom_pane::ExperimentalFeaturesView;
+use crate::bottom_pane::FooterRuntimeProjection;
 use crate::bottom_pane::GoalStatusIndicator;
 use crate::bottom_pane::HistoryEntry;
 use crate::bottom_pane::InputResult;

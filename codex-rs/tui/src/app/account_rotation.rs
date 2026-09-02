@@ -19,6 +19,20 @@ pub(crate) enum AccountRotationEdit {
 }
 
 impl App {
+    fn account_rotation_response_is_current(
+        &self,
+        thread_id: ThreadId,
+        instance_epoch: &str,
+    ) -> bool {
+        self.current_displayed_thread_id() == Some(thread_id)
+            && self
+                .account_runtime
+                .as_ref()
+                .is_some_and(|(epoch, runtime)| {
+                    epoch == instance_epoch && runtime.thread_id == thread_id.to_string()
+                })
+    }
+
     pub(super) fn account_rotation_snapshot(&self) -> Option<&ThreadAccountRotationSnapshot> {
         if !self.account_rotation_available {
             return None;
@@ -32,12 +46,20 @@ impl App {
         let Some(thread_id) = self.current_displayed_thread_id() else {
             return;
         };
-        if self.account_rotation_snapshot().is_none() {
+        let Some((instance_epoch, runtime)) = self
+            .account_runtime
+            .as_ref()
+            .filter(|(_, runtime)| runtime.thread_id == thread_id.to_string())
+        else {
+            return;
+        };
+        if !self.account_rotation_available || runtime.account.rotation.is_none() {
             self.chat_widget.add_error_message(
                 "Account rotation is unavailable for this app-server.".to_string(),
             );
             return;
         }
+        let instance_epoch = instance_epoch.clone();
         self.account_rotation_request_generation =
             self.account_rotation_request_generation.saturating_add(1);
         let request_generation = self.account_rotation_request_generation;
@@ -51,6 +73,7 @@ impl App {
                 .map_err(|error| error.to_string());
             app_event_tx.send(AppEvent::AccountRotationLoaded {
                 thread_id,
+                instance_epoch,
                 request_generation,
                 result,
             });
@@ -60,17 +83,20 @@ impl App {
     pub(super) fn handle_account_rotation_loaded(
         &mut self,
         thread_id: ThreadId,
+        instance_epoch: String,
         request_generation: u64,
         result: Result<codex_app_server_protocol::ThreadAccountRotationReadResponse, String>,
     ) {
         if request_generation != self.account_rotation_request_generation
-            || self.current_displayed_thread_id() != Some(thread_id)
+            || !self.account_rotation_response_is_current(thread_id, &instance_epoch)
         {
             return;
         }
         match result {
             Ok(response) => {
-                self.apply_account_rotation(thread_id, response.rotation);
+                if self.apply_account_rotation(thread_id, response.rotation) {
+                    self.sync_footer_runtime_projection();
+                }
                 self.replace_account_rotation_view_if_present();
             }
             Err(error) => {
@@ -89,12 +115,24 @@ impl App {
         let Some(thread_id) = self.current_displayed_thread_id() else {
             return;
         };
-        let Some(rotation) = self.account_rotation_snapshot().cloned() else {
+        let Some((instance_epoch, runtime)) = self
+            .account_runtime
+            .as_ref()
+            .filter(|(_, runtime)| runtime.thread_id == thread_id.to_string())
+        else {
+            return;
+        };
+        let Some(rotation) = self
+            .account_rotation_available
+            .then_some(runtime.account.rotation.clone())
+            .flatten()
+        else {
             self.chat_widget.add_error_message(
                 "Account rotation is unavailable for this app-server.".to_string(),
             );
             return;
         };
+        let instance_epoch = instance_epoch.clone();
         let expected_rotation_revision = rotation.revision;
         let mut mode = rotation.mode;
         let mut fixed_account_slot_id = rotation.fixed_account_slot_id;
@@ -128,6 +166,7 @@ impl App {
                 .map_err(|error| error.to_string());
             app_event_tx.send(AppEvent::AccountRotationUpdated {
                 thread_id,
+                instance_epoch,
                 expected_rotation_revision,
                 result,
             });
@@ -138,15 +177,19 @@ impl App {
         &mut self,
         app_server: &AppServerSession,
         thread_id: ThreadId,
+        instance_epoch: String,
         expected_rotation_revision: u64,
         result: Result<ThreadAccountRotationUpdateResponse, String>,
     ) {
-        if self.current_displayed_thread_id() != Some(thread_id) {
+        if !self.account_rotation_response_is_current(thread_id, &instance_epoch) {
             return;
         }
         match result {
             Ok(response) => {
-                self.apply_account_rotation(thread_id, response.rotation);
+                if !self.apply_account_rotation(thread_id, response.rotation) {
+                    return;
+                }
+                self.sync_footer_runtime_projection();
                 let selected_slot_id = self.selected_account_slot_id();
                 self.replace_open_account_views(selected_slot_id.as_deref());
                 self.chat_widget
@@ -165,12 +208,12 @@ impl App {
         &mut self,
         thread_id: ThreadId,
         rotation: ThreadAccountRotationSnapshot,
-    ) {
+    ) -> bool {
         if !self.account_rotation_available {
-            return;
+            return false;
         }
         let Some((_, runtime)) = self.account_runtime.as_mut() else {
-            return;
+            return false;
         };
         if runtime.thread_id != thread_id.to_string()
             || runtime
@@ -179,9 +222,10 @@ impl App {
                 .as_ref()
                 .is_some_and(|current| current.revision > rotation.revision)
         {
-            return;
+            return false;
         }
         runtime.account.rotation = Some(rotation);
+        true
     }
 }
 

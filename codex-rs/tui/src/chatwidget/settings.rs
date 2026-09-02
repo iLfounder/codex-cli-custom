@@ -267,6 +267,13 @@ impl ChatWidget {
         self.config.tui_theme = theme;
     }
 
+    /// Apply footer config to both the widget's config copy and the live renderer.
+    pub(crate) fn set_footer_config(&mut self, config: codex_config::types::TuiFooter) {
+        self.bottom_pane
+            .set_footer_config(crate::bottom_pane::FooterBoxConfig::from(&config));
+        self.config.tui_footer = config;
+    }
+
     /// Set the model in the widget's config copy and stored collaboration mode.
     pub(crate) fn set_model(&mut self, model: &str) {
         self.current_collaboration_mode = self.current_collaboration_mode.with_updates(

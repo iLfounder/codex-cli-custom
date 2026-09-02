@@ -239,6 +239,8 @@ impl App {
             .await?;
         self.apply_runtime_policy_overrides(&mut config, RuntimePolicyOverrideScope::All);
         self.config = config;
+        self.chat_widget
+            .set_footer_config(self.config.tui_footer.clone());
         self.chat_widget.sync_plugin_mentions_config(&self.config);
         Ok(())
     }
@@ -1641,6 +1643,43 @@ terminal_resize_reflow_max_rows = 9000
             app.config.terminal_resize_reflow.max_rows,
             crate::legacy_core::config::TerminalResizeReflowMaxRows::Limit(9000)
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn refresh_in_memory_config_from_disk_updates_the_live_footer_renderer() -> Result<()> {
+        let mut app = make_test_app().await;
+        let codex_home = tempdir()?;
+        app.config.codex_home = codex_home.path().to_path_buf().abs();
+        app.config.tui_footer.enabled = false;
+        app.chat_widget
+            .set_footer_config(app.config.tui_footer.clone());
+        app.chat_widget.set_footer_runtime_projection(
+            crate::bottom_pane::FooterRuntimeProjection {
+                session_id: Some("session-1".to_string()),
+                ..Default::default()
+            },
+        );
+        let disabled_height = app.chat_widget.desired_height(80);
+        std::fs::write(
+            codex_home.path().join("config.toml"),
+            r#"
+[tui.footer]
+enabled = true
+max_rows = 2
+border = "rounded"
+adapter_ids = ["session"]
+"#,
+        )?;
+
+        app.refresh_in_memory_config_from_disk().await?;
+
+        assert!(app.config.tui_footer.enabled);
+        assert_eq!(
+            app.chat_widget.config_ref().tui_footer,
+            app.config.tui_footer
+        );
+        assert!(app.chat_widget.desired_height(80) > disabled_height);
         Ok(())
     }
 

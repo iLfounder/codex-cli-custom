@@ -12,12 +12,21 @@ pub(super) fn revision_meets_lower_bound(actual: u64, minimum: u64) -> bool {
     actual >= minimum
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct RuntimeRevisionIdentity<'a> {
+    pub(super) instance_epoch: &'a str,
+    pub(super) thread_id: &'a str,
+    pub(super) state_revision: u64,
+}
+
 pub(super) fn runtime_revision_meets_lower_bound(
-    current: Option<(&str, u64)>,
-    candidate: (&str, u64),
+    current: Option<RuntimeRevisionIdentity<'_>>,
+    candidate: RuntimeRevisionIdentity<'_>,
 ) -> bool {
-    current.is_none_or(|(current_epoch, current_revision)| {
-        current_epoch != candidate.0 || revision_meets_lower_bound(candidate.1, current_revision)
+    current.is_none_or(|current| {
+        current.instance_epoch != candidate.instance_epoch
+            || current.thread_id != candidate.thread_id
+            || revision_meets_lower_bound(candidate.state_revision, current.state_revision)
     })
 }
 
@@ -128,22 +137,31 @@ impl App {
         &mut self,
         instance_epoch: String,
         mut snapshot: SessionRuntimeSnapshot,
-    ) {
+    ) -> bool {
         if !self.account_rotation_available {
             snapshot.account.rotation = None;
         }
-        if self
+        let accepted = self
             .current_displayed_thread_id()
             .is_some_and(|thread_id| snapshot.thread_id == thread_id.to_string())
             && runtime_revision_meets_lower_bound(
                 self.account_runtime
                     .as_ref()
-                    .map(|(epoch, runtime)| (epoch.as_str(), runtime.state_revision)),
-                (instance_epoch.as_str(), snapshot.state_revision),
-            )
-        {
+                    .map(|(epoch, runtime)| RuntimeRevisionIdentity {
+                        instance_epoch: epoch,
+                        thread_id: &runtime.thread_id,
+                        state_revision: runtime.state_revision,
+                    }),
+                RuntimeRevisionIdentity {
+                    instance_epoch: &instance_epoch,
+                    thread_id: &snapshot.thread_id,
+                    state_revision: snapshot.state_revision,
+                },
+            );
+        if accepted {
             self.account_runtime = Some((instance_epoch, snapshot));
         }
+        accepted
     }
 
     pub(super) fn handle_account_slot_changed(
@@ -162,13 +180,19 @@ impl App {
         {
             return AccountSlotUpdateDisposition::Stale;
         }
-        let selected_slot_id = self.selected_account_slot_id();
         if registry_revision <= self.account_registry_revision {
             return AccountSlotUpdateDisposition::Stale;
         }
-        if registry_revision != self.account_registry_revision.saturating_add(1)
+        let selected_slot_id = self.selected_account_slot_id();
+        if self.account_slot_capability.is_none()
+            || registry_revision != self.account_registry_revision.saturating_add(1)
             || slot.registry_revision != registry_revision
         {
+            self.account_registry_revision = self.account_registry_revision.max(registry_revision);
+            self.account_slots.clear();
+            self.account_slot_capability = None;
+            self.sync_footer_runtime_projection();
+            self.replace_open_account_views(selected_slot_id.as_deref());
             return AccountSlotUpdateDisposition::Gap;
         }
         self.account_registry_revision = registry_revision;
@@ -186,8 +210,22 @@ impl App {
                 .cmp(&right.account_number)
                 .then_with(|| left.account_slot_id.cmp(&right.account_slot_id))
         });
+        self.sync_footer_runtime_projection();
         self.replace_open_account_views(selected_slot_id.as_deref());
         AccountSlotUpdateDisposition::Successor
+    }
+
+    pub(super) fn handle_account_slot_inventory_changed(&mut self, registry_revision: u64) -> bool {
+        if registry_revision <= self.account_registry_revision {
+            return false;
+        }
+        let selected_slot_id = self.selected_account_slot_id();
+        self.account_registry_revision = registry_revision;
+        self.account_slots.clear();
+        self.account_slot_capability = None;
+        self.sync_footer_runtime_projection();
+        self.replace_open_account_views(selected_slot_id.as_deref());
+        true
     }
 }
 

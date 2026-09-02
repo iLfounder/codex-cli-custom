@@ -3,6 +3,7 @@
 use super::account_picker::AccountControlIntent;
 use super::account_picker::AccountPickerSnapshot;
 use super::account_picker::PendingAccountControl;
+use super::account_validation::RuntimeRevisionIdentity;
 use super::account_validation::revision_meets_lower_bound;
 use super::account_validation::runtime_revision_meets_lower_bound;
 use super::*;
@@ -15,6 +16,7 @@ use codex_app_server_protocol::AccountSlotAction;
 use codex_app_server_protocol::AccountSlotLogoutParams;
 use codex_app_server_protocol::AccountSlotLogoutResponse;
 use codex_app_server_protocol::AccountSlotStatus;
+use codex_app_server_protocol::SESSION_RUNTIME_ACCOUNT_ROTATION_CAPABILITY;
 use codex_app_server_protocol::SessionRuntimeAccountSwitchState;
 use codex_app_server_protocol::SessionRuntimeAction;
 use codex_app_server_protocol::SessionRuntimeOperation;
@@ -77,36 +79,56 @@ impl App {
                 return;
             }
         };
+        let candidate_epoch = snapshot.runtime.instance_epoch.as_str();
+        let inventory_epoch_changed =
+            self.account_inventory_epoch.as_deref() != Some(candidate_epoch);
         let catalog_changed = self
             .account_catalog_kind
             .is_some_and(|catalog_kind| catalog_kind != snapshot.slots.catalog_kind);
-        if (!catalog_changed
-            && !revision_meets_lower_bound(
-                snapshot.slots.registry_revision,
-                self.account_registry_revision,
-            ))
-            || !runtime_revision_meets_lower_bound(
+        let runtime_is_fresh = snapshot.runtime.snapshot.thread_id == thread_id.to_string()
+            && runtime_revision_meets_lower_bound(
                 self.account_runtime
                     .as_ref()
-                    .map(|(epoch, runtime)| (epoch.as_str(), runtime.state_revision)),
-                (
-                    snapshot.runtime.instance_epoch.as_str(),
-                    snapshot.runtime.snapshot.state_revision,
-                ),
-            )
+                    .map(|(epoch, runtime)| RuntimeRevisionIdentity {
+                        instance_epoch: epoch,
+                        thread_id: &runtime.thread_id,
+                        state_revision: runtime.state_revision,
+                    }),
+                RuntimeRevisionIdentity {
+                    instance_epoch: candidate_epoch,
+                    thread_id: &snapshot.runtime.snapshot.thread_id,
+                    state_revision: snapshot.runtime.snapshot.state_revision,
+                },
+            );
+        if !runtime_is_fresh
+            || (!inventory_epoch_changed
+                && !catalog_changed
+                && !revision_meets_lower_bound(
+                    snapshot.slots.registry_revision,
+                    self.account_registry_revision,
+                ))
         {
             self.chat_widget.add_error_message(
                 "Account state changed before the request. Select the action again.".to_string(),
             );
             return;
         }
+        let rotation_available = snapshot.runtime.capabilities.iter().any(|capability| {
+            capability.name == SESSION_RUNTIME_ACCOUNT_ROTATION_CAPABILITY && capability.available
+        });
+        let instance_epoch = snapshot.runtime.instance_epoch;
+        let mut runtime = snapshot.runtime.snapshot;
+        if !rotation_available {
+            runtime.account.rotation = None;
+        }
+        self.account_inventory_epoch = Some(instance_epoch.clone());
         self.account_registry_revision = snapshot.slots.registry_revision;
         self.account_catalog_kind = Some(snapshot.slots.catalog_kind);
         self.account_slots = snapshot.slots.data;
         self.account_slot_capability = Some(snapshot.slots.multi_account);
-        let instance_epoch = snapshot.runtime.instance_epoch;
-        let runtime = snapshot.runtime.snapshot;
+        self.account_rotation_available = rotation_available;
         self.account_runtime = Some((instance_epoch.clone(), runtime.clone()));
+        self.sync_footer_runtime_projection();
         match intent {
             AccountControlIntent::Login { slot_id, method } => {
                 self.start_account_login(app_server, thread_id, instance_epoch, slot_id, method);
