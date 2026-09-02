@@ -29,6 +29,10 @@ The fork makes account selection, thread ownership, session handoff, and externa
 | U13 (P022–P023) | Final telemetry/compaction and MCP convergence, Codex-owned quota failover/rotation, and invocation readiness handshake. |
 | U14 (P024) | Supervised canonical control plane, account-neutral local UDS, global lifecycle APIs, reconnect-safe clients, and bounded OAuth callback compatibility. |
 | U15 (P025 + reconciliation) | Managed-slot binding before fresh canonical threads, inherited resume/fork bindings, multi-row `FooterBox`/`FooterAdapter`, multiplexer-aware Windows terminal rendering, bounded post-ready JSONL terminal failures, Runtime Artifact v2 reconciliation, and Windows security hardening. |
+| U16 | Typed, bounded bootstrap and `turn/start` post-ready failure classification for `codex exec --json`. |
+| U17 | Shared owner-root binding to the canonical default account without exposing credential identity. |
+| U18 | Admitted-turn response stream disconnects remain outcome-unknown/no-replay `turn.failed` events. |
+| U19 | Production wiring from App-accepted runtime/inventory state into the semantic footer, plus restoration of the legacy top-level post-ready JSONL error wire. |
 
 The app-server exposes opaque account references and sanitized session state. It never stores external workflow roles, group IDs, or user handles.
 Session-runtime identity keeps only a source kind and the literal `<workspace>` marker; it does not
@@ -58,6 +62,10 @@ The TUI keeps the upstream `tui.status_line` contract and adds an optional multi
 session/runtime state, quota, rotation, and debug fields can be composed without giving the
 footer access to credentials or performing I/O. Unknown adapter IDs are ignored and managed
 accounts are represented by opaque slot identifiers.
+U19 derives managed account number, slot ID, health, and quota only when the accepted runtime's
+current slot exactly matches the current authoritative sanitized inventory. Epoch, revision, and
+thread fences leave mismatches and stale state empty; config reloads update the live footer while
+preserving the existing account and official-status-line projections.
 
 Example configuration:
 
@@ -72,6 +80,17 @@ adapter_ids = ["official-statusline", "account", "session", "quota"]
 
 `max_rows` may be increased for additional rows; a disabled footer leaves the native status
 line unchanged.
+
+## `codex exec --json` terminal errors
+
+After `invocation.ready` has actually been emitted, pre-semantic bootstrap or `turn/start` failure
+emits and flushes exactly one top-level `{"type":"error","message":"..."}` event. The bounded
+messages are `codex_exec_bootstrap_failed`, `codex_exec_turn_start_server_failed`,
+`codex_exec_turn_start_transport_failed`, and `codex_exec_turn_start_deserialize_failed`.
+Bootstrap/server failures are confirmed non-admitting; transport/deserialization outcomes are
+unknown and must not be replayed automatically. This is distinct from an admitted-turn response
+stream disconnect, which remains the U18 `turn.failed` event with message
+`codex_exec_response_stream_disconnected`, also outcome-unknown/no-replay.
 
 ## Quota-aware latency and capacity
 
@@ -88,14 +107,14 @@ same model/reasoning effort, prewarm setting, proxy/TLS path, and concurrency wh
 
 ## Apply and build
 
-Apply the sixteen logical patches only to the exact upstream commit:
+Apply the nineteen logical patches only to the exact upstream commit:
 
 ```sh
 git checkout 316795b3cf2a45e90d121d9f46499d4658b2645c
 /path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD" rust-v0.152.0
 ```
 
-The applier requires a clean tree, verifies every patch digest, applies U01–U15 in order, and
+The applier requires a clean tree, verifies every patch digest, applies U01–U19 in order, and
 verifies the final Git tree. The historical `rust-v0.149.0` and `rust-v0.148.0` series remain
 available by passing their series name explicitly. The script needs a POSIX shell, Git, `sed`,
 `awk`, and either `shasum` or `sha256sum`.
@@ -159,12 +178,13 @@ Stop every older TUI and app-server sharing the store. Start the 0.152 build onc
 
 ## Repository layout
 
-- `custom-patches/rust-v0.152.0/`: current sixteen-patch ordered series and digest manifest
+- `custom-patches/rust-v0.152.0/`: current nineteen-patch ordered series and digest manifest
 - `custom-patches/rust-v0.151.0/`: preserved historical fifteen-patch series
 - `custom-patches/rust-v0.149.0/`: preserved historical ordered series
 - `custom-patches/rust-v0.148.0/`: previous series retained for reproducibility
 - `custom-patches/apply-series.sh`: clean-tree patch applier
 - `.github/workflows/build-custom-macos-arm64.yml`: manual macOS arm64 build
+- `.github/workflows/build-custom-windows-x64.yml`: manual Windows x64 build
 
 ## License
 

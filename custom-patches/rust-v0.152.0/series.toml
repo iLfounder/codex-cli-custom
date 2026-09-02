@@ -1,7 +1,7 @@
 schema_version = 1
 applies_to = "rust-v0.152.0"
 base_commit = "316795b3cf2a45e90d121d9f46499d4658b2645c"
-final_tree = "472b3064736ec925ba3a6b62e326b0b77defc6f9"
+final_tree = "7d877940c1fd9eac1ae6251ce521547b46458402"
 
 [[patches]]
 number = "U01"
@@ -92,3 +92,8 @@ sha256 = "b7749cecbb9be833bb0d7fe576dd79df0148826cc3ef55367783aec40353a8e6"
 number = "U18"
 file = "0018-U18-preserve-response-stream-disconnect-outcome.patch"
 sha256 = "b8ea6fc378f247c48f61b81313575e1a4f20b1ef16220a076ee75e811645ca20"
+
+[[patches]]
+number = "U19"
+file = "0019-U19-wire-footer-and-restore-post-ready-error.patch"
+sha256 = "ce16a0c821fce1e7bba955692f1519e12250b579a98f59223280008c73f3db38"
