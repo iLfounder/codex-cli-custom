@@ -274,6 +274,7 @@ use super::footer_box::FooterBox;
 use super::footer_box::FooterBoxConfig;
 use super::footer_box::FooterBoxLayout;
 use super::footer_box::FooterSnapshot;
+use super::footer_projection::FooterLiveContext;
 use super::footer_projection::FooterRuntimeProjection;
 use super::mentions_v2::MentionV2Popup;
 use super::mentions_v2::MentionV2Selection;
@@ -1556,6 +1557,14 @@ impl ChatComposer {
     /// Update only the display-safe account projection in the footer snapshot.
     pub(crate) fn set_footer_account(&mut self, email: Option<String>, plan: Option<String>) {
         self.footer_box.set_account(email, plan);
+    }
+
+    pub(crate) fn set_footer_live_context(&mut self, context: FooterLiveContext) {
+        self.footer_box.set_live_context(context);
+    }
+
+    pub(crate) fn reset_footer_thread_context(&mut self) {
+        self.footer_box.reset_thread_context();
     }
 
     pub(crate) fn set_remote_image_urls(&mut self, urls: Vec<String>) {

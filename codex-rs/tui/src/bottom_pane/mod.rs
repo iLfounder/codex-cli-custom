@@ -130,6 +130,7 @@ pub(crate) use footer::GoalStatusIndicator;
 pub(crate) use footer::goal_status_indicator_line;
 pub(crate) use footer_box::FooterBoxConfig;
 pub(crate) use footer_box::FooterSnapshot;
+pub(crate) use footer_projection::FooterLiveContext;
 pub(crate) use footer_projection::FooterRuntimeProjection;
 pub(crate) use list_selection_view::ColumnWidthMode;
 pub(crate) use list_selection_view::ListSelectionView;
@@ -377,6 +378,16 @@ impl BottomPane {
     /// Update only display-safe account fields in the semantic footer snapshot.
     pub(crate) fn set_footer_account(&mut self, email: Option<String>, plan: Option<String>) {
         self.composer.set_footer_account(email, plan);
+        self.request_redraw();
+    }
+
+    pub(crate) fn set_footer_live_context(&mut self, context: FooterLiveContext) {
+        self.composer.set_footer_live_context(context);
+        self.request_redraw();
+    }
+
+    pub(crate) fn reset_footer_thread_context(&mut self) {
+        self.composer.reset_footer_thread_context();
         self.request_redraw();
     }
 

@@ -3854,9 +3854,11 @@
           "default": {
             "adapter_ids": [],
             "border": "none",
+            "colors": {},
             "enabled": false,
             "layout": "stacked",
-            "max_rows": 1
+            "max_rows": 1,
+            "rows": []
           },
           "description": "Opt-in semantic contextual footer box. Disabled by default to preserve the legacy footer."
         },
@@ -4547,6 +4549,14 @@
           "default": "none",
           "description": "Border style. Defaults to `none`."
         },
+        "colors": {
+          "additionalProperties": {
+            "$ref": "#/definitions/TuiFooterColor"
+          },
+          "default": {},
+          "description": "Optional per-variable colors used by declarative rows.",
+          "type": "object"
+        },
         "enabled": {
           "default": false,
           "description": "Enable the contextual footer box. Defaults to `false`.",
@@ -4568,6 +4578,14 @@
           "maximum": 64.0,
           "minimum": 1.0,
           "type": "integer"
+        },
+        "rows": {
+          "default": [],
+          "description": "Ordered declarative rows. When non-empty, these rows take precedence over `adapter_ids`.",
+          "items": {
+            "$ref": "#/definitions/TuiFooterRow"
+          },
+          "type": "array"
         }
       },
       "type": "object"
@@ -4605,6 +4623,22 @@
         }
       ]
     },
+    "TuiFooterColor": {
+      "description": "Finite terminal-safe palette for declarative footer variables.",
+      "enum": [
+        "plain",
+        "dim",
+        "red",
+        "green",
+        "yellow",
+        "blue",
+        "magenta",
+        "cyan",
+        "white",
+        "gray"
+      ],
+      "type": "string"
+    },
     "TuiFooterLayout": {
       "description": "Row arrangement for semantic footer contributions.",
       "oneOf": [
@@ -4623,6 +4657,51 @@
           "type": "string"
         }
       ]
+    },
+    "TuiFooterRow": {
+      "additionalProperties": false,
+      "description": "One ordered declarative footer row with independent left and right lanes.",
+      "properties": {
+        "left": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/TuiFooterVariable"
+          },
+          "type": "array"
+        },
+        "right": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/TuiFooterVariable"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "TuiFooterVariable": {
+      "description": "Display-safe values that can be placed in a declarative footer row.",
+      "enum": [
+        "model",
+        "reasoning_effort",
+        "account_email",
+        "account_plan",
+        "account_slot",
+        "account_slot_label",
+        "account_slot_health",
+        "quota",
+        "session_id",
+        "session_id_short",
+        "session_name",
+        "handle",
+        "thread_id",
+        "thread_name",
+        "display_handle",
+        "runtime_state",
+        "rotation_state",
+        "context_usage"
+      ],
+      "type": "string"
     },
     "TuiGlobalKeymap": {
       "additionalProperties": false,

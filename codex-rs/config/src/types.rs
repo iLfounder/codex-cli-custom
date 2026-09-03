@@ -742,6 +742,59 @@ pub enum TuiFooterLayout {
     Compact,
 }
 
+/// Display-safe values that can be placed in a declarative footer row.
+#[derive(
+    Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TuiFooterVariable {
+    Model,
+    ReasoningEffort,
+    AccountEmail,
+    AccountPlan,
+    AccountSlot,
+    AccountSlotLabel,
+    AccountSlotHealth,
+    Quota,
+    SessionId,
+    SessionIdShort,
+    SessionName,
+    Handle,
+    ThreadId,
+    ThreadName,
+    DisplayHandle,
+    RuntimeState,
+    RotationState,
+    ContextUsage,
+}
+
+/// One ordered declarative footer row with independent left and right lanes.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct TuiFooterRow {
+    #[serde(default)]
+    pub left: Vec<TuiFooterVariable>,
+
+    #[serde(default)]
+    pub right: Vec<TuiFooterVariable>,
+}
+
+/// Finite terminal-safe palette for declarative footer variables.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TuiFooterColor {
+    Plain,
+    Dim,
+    Red,
+    Green,
+    Yellow,
+    Blue,
+    Magenta,
+    Cyan,
+    White,
+    Gray,
+}
+
 /// Opt-in semantic footer presentation settings.
 ///
 /// The footer is disabled by default. When enabled, the composer can reserve and render up to
@@ -772,6 +825,14 @@ pub struct TuiFooter {
     /// accepted as an alias for callers that prefer the shorter spelling.
     #[serde(default, rename = "adapter_ids", alias = "adapters")]
     pub adapter_ids: Vec<String>,
+
+    /// Ordered declarative rows. When non-empty, these rows take precedence over `adapter_ids`.
+    #[serde(default)]
+    pub rows: Vec<TuiFooterRow>,
+
+    /// Optional per-variable colors used by declarative rows.
+    #[serde(default)]
+    pub colors: BTreeMap<TuiFooterVariable, TuiFooterColor>,
 }
 
 const fn default_tui_footer_max_rows() -> u16 {
@@ -786,6 +847,8 @@ impl Default for TuiFooter {
             border: TuiFooterBorder::default(),
             layout: TuiFooterLayout::default(),
             adapter_ids: Vec::new(),
+            rows: Vec::new(),
+            colors: BTreeMap::new(),
         }
     }
 }

@@ -95,6 +95,7 @@ async fn accepted_c2_state_is_unchanged_by_stale_c1_events() {
     assert!(app.handle_account_runtime_changed("epoch-a".to_string(), runtime(2, "C2")));
     let accepted = project_footer_runtime(
         Some(THREAD_ID),
+        Some("Current thread"),
         app.account_runtime.as_ref().map(|(_, runtime)| runtime),
         app.account_slot_capability.as_ref(),
         &app.account_slots,
@@ -105,11 +106,19 @@ async fn accepted_c2_state_is_unchanged_by_stale_c1_events() {
             accepted.managed_slot_id.as_deref(),
             accepted.managed_slot_health.as_deref(),
             accepted.managed_slot_quota.as_deref(),
+            accepted.thread_name.as_deref(),
         ),
-        (Some("2"), Some("C2"), Some("healthy"), Some("Week 68%"))
+        (
+            Some("2"),
+            Some("C2"),
+            Some("healthy"),
+            Some("Week 68%"),
+            Some("Current thread"),
+        )
     );
     let mismatched = project_footer_runtime(
         Some(THREAD_ID),
+        Some("Current thread"),
         Some(&runtime(2, "C3")),
         app.account_slot_capability.as_ref(),
         &app.account_slots,
@@ -126,6 +135,7 @@ async fn accepted_c2_state_is_unchanged_by_stale_c1_events() {
     assert!(
         project_footer_runtime(
             Some(THREAD_ID),
+            Some("Current thread"),
             app.account_runtime.as_ref().map(|(_, runtime)| runtime),
             None,
             &app.account_slots,
@@ -156,6 +166,7 @@ async fn accepted_c2_state_is_unchanged_by_stale_c1_events() {
     );
     let after_stale = project_footer_runtime(
         Some(THREAD_ID),
+        Some("Current thread"),
         app.account_runtime.as_ref().map(|(_, runtime)| runtime),
         app.account_slot_capability.as_ref(),
         &app.account_slots,
@@ -163,6 +174,29 @@ async fn accepted_c2_state_is_unchanged_by_stale_c1_events() {
 
     assert_eq!(accepted, after_stale);
     assert_eq!(after_stale.managed_slot_id.as_deref(), Some("C2"));
+}
+
+#[test]
+fn cached_thread_identity_projects_without_runtime_and_ignores_runtime_name() {
+    let mut stale_runtime = runtime(3, "C1");
+    stale_runtime.identity.name = Some("Stale runtime name".to_string());
+
+    let without_runtime =
+        project_footer_runtime(Some(THREAD_ID), Some("Cached rename"), None, None, &[]);
+    let with_runtime = project_footer_runtime(
+        Some(THREAD_ID),
+        Some("Cached rename"),
+        Some(&stale_runtime),
+        None,
+        &[],
+    );
+
+    assert_eq!(without_runtime.thread_id.as_deref(), Some(THREAD_ID));
+    assert_eq!(
+        without_runtime.thread_name.as_deref(),
+        Some("Cached rename")
+    );
+    assert_eq!(with_runtime.thread_name.as_deref(), Some("Cached rename"));
 }
 
 #[tokio::test]

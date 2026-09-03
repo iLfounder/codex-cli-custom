@@ -471,6 +471,7 @@ impl ChatWidget {
         self.sync_backend_banner_view();
         self.refresh_model_display();
         self.refresh_status_line();
+        self.sync_footer_live_context();
     }
 
     fn apply_thread_settings(&mut self, mut settings: ThreadSettings) {

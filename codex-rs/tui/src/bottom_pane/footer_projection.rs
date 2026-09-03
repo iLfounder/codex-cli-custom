@@ -14,3 +14,12 @@ pub(crate) struct FooterRuntimeProjection {
     pub(crate) runtime_state: Option<String>,
     pub(crate) rotation_state: Option<String>,
 }
+
+/// ChatWidget-owned footer fields refreshed at existing model and usage commit seams.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FooterLiveContext {
+    pub(crate) model: Option<String>,
+    pub(crate) reasoning_effort: Option<String>,
+    pub(crate) handle: Option<String>,
+    pub(crate) context_usage: Option<String>,
+}

@@ -284,6 +284,7 @@ impl ChatWidget {
         let account_plan = account_plan.or_else(|| widget.plan_type.map(plan_type_display_name));
         let footer_snapshot = FooterSnapshot::new().with_account(account_email, account_plan);
         widget.bottom_pane.set_footer_snapshot(footer_snapshot);
+        widget.sync_footer_live_context();
 
         widget.prefetch_rate_limits();
         if let Some(keymap) = runtime_keymap {

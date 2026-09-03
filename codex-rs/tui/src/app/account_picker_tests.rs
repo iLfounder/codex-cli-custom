@@ -286,6 +286,7 @@ async fn fresh_slots_do_not_accept_stale_runtime_capability_or_rotation() {
     assert_eq!(
         crate::app::footer_projection::project_footer_runtime(
             Some(THREAD_ID),
+            /*displayed_thread_name*/ None,
             app.account_runtime.as_ref().map(|(_, runtime)| runtime),
             app.account_slot_capability.as_ref(),
             &app.account_slots,

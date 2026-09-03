@@ -10,7 +10,10 @@ use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
 use crate::render::renderable::Renderable;
 use codex_config::types::TuiFooter;
 use codex_config::types::TuiFooterBorder;
+use codex_config::types::TuiFooterColor;
 use codex_config::types::TuiFooterLayout;
+use codex_config::types::TuiFooterRow;
+use codex_config::types::TuiFooterVariable;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Stylize;
@@ -24,6 +27,7 @@ use ratatui::widgets::Widget;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use super::footer_projection::FooterLiveContext;
 use super::footer_projection::FooterRuntimeProjection;
 
 /// Adapter IDs understood by the footer registry.
@@ -36,6 +40,7 @@ pub(crate) const THREAD_ADAPTER_ID: &str = "thread";
 pub(crate) const RUNTIME_ADAPTER_ID: &str = "runtime";
 pub(crate) const ROTATION_ADAPTER_ID: &str = "rotation";
 pub(crate) const DEBUG_ADAPTER_ID: &str = "debug";
+const CONFIGURED_ADAPTER_ID: &str = "configured";
 
 const DEFAULT_ADAPTER_IDS: [&str; 8] = [
     OFFICIAL_STATUSLINE_ADAPTER_ID,
@@ -77,6 +82,10 @@ impl FooterStatusValue {
 /// replace the whole snapshot on [`FooterBox`] when an event updates the visible state.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct FooterSnapshot {
+    /// Current ChatWidget-owned model and reasoning selections.
+    pub(crate) model: Option<String>,
+    pub(crate) reasoning_effort: Option<String>,
+
     /// Values exposed by the existing `/statusline` implementation.
     pub(crate) official_status: Vec<FooterStatusValue>,
 
@@ -94,12 +103,16 @@ pub(crate) struct FooterSnapshot {
     /// Generic session/thread identifiers and labels.
     pub(crate) session_id: Option<String>,
     pub(crate) session_name: Option<String>,
+    pub(crate) handle: Option<String>,
     pub(crate) thread_id: Option<String>,
     pub(crate) thread_name: Option<String>,
 
     /// Generic runtime and rotation state labels supplied by the TUI state owner.
     pub(crate) runtime_state: Option<String>,
     pub(crate) rotation_state: Option<String>,
+
+    /// Current context-window usage display value owned by ChatWidget.
+    pub(crate) context_usage: Option<String>,
 
     /// Optional bounded text reserved for the explicit debug adapter.
     pub(crate) debug: Option<String>,
@@ -109,6 +122,8 @@ impl FooterSnapshot {
     /// Return an empty snapshot.  Empty snapshots produce no semantic footer rows.
     pub(crate) const fn new() -> Self {
         Self {
+            model: None,
+            reasoning_effort: None,
             official_status: Vec::new(),
             primary_account_email: None,
             primary_account_plan: None,
@@ -118,10 +133,12 @@ impl FooterSnapshot {
             managed_slot_quota: None,
             session_id: None,
             session_name: None,
+            handle: None,
             thread_id: None,
             thread_name: None,
             runtime_state: None,
             rotation_state: None,
+            context_usage: None,
             debug: None,
         }
     }
@@ -164,6 +181,15 @@ impl FooterSnapshot {
     pub(crate) fn with_account(mut self, email: Option<String>, plan: Option<String>) -> Self {
         self.primary_account_email = sanitize_optional(email);
         self.primary_account_plan = sanitize_optional(plan);
+        self
+    }
+
+    /// Set ChatWidget-owned live values without changing account or runtime projections.
+    pub(crate) fn with_live_context(mut self, context: FooterLiveContext) -> Self {
+        self.model = sanitize_optional(context.model);
+        self.reasoning_effort = sanitize_optional(context.reasoning_effort);
+        self.handle = sanitize_optional(context.handle);
+        self.context_usage = sanitize_optional(context.context_usage);
         self
     }
 
@@ -232,6 +258,8 @@ impl FooterSnapshot {
     /// Return a sanitized copy, useful when a snapshot was assembled with struct fields directly.
     pub(crate) fn sanitized(self) -> Self {
         Self {
+            model: sanitize_optional(self.model),
+            reasoning_effort: sanitize_optional(self.reasoning_effort),
             official_status: self
                 .official_status
                 .into_iter()
@@ -245,10 +273,12 @@ impl FooterSnapshot {
             managed_slot_quota: sanitize_optional(self.managed_slot_quota),
             session_id: sanitize_optional(self.session_id),
             session_name: sanitize_optional(self.session_name),
+            handle: sanitize_optional(self.handle),
             thread_id: sanitize_optional(self.thread_id),
             thread_name: sanitize_optional(self.thread_name),
             runtime_state: sanitize_optional(self.runtime_state),
             rotation_state: sanitize_optional(self.rotation_state),
+            context_usage: sanitize_optional(self.context_usage),
             debug: sanitize_optional(self.debug),
         }
     }
@@ -300,6 +330,28 @@ pub(crate) enum FooterTextStyle {
     Accent,
     Success,
     Warning,
+    Red,
+    Blue,
+    Magenta,
+    White,
+    Gray,
+}
+
+impl From<TuiFooterColor> for FooterTextStyle {
+    fn from(value: TuiFooterColor) -> Self {
+        match value {
+            TuiFooterColor::Plain => Self::Plain,
+            TuiFooterColor::Dim => Self::Dim,
+            TuiFooterColor::Red => Self::Red,
+            TuiFooterColor::Green => Self::Success,
+            TuiFooterColor::Yellow => Self::Warning,
+            TuiFooterColor::Blue => Self::Blue,
+            TuiFooterColor::Magenta => Self::Magenta,
+            TuiFooterColor::Cyan => Self::Accent,
+            TuiFooterColor::White => Self::White,
+            TuiFooterColor::Gray => Self::Gray,
+        }
+    }
 }
 
 /// A semantic piece of footer text.
@@ -406,18 +458,13 @@ impl FooterModel {
 
 /// Border style used by the TUI renderer after converting config values into local presentation
 /// types.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub(crate) enum FooterBorderStyle {
+    #[default]
     None,
     Plain,
     Rounded,
     Double,
-}
-
-impl Default for FooterBorderStyle {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 impl From<TuiFooterBorder> for FooterBorderStyle {
@@ -431,16 +478,11 @@ impl From<TuiFooterBorder> for FooterBorderStyle {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub(crate) enum FooterLayoutStyle {
+    #[default]
     Stacked,
     Compact,
-}
-
-impl Default for FooterLayoutStyle {
-    fn default() -> Self {
-        Self::Stacked
-    }
 }
 
 impl From<TuiFooterLayout> for FooterLayoutStyle {
@@ -460,6 +502,8 @@ pub(crate) struct FooterBoxConfig {
     pub(crate) border: FooterBorderStyle,
     pub(crate) layout: FooterLayoutStyle,
     pub(crate) adapter_ids: Vec<String>,
+    pub(crate) rows: Vec<TuiFooterRow>,
+    pub(crate) colors: BTreeMap<TuiFooterVariable, TuiFooterColor>,
 }
 
 impl Default for FooterBoxConfig {
@@ -470,6 +514,8 @@ impl Default for FooterBoxConfig {
             border: FooterBorderStyle::None,
             layout: FooterLayoutStyle::Stacked,
             adapter_ids: Vec::new(),
+            rows: Vec::new(),
+            colors: BTreeMap::new(),
         }
     }
 }
@@ -482,6 +528,8 @@ impl From<&TuiFooter> for FooterBoxConfig {
             border: value.border.into(),
             layout: value.layout.into(),
             adapter_ids: value.adapter_ids.clone(),
+            rows: value.rows.clone(),
+            colors: value.colors.clone(),
         }
     }
 }
@@ -571,7 +619,7 @@ impl std::fmt::Debug for FooterBox {
 
 impl FooterBox {
     pub(crate) fn new(config: FooterBoxConfig) -> Self {
-        let adapters = adapters_for_ids(&config.adapter_ids);
+        let adapters = adapters_for_config(&config);
         Self {
             config,
             snapshot: FooterSnapshot::new(),
@@ -594,8 +642,11 @@ impl FooterBox {
     }
 
     pub(crate) fn set_config(&mut self, config: FooterBoxConfig) {
-        if self.config.adapter_ids != config.adapter_ids {
-            self.adapters = adapters_for_ids(&config.adapter_ids);
+        if self.config.adapter_ids != config.adapter_ids
+            || self.config.rows != config.rows
+            || self.config.colors != config.colors
+        {
+            self.adapters = adapters_for_config(&config);
         }
         self.config = config;
     }
@@ -617,6 +668,27 @@ impl FooterBox {
     /// Synchronize display-safe account fields without exposing credential/runtime state.
     pub(crate) fn set_account(&mut self, email: Option<String>, plan: Option<String>) {
         self.set_snapshot(self.snapshot.clone().with_account(email, plan));
+    }
+
+    /// Synchronize ChatWidget-owned live values without changing runtime/account state.
+    pub(crate) fn set_live_context(&mut self, context: FooterLiveContext) {
+        self.set_snapshot(self.snapshot.clone().with_live_context(context));
+    }
+
+    /// Clear every value owned by the previous thread while retaining global account identity.
+    pub(crate) fn reset_thread_context(&mut self) {
+        // Legacy adapters did not reset their accepted projection during SessionConfigured. Keep
+        // that path byte-for-byte compatible; declarative rows are the only consumers of the new
+        // thread-owned fields that require eager clearing during a transition.
+        if self.config.rows.is_empty() {
+            return;
+        }
+        self.snapshot = FooterSnapshot {
+            primary_account_email: self.snapshot.primary_account_email.clone(),
+            primary_account_plan: self.snapshot.primary_account_plan.clone(),
+            official_status: self.snapshot.official_status.clone(),
+            ..FooterSnapshot::new()
+        };
     }
 
     pub(crate) fn set_adapters(&mut self, adapters: Vec<Arc<dyn FooterAdapter>>) {
@@ -886,6 +958,11 @@ fn segment_span(segment: &FooterSegment) -> Span<'static> {
         FooterTextStyle::Accent => Span::from(segment.text.clone()).cyan(),
         FooterTextStyle::Success => Span::from(segment.text.clone()).green(),
         FooterTextStyle::Warning => Span::from(segment.text.clone()).yellow(),
+        FooterTextStyle::Red => Span::from(segment.text.clone()).red(),
+        FooterTextStyle::Blue => Span::from(segment.text.clone()).blue(),
+        FooterTextStyle::Magenta => Span::from(segment.text.clone()).magenta(),
+        FooterTextStyle::White => Span::from(segment.text.clone()).white(),
+        FooterTextStyle::Gray => Span::from(segment.text.clone()).gray(),
     }
 }
 
@@ -903,6 +980,16 @@ fn render_border(style: FooterBorderStyle, area: Rect, buf: &mut Buffer) {
         .borders(Borders::ALL)
         .border_type(border_type)
         .render(area, buf);
+}
+
+fn adapters_for_config(config: &FooterBoxConfig) -> Vec<Arc<dyn FooterAdapter>> {
+    if !config.rows.is_empty() {
+        return vec![Arc::new(ConfiguredAdapter {
+            rows: config.rows.clone(),
+            colors: config.colors.clone(),
+        })];
+    }
+    adapters_for_ids(&config.adapter_ids)
 }
 
 fn adapters_for_ids(ids: &[String]) -> Vec<Arc<dyn FooterAdapter>> {
@@ -935,6 +1022,93 @@ fn adapter_for_id(id: &str) -> Option<Arc<dyn FooterAdapter>> {
         DEBUG_ADAPTER_ID => Some(Arc::new(DebugAdapter)),
         _ => None,
     }
+}
+
+struct ConfiguredAdapter {
+    rows: Vec<TuiFooterRow>,
+    colors: BTreeMap<TuiFooterVariable, TuiFooterColor>,
+}
+
+impl FooterAdapter for ConfiguredAdapter {
+    fn id(&self) -> &'static str {
+        CONFIGURED_ADAPTER_ID
+    }
+
+    fn contribute(&self, snapshot: &FooterSnapshot, out: &mut Vec<FooterContribution>) {
+        for (row, configured) in self.rows.iter().enumerate() {
+            for (lane, variables) in [
+                (FooterLane::Left, configured.left.as_slice()),
+                (FooterLane::Right, configured.right.as_slice()),
+            ] {
+                if variables.is_empty() {
+                    continue;
+                }
+                let segments = variables
+                    .iter()
+                    .map(|variable| {
+                        let text = configured_variable_text(*variable, snapshot);
+                        let style = self
+                            .colors
+                            .get(variable)
+                            .copied()
+                            .unwrap_or(TuiFooterColor::Plain)
+                            .into();
+                        FooterSegment::styled(text, style)
+                    })
+                    .collect();
+                out.push(FooterContribution::new(
+                    row,
+                    lane,
+                    u8::try_from(row).unwrap_or(u8::MAX),
+                    segments,
+                ));
+            }
+        }
+    }
+}
+
+fn configured_variable_text(variable: TuiFooterVariable, snapshot: &FooterSnapshot) -> String {
+    const NOT_AVAILABLE: &str = "N/A";
+
+    let value = match variable {
+        TuiFooterVariable::Model => snapshot.model.clone(),
+        TuiFooterVariable::ReasoningEffort => snapshot.reasoning_effort.clone(),
+        TuiFooterVariable::AccountEmail => snapshot
+            .primary_account_email
+            .as_ref()
+            .map(|value| format!("Account {value}")),
+        TuiFooterVariable::AccountPlan => snapshot
+            .primary_account_plan
+            .as_ref()
+            .map(|value| format!("Plan {value}")),
+        TuiFooterVariable::AccountSlot => snapshot.managed_slot_id.clone(),
+        TuiFooterVariable::AccountSlotLabel => snapshot
+            .managed_slot_label
+            .as_ref()
+            .map(|value| format!("Slot {value}")),
+        TuiFooterVariable::AccountSlotHealth => snapshot.managed_slot_health.clone(),
+        TuiFooterVariable::Quota => snapshot
+            .managed_slot_quota
+            .as_ref()
+            .map(|value| format!("Quota {value}")),
+        TuiFooterVariable::SessionId => snapshot.session_id.clone(),
+        TuiFooterVariable::SessionIdShort => snapshot
+            .session_id
+            .as_ref()
+            .map(|value| value.chars().take(8).collect()),
+        TuiFooterVariable::SessionName => snapshot.session_name.clone(),
+        TuiFooterVariable::Handle => snapshot.handle.clone(),
+        TuiFooterVariable::ThreadId => snapshot.thread_id.clone(),
+        TuiFooterVariable::ThreadName => snapshot.thread_name.clone(),
+        TuiFooterVariable::DisplayHandle => snapshot
+            .handle
+            .clone()
+            .or_else(|| snapshot.session_name.clone()),
+        TuiFooterVariable::RuntimeState => snapshot.runtime_state.clone(),
+        TuiFooterVariable::RotationState => snapshot.rotation_state.clone(),
+        TuiFooterVariable::ContextUsage => snapshot.context_usage.clone(),
+    };
+    value.unwrap_or_else(|| NOT_AVAILABLE.to_string())
 }
 
 struct OfficialStatuslineAdapter;

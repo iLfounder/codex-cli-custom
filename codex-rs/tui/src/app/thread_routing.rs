@@ -1066,6 +1066,13 @@ impl App {
                 .await
                 .map_err(color_eyre::eyre::Report::msg)?;
         }
+        if let ServerNotification::ThreadNameUpdated(update) = &notification
+            && let Ok(notification_thread_id) = ThreadId::from_string(&update.thread_id)
+            && notification_thread_id == thread_id
+        {
+            self.update_cached_thread_name(thread_id, update.thread_name.clone())
+                .await;
+        }
         let inferred_session = if let ServerNotification::ThreadStarted(started) = &notification
             && self.primary_session_configured.is_some()
         {
@@ -1800,6 +1807,11 @@ impl App {
                         | ServerNotification::ThreadTokenUsageUpdated(_)
                 )
         );
+        let needs_footer_projection = matches!(
+            &event,
+            ThreadBufferedEvent::Notification(notification)
+                if matches!(notification.as_ref(), ServerNotification::ThreadNameUpdated(_))
+        );
         match event {
             ThreadBufferedEvent::Notification(notification) => {
                 self.cache_collab_receiver_threads_for_notification(notification.as_ref());
@@ -1833,9 +1845,17 @@ impl App {
         if needs_refresh {
             self.refresh_status_line();
         }
+        if needs_footer_projection {
+            self.sync_footer_runtime_projection();
+        }
     }
 
     pub(super) fn handle_thread_event_replay(&mut self, event: ThreadBufferedEvent) {
+        let needs_footer_projection = matches!(
+            &event,
+            ThreadBufferedEvent::Notification(notification)
+                if matches!(notification.as_ref(), ServerNotification::ThreadNameUpdated(_))
+        );
         match event {
             ThreadBufferedEvent::Notification(notification) => self
                 .chat_widget
@@ -1858,6 +1878,9 @@ impl App {
             ThreadBufferedEvent::FeedbackSubmission(event) => {
                 self.handle_feedback_thread_event(event);
             }
+        }
+        if needs_footer_projection {
+            self.sync_footer_runtime_projection();
         }
     }
 

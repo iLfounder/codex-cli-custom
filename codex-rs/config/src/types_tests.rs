@@ -10,6 +10,59 @@ fn tui_footer_defaults_to_disabled_single_borderless_row() {
     assert_eq!(footer.border, TuiFooterBorder::None);
     assert_eq!(footer.layout, TuiFooterLayout::Stacked);
     assert!(footer.adapter_ids.is_empty());
+    assert!(footer.rows.is_empty());
+    assert!(footer.colors.is_empty());
+}
+
+#[test]
+fn tui_footer_parses_typed_rows_and_colors() {
+    let footer: TuiFooter = toml::from_str(
+        r#"
+rows = [
+  { left = ["model", "reasoning_effort"], right = ["account_slot"] },
+  { left = ["display_handle", "session_id_short"], right = ["account_plan"] },
+]
+
+[colors]
+model = "cyan"
+reasoning_effort = "magenta"
+account_slot = "green"
+"#,
+    )
+    .expect("typed footer should deserialize");
+
+    assert_eq!(footer.rows.len(), 2);
+    assert_eq!(
+        footer.rows[0].left,
+        vec![TuiFooterVariable::Model, TuiFooterVariable::ReasoningEffort]
+    );
+    assert_eq!(footer.rows[0].right, vec![TuiFooterVariable::AccountSlot]);
+    assert_eq!(
+        footer.rows[1].left,
+        vec![
+            TuiFooterVariable::DisplayHandle,
+            TuiFooterVariable::SessionIdShort
+        ]
+    );
+    assert_eq!(footer.rows[1].right, vec![TuiFooterVariable::AccountPlan]);
+    assert_eq!(
+        footer.colors,
+        BTreeMap::from([
+            (TuiFooterVariable::Model, TuiFooterColor::Cyan),
+            (TuiFooterVariable::ReasoningEffort, TuiFooterColor::Magenta,),
+            (TuiFooterVariable::AccountSlot, TuiFooterColor::Green),
+        ])
+    );
+}
+
+#[test]
+fn tui_footer_rejects_unknown_variables_and_colors() {
+    let unknown_variable =
+        toml::from_str::<TuiFooter>(r#"rows = [{ left = ["credential_path"] }]"#);
+    let unknown_color = toml::from_str::<TuiFooter>("[colors]\nmodel = \"ansi-31\"\n");
+
+    assert!(unknown_variable.is_err());
+    assert!(unknown_color.is_err());
 }
 
 #[test]

@@ -19,6 +19,25 @@ fn legacy_api_path(path: &impl serde::Serialize) -> LegacyAppPathString {
 }
 
 impl App {
+    pub(super) async fn update_cached_thread_name(
+        &mut self,
+        thread_id: ThreadId,
+        thread_name: Option<String>,
+    ) {
+        if let Some(session) = self.primary_session_configured.as_mut()
+            && session.thread_id == thread_id
+        {
+            session.thread_name = thread_name.clone();
+        }
+
+        if let Some(channel) = self.thread_event_channels.get(&thread_id) {
+            let mut store = channel.store.lock().await;
+            if let Some(session) = store.session.as_mut() {
+                session.thread_name = thread_name;
+            }
+        }
+    }
+
     pub(super) async fn sync_active_thread_service_tier_to_cached_session(&mut self) {
         let Some(active_thread_id) = self.active_thread_id else {
             return;
@@ -249,6 +268,84 @@ mod tests {
             message_history: None,
             network_proxy: None,
         }
+    }
+
+    #[tokio::test]
+    async fn accepted_thread_name_updates_primary_and_event_cache_together() {
+        let mut app = make_test_app().await;
+        let thread_id = ThreadId::new();
+        let session = test_thread_session(thread_id, test_path_buf("/tmp/main"));
+        app.primary_session_configured = Some(session.clone());
+        app.thread_event_channels.insert(
+            thread_id,
+            ThreadEventChannel::new_with_session(/*capacity*/ 4, session, Vec::new()),
+        );
+
+        app.update_cached_thread_name(thread_id, Some("Renamed thread".to_string()))
+            .await;
+
+        assert_eq!(
+            app.primary_session_configured
+                .as_ref()
+                .and_then(|session| session.thread_name.as_deref()),
+            Some("Renamed thread")
+        );
+        let store = app
+            .thread_event_channels
+            .get(&thread_id)
+            .expect("thread channel")
+            .store
+            .lock()
+            .await;
+        assert_eq!(
+            store
+                .session
+                .as_ref()
+                .and_then(|session| session.thread_name.as_deref()),
+            Some("Renamed thread")
+        );
+    }
+
+    #[tokio::test]
+    async fn footer_name_sync_uses_primary_then_side_session_cache() {
+        let mut app = make_test_app().await;
+        let primary_thread_id = ThreadId::new();
+        let side_thread_id = ThreadId::new();
+        let mut primary_session =
+            test_thread_session(primary_thread_id, test_path_buf("/tmp/main"));
+        primary_session.thread_name = Some("Cached primary".to_string());
+        app.primary_thread_id = Some(primary_thread_id);
+        app.active_thread_id = Some(primary_thread_id);
+        app.primary_session_configured = Some(primary_session.clone());
+
+        let mut stale_primary_widget = primary_session;
+        stale_primary_widget.thread_name = Some("Stale widget primary".to_string());
+        app.chat_widget.handle_thread_session(stale_primary_widget);
+        app.sync_footer_runtime_projection_for_thread(primary_thread_id);
+        assert_eq!(
+            app.chat_widget.thread_name().as_deref(),
+            Some("Cached primary")
+        );
+
+        let mut side_session = test_thread_session(side_thread_id, test_path_buf("/tmp/side"));
+        side_session.thread_name = Some("Cached side".to_string());
+        app.thread_event_channels.insert(
+            side_thread_id,
+            ThreadEventChannel::new_with_session(
+                /*capacity*/ 4,
+                side_session.clone(),
+                Vec::new(),
+            ),
+        );
+        app.active_thread_id = Some(side_thread_id);
+        let mut stale_side_widget = side_session;
+        stale_side_widget.thread_name = Some("Stale widget side".to_string());
+        app.chat_widget.handle_thread_session(stale_side_widget);
+        app.sync_footer_runtime_projection_for_thread(side_thread_id);
+        assert_eq!(
+            app.chat_widget.thread_name().as_deref(),
+            Some("Cached side")
+        );
     }
 
     #[tokio::test]

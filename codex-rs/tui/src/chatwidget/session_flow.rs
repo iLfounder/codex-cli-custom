@@ -22,6 +22,7 @@ impl ChatWidget {
         fork_parent_title: Option<String>,
     ) {
         self.transcript.reset_copy_history();
+        self.bottom_pane.reset_footer_thread_context();
         let history_metadata = session.message_history.unwrap_or_default();
         self.bottom_pane.set_history_metadata(
             session.thread_id,
@@ -142,6 +143,7 @@ impl ChatWidget {
         self.bottom_pane
             .set_active_reasoning_effort_baseline(effort.as_ref());
         self.refresh_model_display();
+        self.sync_footer_live_context();
         self.refresh_status_surfaces();
         self.sync_service_tier_commands();
         self.sync_personality_command_enabled();
@@ -286,6 +288,20 @@ impl ChatWidget {
     pub(crate) fn expect_manual_thread_name(&mut self, thread_id: ThreadId, name: String) {
         if self.thread_id == Some(thread_id) {
             self.thread_name = Some(name);
+            self.refresh_status_surfaces();
+            self.request_redraw();
+        }
+    }
+
+    /// Synchronize the visible name from the App-owned cached session without emitting a rename
+    /// confirmation for a value that was already accepted.
+    pub(crate) fn sync_cached_thread_name(
+        &mut self,
+        thread_id: ThreadId,
+        thread_name: Option<String>,
+    ) {
+        if self.thread_id == Some(thread_id) && self.thread_name != thread_name {
+            self.thread_name = thread_name;
             self.refresh_status_surfaces();
             self.request_redraw();
         }

@@ -90,6 +90,23 @@ impl ChatWidget {
         self.bottom_pane.set_footer_runtime_projection(projection);
     }
 
+    /// Refresh the declarative footer values owned directly by ChatWidget.
+    pub(crate) fn sync_footer_live_context(&mut self) {
+        let context_usage = self.token_info.as_ref().and_then(|_| {
+            self.status_line_context_used_percent()
+                .map(|used| format!("Context {used}% used"))
+        });
+        let context = FooterLiveContext {
+            model: Some(self.current_model().to_string()),
+            reasoning_effort: self
+                .effective_reasoning_effort()
+                .map(|effort| effort.as_str().to_string()),
+            handle: None,
+            context_usage,
+        };
+        self.bottom_pane.set_footer_live_context(context);
+    }
+
     /// Recomputes footer status-line content from config and current runtime state.
     ///
     /// This method is the status-line orchestrator: it parses configured item identifiers,
