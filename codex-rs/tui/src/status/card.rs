@@ -321,8 +321,10 @@ impl StatusHistoryCell {
             config_entries.push(("reasoning effort", effort_value));
             config_entries.push((
                 "reasoning summaries",
-                config
-                    .model_reasoning_summary
+                runtime_display
+                    .map_or(config.model_reasoning_summary, |runtime| {
+                        runtime.reasoning_summary
+                    })
                     .map(|summary| summary.to_string())
                     .unwrap_or_else(|| "auto".to_string()),
             ));

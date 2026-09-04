@@ -102,6 +102,44 @@ pub(super) struct CachedProjectRootName {
 }
 
 impl ChatWidget {
+    /// Project the visible runtime's settings into an isolated title or recap request.
+    pub(crate) fn temporary_structured_thread_options(
+        &self,
+        app_server: &crate::app_server_session::AppServerSession,
+        model: String,
+    ) -> crate::temporary_structured_request::TemporaryStructuredThreadOptions {
+        let (model_provider, active_permission_profile, mcp_server_names) =
+            if app_server.uses_remote_workspace() {
+                (
+                    self.remote_runtime_status
+                        .as_ref()
+                        .map(|runtime| runtime.model_provider_id().to_string()),
+                    self.remote_active_permission_profile_id(),
+                    Vec::new(),
+                )
+            } else {
+                (
+                    Some(self.config.model_provider_id.clone()),
+                    self.config
+                        .permissions
+                        .active_permission_profile()
+                        .map(|profile| profile.id),
+                    self.config.mcp_servers.get().keys().cloned().collect(),
+                )
+            };
+        crate::temporary_structured_request::TemporaryStructuredThreadOptions {
+            model,
+            model_provider,
+            cwd: self
+                .current_remote_cwd
+                .clone()
+                .or_else(|| app_server.remote_cwd_override().cloned())
+                .unwrap_or_else(|| self.server_cwd()),
+            active_permission_profile,
+            mcp_server_names,
+        }
+    }
+
     fn status_surface_selections(&self) -> StatusSurfaceSelections {
         let (status_line_items, invalid_status_line_items) = self.status_line_items_with_invalids();
         let (terminal_title_items, invalid_terminal_title_items) =
@@ -165,7 +203,7 @@ impl ChatWidget {
             let cwd = self.server_cwd();
             self.sync_status_line_branch_state(&cwd);
             if !self.status_line_branch_lookup_complete {
-                self.request_status_line_branch(cwd, self.status_line_local_cwd().to_path_buf());
+                self.request_status_line_branch(cwd);
             }
         }
 
@@ -177,10 +215,7 @@ impl ChatWidget {
             let cwd = self.server_cwd();
             self.sync_status_line_git_summary_state(&cwd);
             if !self.status_line_git_summary_lookup_complete {
-                self.request_status_line_git_summary(
-                    cwd,
-                    self.status_line_local_cwd().to_path_buf(),
-                );
+                self.request_status_line_git_summary(cwd);
             }
         }
 
@@ -405,7 +440,7 @@ impl ChatWidget {
         }
         let cwd = self.server_cwd();
         self.sync_status_line_branch_state(&cwd);
-        self.request_status_line_branch(cwd, self.status_line_local_cwd().to_path_buf());
+        self.request_status_line_branch(cwd);
     }
 
     pub(super) fn request_status_line_git_summary_refresh(&mut self) {
@@ -415,7 +450,7 @@ impl ChatWidget {
         }
         let cwd = self.server_cwd();
         self.sync_status_line_git_summary_state(&cwd);
-        self.request_status_line_git_summary(cwd, self.status_line_local_cwd().to_path_buf());
+        self.request_status_line_git_summary(cwd);
     }
 
     /// Parses configured status-line ids into known items and collects unknown ids.
@@ -532,6 +567,17 @@ impl ChatWidget {
         ))
     }
 
+    pub(super) fn invalidate_status_line_git_state(&mut self) {
+        self.status_line_branch_cwd = None;
+        self.status_line_branch = None;
+        self.status_line_branch_pending = false;
+        self.status_line_branch_lookup_complete = false;
+        self.status_line_git_summary_cwd = None;
+        self.status_line_git_summary = None;
+        self.status_line_git_summary_pending = false;
+        self.status_line_git_summary_lookup_complete = false;
+    }
+
     /// Resets git-branch cache state when the status-line cwd changes.
     ///
     /// The branch cache is keyed by cwd because branch lookup is performed relative to that path.
@@ -570,8 +616,10 @@ impl ChatWidget {
     fn request_status_line_branch(
         &mut self,
         cwd: codex_utils_path_uri::LegacyAppPathString,
-        command_cwd: PathBuf,
     ) {
+        if !self.workspace_requests_ready() {
+            return;
+        }
         if self.status_line_branch_pending {
             return;
         }
@@ -581,17 +629,20 @@ impl ChatWidget {
         };
         self.status_line_branch_pending = true;
         let tx = self.app_event_tx.clone();
+        let generation = self.connector_scope_generation();
         tokio::spawn(async move {
-            let branch = branch_summary::current_branch_name(runner.as_ref(), &command_cwd).await;
-            tx.send(AppEvent::StatusLineBranchUpdated { cwd, branch });
+            let branch = branch_summary::current_branch_name(runner.as_ref(), &cwd).await;
+            tx.send(AppEvent::StatusLineBranchUpdated { cwd, generation, branch });
         });
     }
 
     fn request_status_line_git_summary(
         &mut self,
         cwd: codex_utils_path_uri::LegacyAppPathString,
-        command_cwd: PathBuf,
     ) {
+        if !self.workspace_requests_ready() {
+            return;
+        }
         if self.status_line_git_summary_pending {
             return;
         }
@@ -601,10 +652,11 @@ impl ChatWidget {
         };
         self.status_line_git_summary_pending = true;
         let tx = self.app_event_tx.clone();
+        let generation = self.connector_scope_generation();
         tokio::spawn(async move {
             let summary =
-                branch_summary::status_line_git_summary(runner.as_ref(), &command_cwd).await;
-            tx.send(AppEvent::StatusLineGitSummaryUpdated { cwd, summary });
+                branch_summary::status_line_git_summary(runner.as_ref(), &cwd).await;
+            tx.send(AppEvent::StatusLineGitSummaryUpdated { cwd, generation, summary });
         });
     }
 

@@ -170,9 +170,32 @@ impl App {
                     .chat_widget
                     .add_error_message(format!("Logout failed after session release: {error}")),
             },
-            AppEvent::SkillsListLoaded { ref cwd, .. }
-            | AppEvent::PluginMentionsLoaded { ref cwd, .. }
-                if cwds_differ(cwd, self.config.cwd.as_path()) => {}
+            AppEvent::SetHookEnabled { ref scope, .. }
+            | AppEvent::TrustHook { ref scope, .. }
+            | AppEvent::TrustHooks { ref scope, .. }
+            | AppEvent::OpenMarketplaceAddLoading { ref scope, .. }
+            | AppEvent::OpenMarketplaceRemoveLoading { ref scope, .. }
+            | AppEvent::OpenMarketplaceUpgradeLoading { ref scope, .. }
+            | AppEvent::OpenPluginDetailLoading { ref scope, .. }
+            | AppEvent::OpenPluginInstallLoading { ref scope, .. }
+            | AppEvent::OpenPluginUninstallLoading { ref scope, .. }
+            | AppEvent::FetchPluginsList { ref scope, .. }
+            | AppEvent::FetchHooksList { ref scope, .. }
+            | AppEvent::PluginsLoaded { ref scope, .. }
+            | AppEvent::OpenPluginsList { ref scope, .. }
+            | AppEvent::PluginRemoteSectionsLoaded { ref scope, .. }
+            | AppEvent::HooksLoaded { ref scope, .. }
+            | AppEvent::FetchMarketplaceAdd { ref scope, .. }
+            | AppEvent::FetchMarketplaceRemove { ref scope, .. }
+            | AppEvent::FetchMarketplaceUpgrade { ref scope, .. }
+            | AppEvent::FetchPluginDetail { ref scope, .. }
+            | AppEvent::PluginDetailLoaded { ref scope, .. }
+            | AppEvent::FetchPluginInstall { ref scope, .. }
+            | AppEvent::FetchPluginUninstall { ref scope, .. }
+            | AppEvent::SetPluginEnabled { ref scope, .. }
+            | AppEvent::PluginMentionsLoaded { ref scope, .. }
+            | AppEvent::SkillsListLoaded { ref scope, .. }
+                if !self.chat_widget.matches_workspace_request_scope(scope) => {}
             AppEvent::NewSession { name } => {
                 self.start_fresh_session_with_summary_hint(
                     tui, app_server, /*session_start_source*/ None,
@@ -933,8 +956,8 @@ impl App {
                 self.enqueue_thread_history_entry_response(thread_id, event)
                     .await?;
             }
-            AppEvent::DiffResult(cwd, text) => {
-                if cwds_differ(&cwd, self.chat_widget.config_ref().cwd.as_path()) {
+            AppEvent::DiffResult { scope, text } => {
+                if !self.chat_widget.matches_workspace_request_scope(&scope) {
                     return Ok(AppRunControl::Continue);
                 }
                 // Clear the in-progress state in the bottom pane
@@ -1034,16 +1057,16 @@ impl App {
             AppEvent::PluginInstallAuthAbandon => {
                 self.chat_widget.abandon_plugin_install_auth_flow();
             }
-            AppEvent::FetchPluginsList { cwd } => {
+            AppEvent::FetchPluginsList { cwd, .. } => {
                 self.fetch_plugins_list(app_server, cwd);
             }
-            AppEvent::FetchHooksList { cwd } => {
+            AppEvent::FetchHooksList { cwd, .. } => {
                 self.fetch_hooks_list(app_server, cwd);
             }
             AppEvent::OpenMarketplaceAddPrompt => {
                 self.chat_widget.open_marketplace_add_prompt();
             }
-            AppEvent::OpenMarketplaceAddLoading { source } => {
+            AppEvent::OpenMarketplaceAddLoading { source, .. } => {
                 self.chat_widget.open_marketplace_add_loading_popup(&source);
             }
             AppEvent::OpenMarketplaceRemoveConfirm {
@@ -1057,42 +1080,48 @@ impl App {
             }
             AppEvent::OpenMarketplaceRemoveLoading {
                 marketplace_display_name,
+                ..
             } => {
                 self.chat_widget
                     .open_marketplace_remove_loading_popup(&marketplace_display_name);
             }
-            AppEvent::OpenMarketplaceUpgradeLoading { marketplace_name } => {
+            AppEvent::OpenMarketplaceUpgradeLoading { marketplace_name, .. } => {
                 self.chat_widget
                     .open_marketplace_upgrade_loading_popup(marketplace_name.as_deref());
             }
             AppEvent::OpenPluginDetailLoading {
                 plugin_display_name,
+                ..
             } => {
                 self.chat_widget
                     .open_plugin_detail_loading_popup(&plugin_display_name);
             }
             AppEvent::OpenPluginInstallLoading {
                 plugin_display_name,
+                ..
             } => {
                 self.chat_widget
                     .open_plugin_install_loading_popup(&plugin_display_name);
             }
             AppEvent::OpenPluginUninstallLoading {
                 plugin_display_name,
+                ..
             } => {
                 self.chat_widget
                     .open_plugin_uninstall_loading_popup(&plugin_display_name);
             }
-            AppEvent::PluginsLoaded { cwd, result } => {
+            AppEvent::PluginsLoaded { cwd, result, marketplace_management, .. } => {
+                self.chat_widget.on_marketplace_management_loaded(marketplace_management);
                 self.chat_widget.on_plugins_loaded(cwd, result);
             }
-            AppEvent::OpenPluginsList { cwd, response } => {
+            AppEvent::OpenPluginsList { cwd, response, .. } => {
                 self.chat_widget.open_plugins_list(cwd, response);
             }
             AppEvent::PluginRemoteSectionsLoaded {
                 cwd,
                 marketplaces,
                 section_errors,
+                ..
             } => {
                 self.chat_widget.on_plugin_remote_sections_loaded(
                     cwd,
@@ -1100,19 +1129,21 @@ impl App {
                     section_errors,
                 );
             }
-            AppEvent::HooksLoaded { cwd, result } => {
+            AppEvent::HooksLoaded { cwd, result, .. } => {
                 self.chat_widget.on_hooks_loaded(cwd, result);
             }
             AppEvent::FetchMarketplaceAdd {
                 cwd,
                 remote_cwd,
                 source,
+                ..
             } => {
                 self.fetch_marketplace_add(app_server, cwd, remote_cwd, source);
             }
             AppEvent::FetchMarketplaceUpgrade {
                 cwd,
                 marketplace_name,
+                ..
             } => {
                 self.fetch_marketplace_upgrade(app_server, cwd, marketplace_name);
             }
@@ -1121,7 +1152,11 @@ impl App {
                 remote_cwd,
                 source,
                 result,
+                scope,
             } => {
+                if self.report_stale_workspace_mutation(&scope, "Marketplace addition", result.as_ref().map(|_| ())) {
+                    return Ok(AppRunControl::Continue);
+                }
                 let add_succeeded = result.is_ok();
                 self.chat_widget.on_marketplace_add_loaded(
                     cwd.clone(),
@@ -1139,7 +1174,10 @@ impl App {
                     self.fetch_plugins_list(app_server, cwd);
                 }
             }
-            AppEvent::MarketplaceUpgradeLoaded { cwd, result } => {
+            AppEvent::MarketplaceUpgradeLoaded { cwd, result, scope } => {
+                if self.report_stale_workspace_mutation(&scope, "Marketplace upgrade", result.as_ref().map(|_| ())) {
+                    return Ok(AppRunControl::Continue);
+                }
                 let marketplace_contents_changed =
                     matches!(&result, Ok(response) if !response.upgraded_roots.is_empty());
                 if marketplace_contents_changed {
@@ -1155,6 +1193,7 @@ impl App {
                 cwd,
                 marketplace_name,
                 marketplace_display_name,
+                ..
             } => {
                 self.fetch_marketplace_remove(
                     app_server,
@@ -1168,7 +1207,11 @@ impl App {
                 marketplace_name,
                 marketplace_display_name,
                 result,
+                scope,
             } => {
+                if self.report_stale_workspace_mutation(&scope, "Marketplace removal", result.as_ref().map(|_| ())) {
+                    return Ok(AppRunControl::Continue);
+                }
                 let remove_succeeded = result.is_ok();
                 self.chat_widget.on_marketplace_remove_loaded(
                     cwd.clone(),
@@ -1182,10 +1225,10 @@ impl App {
                     self.fetch_plugins_list(app_server, cwd);
                 }
             }
-            AppEvent::FetchPluginDetail { cwd, params } => {
+            AppEvent::FetchPluginDetail { cwd, params, .. } => {
                 self.fetch_plugin_detail(app_server, cwd, params);
             }
-            AppEvent::PluginDetailLoaded { cwd, result } => {
+            AppEvent::PluginDetailLoaded { cwd, result, .. } => {
                 self.chat_widget.on_plugin_detail_loaded(cwd, result);
             }
             AppEvent::FetchPluginInstall {
@@ -1193,6 +1236,7 @@ impl App {
                 location,
                 plugin_name,
                 plugin_display_name,
+                ..
             } => {
                 self.fetch_plugin_install(
                     app_server,
@@ -1206,6 +1250,7 @@ impl App {
                 cwd,
                 plugin_id,
                 plugin_display_name,
+                ..
             } => {
                 self.fetch_plugin_uninstall(app_server, cwd, plugin_id, plugin_display_name);
             }
@@ -1213,6 +1258,7 @@ impl App {
                 cwd,
                 plugin_id,
                 enabled,
+                ..
             } => {
                 self.set_plugin_enabled(app_server, cwd, plugin_id, enabled);
             }
@@ -1222,7 +1268,11 @@ impl App {
                 plugin_name,
                 plugin_display_name,
                 result,
+                scope,
             } => {
+                if self.report_stale_workspace_mutation(&scope, "Plugin installation", result.as_ref().map(|_| ())) {
+                    return Ok(AppRunControl::Continue);
+                }
                 let install_succeeded = result.is_ok();
                 if install_succeeded {
                     self.refresh_plugin_mentions_after_config_write();
@@ -1257,16 +1307,21 @@ impl App {
                 plugin_id,
                 enabled,
                 result,
+                scope,
             } => {
+                let key = (scope.clone(), plugin_id.clone());
+                let current_scope = self.chat_widget.matches_workspace_request_scope(&scope);
                 let queued_enabled = self
                     .pending_plugin_enabled_writes
-                    .get_mut(&plugin_id)
+                    .get_mut(&key)
                     .and_then(Option::take);
                 let should_apply_result = if let Some(queued_enabled) = queued_enabled
+                    && current_scope
                     && (result.is_err() || queued_enabled != enabled)
                 {
                     self.spawn_plugin_enabled_write(
                         app_server,
+                        scope.clone(),
                         cwd.clone(),
                         plugin_id.clone(),
                         queued_enabled,
@@ -1276,7 +1331,10 @@ impl App {
                     true
                 };
                 if should_apply_result {
-                    self.pending_plugin_enabled_writes.remove(&plugin_id);
+                    self.pending_plugin_enabled_writes.remove(&key);
+                    if self.report_stale_workspace_mutation(&scope, "Plugin setting update", result.as_ref().map(|_| ())) {
+                        return Ok(AppRunControl::Continue);
+                    }
                     let update_succeeded = result.is_ok();
                     if update_succeeded {
                         self.refresh_plugin_mentions_after_config_write();
@@ -2459,7 +2517,11 @@ impl App {
                 plugin_id: _plugin_id,
                 plugin_display_name,
                 result,
+                scope,
             } => {
+                if self.report_stale_workspace_mutation(&scope, "Plugin removal", result.as_ref().map(|_| ())) {
+                    return Ok(AppRunControl::Continue);
+                }
                 let uninstall_succeeded = result.is_ok();
                 if uninstall_succeeded {
                     self.refresh_plugin_mentions_after_config_write();
@@ -3023,40 +3085,50 @@ impl App {
                     }
                 }
             }
-            AppEvent::SetHookEnabled { key, enabled } => {
+            AppEvent::SetHookEnabled { key, enabled, .. } => {
                 self.set_hook_enabled(app_server, key, enabled);
             }
-            AppEvent::TrustHook { key, current_hash } => {
+            AppEvent::TrustHook { key, current_hash, .. } => {
                 self.trust_hook(app_server, key, current_hash);
             }
-            AppEvent::TrustHooks { updates } => {
+            AppEvent::TrustHooks { updates, .. } => {
                 self.trust_hooks(app_server, updates);
             }
             AppEvent::HookEnabledSet {
+                scope,
                 key,
                 enabled,
                 result,
             } => {
+                let request_key = (scope.clone(), key.clone());
+                let current_scope = self.chat_widget.matches_workspace_request_scope(&scope);
                 let queued_enabled = self
                     .pending_hook_enabled_writes
-                    .get_mut(&key)
+                    .get_mut(&request_key)
                     .and_then(Option::take);
                 let should_apply_result = if let Some(queued_enabled) = queued_enabled
+                    && current_scope
                     && (result.is_err() || queued_enabled != enabled)
                 {
-                    self.spawn_hook_enabled_write(app_server, key.clone(), queued_enabled);
+                    self.spawn_hook_enabled_write(app_server, scope.clone(), key.clone(), queued_enabled);
                     false
                 } else {
                     true
                 };
                 if should_apply_result {
-                    self.pending_hook_enabled_writes.remove(&key);
+                    self.pending_hook_enabled_writes.remove(&request_key);
+                    if self.report_stale_workspace_mutation(&scope, "Hook setting update", result.as_ref().map(|_| ())) {
+                        return Ok(AppRunControl::Continue);
+                    }
                     if let Err(err) = result {
                         self.chat_widget.add_error_message(err);
                     }
                 }
             }
-            AppEvent::HookTrusted { result } => {
+            AppEvent::HookTrusted { scope, result } => {
+                if self.report_stale_workspace_mutation(&scope, "Hook trust update", result.as_ref().map(|_| ())) {
+                    return Ok(AppRunControl::Continue);
+                }
                 if let Err(err) = result {
                     self.chat_widget.add_error_message(err);
                 }
@@ -3191,12 +3263,12 @@ impl App {
                     }
                 }
             }
-            AppEvent::StatusLineBranchUpdated { cwd, branch } => {
-                self.chat_widget.set_status_line_branch(cwd, branch);
+            AppEvent::StatusLineBranchUpdated { cwd, generation, branch } => {
+                self.chat_widget.set_status_line_branch(cwd, generation, branch);
                 self.refresh_status_line();
             }
-            AppEvent::StatusLineGitSummaryUpdated { cwd, summary } => {
-                self.chat_widget.set_status_line_git_summary(cwd, summary);
+            AppEvent::StatusLineGitSummaryUpdated { cwd, generation, summary } => {
+                self.chat_widget.set_status_line_git_summary(cwd, generation, summary);
                 self.refresh_status_line();
             }
             AppEvent::StatusLineWorkspaceHeadlineUpdated { request_id, result } => {
@@ -3448,7 +3520,7 @@ impl App {
         }
     }
 
-    fn refresh_plugin_mentions_after_config_write(&mut self) {
+    pub(super) fn refresh_plugin_mentions_after_config_write(&mut self) {
         self.invalidate_plugin_command_catalog();
         self.app_event_tx.send(AppEvent::RefreshPluginCommands);
         self.chat_widget.refresh_plugin_mentions();

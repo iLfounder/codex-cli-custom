@@ -2,13 +2,14 @@
 
 use super::*;
 use crate::app_event::ConnectorsSnapshot;
+use crate::app_event::WorkspaceRequestScope;
 use std::sync::atomic::AtomicU64;
 
 /// Prevents stale requests from matching a replacement widget for the same thread.
 static NEXT_CONNECTOR_SCOPE_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 /// Identifies one account-, workspace-, and thread-scoped connector state.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub(crate) struct ConnectorScopeGeneration(u64);
 
 #[derive(Debug, Clone, Default)]
@@ -100,6 +101,17 @@ impl ChatWidget {
         self.connectors.generation
     }
 
+    pub(crate) fn workspace_request_scope(&self) -> WorkspaceRequestScope {
+        WorkspaceRequestScope {
+            cwd: self.server_cwd(),
+            generation: self.connector_scope_generation(),
+        }
+    }
+
+    pub(crate) fn matches_workspace_request_scope(&self, scope: &WorkspaceRequestScope) -> bool {
+        self.workspace_requests_ready() && self.workspace_request_scope() == *scope
+    }
+
     /// Revoke cached app data and pending work before its account or thread changes.
     pub(crate) fn invalidate_connector_scope(&mut self) {
         let generation = ConnectorScopeGeneration(
@@ -109,6 +121,21 @@ impl ChatWidget {
             generation,
             ..Default::default()
         };
+        self.plugins_fetch_state = Default::default();
+        self.plugins_cache = Default::default();
+        self.plugin_remote_sections_loading = false;
+        self.plugin_remote_sections_loaded = false;
+        self.plugin_remote_section_errors.clear();
+        self.plugin_install_apps_needing_auth.clear();
+        self.plugin_install_auth_flow = None;
+        self.bottom_pane
+            .dismiss_view_by_id(super::plugins::PLUGINS_SELECTION_VIEW_ID);
+        self.bottom_pane
+            .dismiss_view_by_id(crate::bottom_pane::HooksBrowserView::VIEW_ID);
+        self.bottom_pane.set_plugin_mentions(None);
+        self.skills_all.clear();
+        self.set_skills(None);
+        self.invalidate_status_line_git_state();
         self.bottom_pane.set_connectors_snapshot(/*snapshot*/ None);
         self.bottom_pane
             .dismiss_view_by_id(CONNECTORS_SELECTION_VIEW_ID);

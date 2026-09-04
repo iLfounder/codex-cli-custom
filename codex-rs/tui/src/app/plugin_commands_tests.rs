@@ -25,7 +25,10 @@ fn catalog_subject(
         instance_epoch: "epoch".to_string(),
         account_slot_id: Some(account_slot_id.to_string()),
         execution_generation: Some(execution_generation),
-        cwd: PathBuf::from("/workspace"),
+        workspace: WorkspaceRequestScope {
+            cwd: LegacyAppPathString::from_string("/workspace"),
+            generation: Default::default(),
+        },
         invalidation_generation,
     }
 }

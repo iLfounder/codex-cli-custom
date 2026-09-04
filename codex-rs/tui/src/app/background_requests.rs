@@ -41,6 +41,34 @@ const WORKSPACE_HEADLINE_FETCH_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(/*millis*/ 2000);
 
 impl App {
+    /// Report a completed write without applying its old workspace projection to the active UI.
+    pub(super) fn report_stale_workspace_mutation(
+        &mut self,
+        scope: &crate::app_event::WorkspaceRequestScope,
+        operation: &str,
+        result: Result<(), &String>,
+    ) -> bool {
+        if self.chat_widget.matches_workspace_request_scope(scope) {
+            return false;
+        }
+        let cwd = scope.cwd.as_str();
+        match result {
+            Ok(()) => {
+                self.chat_widget.add_info_message(
+                    format!("{operation} completed in the previous workspace ({cwd})."),
+                    None,
+                );
+                // The write may affect shared config. Re-read the active scope; never apply
+                // the old response or continue an old popup's install/auth flow here.
+                self.refresh_plugin_mentions_after_config_write();
+            }
+            Err(error) => self.chat_widget.add_error_message(format!(
+                "{operation} failed in the previous workspace ({cwd}): {error}"
+            )),
+        }
+        true
+    }
+
     pub(super) fn fetch_mcp_inventory(
         &mut self,
         app_server: &AppServerSession,
@@ -265,6 +293,10 @@ impl App {
     /// app-server RPC finishes. User-initiated skills refreshes still use the blocking app command path so
     /// callers that explicitly asked for fresh skill state do not race ahead of their own refresh.
     pub(super) fn refresh_startup_skills(&mut self, app_server: &AppServerSession) {
+        if !self.chat_widget.workspace_requests_ready() {
+            return;
+        }
+        let scope = self.chat_widget.workspace_request_scope();
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         let cwd = self.config.cwd.to_path_buf();
@@ -273,7 +305,7 @@ impl App {
             let result = fetch_skills_list(request_handle, request_cwd)
                 .await
                 .map_err(|err| format!("{err:#}"));
-            app_event_tx.send(AppEvent::SkillsListLoaded { cwd, result });
+            app_event_tx.send(AppEvent::SkillsListLoaded { scope, cwd, result });
         });
     }
 
@@ -306,6 +338,11 @@ impl App {
     }
 
     pub(super) fn fetch_plugins_list(&mut self, app_server: &AppServerSession, cwd: PathBuf) {
+        if !self.chat_widget.workspace_requests_ready() {
+            return;
+        }
+        let remote = app_server.uses_remote_workspace();
+        let scope = self.chat_widget.workspace_request_scope();
         self.chat_widget.on_plugins_list_fetch_started(cwd.clone());
         let request_cwd = self.chat_widget.server_cwd();
         let request_handle = app_server.request_handle();
@@ -313,11 +350,23 @@ impl App {
         let plugin_sharing_enabled = self.config.features.enabled(Feature::PluginSharing);
         let remote_plugin_enabled = self.config.features.enabled(Feature::RemotePlugin);
         tokio::spawn(async move {
-            let result = fetch_plugins_list(request_handle.clone(), request_cwd.clone())
-                .await
-                .map_err(|err| err.to_string());
+            let (result, marketplace_management) = tokio::join!(
+                fetch_plugins_list(request_handle.clone(), request_cwd.clone()),
+                async {
+                    if remote {
+                        Some(crate::marketplace_management::fetch_marketplace_management(
+                            request_handle.clone(), request_cwd.clone(),
+                        ).await)
+                    } else {
+                        None
+                    }
+                },
+            );
+            let result = result.map_err(|err| err.to_string());
             let should_fetch_additional_remote_sections = result.is_ok();
             app_event_tx.send(AppEvent::PluginsLoaded {
+                marketplace_management,
+                scope: scope.clone(),
                 cwd: cwd.clone(),
                 result,
             });
@@ -330,6 +379,7 @@ impl App {
                 )
                 .await;
                 app_event_tx.send(AppEvent::PluginRemoteSectionsLoaded {
+                scope: scope.clone(),
                     cwd,
                     marketplaces,
                     section_errors,
@@ -339,6 +389,10 @@ impl App {
     }
 
     pub(super) fn fetch_hooks_list(&mut self, app_server: &AppServerSession, cwd: PathBuf) {
+        if !self.chat_widget.workspace_requests_ready() {
+            return;
+        }
+        let scope = self.chat_widget.workspace_request_scope();
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         let request_cwd = self.chat_widget.server_cwd();
@@ -346,7 +400,7 @@ impl App {
             let result = fetch_hooks_list(request_handle, request_cwd)
                 .await
                 .map_err(|err| err.to_string());
-            app_event_tx.send(AppEvent::HooksLoaded { cwd, result });
+            app_event_tx.send(AppEvent::HooksLoaded { scope, cwd, result });
         });
     }
 
@@ -356,13 +410,14 @@ impl App {
         cwd: PathBuf,
         params: PluginReadParams,
     ) {
+        let scope = self.chat_widget.workspace_request_scope();
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
             let result = fetch_plugin_detail(request_handle, params)
                 .await
                 .map_err(|err| err.to_string());
-            app_event_tx.send(AppEvent::PluginDetailLoaded { cwd, result });
+            app_event_tx.send(AppEvent::PluginDetailLoaded { scope, cwd, result });
         });
     }
 
@@ -373,6 +428,7 @@ impl App {
         remote_cwd: Option<LegacyAppPathString>,
         source: String,
     ) {
+        let scope = self.chat_widget.workspace_request_scope();
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
@@ -382,6 +438,7 @@ impl App {
                 .await
                 .map_err(|err| format!("Failed to add marketplace: {err}"));
             app_event_tx.send(AppEvent::MarketplaceAddLoaded {
+                scope: scope.clone(),
                 cwd: cwd_for_event,
                 remote_cwd,
                 source: source_for_event,
@@ -397,6 +454,7 @@ impl App {
         marketplace_name: String,
         marketplace_display_name: String,
     ) {
+        let scope = self.chat_widget.workspace_request_scope();
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
@@ -406,6 +464,7 @@ impl App {
                 .await
                 .map_err(|err| format!("Failed to remove marketplace: {err}"));
             app_event_tx.send(AppEvent::MarketplaceRemoveLoaded {
+                scope: scope.clone(),
                 cwd: cwd_for_event,
                 marketplace_name: marketplace_name_for_event,
                 marketplace_display_name,
@@ -420,6 +479,7 @@ impl App {
         cwd: PathBuf,
         marketplace_name: Option<String>,
     ) {
+        let scope = self.chat_widget.workspace_request_scope();
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
@@ -428,6 +488,7 @@ impl App {
                 .await
                 .map_err(|err| format!("Failed to upgrade marketplace: {err}"));
             app_event_tx.send(AppEvent::MarketplaceUpgradeLoaded {
+                scope: scope.clone(),
                 cwd: cwd_for_event,
                 result,
             });
@@ -442,6 +503,7 @@ impl App {
         plugin_name: String,
         plugin_display_name: String,
     ) {
+        let scope = self.chat_widget.workspace_request_scope();
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
@@ -452,6 +514,7 @@ impl App {
                 .await
                 .map_err(|err| format!("Failed to install plugin: {err}"));
             app_event_tx.send(AppEvent::PluginInstallLoaded {
+                scope: scope.clone(),
                 cwd: cwd_for_event,
                 location: location_for_event,
                 plugin_name: plugin_name_for_event,
@@ -468,6 +531,7 @@ impl App {
         plugin_id: String,
         plugin_display_name: String,
     ) {
+        let scope = self.chat_widget.workspace_request_scope();
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
@@ -477,6 +541,7 @@ impl App {
                 .await
                 .map_err(|err| format!("Failed to uninstall plugin: {err}"));
             app_event_tx.send(AppEvent::PluginUninstallLoaded {
+                scope: scope.clone(),
                 cwd: cwd_for_event,
                 plugin_id: plugin_id_for_event,
                 plugin_display_name,
@@ -492,19 +557,22 @@ impl App {
         plugin_id: String,
         enabled: bool,
     ) {
-        if let Some(queued_enabled) = self.pending_plugin_enabled_writes.get_mut(&plugin_id) {
+        let scope = self.chat_widget.workspace_request_scope();
+        let key = (scope.clone(), plugin_id.clone());
+        if let Some(queued_enabled) = self.pending_plugin_enabled_writes.get_mut(&key) {
             *queued_enabled = Some(enabled);
             return;
         }
 
         self.pending_plugin_enabled_writes
-            .insert(plugin_id.clone(), None);
-        self.spawn_plugin_enabled_write(app_server, cwd, plugin_id, enabled);
+            .insert(key, None);
+        self.spawn_plugin_enabled_write(app_server, scope, cwd, plugin_id, enabled);
     }
 
     pub(super) fn spawn_plugin_enabled_write(
         &mut self,
         app_server: &AppServerSession,
+        scope: crate::app_event::WorkspaceRequestScope,
         cwd: PathBuf,
         plugin_id: String,
         enabled: bool,
@@ -519,6 +587,7 @@ impl App {
                 .map(|_| ())
                 .map_err(|err| format!("Failed to update plugin config: {err}"));
             app_event_tx.send(AppEvent::PluginEnabledSet {
+                scope,
                 cwd: cwd_for_event,
                 plugin_id: plugin_id_for_event,
                 enabled,
@@ -533,18 +602,21 @@ impl App {
         key: String,
         enabled: bool,
     ) {
-        if let Some(queued_enabled) = self.pending_hook_enabled_writes.get_mut(&key) {
+        let scope = self.chat_widget.workspace_request_scope();
+        let request_key = (scope.clone(), key.clone());
+        if let Some(queued_enabled) = self.pending_hook_enabled_writes.get_mut(&request_key) {
             *queued_enabled = Some(enabled);
             return;
         }
 
-        self.pending_hook_enabled_writes.insert(key.clone(), None);
-        self.spawn_hook_enabled_write(app_server, key, enabled);
+        self.pending_hook_enabled_writes.insert(request_key, None);
+        self.spawn_hook_enabled_write(app_server, scope, key, enabled);
     }
 
     pub(super) fn spawn_hook_enabled_write(
         &mut self,
         app_server: &AppServerSession,
+        scope: crate::app_event::WorkspaceRequestScope,
         key: String,
         enabled: bool,
     ) {
@@ -562,6 +634,7 @@ impl App {
                     )
                 });
             app_event_tx.send(AppEvent::HookEnabledSet {
+                scope,
                 key: key_for_event,
                 enabled,
                 result,
@@ -575,6 +648,7 @@ impl App {
         key: String,
         current_hash: String,
     ) {
+        let scope = self.chat_widget.workspace_request_scope();
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
@@ -582,7 +656,7 @@ impl App {
                 .await
                 .map(|_| ())
                 .map_err(|err| format!("Failed to trust hook: {}", format_config_error(&err)));
-            app_event_tx.send(AppEvent::HookTrusted { result });
+            app_event_tx.send(AppEvent::HookTrusted { scope, result });
         });
     }
 
@@ -591,6 +665,7 @@ impl App {
         app_server: &AppServerSession,
         updates: Vec<HookTrustUpdate>,
     ) {
+        let scope = self.chat_widget.workspace_request_scope();
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
@@ -598,17 +673,21 @@ impl App {
                 .await
                 .map(|_| ())
                 .map_err(|err| format!("Failed to trust hooks: {}", format_config_error(&err)));
-            app_event_tx.send(AppEvent::HookTrusted { result });
+            app_event_tx.send(AppEvent::HookTrusted { scope, result });
         });
     }
 
     pub(super) fn refresh_plugin_mentions(&mut self, app_server: &AppServerSession) {
+        if !self.chat_widget.workspace_requests_ready() {
+            return;
+        }
+        let scope = self.chat_widget.workspace_request_scope();
         let cwd = self.config.cwd.to_path_buf();
         let request_cwd = self.chat_widget.server_cwd();
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         if !self.config.features.enabled(Feature::Plugins) {
-            app_event_tx.send(AppEvent::PluginMentionsLoaded { cwd, plugins: None });
+            app_event_tx.send(AppEvent::PluginMentionsLoaded { scope, cwd, plugins: None });
             return;
         }
 
@@ -616,6 +695,7 @@ impl App {
             match fetch_plugin_mentions(request_handle, request_cwd).await {
                 Ok(plugins) => {
                     app_event_tx.send(AppEvent::PluginMentionsLoaded {
+                        scope,
                         cwd,
                         plugins: Some(plugins),
                     });

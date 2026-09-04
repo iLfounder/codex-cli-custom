@@ -10,6 +10,7 @@ use codex_app_server_protocol::HooksListResponse;
 impl ChatWidget {
     pub(crate) fn add_hooks_output(&mut self) {
         self.app_event_tx.send(AppEvent::FetchHooksList {
+            scope: self.workspace_request_scope(),
             cwd: self.config.cwd.to_path_buf(),
         });
     }
@@ -34,6 +35,7 @@ impl ChatWidget {
     pub(crate) fn open_hooks_browser(&mut self, entry: HooksListEntry) {
         self.bottom_pane
             .show_view(Box::new(HooksBrowserView::from_entry(
+                self.workspace_request_scope(),
                 entry,
                 self.app_event_tx.clone(),
                 self.bottom_pane.list_keymap(),

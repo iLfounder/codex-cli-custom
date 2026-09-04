@@ -17,7 +17,6 @@ use crate::history_cell::ThreadRecapHistoryCell;
 use crate::history_cell::ThreadRecapLoadingCell;
 use crate::history_cell::UserHistoryCell;
 use crate::pager_overlay::Overlay;
-use crate::temporary_structured_request::TemporaryStructuredThreadOptions;
 use crate::temporary_structured_request::run_temporary_structured_turn;
 use crate::temporary_structured_request::start_temporary_thread;
 use crate::temporary_structured_request::unsubscribe_temporary_thread;
@@ -282,21 +281,9 @@ impl App {
         };
         let request_handle = app_server.request_handle();
         let model = self.chat_widget.current_model().to_string();
-        let cwd = app_server
-            .remote_cwd_override()
-            .cloned()
-            .unwrap_or_else(|| self.chat_widget.server_cwd());
-        let config = self.chat_widget.config_ref();
-        let options = TemporaryStructuredThreadOptions {
-            model,
-            model_provider: config.model_provider_id.clone(),
-            cwd,
-            active_permission_profile: config
-                .permissions
-                .active_permission_profile()
-                .map(|profile| profile.id),
-            mcp_server_names: config.mcp_servers.get().keys().cloned().collect(),
-        };
+        let options = self
+            .chat_widget
+            .temporary_structured_thread_options(app_server, model);
         let event_sender = self.app_event_tx.clone();
         let task = tokio::spawn(async move {
             let result = start_temporary_thread(&request_handle, options)

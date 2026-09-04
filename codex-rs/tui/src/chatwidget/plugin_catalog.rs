@@ -393,8 +393,11 @@ impl ChatWidget {
         ));
 
         let cwd_for_remove = self.config.cwd.to_path_buf();
+        let cwd_for_remove_scope = self.workspace_request_scope();
         let cwd_for_cancel = self.config.cwd.to_path_buf();
+        let cwd_for_cancel_scope = self.workspace_request_scope();
         let cwd_for_on_cancel = self.config.cwd.to_path_buf();
+        let cwd_for_on_cancel_scope = self.workspace_request_scope();
         let plugins_response_for_cancel = plugins_response.clone();
         let plugins_response_for_on_cancel = plugins_response.clone();
 
@@ -418,9 +421,11 @@ impl ChatWidget {
                     ),
                     actions: vec![Box::new(move |tx| {
                         tx.send(AppEvent::OpenMarketplaceRemoveLoading {
+                            scope: cwd_for_remove_scope.clone(),
                             marketplace_display_name: marketplace_display_name.clone(),
                         });
                         tx.send(AppEvent::FetchMarketplaceRemove {
+                            scope: cwd_for_remove_scope.clone(),
                             cwd: cwd_for_remove.clone(),
                             marketplace_name: marketplace_name.clone(),
                             marketplace_display_name: marketplace_display_name.clone(),
@@ -434,6 +439,7 @@ impl ChatWidget {
                     selected_description: Some("Keep this marketplace installed.".to_string()),
                     actions: vec![Box::new(move |tx| {
                         tx.send(AppEvent::OpenPluginsList {
+                            scope: cwd_for_cancel_scope.clone(),
                             cwd: cwd_for_cancel.clone(),
                             response: plugins_response_for_cancel.clone(),
                         });
@@ -443,6 +449,7 @@ impl ChatWidget {
             ],
             on_cancel: Some(Box::new(move |tx| {
                 tx.send(AppEvent::OpenPluginsList {
+                    scope: cwd_for_on_cancel_scope.clone(),
                     cwd: cwd_for_on_cancel.clone(),
                     response: plugins_response_for_on_cancel.clone(),
                 });
@@ -612,12 +619,14 @@ impl ChatWidget {
 
         if let PluginsCacheState::Ready(plugins_response) = self.plugins_cache_for_current_cwd() {
             let cwd = self.config.cwd.to_path_buf();
+            let cwd_scope = self.workspace_request_scope();
             items.push(SelectionItem {
                 name: "Back to plugins".to_string(),
                 description: Some("Return to the plugin list.".to_string()),
                 selected_description: Some("Return to the plugin list.".to_string()),
                 actions: vec![Box::new(move |tx| {
                     tx.send(AppEvent::OpenPluginsList {
+                        scope: cwd_scope.clone(),
                         cwd: cwd.clone(),
                         response: plugins_response.clone(),
                     });
@@ -669,12 +678,14 @@ impl ChatWidget {
 
         if let PluginsCacheState::Ready(plugins_response) = self.plugins_cache_for_current_cwd() {
             let cwd = self.config.cwd.to_path_buf();
+            let cwd_scope = self.workspace_request_scope();
             items.push(SelectionItem {
                 name: "Back to plugins".to_string(),
                 description: Some("Return to the plugin list.".to_string()),
                 selected_description: Some("Return to the plugin list.".to_string()),
                 actions: vec![Box::new(move |tx| {
                     tx.send(AppEvent::OpenPluginsList {
+                        scope: cwd_scope.clone(),
                         cwd: cwd.clone(),
                         response: plugins_response.clone(),
                     });
@@ -709,12 +720,14 @@ impl ChatWidget {
         }];
         if let Some(plugins_response) = plugins_response.cloned() {
             let cwd = self.config.cwd.to_path_buf();
+            let cwd_scope = self.workspace_request_scope();
             items.push(SelectionItem {
                 name: "Back to plugins".to_string(),
                 description: Some("Return to the plugin list.".to_string()),
                 selected_description: Some("Return to the plugin list.".to_string()),
                 actions: vec![Box::new(move |tx| {
                     tx.send(AppEvent::OpenPluginsList {
+                        scope: cwd_scope.clone(),
                         cwd: cwd.clone(),
                         response: plugins_response.clone(),
                     });
@@ -898,9 +911,9 @@ impl ChatWidget {
                 .count();
             let tab_id = marketplace_tab_id(marketplace);
             let can_remove_marketplace =
-                marketplace_is_user_configured(&self.config, &marketplace.name);
+                self.marketplace_is_user_configured(&marketplace.name);
             let can_upgrade_marketplace = marketplace.path.is_some()
-                && marketplace_is_user_configured_git(&self.config, &marketplace.name);
+                && self.marketplace_is_user_configured_git(&marketplace.name);
             if can_remove_marketplace || can_upgrade_marketplace {
                 tab_footer_hints.push((
                     tab_id.clone(),
@@ -1027,6 +1040,7 @@ impl ChatWidget {
         }
 
         let cwd = self.config.cwd.to_path_buf();
+        let cwd_scope = self.workspace_request_scope();
         let plugins_response = plugins_response.clone();
         let mut items = vec![SelectionItem {
             name: "Back to plugins".to_string(),
@@ -1034,6 +1048,7 @@ impl ChatWidget {
             selected_description: Some("Return to the plugin list.".to_string()),
             actions: vec![Box::new(move |tx| {
                 tx.send(AppEvent::OpenPluginsList {
+                    scope: cwd_scope.clone(),
                     cwd: cwd.clone(),
                     response: plugins_response.clone(),
                 });
@@ -1053,6 +1068,7 @@ impl ChatWidget {
                 });
             } else if let Some(plugin_id) = plugin_uninstall_id(&plugin.summary) {
                 let uninstall_cwd = self.config.cwd.to_path_buf();
+                let uninstall_cwd_scope = self.workspace_request_scope();
                 let plugin_display_name = display_name;
                 items.push(SelectionItem {
                     name: "Uninstall plugin".to_string(),
@@ -1060,9 +1076,11 @@ impl ChatWidget {
                     selected_description: Some("Remove this plugin now.".to_string()),
                     actions: vec![Box::new(move |tx| {
                         tx.send(AppEvent::OpenPluginUninstallLoading {
+                            scope: uninstall_cwd_scope.clone(),
                             plugin_display_name: plugin_display_name.clone(),
                         });
                         tx.send(AppEvent::FetchPluginUninstall {
+                            scope: uninstall_cwd_scope.clone(),
                             cwd: uninstall_cwd.clone(),
                             plugin_id: plugin_id.clone(),
                             plugin_display_name: plugin_display_name.clone(),
@@ -1098,6 +1116,7 @@ impl ChatWidget {
             });
         } else if let Some(location) = plugin_detail_location(plugin) {
             let install_cwd = self.config.cwd.to_path_buf();
+            let install_cwd_scope = self.workspace_request_scope();
             let plugin_name = plugin_request_name(&plugin.summary);
             let plugin_display_name = display_name;
             items.push(SelectionItem {
@@ -1106,9 +1125,11 @@ impl ChatWidget {
                 selected_description: Some("Install this plugin now.".to_string()),
                 actions: vec![Box::new(move |tx| {
                     tx.send(AppEvent::OpenPluginInstallLoading {
+                            scope: install_cwd_scope.clone(),
                         plugin_display_name: plugin_display_name.clone(),
                     });
                     tx.send(AppEvent::FetchPluginInstall {
+                        scope: install_cwd_scope.clone(),
                         cwd: install_cwd.clone(),
                         location: location.clone(),
                         plugin_name: plugin_name.clone(),
@@ -1226,13 +1247,16 @@ impl ChatWidget {
                 plugin.keywords.join(" ")
             );
             let cwd = self.config.cwd.to_path_buf();
+            let cwd_scope = self.workspace_request_scope();
             let plugin_display_name = display_name.clone();
             let toggle_cwd = cwd.clone();
+            let toggle_cwd_scope = self.workspace_request_scope();
             let toggle_plugin_id = plugin.id.clone();
             let toggle = can_toggle_plugin.then(|| SelectionToggle {
                 is_on: plugin.enabled,
                 action: Box::new(move |enabled, tx| {
                     tx.send(AppEvent::SetPluginEnabled {
+                        scope: toggle_cwd_scope.clone(),
                         cwd: toggle_cwd.clone(),
                         plugin_id: toggle_plugin_id.clone(),
                         enabled,
@@ -1243,11 +1267,13 @@ impl ChatWidget {
                 if let Some((location, plugin_name)) = plugin_detail_request {
                     vec![Box::new(move |tx| {
                         tx.send(AppEvent::OpenPluginDetailLoading {
+                            scope: cwd_scope.clone(),
                             plugin_display_name: plugin_display_name.clone(),
                         });
                         let (marketplace_path, remote_marketplace_name) =
                             location.clone().into_request_params();
                         tx.send(AppEvent::FetchPluginDetail {
+                            scope: cwd_scope.clone(),
                             cwd: cwd.clone(),
                             params: codex_app_server_protocol::PluginReadParams {
                                 marketplace_path,

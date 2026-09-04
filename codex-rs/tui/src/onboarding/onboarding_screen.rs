@@ -18,6 +18,7 @@ use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_exec_server::LOCAL_FS;
 use codex_git_utils::resolve_root_git_project_for_trust;
+use codex_login::AuthConfig;
 #[cfg(target_os = "windows")]
 use codex_protocol::config_types::WindowsSandboxLevel;
 use crossterm::event::KeyCode;
@@ -93,6 +94,7 @@ pub(crate) struct OnboardingScreenArgs {
     pub remote_project_trust: Option<RemoteProjectTrust>,
     pub show_login_screen: bool,
     pub allow_api_key_env_prefill: bool,
+    pub auth_config: AuthConfig,
     pub bedrock_setup_enabled: bool,
     pub login_status: LoginStatus,
     pub app_server_request_handle: Option<AppServerRequestHandle>,
@@ -119,6 +121,7 @@ impl OnboardingScreen {
             remote_project_trust,
             show_login_screen,
             allow_api_key_env_prefill,
+            auth_config,
             bedrock_setup_enabled,
             login_status,
             app_server_request_handle,
@@ -128,7 +131,6 @@ impl OnboardingScreen {
         let remote_trust_key = remote_project_trust
             .as_ref()
             .map(|project| project.trust_target.to_string_lossy().into_owned());
-        let auth_config = config.auth_config();
         let mut steps: Vec<Step> = Vec::new();
         steps.push(Step::Welcome(WelcomeWidget::new(
             !matches!(login_status, LoginStatus::NotAuthenticated),

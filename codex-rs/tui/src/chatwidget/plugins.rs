@@ -2,14 +2,13 @@ use std::path::PathBuf;
 
 use super::ChatWidget;
 use super::plugin_catalog::marketplace_display_name;
-use super::plugin_catalog::marketplace_is_user_configured;
-use super::plugin_catalog::marketplace_is_user_configured_git;
 use super::plugin_catalog::marketplace_tab_id;
 use super::plugin_catalog::marketplace_tab_id_from_server_path;
 use super::plugin_catalog::marketplace_tab_id_matching_saved_id;
 use super::plugin_catalog::merge_remote_marketplaces;
 use super::plugin_catalog::plugin_detail_hint_line;
 use crate::app_event::AppEvent;
+use crate::app_event::WorkspaceRequestScope;
 use crate::app_event::PluginLocation;
 use crate::app_event::PluginRemoteSectionError;
 use crate::bottom_pane::ColumnWidthMode;
@@ -40,9 +39,10 @@ pub(super) const ADD_MARKETPLACE_TAB_ID: &str = "add-marketplace";
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct PluginListFetchState {
-    pub(super) cache_cwd: Option<PathBuf>,
-    pub(super) in_flight_cwd: Option<PathBuf>,
+    pub(super) cache_scope: Option<WorkspaceRequestScope>,
+    pub(super) in_flight_scope: Option<WorkspaceRequestScope>,
     pub(super) vertical_section_requested: bool,
+    pub(super) marketplace_management: Option<crate::marketplace_management::MarketplaceManagement>,
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +61,38 @@ pub(super) enum PluginsCacheState {
 }
 
 impl ChatWidget {
+    pub(crate) fn on_marketplace_management_loaded(
+        &mut self,
+        result: Option<Result<crate::marketplace_management::MarketplaceManagement, String>>,
+    ) {
+        self.plugins_fetch_state.marketplace_management = match result {
+            Some(Ok(metadata)) => Some(metadata),
+            Some(Err(error)) => {
+                self.add_error_message(error);
+                None
+            }
+            None => None,
+        };
+    }
+
+    pub(super) fn marketplace_is_user_configured(&self, name: &str) -> bool {
+        if self.uses_remote_workspace() {
+            self.plugins_fetch_state.marketplace_management.as_ref()
+                .is_some_and(|metadata| metadata.is_user_configured(name))
+        } else {
+            super::plugin_catalog::marketplace_is_user_configured(&self.config, name)
+        }
+    }
+
+    pub(super) fn marketplace_is_user_configured_git(&self, name: &str) -> bool {
+        if self.uses_remote_workspace() {
+            self.plugins_fetch_state.marketplace_management.as_ref()
+                .is_some_and(|metadata| metadata.is_user_configured_git(name))
+        } else {
+            super::plugin_catalog::marketplace_is_user_configured_git(&self.config, name)
+        }
+    }
+
     pub(crate) fn add_plugins_output(&mut self) {
         if !self.config.features.enabled(Feature::Plugins) {
             self.add_info_message(
@@ -92,14 +124,13 @@ impl ChatWidget {
         cwd: PathBuf,
         result: Result<PluginListResponse, String>,
     ) {
-        let request_was_in_flight =
-            self.plugins_fetch_state.in_flight_cwd.as_deref() == Some(cwd.as_path());
-        if request_was_in_flight {
-            self.plugins_fetch_state.in_flight_cwd = None;
-        }
-
         if self.config.cwd.as_path() != cwd.as_path() {
             return;
+        }
+        let request_was_in_flight =
+            self.plugins_fetch_state.in_flight_scope.as_ref() == Some(&self.workspace_request_scope());
+        if request_was_in_flight {
+            self.plugins_fetch_state.in_flight_scope = None;
         }
 
         let auth_flow_active = self.plugin_install_auth_flow.is_some();
@@ -119,7 +150,7 @@ impl ChatWidget {
 
         match result {
             Ok(response) => {
-                self.plugins_fetch_state.cache_cwd = Some(cwd);
+                self.plugins_fetch_state.cache_scope = Some(self.workspace_request_scope());
                 self.plugin_remote_sections_loading = request_was_in_flight;
                 if request_was_in_flight {
                     self.plugin_remote_sections_loaded = false;
@@ -150,7 +181,7 @@ impl ChatWidget {
                 self.plugin_remote_sections_loaded = false;
                 self.plugins_fetch_state.vertical_section_requested = false;
                 if should_refresh_plugins_popup {
-                    self.plugins_fetch_state.cache_cwd = None;
+                    self.plugins_fetch_state.cache_scope = None;
                     self.plugins_cache = PluginsCacheState::Failed(err.clone());
                     let _ = self.bottom_pane.replace_selection_view_if_active(
                         PLUGINS_SELECTION_VIEW_ID,
@@ -178,9 +209,10 @@ impl ChatWidget {
         self.plugin_remote_sections_loading = false;
         self.plugin_remote_sections_loaded = true;
         self.plugins_fetch_state.vertical_section_requested = false;
+        let scope = self.workspace_request_scope();
         let refreshed_response = match &mut self.plugins_cache {
             PluginsCacheState::Ready(response)
-                if self.plugins_fetch_state.cache_cwd.as_deref() == Some(cwd.as_path()) =>
+                if self.plugins_fetch_state.cache_scope.as_ref() == Some(&scope) =>
             {
                 merge_remote_marketplaces(response, marketplaces);
                 self.plugin_remote_section_errors = section_errors;
@@ -201,12 +233,12 @@ impl ChatWidget {
 
     fn prefetch_plugins(&mut self) {
         let cwd = self.config.cwd.to_path_buf();
-        if self.plugins_fetch_state.in_flight_cwd.as_deref() == Some(cwd.as_path()) {
+        if self.plugins_fetch_state.in_flight_scope.as_ref() == Some(&self.workspace_request_scope()) {
             return;
         }
 
         self.on_plugins_list_fetch_started(cwd.clone());
-        self.app_event_tx.send(AppEvent::FetchPluginsList { cwd });
+        self.app_event_tx.send(AppEvent::FetchPluginsList { scope: self.workspace_request_scope(), cwd });
     }
 
     pub(crate) fn on_plugins_list_fetch_started(&mut self, cwd: PathBuf) {
@@ -214,16 +246,16 @@ impl ChatWidget {
             return;
         }
 
-        self.plugins_fetch_state.in_flight_cwd = Some(cwd.clone());
+        self.plugins_fetch_state.in_flight_scope = Some(self.workspace_request_scope());
         self.plugins_fetch_state.vertical_section_requested =
             !self.config.features.enabled(Feature::RemotePlugin);
-        if self.plugins_fetch_state.cache_cwd.as_deref() != Some(cwd.as_path()) {
+        if self.plugins_fetch_state.cache_scope.as_ref() != Some(&self.workspace_request_scope()) {
             self.plugins_cache = PluginsCacheState::Loading;
         }
     }
 
     pub(super) fn plugins_cache_for_current_cwd(&self) -> PluginsCacheState {
-        if self.plugins_fetch_state.cache_cwd.as_deref() == Some(self.config.cwd.as_path()) {
+        if self.plugins_fetch_state.cache_scope.as_ref() == Some(&self.workspace_request_scope()) {
             self.plugins_cache.clone()
         } else {
             PluginsCacheState::Uninitialized
@@ -261,7 +293,7 @@ impl ChatWidget {
             | PluginsCacheState::Loading
             | PluginsCacheState::Failed(_) => response,
         };
-        self.plugins_fetch_state.cache_cwd = Some(cwd);
+        self.plugins_fetch_state.cache_scope = Some(self.workspace_request_scope());
         self.plugins_cache = PluginsCacheState::Ready(response.clone());
         let active_tab_id = self
             .bottom_pane
@@ -285,6 +317,7 @@ impl ChatWidget {
         let tx = self.app_event_tx.clone();
         let cwd = self.config.cwd.to_path_buf();
         let remote_cwd = self.current_remote_cwd.clone();
+        let scope = self.workspace_request_scope();
         let view = CustomPromptView::new(
             "Add marketplace".to_string(),
             "owner/repo, git URL, or local marketplace path".to_string(),
@@ -296,9 +329,11 @@ impl ChatWidget {
                     return;
                 }
                 tx.send(AppEvent::OpenMarketplaceAddLoading {
+                    scope: scope.clone(),
                     source: source.clone(),
                 });
                 tx.send(AppEvent::FetchMarketplaceAdd {
+                    scope: scope.clone(),
                     cwd: cwd.clone(),
                     remote_cwd: remote_cwd.clone(),
                     source,
@@ -711,7 +746,7 @@ impl ChatWidget {
         };
         let Some(marketplace) = plugins_response.marketplaces.iter().find(|marketplace| {
             marketplace_tab_id(marketplace) == active_tab_id
-                && marketplace_is_user_configured(&self.config, &marketplace.name)
+                && self.marketplace_is_user_configured(&marketplace.name)
         }) else {
             return false;
         };
@@ -724,7 +759,7 @@ impl ChatWidget {
             return true;
         }
         if marketplace.path.is_none()
-            || !marketplace_is_user_configured_git(&self.config, &marketplace.name)
+            || !self.marketplace_is_user_configured_git(&marketplace.name)
         {
             return false;
         }
@@ -737,9 +772,11 @@ impl ChatWidget {
         self.open_marketplace_upgrade_loading_popup(marketplace_name.as_deref());
         self.app_event_tx
             .send(AppEvent::OpenMarketplaceUpgradeLoading {
+                scope: self.workspace_request_scope(),
                 marketplace_name: marketplace_name.clone(),
             });
         self.app_event_tx.send(AppEvent::FetchMarketplaceUpgrade {
+            scope: self.workspace_request_scope(),
             cwd,
             marketplace_name,
         });
@@ -767,9 +804,10 @@ impl ChatWidget {
             return;
         }
 
+        let scope = self.workspace_request_scope();
         let refreshed_response = match &mut self.plugins_cache {
             PluginsCacheState::Ready(response)
-                if self.plugins_fetch_state.cache_cwd.as_deref() == Some(cwd.as_path()) =>
+                if self.plugins_fetch_state.cache_scope.as_ref() == Some(&scope) =>
             {
                 for plugin in response
                     .marketplaces

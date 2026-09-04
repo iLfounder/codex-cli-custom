@@ -2940,11 +2940,15 @@ async fn changing_directory_preserves_project_trust_permissions_history_and_hook
     let configured = app.primary_session_configured.as_ref().expect("session");
     let source = codex_utils_path_uri::PathUri::from_abs_path(&agents.abs());
     assert!(configured.instruction_source_paths.contains(&source));
+    let scope = crate::app_event::WorkspaceRequestScope {
+        cwd: LegacyAppPathString::from_path(&current),
+        generation: app.chat_widget.connector_scope_generation(),
+    };
     let (cwd, result) = (current.clone(), Err("stale skills".into()));
-    let skills = AppEvent::SkillsListLoaded { cwd, result };
+    let skills = AppEvent::SkillsListLoaded { scope: scope.clone(), cwd, result };
     let (cwd, plugins) = (current.clone(), Some(vec![]));
-    let plugins = AppEvent::PluginMentionsLoaded { cwd, plugins };
-    let diff = AppEvent::DiffResult(current.clone(), "stale diff".to_string());
+    let plugins = AppEvent::PluginMentionsLoaded { scope: scope.clone(), cwd, plugins };
+    let diff = AppEvent::DiffResult { scope, text: "stale diff".to_string() };
     let branch = AppEvent::SyncThreadGitBranch {
         thread_id: original,
         branch: "stale".to_string(),

@@ -81,6 +81,13 @@ use codex_protocol::models::ActivePermissionProfile;
 
 use crate::history_cell::HistoryCell;
 
+/// Captures the workspace and identity boundary that owns an asynchronous UI request.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct WorkspaceRequestScope {
+    pub(crate) cwd: LegacyAppPathString,
+    pub(crate) generation: ConnectorScopeGeneration,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ThreadGoalSemanticSnapshot {
     pub(crate) goal_id: String,
@@ -769,7 +776,7 @@ pub(crate) enum AppEvent {
     },
 
     /// Result of computing a `/diff` command.
-    DiffResult(PathBuf, String),
+    DiffResult { scope: WorkspaceRequestScope, text: String },
 
     /// Open the app link view in the bottom pane.
     OpenAppLink {
@@ -843,28 +850,34 @@ pub(crate) enum AppEvent {
 
     /// Fetch plugin marketplace state for the provided working directory.
     FetchPluginsList {
+        scope: WorkspaceRequestScope,
         cwd: PathBuf,
     },
 
     /// Fetch lifecycle hook inventory for the provided working directory.
     FetchHooksList {
+        scope: WorkspaceRequestScope,
         cwd: PathBuf,
     },
 
     /// Result of fetching plugin marketplace state.
     PluginsLoaded {
+        scope: WorkspaceRequestScope,
         cwd: PathBuf,
         result: Result<PluginListResponse, String>,
+        marketplace_management: Option<Result<crate::marketplace_management::MarketplaceManagement, String>>,
     },
 
     /// Open the plugin list from an already cached response.
     OpenPluginsList {
+        scope: WorkspaceRequestScope,
         cwd: PathBuf,
         response: PluginListResponse,
     },
 
     /// Result of explicitly fetching remote-backed plugin sections.
     PluginRemoteSectionsLoaded {
+        scope: WorkspaceRequestScope,
         cwd: PathBuf,
         marketplaces: Vec<PluginMarketplaceEntry>,
         section_errors: Vec<PluginRemoteSectionError>,
@@ -872,6 +885,7 @@ pub(crate) enum AppEvent {
 
     /// Result of fetching lifecycle hook inventory.
     HooksLoaded {
+        scope: WorkspaceRequestScope,
         cwd: PathBuf,
         result: Result<codex_app_server_protocol::HooksListResponse, String>,
     },
@@ -881,11 +895,13 @@ pub(crate) enum AppEvent {
 
     /// Replace the plugins popup with a marketplace-add loading state.
     OpenMarketplaceAddLoading {
+        scope: WorkspaceRequestScope,
         source: String,
     },
 
     /// Add a marketplace from the provided source.
     FetchMarketplaceAdd {
+        scope: WorkspaceRequestScope,
         cwd: PathBuf,
         remote_cwd: Option<LegacyAppPathString>,
         source: String,
@@ -893,6 +909,7 @@ pub(crate) enum AppEvent {
 
     /// Result of adding a marketplace.
     MarketplaceAddLoaded {
+        scope: WorkspaceRequestScope,
         cwd: PathBuf,
         remote_cwd: Option<LegacyAppPathString>,
         source: String,
@@ -907,11 +924,13 @@ pub(crate) enum AppEvent {
 
     /// Replace the plugins popup with a marketplace-remove loading state.
     OpenMarketplaceRemoveLoading {
+        scope: WorkspaceRequestScope,
         marketplace_display_name: String,
     },
 
     /// Remove a marketplace by name.
     FetchMarketplaceRemove {
+        scope: WorkspaceRequestScope,
         cwd: PathBuf,
         marketplace_name: String,
         marketplace_display_name: String,
@@ -919,6 +938,7 @@ pub(crate) enum AppEvent {
 
     /// Result of removing a marketplace.
     MarketplaceRemoveLoaded {
+        scope: WorkspaceRequestScope,
         cwd: PathBuf,
         marketplace_name: String,
         marketplace_display_name: String,
@@ -927,50 +947,59 @@ pub(crate) enum AppEvent {
 
     /// Replace the plugins popup with a marketplace-upgrade loading state.
     OpenMarketplaceUpgradeLoading {
+        scope: WorkspaceRequestScope,
         marketplace_name: Option<String>,
     },
 
     /// Upgrade configured Git marketplaces.
     FetchMarketplaceUpgrade {
+        scope: WorkspaceRequestScope,
         cwd: PathBuf,
         marketplace_name: Option<String>,
     },
 
     /// Result of upgrading configured Git marketplaces.
     MarketplaceUpgradeLoaded {
+        scope: WorkspaceRequestScope,
         cwd: PathBuf,
         result: Result<MarketplaceUpgradeResponse, String>,
     },
 
     /// Replace the plugins popup with a plugin-detail loading state.
     OpenPluginDetailLoading {
+        scope: WorkspaceRequestScope,
         plugin_display_name: String,
     },
 
     /// Fetch detail for a specific plugin from a marketplace.
     FetchPluginDetail {
+        scope: WorkspaceRequestScope,
         cwd: PathBuf,
         params: PluginReadParams,
     },
 
     /// Result of fetching plugin detail.
     PluginDetailLoaded {
+        scope: WorkspaceRequestScope,
         cwd: PathBuf,
         result: Result<PluginReadResponse, String>,
     },
 
     /// Replace the plugins popup with an install loading state.
     OpenPluginInstallLoading {
+        scope: WorkspaceRequestScope,
         plugin_display_name: String,
     },
 
     /// Replace the plugins popup with an uninstall loading state.
     OpenPluginUninstallLoading {
+        scope: WorkspaceRequestScope,
         plugin_display_name: String,
     },
 
     /// Install a specific plugin from a marketplace.
     FetchPluginInstall {
+        scope: WorkspaceRequestScope,
         cwd: PathBuf,
         location: PluginLocation,
         plugin_name: String,
@@ -979,6 +1008,7 @@ pub(crate) enum AppEvent {
 
     /// Result of installing a plugin.
     PluginInstallLoaded {
+        scope: WorkspaceRequestScope,
         cwd: PathBuf,
         location: PluginLocation,
         plugin_name: String,
@@ -988,6 +1018,7 @@ pub(crate) enum AppEvent {
 
     /// Uninstall a specific plugin by canonical plugin id.
     FetchPluginUninstall {
+        scope: WorkspaceRequestScope,
         cwd: PathBuf,
         plugin_id: String,
         plugin_display_name: String,
@@ -995,6 +1026,7 @@ pub(crate) enum AppEvent {
 
     /// Result of uninstalling a plugin.
     PluginUninstallLoaded {
+        scope: WorkspaceRequestScope,
         cwd: PathBuf,
         plugin_id: String,
         plugin_display_name: String,
@@ -1003,6 +1035,7 @@ pub(crate) enum AppEvent {
 
     /// Enable or disable an installed plugin.
     SetPluginEnabled {
+        scope: WorkspaceRequestScope,
         cwd: PathBuf,
         plugin_id: String,
         enabled: bool,
@@ -1010,6 +1043,7 @@ pub(crate) enum AppEvent {
 
     /// Result of enabling or disabling a plugin.
     PluginEnabledSet {
+        scope: WorkspaceRequestScope,
         cwd: PathBuf,
         plugin_id: String,
         enabled: bool,
@@ -1021,6 +1055,7 @@ pub(crate) enum AppEvent {
 
     /// Result of refreshing plugin mention bindings.
     PluginMentionsLoaded {
+        scope: WorkspaceRequestScope,
         cwd: PathBuf,
         plugins: Option<Vec<PluginCapabilitySummary>>,
     },
@@ -1077,6 +1112,7 @@ pub(crate) enum AppEvent {
     /// command path because those callers expect the visible skill state to be current when their command
     /// completes.
     SkillsListLoaded {
+        scope: WorkspaceRequestScope,
         cwd: PathBuf,
         result: Result<SkillsListResponse, String>,
     },
@@ -1354,23 +1390,27 @@ pub(crate) enum AppEvent {
 
     /// Enable or disable a hook by stable hook key.
     SetHookEnabled {
+        scope: WorkspaceRequestScope,
         key: String,
         enabled: bool,
     },
 
     /// Trust the current definition for a hook by stable hook key.
     TrustHook {
+        scope: WorkspaceRequestScope,
         key: String,
         current_hash: String,
     },
 
     /// Trust the current definitions for one or more hooks by stable hook key.
     TrustHooks {
+        scope: WorkspaceRequestScope,
         updates: Vec<crate::hooks_rpc::HookTrustUpdate>,
     },
 
     /// Result of persisting hook enabled state.
     HookEnabledSet {
+        scope: WorkspaceRequestScope,
         key: String,
         enabled: bool,
         result: Result<(), String>,
@@ -1378,6 +1418,7 @@ pub(crate) enum AppEvent {
 
     /// Result of persisting hook trust state.
     HookTrusted {
+        scope: WorkspaceRequestScope,
         result: Result<(), String>,
     },
 
@@ -1441,11 +1482,13 @@ pub(crate) enum AppEvent {
     /// Async update of the current git branch for status line rendering.
     StatusLineBranchUpdated {
         cwd: LegacyAppPathString,
+        generation: ConnectorScopeGeneration,
         branch: Option<String>,
     },
     /// Async update of Git summary fields for status line rendering.
     StatusLineGitSummaryUpdated {
         cwd: LegacyAppPathString,
+        generation: ConnectorScopeGeneration,
         summary: crate::chatwidget::StatusLineGitSummary,
     },
     /// Async update of the workspace notification headline for status line rendering.

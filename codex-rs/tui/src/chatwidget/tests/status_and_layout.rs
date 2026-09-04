@@ -287,6 +287,7 @@ async fn stale_status_line_git_summary_update_is_ignored() {
 
     chat.set_status_line_git_summary(
         codex_utils_path_uri::LegacyAppPathString::from_string("/other"),
+        chat.connector_scope_generation(),
         StatusLineGitSummary {
             pull_request: Some(crate::branch_summary::StatusLinePullRequest {
                 number: 20_252,
@@ -300,7 +301,82 @@ async fn stale_status_line_git_summary_update_is_ignored() {
     );
 
     assert!(chat.status_line_git_summary.is_none());
+    assert!(chat.status_line_git_summary_pending);
+}
+
+#[tokio::test]
+async fn git_completions_from_before_workspace_round_trip_do_not_clear_current_requests() {
+    use codex_utils_path_uri::LegacyAppPathString;
+
+    let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    let cwd = LegacyAppPathString::from_string("/workspace/a");
+    chat.current_remote_cwd = Some(cwd.clone());
+    let old_generation = chat.connector_scope_generation();
+    chat.current_remote_cwd = Some(LegacyAppPathString::from_string("/workspace/b"));
+    chat.invalidate_connector_scope();
+    chat.current_remote_cwd = Some(cwd.clone());
+    chat.invalidate_connector_scope();
+    chat.config.tui_status_line = Some(vec!["git-branch".to_string(), "branch-changes".to_string()]);
+    chat.status_line_branch_cwd = Some(cwd.clone());
+    chat.status_line_branch_pending = true;
+    chat.status_line_git_summary_cwd = Some(cwd.clone());
+    chat.status_line_git_summary_pending = true;
+
+    chat.set_status_line_branch(cwd.clone(), old_generation, Some("stale".to_string()));
+    chat.set_status_line_git_summary(cwd.clone(), old_generation, StatusLineGitSummary::default());
+    assert!(chat.status_line_branch.is_none());
+    assert!(chat.status_line_git_summary.is_none());
+    assert!(chat.status_line_branch_pending);
+    assert!(chat.status_line_git_summary_pending);
+
+    let current_generation = chat.connector_scope_generation();
+    chat.set_status_line_branch(cwd.clone(), current_generation, Some("current".to_string()));
+    chat.set_status_line_git_summary(cwd, current_generation, StatusLineGitSummary::default());
+    assert_eq!(chat.status_line_branch.as_deref(), Some("current"));
+    assert!(chat.status_line_git_summary.is_some());
+    assert!(!chat.status_line_branch_pending);
     assert!(!chat.status_line_git_summary_pending);
+}
+
+#[tokio::test]
+async fn remote_git_lookup_waits_for_server_cwd_before_sending_a_command() {
+    use crate::workspace_command::WorkspaceCommand;
+    use crate::workspace_command::WorkspaceCommandError;
+    use crate::workspace_command::WorkspaceCommandExecutor;
+    use crate::workspace_command::WorkspaceCommandOutput;
+    use codex_utils_path_uri::LegacyAppPathString;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct RemoteRunner(Mutex<Vec<WorkspaceCommand>>);
+    impl WorkspaceCommandExecutor for RemoteRunner {
+        fn uses_remote_workspace(&self) -> bool { true }
+
+        fn run(&self, command: WorkspaceCommand) -> Pin<Box<dyn Future<Output = Result<WorkspaceCommandOutput, WorkspaceCommandError>> + Send + '_>> {
+            self.0.lock().expect("commands lock").push(command);
+            Box::pin(async { Ok(WorkspaceCommandOutput { exit_code: 0, stdout: "main\n".to_string(), stderr: String::new() }) })
+        }
+    }
+
+    let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    let runner = Arc::new(RemoteRunner::default());
+    chat.workspace_command_runner = Some(runner.clone());
+    chat.config.tui_status_line = Some(vec!["git-branch".to_string()]);
+    chat.config.tui_terminal_title = Some(Vec::new());
+    chat.refresh_status_surfaces();
+    tokio::task::yield_now().await;
+    assert!(runner.0.lock().expect("commands lock").is_empty());
+
+    let server_cwd = LegacyAppPathString::from_string("/server/project");
+    chat.current_remote_cwd = Some(server_cwd.clone());
+    chat.invalidate_connector_scope();
+    chat.refresh_status_surfaces();
+    tokio::task::yield_now().await;
+    let commands = runner.0.lock().expect("commands lock");
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0].cwd.as_ref(), Some(&server_cwd));
 }
 
 #[tokio::test]

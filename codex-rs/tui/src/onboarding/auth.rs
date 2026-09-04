@@ -1206,6 +1206,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remote_onboarding_leaves_login_policy_to_server() {
+        let (mut widget, _tmp) = widget_forced_chatgpt().await;
+        let target = crate::AppServerTarget::Remote {
+            endpoint: crate::RemoteAppServerEndpoint::WebSocket {
+                websocket_url: "ws://127.0.0.1:4500/".to_string(),
+                auth_token: None,
+            },
+        };
+        for local_method in [ForcedLoginMethod::Chatgpt, ForcedLoginMethod::Api] {
+            let mut local_auth = widget.auth_config.clone();
+            local_auth.forced_login_method = Some(local_method);
+            local_auth.forced_chatgpt_workspace_id = Some(vec!["windows-workspace".to_string()]);
+            local_auth.managed_auth_policy.allowed_login_methods = Some(vec![local_method]);
+            local_auth.managed_auth_policy.allowed_chatgpt_workspaces =
+                Some(vec!["windows-workspace".to_string()]);
+            assert_eq!(
+                crate::AppServerTarget::Embedded.client_auth_config(local_auth.clone()),
+                local_auth,
+            );
+            widget.auth_config = target.client_auth_config(local_auth);
+            assert_eq!(widget.displayed_sign_in_options(), vec![
+                SignInOption::ChatGpt, SignInOption::DeviceCode, SignInOption::ApiKey,
+            ]);
+            assert_eq!(widget.auth_config.effective_chatgpt_workspaces(), None);
+        }
+        widget.allow_api_key_env_prefill = false;
+        let area = Rect::new(/*x*/ 0, /*y*/ 0, /*width*/ 90, /*height*/ 20);
+        let mut buffer = Buffer::empty(area);
+        widget.render_pick_mode(area, &mut buffer);
+        let choices = (area.top()..area.bottom()).map(|y| {
+            (area.left()..area.right()).map(|x| buffer[(x, y)].symbol()).collect::<String>()
+        }).filter(|line| line.contains("1. ") || line.contains("2. ") || line.contains("3. "))
+            .map(|line| line.trim().to_string()).collect::<Vec<_>>().join("\n");
+        insta::assert_snapshot!(choices, @"
+        > 1. Sign in with ChatGPT
+        2. Sign in with Device Code
+        3. Provide your own API key
+        ");
+        widget.start_api_key_entry();
+        assert!(matches!(&*widget.sign_in_state.read().unwrap(),
+            SignInState::ApiKeyEntry(state) if state.value.is_empty() && !state.prepopulated_from_env
+        ));
+    }
+
+    #[tokio::test]
     async fn bedrock_option_requires_feature_and_api_login_permission() {
         let (mut widget, _tmp) = widget_forced_chatgpt().await;
         widget.auth_config.forced_login_method = None;

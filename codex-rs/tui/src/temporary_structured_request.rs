@@ -34,7 +34,8 @@ const STRUCTURED_RESPONSE_MAX_BYTES: usize = 8 * 1024;
 /// Preserve the visible thread's provider, permissions, and external-tool isolation.
 pub(crate) struct TemporaryStructuredThreadOptions {
     pub(crate) model: String,
-    pub(crate) model_provider: String,
+    /// Leave unset when a remote session has not supplied its provider yet.
+    pub(crate) model_provider: Option<String>,
     pub(crate) cwd: LegacyAppPathString,
     pub(crate) active_permission_profile: Option<String>,
     pub(crate) mcp_server_names: Vec<String>,
@@ -133,7 +134,7 @@ pub(crate) async fn start_temporary_thread(
                 request_id: RequestId::String(format!("temporary-structured-{}", Uuid::new_v4())),
                 params: ThreadStartParams {
                     model: Some(model),
-                    model_provider: Some(model_provider),
+                    model_provider,
                     cwd: Some(cwd),
                     approval_policy: Some(AskForApproval::Never),
                     sandbox: custom_permission_profile

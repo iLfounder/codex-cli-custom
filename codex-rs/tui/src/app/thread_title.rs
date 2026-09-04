@@ -5,7 +5,6 @@ use super::thread_events::ThreadBufferedEvent;
 use crate::app_event::AppEvent;
 use crate::app_event::ThreadTitleDestination;
 use crate::app_server_session::AppServerSession;
-use crate::temporary_structured_request::TemporaryStructuredThreadOptions;
 use crate::temporary_structured_request::run_temporary_structured_turn;
 use crate::temporary_structured_request::start_temporary_thread;
 use codex_app_server_protocol::ServerNotification;
@@ -40,7 +39,11 @@ impl App {
         prompt: String,
     ) {
         let request_handle = app_server.request_handle();
-        let model = if self.chat_widget.config_ref().model_provider_id == "openai"
+        let mut options = self.chat_widget.temporary_structured_thread_options(
+            app_server,
+            self.chat_widget.current_model().to_string(),
+        );
+        let model = if options.model_provider.as_deref() == Some("openai")
             && self.chat_widget.has_chatgpt_account()
             && self
                 .chat_widget
@@ -53,18 +56,7 @@ impl App {
             self.chat_widget.current_model().to_string()
         };
         let effort = (model == THREAD_TITLE_MODEL).then_some(ReasoningEffort::Low);
-        let cwd = self.chat_widget.server_cwd();
-        let config = self.chat_widget.config_ref();
-        let options = TemporaryStructuredThreadOptions {
-            model,
-            model_provider: config.model_provider_id.clone(),
-            cwd,
-            active_permission_profile: config
-                .permissions
-                .active_permission_profile()
-                .map(|profile| profile.id),
-            mcp_server_names: config.mcp_servers.get().keys().cloned().collect(),
-        };
+        options.model = model;
 
         let event_sender = self.app_event_tx.clone();
         tokio::spawn(async move {

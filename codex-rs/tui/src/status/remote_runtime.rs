@@ -1,6 +1,7 @@
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::SandboxPolicy;
 use codex_protocol::config_types::ApprovalsReviewer;
+use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_READ_ONLY;
@@ -22,6 +23,7 @@ pub(crate) struct RemoteRuntimeStatus {
     approval_policy: AskForApproval,
     approvals_reviewer: ApprovalsReviewer,
     model_provider_id: String,
+    reasoning_summary: Option<ReasoningSummary>,
     requires_openai_auth: bool,
 }
 
@@ -30,6 +32,7 @@ pub(crate) struct StatusRuntimeDisplay {
     pub(crate) directory: String,
     pub(crate) permissions: String,
     pub(crate) model_provider_id: String,
+    pub(crate) reasoning_summary: Option<ReasoningSummary>,
     pub(crate) requires_openai_auth: bool,
 }
 
@@ -49,6 +52,8 @@ impl RemoteRuntimeStatus {
             approval_policy: session.approval_policy,
             approvals_reviewer: session.approvals_reviewer,
             model_provider_id: session.model_provider_id.clone(),
+            // Lifecycle responses omit summary; only ThreadSettings can supply it.
+            reasoning_summary: None,
             requires_openai_auth,
         })
     }
@@ -56,27 +61,28 @@ impl RemoteRuntimeStatus {
     pub(crate) fn update(
         &mut self,
         cwd: LegacyAppPathString,
-        sandbox: SandboxPolicy,
-        active_permission_profile: Option<ActivePermissionProfile>,
-        approval_policy: AskForApproval,
-        approvals_reviewer: ApprovalsReviewer,
-        model_provider_id: String,
+        settings: &codex_app_server_protocol::ThreadSettings,
     ) {
         if self.runtime_workspace_roots.as_slice() == [self.cwd.clone()] {
             self.runtime_workspace_roots = vec![cwd.clone()];
         }
         self.cwd = cwd;
-        self.sandbox = sandbox;
-        self.active_permission_profile = active_permission_profile;
-        self.approval_policy = approval_policy;
-        self.approvals_reviewer = approvals_reviewer;
-        self.model_provider_id = model_provider_id;
+        self.sandbox = settings.sandbox_policy.clone();
+        self.active_permission_profile = settings.active_permission_profile.clone().map(Into::into);
+        self.approval_policy = settings.approval_policy;
+        self.approvals_reviewer = settings.approvals_reviewer.to_core();
+        self.model_provider_id = settings.model_provider.clone();
+        self.reasoning_summary = settings.summary;
     }
 
     pub(crate) fn active_permission_profile_id(&self) -> Option<String> {
         self.active_permission_profile
             .as_ref()
             .map(|profile| profile.id.clone())
+    }
+
+    pub(crate) fn model_provider_id(&self) -> &str {
+        &self.model_provider_id
     }
 
     pub(crate) fn directory_display(&self) -> String {
@@ -135,6 +141,7 @@ impl RemoteRuntimeStatus {
             directory: self.directory_display(),
             permissions: self.status_permissions_label(),
             model_provider_id: self.model_provider_id.clone(),
+            reasoning_summary: self.reasoning_summary,
             requires_openai_auth: self.requires_openai_auth,
         }
     }
@@ -257,7 +264,7 @@ mod tests {
 
     #[test]
     fn remote_status_preserves_foreign_paths_and_runtime_authority() {
-        let status = RemoteRuntimeStatus {
+        let mut status = RemoteRuntimeStatus {
             cwd: LegacyAppPathString::from_string("/Users/daniel/work/repo/subdir"),
             runtime_workspace_roots: vec![
                 LegacyAppPathString::from_string("/Users/daniel/work/repo"),
@@ -276,6 +283,7 @@ mod tests {
             approval_policy: AskForApproval::OnRequest,
             approvals_reviewer: ApprovalsReviewer::AutoReview,
             model_provider_id: "remote-provider".to_string(),
+            reasoning_summary: None,
             requires_openai_auth: false,
         };
 
@@ -283,9 +291,33 @@ mod tests {
         assert_eq!(status.project_root_name().as_deref(), Some("repo"));
         assert_eq!(status.compact_permissions_label(), "Workspace");
         assert_eq!(status.approval_mode_label(), "Approve for me");
+        let settings = codex_app_server_protocol::ThreadSettings {
+            cwd: status.cwd.clone(),
+            approval_policy: status.approval_policy,
+            approvals_reviewer: status.approvals_reviewer.into(),
+            sandbox_policy: status.sandbox.clone(),
+            active_permission_profile: status.active_permission_profile.clone().map(Into::into),
+            model: "remote-model".to_string(),
+            model_provider: "updated-remote-provider".to_string(),
+            service_tier: None,
+            effort: None,
+            summary: Some(ReasoningSummary::Detailed),
+            collaboration_mode: codex_protocol::config_types::CollaborationMode {
+                mode: codex_protocol::config_types::ModeKind::Default,
+                settings: codex_protocol::config_types::Settings {
+                    model: "remote-model".to_string(),
+                    reasoning_effort: None,
+                    developer_instructions: None,
+                },
+            },
+            multi_agent_mode: Default::default(),
+            personality: None,
+        };
+        status.update(status.cwd.clone(), &settings);
         let display = status.status_display();
         assert!(display.permissions.contains("/Volumes/shared"));
-        assert_eq!(display.model_provider_id, "remote-provider");
+        assert_eq!(display.model_provider_id, "updated-remote-provider");
+        assert_eq!(display.reasoning_summary, Some(ReasoningSummary::Detailed));
         assert!(!display.requires_openai_auth);
 
         let external = RemoteRuntimeStatus {

@@ -342,7 +342,7 @@ impl ChatWidget {
             && let Some(thread_id) = self.thread_id
             && let Some(runner) = self.workspace_command_runner.clone()
         {
-            let branch_cwd = PathBuf::from(cwd);
+            let branch_cwd = codex_utils_path_uri::LegacyAppPathString::from_string(cwd);
             let cwd = self.config.cwd.to_path_buf();
             let tx = self.app_event_tx.clone();
             tokio::spawn(async move {

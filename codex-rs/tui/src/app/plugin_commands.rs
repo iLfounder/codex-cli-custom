@@ -14,7 +14,7 @@ use codex_app_server_protocol::SessionRuntimeSnapshot;
 use codex_app_server_protocol::ThreadPresentation;
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use crate::app_event::WorkspaceRequestScope;
 
 const MAX_PRESENTATIONS: usize = 128;
 const MAX_RUNTIME_SUBJECTS: usize = 128;
@@ -26,7 +26,7 @@ pub(super) struct PluginCommandCatalogSubject {
     instance_epoch: String,
     account_slot_id: Option<String>,
     execution_generation: Option<u64>,
-    cwd: PathBuf,
+    workspace: WorkspaceRequestScope,
     invalidation_generation: u64,
 }
 
@@ -300,7 +300,7 @@ impl App {
             instance_epoch: runtime.instance_epoch,
             account_slot_id: runtime.account_slot_id,
             execution_generation: runtime.execution_generation,
-            cwd: self.chat_widget.config_ref().cwd.to_path_buf(),
+            workspace: self.chat_widget.workspace_request_scope(),
             invalidation_generation: self.plugin_command_state.invalidation_generation,
         })
     }
@@ -362,6 +362,13 @@ impl App {
         request_generation: u64,
         result: Result<Vec<PluginCommand>, String>,
     ) {
+        // A queued result can arrive before the refresh event queued by a workspace change.
+        if self.plugin_command_state.current_subject.as_ref()
+            != self.current_plugin_command_catalog_subject().as_ref()
+        {
+            self.invalidate_plugin_command_catalog();
+            self.refresh_plugin_commands(app_server);
+        }
         let completion = self.plugin_command_state.complete_catalog_request(
             thread_id,
             request_generation,

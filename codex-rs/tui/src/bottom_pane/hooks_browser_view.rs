@@ -26,6 +26,7 @@ use super::popup_consts::MAX_POPUP_ROWS;
 use super::scroll_state::ScrollState;
 use super::selection_popup_common::render_menu_surface;
 use crate::app_event::AppEvent;
+use crate::app_event::WorkspaceRequestScope;
 use crate::app_event_sender::AppEventSender;
 use crate::hooks_rpc::HookTrustUpdate;
 use crate::hooks_rpc::hook_needs_review;
@@ -48,6 +49,7 @@ enum HooksBrowserPage {
 }
 
 pub(crate) struct HooksBrowserView {
+    scope: WorkspaceRequestScope,
     entry: HooksListEntry,
     page: HooksBrowserPage,
     state: ScrollState,
@@ -57,6 +59,8 @@ pub(crate) struct HooksBrowserView {
 }
 
 impl HooksBrowserView {
+    pub(crate) const VIEW_ID: &'static str = "hooks-browser";
+
     #[cfg(test)]
     pub(crate) fn new(
         hooks: Vec<HookMetadata>,
@@ -65,6 +69,10 @@ impl HooksBrowserView {
         app_event_tx: AppEventSender,
     ) -> Self {
         Self::from_entry(
+            WorkspaceRequestScope {
+                cwd: codex_utils_path_uri::LegacyAppPathString::from_string(""),
+                generation: Default::default(),
+            },
             HooksListEntry {
                 cwd: codex_utils_path_uri::LegacyAppPathString::from_string(String::new()),
                 hooks,
@@ -77,12 +85,14 @@ impl HooksBrowserView {
     }
 
     pub(crate) fn from_entry(
+        scope: WorkspaceRequestScope,
         mut entry: HooksListEntry,
         app_event_tx: AppEventSender,
         keymap: ListKeymap,
     ) -> Self {
         entry.hooks.sort_by_key(|hook| hook.display_order);
         let mut view = Self {
+            scope,
             entry,
             page: HooksBrowserPage::Events,
             state: ScrollState::new(),
@@ -233,6 +243,7 @@ impl HooksBrowserView {
 
         hook.enabled = !hook.enabled;
         self.app_event_tx.send(AppEvent::SetHookEnabled {
+            scope: self.scope.clone(),
             key: hook.key.clone(),
             enabled: hook.enabled,
         });
@@ -251,6 +262,7 @@ impl HooksBrowserView {
 
         hook.trust_status = HookTrustStatus::Trusted;
         self.app_event_tx.send(AppEvent::TrustHook {
+            scope: self.scope.clone(),
             key: hook.key.clone(),
             current_hash: hook.current_hash.clone(),
         });
@@ -270,7 +282,7 @@ impl HooksBrowserView {
             });
         }
         if !updates.is_empty() {
-            self.app_event_tx.send(AppEvent::TrustHooks { updates });
+            self.app_event_tx.send(AppEvent::TrustHooks { scope: self.scope.clone(), updates });
         }
     }
 
@@ -594,6 +606,10 @@ impl HooksBrowserView {
 }
 
 impl BottomPaneView for HooksBrowserView {
+    fn view_id(&self) -> Option<&'static str> {
+        Some(Self::VIEW_ID)
+    }
+
     fn keymap_contexts(&self) -> crate::keymap::KeymapContextSet {
         crate::keymap::KeymapContextSet::new(crate::keymap::KeymapContext::List)
     }
@@ -1544,7 +1560,7 @@ mod tests {
         view.handle_key_event(KeyEvent::from(key_code));
 
         match rx.try_recv().expect("toggle event") {
-            AppEvent::SetHookEnabled { key, enabled } => {
+            AppEvent::SetHookEnabled { key, enabled, .. } => {
                 assert_eq!(key, "plugin:superpowers");
                 assert!(!enabled);
             }
@@ -1611,6 +1627,7 @@ mod tests {
             AppEvent::TrustHook {
                 key,
                 current_hash: hash_to_trust,
+                ..
             } => {
                 assert_eq!(key, "path:untrusted");
                 assert_eq!(hash_to_trust, current_hash);
@@ -1650,6 +1667,7 @@ mod tests {
             AppEvent::TrustHook {
                 key,
                 current_hash: hash_to_trust,
+                ..
             } => {
                 assert_eq!(key, "path:modified");
                 assert_eq!(hash_to_trust, current_hash);
@@ -1718,7 +1736,7 @@ mod tests {
             ]
         );
         match rx.try_recv().expect("trust event") {
-            AppEvent::TrustHooks { updates } => assert_eq!(
+            AppEvent::TrustHooks { updates, .. } => assert_eq!(
                 updates,
                 vec![
                     HookTrustUpdate {

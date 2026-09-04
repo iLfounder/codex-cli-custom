@@ -429,7 +429,7 @@ pub(super) async fn run_main_inner(
     } else {
         startup_draft
             .run_until(cloud_config_bundle_loader_for_storage(
-                app_server_target.auth_config_for_cloud_loader(config.auth_config()),
+                app_server_target.client_auth_config(config.auth_config()),
                 /*enable_codex_api_key_env*/ false,
             ))
             .await??

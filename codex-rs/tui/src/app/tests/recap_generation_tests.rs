@@ -400,6 +400,102 @@ async fn recap_generation_uses_remote_workspace_cwd() -> Result<()> {
 }
 
 #[tokio::test]
+async fn title_and_recap_use_server_provider_profile_and_mcp_configuration() -> Result<()> {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let local_home = tempdir()?;
+    let server_home = tempdir()?;
+    std::fs::write(
+        local_home.path().join("config.toml"),
+        "model_provider = 'windows-provider'\n\
+         default_permissions = 'windows-profile'\n\
+         [model_providers.windows-provider]\nname = 'Windows provider'\n\
+         [permissions.windows-profile.filesystem]\n':root' = 'read'\n\
+         [mcp_servers.windows-only]\ncommand = 'windows-only-mcp'\nenabled = false\n",
+    )?;
+    std::fs::write(
+        server_home.path().join("config.toml"),
+        "model_provider = 'mac-provider'\n\
+         [model_providers.mac-provider]\nname = 'Mac provider'\n\
+         [permissions.mac-profile.filesystem]\n':root' = 'read'\n\
+         [mcp_servers.mac-only]\ncommand = 'missing-mac-mcp'\nrequired = true\n",
+    )?;
+    app.config = ConfigBuilder::default()
+        .codex_home(local_home.path().to_path_buf())
+        .build()
+        .await?;
+    let server_config = ConfigBuilder::default()
+        .codex_home(server_home.path().to_path_buf())
+        .build()
+        .await?;
+    let (app_server, requests, proxy) = start_recording_remote_app_server(&server_config).await?;
+    let thread_id = ThreadId::new();
+    let mut session = test_thread_session(thread_id, server_config.cwd.to_path_buf());
+    session.model = MODEL.to_string();
+    session.model_provider_id = "mac-provider".to_string();
+    session.active_permission_profile = Some(codex_protocol::models::ActivePermissionProfile {
+        id: "mac-profile".to_string(),
+        extends: None,
+    });
+    session.execution_context = crate::session_state::SessionExecutionContext::Remote {
+        cwd: server_config.cwd.clone().into(),
+        runtime_workspace_roots: Vec::new(),
+        sandbox: codex_app_server_protocol::SandboxPolicy::ReadOnly { network_access: false },
+        rollout_path: None,
+    };
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    app.replace_chat_widget_with_app_server_thread(
+        &mut tui,
+        crate::app_server_session::AppServerStartedThread {
+            session,
+            turns: Vec::new(),
+            blocks_direct_input: false,
+            task_tools_available: false,
+        },
+        ThreadAttachPresentation::SessionLineage,
+        /*initial_user_message*/ None,
+    ).await?;
+    prepare_eligible_recap(&mut app, thread_id);
+    while app_event_rx.try_recv().is_ok() {}
+
+    app.generate_thread_title(
+        &app_server,
+        thread_id,
+        crate::app_event::ThreadTitleDestination::Automatic {
+            expected_title: "Existing title".to_string(),
+        },
+        "Generate a title".to_string(),
+    );
+    app.request_recap(&app_server, thread_id, RecapTrigger::Manual);
+    for _ in 0..2 {
+        let event = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), app_event_rx.recv())
+            .await?.expect("temporary request start event");
+        assert!(matches!(event,
+            AppEvent::ThreadTitleStarted { result: Ok(_), .. }
+                | AppEvent::RecapStarted { result: Ok(_), .. }
+        ), "unexpected event: {event:?}");
+    }
+    let starts = recorded_params(&requests, "thread/start");
+    assert_eq!(starts.len(), 2);
+    for params in starts {
+        assert_eq!(
+            serde_json::json!({
+                "provider": params["modelProvider"],
+                "permissions": params["permissions"],
+                "mcp": params["config"]["mcp_servers"],
+            }),
+            serde_json::json!({
+                "provider": "mac-provider",
+                "permissions": "mac-profile",
+                "mcp": { "mac-only": { "enabled": false } },
+            }),
+        );
+    }
+    app_server.shutdown().await?;
+    proxy.await??;
+    Ok(())
+}
+
+#[tokio::test]
 async fn temporary_recap_threads_disable_memories_and_remote_mcp_servers() -> Result<()> {
     let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
     let codex_home = tempdir()?;
@@ -414,7 +510,7 @@ async fn temporary_recap_threads_disable_memories_and_remote_mcp_servers() -> Re
     let config = app.chat_widget.config_ref();
     let options = crate::temporary_structured_request::TemporaryStructuredThreadOptions {
         model: app.chat_widget.current_model().to_string(),
-        model_provider: config.model_provider_id.clone(),
+        model_provider: Some(config.model_provider_id.clone()),
         cwd: config.cwd.clone().into(),
         active_permission_profile: config
             .permissions

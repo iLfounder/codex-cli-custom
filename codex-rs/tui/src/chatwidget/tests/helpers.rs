@@ -185,6 +185,7 @@ pub(super) async fn make_chatwidget_manual_with_auth(
     }
     let session_telemetry = test_session_telemetry(&cfg, resolved_model.as_str());
     let model_catalog = test_model_catalog(&cfg);
+    let runtime_requires_openai_auth = cfg.model_provider.requires_openai_auth;
     let common = ChatWidgetInit {
         config: cfg,
         frame_requester,
@@ -199,7 +200,7 @@ pub(super) async fn make_chatwidget_manual_with_auth(
         is_first_run: true,
         status_account_display: None,
         runtime_model_provider_base_url: None,
-        runtime_requires_openai_auth: false,
+        runtime_requires_openai_auth,
         initial_plan_type: None,
         model: Some(resolved_model.clone()),
         startup_tooltip_override: None,

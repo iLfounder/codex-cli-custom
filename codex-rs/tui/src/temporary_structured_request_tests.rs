@@ -75,7 +75,7 @@ async fn preserves_custom_permissions_and_disables_required_mcp_servers() -> col
         &app_server.request_handle(),
         TemporaryStructuredThreadOptions {
             model: "gpt-5.2".to_string(),
-            model_provider: config.model_provider_id.clone(),
+            model_provider: Some(config.model_provider_id.clone()),
             cwd: config.cwd.clone().into(),
             active_permission_profile: Some("title-restricted".to_string()),
             mcp_server_names: vec!["forbidden".to_string()],

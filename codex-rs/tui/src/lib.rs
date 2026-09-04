@@ -234,6 +234,7 @@ mod width;
 #[cfg(any(target_os = "windows", test))]
 mod windows_sandbox;
 mod workspace_command;
+mod marketplace_management;
 mod workspace_messages;
 
 mod wrapping;
@@ -308,10 +309,10 @@ impl AppServerTarget {
         matches!(self, Self::Remote { .. })
     }
 
-    fn auth_config_for_cloud_loader(&self, mut auth_config: AuthConfig) -> AuthConfig {
+    fn client_auth_config(&self, mut auth_config: AuthConfig) -> AuthConfig {
         if self.uses_remote_workspace() {
-            // Remove local auth restrictions before loading credentials for a remote
-            // workspace; the remote app server enforces its own authentication policy.
+            // Local credential loading and onboarding must not enforce this host's
+            // restrictions on a remote workspace. The server enforces its own policy.
             auth_config.forced_login_method = None;
             auth_config.forced_chatgpt_workspace_id = None;
             auth_config.managed_auth_policy = Default::default();
@@ -1002,7 +1003,7 @@ async fn cloud_config_bundle_for_app_server_target(
 ) -> std::io::Result<CloudConfigBundleLoader> {
     cloud_config_bundle_loader_for_storage(
         app_server_target
-            .auth_config_for_cloud_loader(bootstrap_auth_config(codex_home, bootstrap_config)?),
+            .client_auth_config(bootstrap_auth_config(codex_home, bootstrap_config)?),
         /*enable_codex_api_key_env*/ false,
     )
     .await
@@ -1264,6 +1265,7 @@ async fn run_ratatui_app(
             OnboardingScreenArgs {
                 show_login_screen,
                 allow_api_key_env_prefill: !uses_remote_workspace,
+                auth_config: app_server_target.client_auth_config(initial_config.auth_config()),
                 bedrock_setup_enabled,
                 show_trust_screen: should_show_trust_screen_flag,
                 remote_project_trust,

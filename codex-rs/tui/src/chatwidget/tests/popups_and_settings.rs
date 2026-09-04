@@ -15,6 +15,24 @@ use codex_features::Stage;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
+async fn account_update_revokes_plugin_workspace_cache_and_old_scope() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let cwd = chat.config.cwd.to_path_buf();
+    chat.on_plugins_loaded(cwd, Ok(plugins_test_response(Vec::new())));
+    let old_scope = chat.workspace_request_scope();
+    assert_eq!(chat.plugins_fetch_state.cache_scope.as_ref(), Some(&old_scope));
+
+    chat.update_account_state(
+        /*status_account_display*/ None, /*plan_type*/ None,
+        /*has_chatgpt_account*/ true, /*has_codex_backend_auth*/ true,
+    );
+
+    assert!(!chat.matches_workspace_request_scope(&old_scope));
+    assert!(chat.plugins_fetch_state.cache_scope.is_none());
+    assert!(chat.plugins_fetch_state.in_flight_scope.is_none());
+}
+
+#[tokio::test]
 async fn experimental_mode_plan_is_ignored_on_startup() {
     let codex_home = tempdir().expect("tempdir");
     let cfg = ConfigBuilder::default()
@@ -327,7 +345,7 @@ async fn plugins_popup_add_marketplace_tab_opens_prompt_and_submits_source() {
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
 
     match rx.try_recv() {
-        Ok(AppEvent::OpenMarketplaceAddLoading { source }) => {
+        Ok(AppEvent::OpenMarketplaceAddLoading { source, .. }) => {
             assert_eq!(source, "owner/repo");
         }
         other => panic!("expected OpenMarketplaceAddLoading event, got {other:?}"),
@@ -337,6 +355,7 @@ async fn plugins_popup_add_marketplace_tab_opens_prompt_and_submits_source() {
             cwd: event_cwd,
             remote_cwd,
             source,
+            ..
         }) => {
             assert_eq!(event_cwd, cwd);
             assert_eq!(remote_cwd, None);
@@ -393,7 +412,7 @@ async fn plugins_popup_upgrades_user_configured_git_marketplace_from_marketplace
     chat.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
 
     match rx.try_recv() {
-        Ok(AppEvent::OpenMarketplaceUpgradeLoading { marketplace_name }) => {
+        Ok(AppEvent::OpenMarketplaceUpgradeLoading { marketplace_name, .. }) => {
             assert_eq!(marketplace_name, Some("repo".to_string()));
         }
         other => panic!("expected OpenMarketplaceUpgradeLoading event, got {other:?}"),
@@ -402,6 +421,7 @@ async fn plugins_popup_upgrades_user_configured_git_marketplace_from_marketplace
         Ok(AppEvent::FetchMarketplaceUpgrade {
             cwd: event_cwd,
             marketplace_name,
+            ..
         }) => {
             assert_eq!(event_cwd, cwd);
             assert_eq!(marketplace_name, Some("repo".to_string()));
@@ -413,6 +433,69 @@ async fn plugins_popup_upgrades_user_configured_git_marketplace_from_marketplace
         no_more_events.is_err(),
         "expected no duplicate marketplace upgrade events, got {no_more_events:?}"
     );
+}
+
+#[tokio::test]
+async fn remote_marketplace_actions_follow_server_user_layers_not_windows_config() {
+    use crate::marketplace_management::MarketplaceManagement;
+    use codex_app_server_protocol::ConfigLayer;
+    use codex_app_server_protocol::ConfigLayerSource as ApiConfigLayerSource;
+    use codex_utils_path_uri::LegacyAppPathString;
+
+    for server_has_repo in [true, false] {
+        let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+        chat.set_feature_enabled(Feature::Plugins, true);
+        chat.current_remote_cwd = Some(LegacyAppPathString::from_string("/server/project"));
+        let temp = tempdir().expect("tempdir");
+        chat.config.config_layer_stack = ConfigLayerStack::default().with_user_config(
+            &temp.path().join("config.toml").abs(),
+            toml::from_str::<TomlValue>(if server_has_repo {
+                "[marketplaces.windows_only]\nsource_type = \"git\"\nsource = \"https://example.com/windows.git\"\n"
+            } else {
+                "[marketplaces.repo]\nsource_type = \"git\"\nsource = \"https://example.com/windows.git\"\n"
+            }).expect("local marketplace config"),
+        ).expect("local config layer");
+        let server_config = if server_has_repo {
+            serde_json::json!({"marketplaces": {"repo": {"source_type": "git"}}})
+        } else {
+            serde_json::json!({})
+        };
+        chat.on_marketplace_management_loaded(Some(Ok(MarketplaceManagement::from_layers(&[ConfigLayer {
+            name: ApiConfigLayerSource::User {
+                file: LegacyAppPathString::from_string("/server/codex/config.toml"), profile: None,
+            },
+            version: "test".to_string(), config: server_config, disabled_reason: None,
+        }]))));
+        render_loaded_plugins_popup(&mut chat, plugins_test_response(vec![
+            plugins_test_curated_marketplace(Vec::new()),
+            plugins_test_repo_marketplace(vec![plugins_test_summary(
+                "plugin-debug", "debug", Some("Debug Plugin"), Some("Server plugin."),
+                false, true, PluginInstallPolicy::Available,
+            )]),
+        ]));
+        while rx.try_recv().is_ok() {}
+        let popup = select_plugins_tab_containing(&mut chat, 100, "Repo Marketplace.");
+        assert_eq!(popup.contains("ctrl + u upgrade"), server_has_repo);
+        assert_eq!(popup.contains("ctrl + r remove"), server_has_repo);
+        if server_has_repo {
+            insta::assert_snapshot!("remote_marketplace_server_owned_actions", popup);
+        } else {
+            insta::assert_snapshot!("remote_marketplace_windows_config_not_authority", popup);
+        }
+        chat.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        let mut sent_upgrade = false;
+        while let Ok(event) = rx.try_recv() {
+            if let AppEvent::FetchMarketplaceUpgrade { scope, marketplace_name, .. } = event {
+                assert_eq!(scope.cwd, LegacyAppPathString::from_string("/server/project"));
+                assert_eq!(marketplace_name.as_deref(), Some("repo"));
+                sent_upgrade = true;
+            }
+        }
+        assert_eq!(sent_upgrade, server_has_repo);
+        chat.invalidate_connector_scope();
+        assert!(!chat.marketplace_is_user_configured("repo"));
+        assert!(!chat.marketplace_is_user_configured_git("repo"));
+    }
 }
 
 #[tokio::test]
@@ -572,6 +655,7 @@ async fn plugins_popup_removes_user_configured_marketplace_flow() {
     let marketplace_display_name = match rx.try_recv() {
         Ok(AppEvent::OpenMarketplaceRemoveLoading {
             marketplace_display_name,
+            ..
         }) => marketplace_display_name,
         other => panic!("expected OpenMarketplaceRemoveLoading event, got {other:?}"),
     };
@@ -581,6 +665,7 @@ async fn plugins_popup_removes_user_configured_marketplace_flow() {
             cwd: event_cwd,
             marketplace_name,
             marketplace_display_name,
+            ..
         }) => {
             assert_eq!(event_cwd, cwd);
             assert_eq!(marketplace_name, "repo");
@@ -828,13 +913,14 @@ async fn plugins_popup_remote_row_opens_remote_detail() {
     match rx.try_recv() {
         Ok(AppEvent::OpenPluginDetailLoading {
             plugin_display_name,
+            ..
         }) => {
             assert_eq!(plugin_display_name, "Calendar");
         }
         other => panic!("expected OpenPluginDetailLoading event, got {other:?}"),
     }
     match rx.try_recv() {
-        Ok(AppEvent::FetchPluginDetail { cwd: _, params }) => {
+        Ok(AppEvent::FetchPluginDetail { cwd: _, params, .. }) => {
             assert_eq!(params.marketplace_path, None);
             assert_eq!(
                 params.remote_marketplace_name,
@@ -905,6 +991,7 @@ async fn plugin_detail_unmaterialized_default_uses_remote_install_path() {
     match rx.try_recv() {
         Ok(AppEvent::OpenPluginInstallLoading {
             plugin_display_name,
+            ..
         }) => {
             assert_eq!(plugin_display_name, "Linear");
         }
@@ -916,6 +1003,7 @@ async fn plugin_detail_unmaterialized_default_uses_remote_install_path() {
             location: crate::app_event::PluginLocation::Remote { marketplace_name },
             plugin_name,
             plugin_display_name,
+            ..
         }) => {
             assert_eq!(marketplace_name, "workspace-shared-with-me-private");
             assert_eq!(plugin_name, "plugins~Plugin_linear");
@@ -967,6 +1055,7 @@ async fn plugin_detail_remote_uninstall_uses_remote_plugin_id() {
     match rx.try_recv() {
         Ok(AppEvent::OpenPluginUninstallLoading {
             plugin_display_name,
+            ..
         }) => {
             assert_eq!(plugin_display_name, "Linear");
         }
@@ -1393,6 +1482,7 @@ async fn plugins_popup_remote_detail_tracks_physical_and_policy_install_state() 
     match rx.try_recv() {
         Ok(AppEvent::OpenPluginDetailLoading {
             plugin_display_name,
+            ..
         }) => {
             assert_eq!(plugin_display_name, "Docs");
         }
@@ -1684,6 +1774,7 @@ async fn plugins_popup_space_toggles_installed_plugin_from_list() {
             cwd: event_cwd,
             plugin_id,
             enabled,
+            ..
         }) => {
             assert_eq!(event_cwd, cwd);
             assert_eq!(plugin_id, "plugin-drive");

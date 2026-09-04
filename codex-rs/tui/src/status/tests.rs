@@ -278,6 +278,52 @@ fn permissions_text_for(config: &Config) -> Option<String> {
 }
 
 #[tokio::test]
+async fn remote_status_uses_server_reasoning_summary_instead_of_local_config() {
+    let temp_home = TempDir::new().expect("temp home");
+    let mut config = test_config(&temp_home).await;
+    config.model_reasoning_summary = Some(ReasoningSummary::Detailed);
+    let mut model_rows = Vec::new();
+    for summary in [Some(ReasoningSummary::Concise), None] {
+        let runtime = super::remote_runtime::StatusRuntimeDisplay {
+            directory: "/Users/daniel/mac-project".to_string(),
+            permissions: "Read Only".to_string(),
+            model_provider_id: "mac-provider".to_string(),
+            reasoning_summary: summary,
+            requires_openai_auth: false,
+        };
+        let (cell, _) = new_status_output_with_rate_limits_handle(
+            &config,
+            /*runtime_model_provider_base_url*/ None,
+            Some(&runtime),
+            /*remote_connection*/ None,
+            /*account_display*/ None,
+            /*token_info*/ None,
+            &TokenUsage::default(),
+            &None,
+            /*thread_name*/ None,
+            /*forked_from*/ None,
+            &[],
+            /*_plan_type*/ None,
+            Local::now(),
+            "mac-model",
+            /*collaboration_mode*/ None,
+            Some(Some(ReasoningEffort::High)),
+            "<none>".to_string(),
+            /*refreshing_rate_limits*/ false,
+        );
+        let lines = render_lines(&cell.display_lines(/*width*/ 100));
+        let model_row = lines.iter().find_map(|line| line.split_once("Model:").map(|(_, value)| {
+            value.trim().trim_end_matches('│').trim().to_string()
+        })).expect("model status row");
+        model_rows.push(model_row);
+    }
+    assert_snapshot!(model_rows.join("\n"), @"
+    mac-model (reasoning high, summaries concise)
+    mac-model (reasoning high, summaries auto)
+    ");
+}
+
+#[tokio::test]
 async fn status_snapshot_includes_reasoning_details() {
     let temp_home = TempDir::new().expect("temp home");
     let mut config = test_config(&temp_home).await;

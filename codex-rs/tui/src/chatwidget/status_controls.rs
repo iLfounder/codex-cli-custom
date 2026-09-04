@@ -189,10 +189,12 @@ impl ChatWidget {
     pub(crate) fn set_status_line_branch(
         &mut self,
         cwd: codex_utils_path_uri::LegacyAppPathString,
+        generation: ConnectorScopeGeneration,
         branch: Option<String>,
     ) {
-        if self.status_line_branch_cwd.as_ref() != Some(&cwd) {
-            self.status_line_branch_pending = false;
+        if generation != self.connector_scope_generation()
+            || self.status_line_branch_cwd.as_ref() != Some(&cwd)
+        {
             return;
         }
         self.status_line_branch = branch;
@@ -205,10 +207,12 @@ impl ChatWidget {
     pub(crate) fn set_status_line_git_summary(
         &mut self,
         cwd: codex_utils_path_uri::LegacyAppPathString,
+        generation: ConnectorScopeGeneration,
         summary: StatusLineGitSummary,
     ) {
-        if self.status_line_git_summary_cwd.as_ref() != Some(&cwd) {
-            self.status_line_git_summary_pending = false;
+        if generation != self.connector_scope_generation()
+            || self.status_line_git_summary_cwd.as_ref() != Some(&cwd)
+        {
             return;
         }
         self.status_line_git_summary = Some(summary);

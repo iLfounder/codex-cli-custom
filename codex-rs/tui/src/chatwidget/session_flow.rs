@@ -3,6 +3,15 @@
 use super::*;
 
 impl ChatWidget {
+    pub(super) fn uses_remote_workspace(&self) -> bool {
+        self.current_remote_cwd.is_some()
+            || self.workspace_command_runner.as_ref().is_some_and(|runner| runner.uses_remote_workspace())
+    }
+
+    pub(crate) fn workspace_requests_ready(&self) -> bool {
+        !self.uses_remote_workspace() || self.current_remote_cwd.is_some()
+    }
+
     pub(crate) fn server_cwd(&self) -> codex_utils_path_uri::LegacyAppPathString {
         self.current_remote_cwd.clone().unwrap_or_else(|| {
             codex_utils_path_uri::LegacyAppPathString::from_abs_path(&self.config.cwd)
@@ -61,9 +70,6 @@ impl ChatWidget {
             &session,
             self.runtime_requires_openai_auth,
         );
-        if let Some(runner) = &self.workspace_command_runner {
-            runner.set_remote_cwd(self.current_remote_cwd.clone());
-        }
         if connector_scope_changed {
             self.invalidate_connector_scope();
         }

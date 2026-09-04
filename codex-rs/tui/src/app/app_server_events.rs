@@ -214,6 +214,11 @@ impl App {
                 }
                 let current_plugin_command_subject = self.current_plugin_command_catalog_subject();
                 if previous_plugin_command_subject != current_plugin_command_subject {
+                    self.chat_widget.invalidate_connector_scope();
+                    self.refresh_startup_skills(app_server_client);
+                    self.refresh_plugin_mentions(app_server_client);
+                    self.chat_widget.refresh_connectors(/*force_refetch*/ false);
+                    self.chat_widget.refresh_status_surfaces();
                     self.invalidate_plugin_command_catalog();
                     if current_plugin_command_subject.is_some() {
                         self.refresh_plugin_commands(app_server_client);
@@ -395,6 +400,8 @@ impl App {
                 self.account_runtime = None;
                 self.account_rotation_available = false;
                 self.sync_footer_runtime_projection();
+                self.refresh_startup_skills(app_server_client);
+                self.refresh_plugin_mentions(app_server_client);
                 self.refresh_account_state(app_server_client);
                 return;
             }

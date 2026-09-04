@@ -12,7 +12,7 @@
 
 #[cfg(test)]
 use std::collections::VecDeque;
-use std::path::Path;
+use codex_utils_path_uri::LegacyAppPathString;
 
 use serde::Deserialize;
 
@@ -99,7 +99,7 @@ struct GhRepoParent {
 /// omit the branch item without surfacing a background lookup error.
 pub(crate) async fn current_branch_name(
     runner: &dyn WorkspaceCommandExecutor,
-    cwd: &Path,
+    cwd: &LegacyAppPathString,
 ) -> Option<String> {
     let output = run_git_command(runner, cwd, &["branch", "--show-current"])
         .await
@@ -118,7 +118,7 @@ pub(crate) async fn current_branch_name(
 /// status-line cwd changes before the async lookup completes.
 pub(crate) async fn status_line_git_summary(
     runner: &dyn WorkspaceCommandExecutor,
-    cwd: &Path,
+    cwd: &LegacyAppPathString,
 ) -> StatusLineGitSummary {
     let (pull_request, branch_change_stats) = tokio::join!(
         open_pull_request(runner, cwd),
@@ -137,7 +137,7 @@ pub(crate) async fn status_line_git_summary(
 /// branch, not the current dirty worktree.
 async fn branch_diff_stats_to_default_branch(
     runner: &dyn WorkspaceCommandExecutor,
-    cwd: &Path,
+    cwd: &LegacyAppPathString,
 ) -> Option<GitBranchDiffStats> {
     let git_dir = run_git_command(runner, cwd, &["rev-parse", "--git-dir"])
         .await
@@ -195,7 +195,7 @@ async fn branch_diff_stats_to_default_branch(
 /// `origin` is prioritized because most repositories use it as the canonical upstream. Other
 /// remotes are still tried so fork or enterprise layouts with a differently named upstream can
 /// produce branch-change stats when their remote HEAD is configured.
-async fn get_git_remotes(runner: &dyn WorkspaceCommandExecutor, cwd: &Path) -> Option<Vec<String>> {
+async fn get_git_remotes(runner: &dyn WorkspaceCommandExecutor, cwd: &LegacyAppPathString) -> Option<Vec<String>> {
     let output = run_git_command(runner, cwd, &["remote"]).await.ok()?;
     if !output.success() {
         return None;
@@ -216,7 +216,7 @@ async fn get_git_remotes(runner: &dyn WorkspaceCommandExecutor, cwd: &Path) -> O
 /// local `main` or `master` is used as a last resort.
 async fn get_default_branch(
     runner: &dyn WorkspaceCommandExecutor,
-    cwd: &Path,
+    cwd: &LegacyAppPathString,
 ) -> Option<DefaultBranch> {
     let remotes = get_git_remotes(runner, cwd).await.unwrap_or_default();
     for remote in remotes {
@@ -242,7 +242,7 @@ async fn get_default_branch(
 /// to fail in a less obvious place.
 async fn get_remote_default_branch_from_symbolic_ref(
     runner: &dyn WorkspaceCommandExecutor,
-    cwd: &Path,
+    cwd: &LegacyAppPathString,
     remote: &str,
 ) -> Option<DefaultBranch> {
     let remote_head = format!("refs/remotes/{remote}/HEAD");
@@ -272,7 +272,7 @@ async fn get_remote_default_branch_from_symbolic_ref(
 /// must already exist locally before it is accepted.
 async fn get_remote_default_branch_from_remote_show(
     runner: &dyn WorkspaceCommandExecutor,
-    cwd: &Path,
+    cwd: &LegacyAppPathString,
     remote: &str,
 ) -> Option<DefaultBranch> {
     let output = run_git_command(runner, cwd, &["remote", "show", remote])
@@ -302,7 +302,7 @@ async fn get_remote_default_branch_from_remote_show(
 /// Falls back to local `main` or `master` when no remote default branch can be found.
 async fn get_default_branch_local(
     runner: &dyn WorkspaceCommandExecutor,
-    cwd: &Path,
+    cwd: &LegacyAppPathString,
 ) -> Option<DefaultBranch> {
     for candidate in ["main", "master"] {
         let local_ref = format!("refs/heads/{candidate}");
@@ -319,7 +319,7 @@ async fn get_default_branch_local(
 /// Checks whether a git ref exists in the status-line working directory.
 async fn git_ref_exists(
     runner: &dyn WorkspaceCommandExecutor,
-    cwd: &Path,
+    cwd: &LegacyAppPathString,
     reference: &str,
 ) -> bool {
     run_git_command(
@@ -338,7 +338,7 @@ async fn git_ref_exists(
 /// repository even when `gh` infers the fork from the current checkout.
 async fn open_pull_request(
     runner: &dyn WorkspaceCommandExecutor,
-    cwd: &Path,
+    cwd: &LegacyAppPathString,
 ) -> Option<StatusLinePullRequest> {
     if let Some(pull_request) = open_pull_request_for_current_branch(runner, cwd).await {
         return Some(pull_request);
@@ -350,7 +350,7 @@ async fn open_pull_request(
 /// Uses GitHub CLI's current-branch PR lookup.
 async fn open_pull_request_for_current_branch(
     runner: &dyn WorkspaceCommandExecutor,
-    cwd: &Path,
+    cwd: &LegacyAppPathString,
 ) -> Option<StatusLinePullRequest> {
     let output = run_gh_command(runner, cwd, &["pr", "view", "--json", "number,url,state"])
         .await
@@ -364,7 +364,7 @@ async fn open_pull_request_for_current_branch(
 /// Looks up open PRs for `HEAD` across the upstream/fork repository search order.
 async fn open_pull_request_for_head_commit(
     runner: &dyn WorkspaceCommandExecutor,
-    cwd: &Path,
+    cwd: &LegacyAppPathString,
 ) -> Option<StatusLinePullRequest> {
     let head_sha = current_head_sha(runner, cwd).await?;
     for repo in gh_repo_search_order(runner, cwd).await? {
@@ -392,7 +392,7 @@ async fn open_pull_request_for_head_commit(
 }
 
 /// Returns the current `HEAD` SHA for commit-based PR lookup.
-async fn current_head_sha(runner: &dyn WorkspaceCommandExecutor, cwd: &Path) -> Option<String> {
+async fn current_head_sha(runner: &dyn WorkspaceCommandExecutor, cwd: &LegacyAppPathString) -> Option<String> {
     let output = run_git_command(runner, cwd, &["rev-parse", "HEAD"])
         .await
         .ok()?;
@@ -406,7 +406,7 @@ async fn current_head_sha(runner: &dyn WorkspaceCommandExecutor, cwd: &Path) -> 
 /// Returns repositories to query for commit-associated PRs, with parent before fork.
 async fn gh_repo_search_order(
     runner: &dyn WorkspaceCommandExecutor,
-    cwd: &Path,
+    cwd: &LegacyAppPathString,
 ) -> Option<Vec<String>> {
     let output = run_gh_command(
         runner,
@@ -471,7 +471,7 @@ fn repo_search_order_from_output(stdout: &str) -> Option<Vec<String>> {
 /// Runs a git command through the workspace-command abstraction.
 async fn run_git_command(
     runner: &dyn WorkspaceCommandExecutor,
-    cwd: &Path,
+    cwd: &LegacyAppPathString,
     args: &[&str],
 ) -> Result<WorkspaceCommandOutput, crate::workspace_command::WorkspaceCommandError> {
     let mut argv = Vec::with_capacity(args.len() + 3);
@@ -482,7 +482,7 @@ async fn run_git_command(
     runner
         .run(
             WorkspaceCommand::new(argv)
-                .cwd(cwd.to_path_buf())
+                .cwd(cwd.clone())
                 .env("GIT_OPTIONAL_LOCKS", "0"),
         )
         .await
@@ -494,7 +494,7 @@ async fn run_git_command(
 /// authentication or user input should fail and leave the optional PR item hidden.
 async fn run_gh_command(
     runner: &dyn WorkspaceCommandExecutor,
-    cwd: &Path,
+    cwd: &LegacyAppPathString,
     args: &[&str],
 ) -> Result<WorkspaceCommandOutput, crate::workspace_command::WorkspaceCommandError> {
     let mut argv = Vec::with_capacity(args.len() + 1);
@@ -503,7 +503,7 @@ async fn run_gh_command(
     runner
         .run(
             WorkspaceCommand::new(argv)
-                .cwd(cwd.to_path_buf())
+                .cwd(cwd.clone())
                 .env("GH_PROMPT_DISABLED", "1")
                 .env("GIT_TERMINAL_PROMPT", "0"),
         )
@@ -518,6 +518,22 @@ mod tests {
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Mutex;
+
+    #[tokio::test]
+    async fn git_and_gh_probes_preserve_each_requests_portable_cwd() {
+        let runner = FakeRunner::new(vec![
+            response(&["git", "branch", "--show-current"], 0, "main\n"),
+            response(&["gh", "pr", "view", "--json", "number,url,state"], 0,
+                r#"{"number":42,"url":"https://github.com/example/repo/pull/42","state":"OPEN"}"#),
+        ]);
+        let posix = LegacyAppPathString::from_string("/Users/test/project-a");
+        let windows = LegacyAppPathString::from_string(r"C:\work\project-b");
+        assert_eq!(current_branch_name(&runner, &posix).await.as_deref(), Some("main"));
+        assert_eq!(open_pull_request(&runner, &windows).await.map(|pr| pr.number), Some(42));
+        let commands = runner.seen.lock().expect("seen lock");
+        assert_eq!(commands[0].cwd.as_ref(), Some(&posix));
+        assert_eq!(commands[1].cwd.as_ref(), Some(&windows));
+    }
 
     #[tokio::test]
     async fn branch_diff_stats_prefers_remote_default_ref_over_stale_local_branch() {
@@ -556,7 +572,7 @@ mod tests {
             ),
         ]);
 
-        let stats = branch_diff_stats_to_default_branch(&runner, Path::new("/repo"))
+        let stats = branch_diff_stats_to_default_branch(&runner, &LegacyAppPathString::from_string("/repo"))
             .await
             .expect("branch diff stats");
 
@@ -578,7 +594,7 @@ mod tests {
             r#"{"number":20252,"url":"https://github.com/openai/codex/pull/20252","state":"OPEN"}"#,
         )]);
 
-        let pull_request = open_pull_request(&runner, Path::new("/repo"))
+        let pull_request = open_pull_request(&runner, &LegacyAppPathString::from_string("/repo"))
             .await
             .expect("pull request");
 
@@ -623,7 +639,7 @@ mod tests {
             ),
         ]);
 
-        let pull_request = open_pull_request(&runner, Path::new("/repo"))
+        let pull_request = open_pull_request(&runner, &LegacyAppPathString::from_string("/repo"))
             .await
             .expect("pull request");
 
@@ -701,7 +717,7 @@ mod tests {
 
     struct FakeRunner {
         responses: Mutex<VecDeque<FakeResponse>>,
-        seen: Mutex<Vec<Vec<String>>>,
+        seen: Mutex<Vec<WorkspaceCommand>>,
     }
 
     impl FakeRunner {
@@ -727,7 +743,7 @@ mod tests {
                 .lock()
                 .expect("seen lock")
                 .iter()
-                .any(|seen| seen == &argv)
+                .any(|seen| seen.argv == argv)
         }
     }
 
@@ -745,7 +761,7 @@ mod tests {
             self.seen
                 .lock()
                 .expect("seen lock")
-                .push(command.argv.clone());
+                .push(command.clone());
             Box::pin(async move {
                 let mut responses = self.responses.lock().expect("responses lock");
                 let index = responses

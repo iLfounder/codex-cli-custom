@@ -667,10 +667,10 @@ pub(crate) struct App {
     // Serialize plugin enablement writes per plugin so stale completions cannot
     // overwrite a newer toggle, even if the plugin is toggled from different
     // cwd contexts.
-    pending_plugin_enabled_writes: HashMap<String, Option<bool>>,
+    pending_plugin_enabled_writes: HashMap<(crate::app_event::WorkspaceRequestScope, String), Option<bool>>,
     // Serialize hook enablement writes per hook so stale completions cannot
     // persist an older toggle after a newer one.
-    pending_hook_enabled_writes: HashMap<String, Option<bool>>,
+    pending_hook_enabled_writes: HashMap<(crate::app_event::WorkspaceRequestScope, String), Option<bool>>,
     recap: recap::RecapState,
 }
 

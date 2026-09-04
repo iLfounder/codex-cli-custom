@@ -484,23 +484,16 @@ impl ChatWidget {
         };
         if remote {
             self.current_remote_cwd = Some(server_cwd.clone());
-            if let Some(runner) = &self.workspace_command_runner {
-                runner.set_remote_cwd(self.current_remote_cwd.clone());
-            }
             if let Some(runtime_status) = self.remote_runtime_status.as_mut() {
-                runtime_status.update(
-                    server_cwd,
-                    settings.sandbox_policy.clone(),
-                    settings.active_permission_profile.clone().map(Into::into),
-                    settings.approval_policy,
-                    settings.approvals_reviewer.to_core(),
-                    settings.model_provider.clone(),
-                );
+                runtime_status.update(server_cwd, &settings);
             }
         } else if let Some(cwd) = server_cwd.to_inferred_abs_path() {
             self.apply_thread_settings_cwd(cwd);
         } else {
             tracing::warn!("local app server returned a non-native thread settings cwd");
+        }
+        if cwd_changed {
+            self.invalidate_connector_scope();
         }
         self.config.model_provider_id = settings.model_provider.clone();
         self.set_service_tier(settings.service_tier.clone());
@@ -552,11 +545,8 @@ impl ChatWidget {
         self.sync_service_tier_commands();
         self.sync_personality_command_enabled();
         if cwd_changed {
-            self.invalidate_connector_scope();
-            if !remote {
-                self.refresh_skills_for_current_cwd(/*force_reload*/ true);
-                self.refresh_connector_mentions(/*force_refresh*/ false);
-            }
+            self.refresh_skills_for_current_cwd(/*force_reload*/ true);
+            self.refresh_connector_mentions(/*force_refresh*/ false);
         }
         self.refresh_plugin_mentions();
         self.request_redraw();

@@ -5,7 +5,8 @@
 //! untracked files. When the current directory is not inside a Git
 //! repository, the function returns `Ok((false, String::new()))`.
 
-use std::path::Path;
+use codex_utils_path_uri::LegacyAppPathString;
+use codex_utils_path_uri::PathConvention;
 use std::time::Duration;
 
 use crate::workspace_command::WorkspaceCommand;
@@ -16,11 +17,19 @@ use codex_git_utils::FsmonitorProbeRunner;
 use codex_git_utils::detect_fsmonitor_override;
 
 const DIFF_COMMAND_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 30);
-const DISABLE_HOOKS_CONFIG: &str = if cfg!(windows) {
-    "core.hooksPath=NUL"
-} else {
-    "core.hooksPath=/dev/null"
-};
+fn disable_hooks_config(cwd: &LegacyAppPathString) -> &'static str {
+    match cwd.infer_absolute_path_convention() {
+        Some(PathConvention::Windows) => "core.hooksPath=NUL",
+        _ => "core.hooksPath=/dev/null",
+    }
+}
+
+fn workspace_null_device(cwd: &LegacyAppPathString) -> &'static str {
+    match cwd.infer_absolute_path_convention() {
+        Some(PathConvention::Windows) => "NUL",
+        _ => "/dev/null",
+    }
+}
 const EXECUTABLE_FILTER_CONFIG_PATTERN: &str = r"^filter\..*\.(clean|process)$";
 
 // `/diff` may execute Git through a remote workspace, so git-utils owns the
@@ -28,7 +37,7 @@ const EXECUTABLE_FILTER_CONFIG_PATTERN: &str = r"^filter\..*\.(clean|process)$";
 // WorkspaceCommand bounds each call; `/diff` has no aggregate command deadline.
 struct WorkspaceFsmonitorProbeRunner<'a> {
     runner: &'a dyn WorkspaceCommandExecutor,
-    cwd: &'a Path,
+    cwd: &'a LegacyAppPathString,
 }
 
 impl FsmonitorProbeRunner for WorkspaceFsmonitorProbeRunner<'_> {
@@ -36,7 +45,7 @@ impl FsmonitorProbeRunner for WorkspaceFsmonitorProbeRunner<'_> {
         let argv = ["git", "-c", codex_git_utils::SAFE_BARE_REPOSITORY_CONFIG]
             .into_iter()
             .chain(args.iter().copied());
-        let command = WorkspaceCommand::new(argv).cwd(self.cwd.to_path_buf());
+        let command = WorkspaceCommand::new(argv).cwd(self.cwd.clone());
         match self.runner.run(command).await {
             Ok(output) if output.success() => Some(output.stdout.into_bytes()),
             _ => None,
@@ -50,7 +59,7 @@ impl FsmonitorProbeRunner for WorkspaceFsmonitorProbeRunner<'_> {
 /// * `String` – The concatenated diff (may be empty).
 pub(crate) async fn get_git_diff(
     runner: &dyn WorkspaceCommandExecutor,
-    cwd: &Path,
+    cwd: &LegacyAppPathString,
 ) -> Result<(bool, String), String> {
     // First check if we are inside a Git repository.
     if !inside_git_repo(runner, cwd).await? {
@@ -89,13 +98,7 @@ pub(crate) async fn get_git_diff(
     let untracked_output = untracked_output_res?;
 
     let mut untracked_diff = String::new();
-    let null_device: &Path = if cfg!(windows) {
-        Path::new("NUL")
-    } else {
-        Path::new("/dev/null")
-    };
-
-    let null_path = null_device.to_str().unwrap_or("/dev/null");
+    let null_path = workspace_null_device(cwd);
     for file in untracked_output
         .split('\n')
         .map(str::trim)
@@ -125,7 +128,7 @@ pub(crate) async fn get_git_diff(
 /// UTF-8 string. Any non-zero exit status is considered an *error*.
 async fn run_git_capture_stdout(
     runner: &dyn WorkspaceCommandExecutor,
-    cwd: &Path,
+    cwd: &LegacyAppPathString,
     fsmonitor: FsmonitorOverride,
     args: &[&str],
 ) -> Result<String, String> {
@@ -144,7 +147,7 @@ async fn run_git_capture_stdout(
 /// returns stdout. Git returns 1 for diffs when differences are present.
 async fn run_git_capture_diff(
     runner: &dyn WorkspaceCommandExecutor,
-    cwd: &Path,
+    cwd: &LegacyAppPathString,
     fsmonitor: FsmonitorOverride,
     config_overrides: &[(String, String)],
     args: &[&str],
@@ -164,7 +167,7 @@ async fn run_git_capture_diff(
 /// from executing while generating diffs.
 async fn diff_filter_config_overrides(
     runner: &dyn WorkspaceCommandExecutor,
-    cwd: &Path,
+    cwd: &LegacyAppPathString,
     fsmonitor: FsmonitorOverride,
 ) -> Result<Vec<(String, String)>, String> {
     let args = [
@@ -209,7 +212,7 @@ async fn diff_filter_config_overrides(
 /// Determine if the current directory is inside a Git repository.
 async fn inside_git_repo(
     runner: &dyn WorkspaceCommandExecutor,
-    cwd: &Path,
+    cwd: &LegacyAppPathString,
 ) -> Result<bool, String> {
     // `rev-parse` does not inspect the worktree, and probing before this check
     // would also run extra Git commands outside repositories.
@@ -226,7 +229,7 @@ async fn inside_git_repo(
 
 async fn run_git_command(
     runner: &dyn WorkspaceCommandExecutor,
-    cwd: &Path,
+    cwd: &LegacyAppPathString,
     fsmonitor: FsmonitorOverride,
     config_overrides: &[(String, String)],
     args: &[&str],
@@ -238,12 +241,12 @@ async fn run_git_command(
         "-c",
         fsmonitor.git_config_arg(),
         "-c",
-        DISABLE_HOOKS_CONFIG,
+        disable_hooks_config(cwd),
     ]
     .into_iter()
     .chain(args.iter().copied());
     let mut command = WorkspaceCommand::new(argv)
-        .cwd(cwd.to_path_buf())
+        .cwd(cwd.clone())
         .timeout(DIFF_COMMAND_TIMEOUT)
         .disable_output_cap();
     if !config_overrides.is_empty() {
@@ -269,15 +272,30 @@ mod tests {
     use std::future::Future;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    use std::path::PathBuf;
+    #[cfg(unix)]
+    use std::path::Path;
     use std::pin::Pin;
     #[cfg(unix)]
     use std::process::Command as ProcessCommand;
     use std::sync::Mutex;
 
     #[tokio::test]
+    async fn git_diff_windows_workspace_uses_server_null_device_and_cwd() {
+        let cwd = LegacyAppPathString::from_string(r"C:\work\remote-repo");
+        let args = ["rev-parse", "--is-inside-work-tree"];
+        let mut argv = git_command(FsmonitorOverride::Disabled, &args);
+        *argv.iter_mut().find(|arg| *arg == "core.hooksPath=/dev/null").expect("hooks override") =
+            "core.hooksPath=NUL".to_string();
+        let runner = FakeRunner::new(vec![response(argv, 128, "")]);
+        assert_eq!(get_git_diff(&runner, &cwd).await, Ok((false, String::new())));
+        assert_command_metadata(&runner.commands(), &cwd);
+        assert_eq!(workspace_null_device(&cwd), "NUL");
+        assert_eq!(workspace_null_device(&LegacyAppPathString::from_string("/work/repo")), "/dev/null");
+    }
+
+    #[tokio::test]
     async fn get_git_diff_returns_not_git_for_non_git_cwd() {
-        let cwd = PathBuf::from("/workspace");
+        let cwd = LegacyAppPathString::from_string("/workspace");
         let runner = FakeRunner::new(vec![response(
             git_command(
                 FsmonitorOverride::Disabled,
@@ -295,7 +313,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_git_diff_disables_helpers_for_tracked_and_untracked_diffs() {
-        let cwd = PathBuf::from("/workspace");
+        let cwd = LegacyAppPathString::from_string("/workspace");
         let runner = FakeRunner::new(vec![
             response(
                 git_command(
@@ -392,7 +410,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_git_diff_preserves_builtin_fsmonitor_for_diff_workflow() {
-        let cwd = PathBuf::from("/workspace");
+        let cwd = LegacyAppPathString::from_string("/workspace");
         let runner = FakeRunner::new(vec![
             response(
                 git_command(
@@ -478,7 +496,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_git_diff_accepts_diff_exit_code_one() {
-        let cwd = PathBuf::from("/workspace");
+        let cwd = LegacyAppPathString::from_string("/workspace");
         let runner = FakeRunner::new(vec![
             response(
                 git_command(
@@ -540,7 +558,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_git_diff_rejects_unexpected_git_diff_status() {
-        let cwd = PathBuf::from("/workspace");
+        let cwd = LegacyAppPathString::from_string("/workspace");
         let runner = FakeRunner::new(vec![
             response(
                 git_command(
@@ -668,7 +686,7 @@ mod tests {
         fs::write(repo.join("unchanged.txt"), "unchanged\n").expect("refresh unchanged file");
         fs::write(repo.join("tracked.txt"), "after\n").expect("modify tracked file");
 
-        let result = get_git_diff(&LocalRunner, &repo)
+        let result = get_git_diff(&LocalRunner, &LegacyAppPathString::from_path(&repo))
             .await
             .expect("generate diff without invoking helpers");
 
@@ -735,7 +753,7 @@ mod tests {
         std::thread::sleep(Duration::from_secs(/*secs*/ 1));
         fs::write(checkout.join("tracked.txt"), "before\n").expect("refresh child tracked file");
 
-        let result = get_git_diff(&LocalRunner, &repo)
+        let result = get_git_diff(&LocalRunner, &LegacyAppPathString::from_path(&repo))
             .await
             .expect("generate diff without inspecting submodule worktrees");
 
@@ -753,7 +771,7 @@ mod tests {
             "-c",
             fsmonitor.git_config_arg(),
             "-c",
-            DISABLE_HOOKS_CONFIG,
+            "core.hooksPath=/dev/null",
         ]
         .into_iter()
         .chain(args.iter().copied())
@@ -802,7 +820,7 @@ mod tests {
     }
 
     fn null_device() -> &'static str {
-        if cfg!(windows) { "NUL" } else { "/dev/null" }
+        "/dev/null"
     }
 
     #[cfg(unix)]
@@ -832,9 +850,9 @@ mod tests {
         fs::set_permissions(path, permissions).expect("make helper executable");
     }
 
-    fn assert_command_metadata(commands: &[WorkspaceCommand], cwd: &Path) {
+    fn assert_command_metadata(commands: &[WorkspaceCommand], cwd: &LegacyAppPathString) {
         for command in commands {
-            assert_eq!(command.cwd.as_deref(), Some(cwd));
+            assert_eq!(command.cwd.as_ref(), Some(cwd));
             if matches!(
                 command.argv.get(3).map(String::as_str),
                 Some("config" | "version")
@@ -918,7 +936,7 @@ mod tests {
                 let mut process = ProcessCommand::new(&command.argv[0]);
                 process
                     .args(&command.argv[1..])
-                    .current_dir(command.cwd.expect("test command cwd"));
+                    .current_dir(command.cwd.expect("test command cwd").to_inferred_abs_path().expect("native test cwd"));
                 for (key, value) in command.env {
                     match value {
                         Some(value) => {

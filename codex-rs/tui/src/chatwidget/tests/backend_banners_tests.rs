@@ -308,6 +308,8 @@ async fn backend_banner_invalid_content_and_absence_restore_fallback() {
 async fn backend_banner_fallback_candidates_and_notice_follow_selected_model() {
     let (mut chat, _events, _ops) = make_chatwidget_manual(Some("test-model-a")).await;
     chat.has_chatgpt_account = true;
+    chat.runtime_requires_openai_auth = true;
+    chat.config.model_provider.requires_openai_auth = false;
     let template = chat.model_catalog.try_list_models().unwrap()[0].clone();
     let models = ["hidden-model", "test-model-b", "test-model-c"].map(|model| ModelPreset {
         model: model.into(),
@@ -321,10 +323,11 @@ async fn backend_banner_fallback_candidates_and_notice_follow_selected_model() {
         json!(["hidden-model", "test-model-c", "test-model-b"]);
     chat.update_backend_banner(&response);
     assert_eq!(chat.backend_banner_fallback(), Some(models[2].clone()));
-    // A retained ChatGPT login must not change a task using a custom provider.
-    chat.config.model_provider.requires_openai_auth = false;
-    assert_eq!(chat.backend_banner_fallback(), None);
+    // The server's provider requirement wins over the local provider configuration.
+    chat.runtime_requires_openai_auth = false;
     chat.config.model_provider.requires_openai_auth = true;
+    assert_eq!(chat.backend_banner_fallback(), None);
+    chat.runtime_requires_openai_auth = true;
     let mut mode = chat.effective_collaboration_mode();
     mode.settings.model = "test-model-c".into();
     chat.finish_backend_banner_fallback(mode);
