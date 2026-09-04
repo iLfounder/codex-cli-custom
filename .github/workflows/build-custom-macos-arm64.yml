@@ -12,6 +12,98 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  focused-validation:
+    name: focused validation / macOS arm64
+    runs-on: macos-15
+    timeout-minutes: 180
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
+      CARGO_TERM_COLOR: always
+      SOURCE_COMMIT: 316795b3cf2a45e90d121d9f46499d4658b2645c
+      PATCH_TREE: 0ae3e26557a912bcf78ad7102c01b5a63276874f
+
+    steps:
+      - name: Check out patch repository
+        uses: actions/checkout@v6
+
+      - name: Set up validation Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Fetch exact upstream and apply patch series
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init upstream-codex
+          git -C upstream-codex remote add origin https://github.com/openai/codex.git
+          git -C upstream-codex fetch --depth=1 origin "$SOURCE_COMMIT"
+          git -C upstream-codex checkout --detach FETCH_HEAD
+          test "$(git -C upstream-codex rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test -z "$(git -C upstream-codex status --porcelain)"
+          git -C upstream-codex config user.name github-actions
+          git -C upstream-codex config user.email github-actions@users.noreply.github.com
+          ./custom-patches/apply-series.sh upstream-codex
+          test "$(git -C upstream-codex rev-parse HEAD^{tree})" = "$PATCH_TREE"
+
+      - name: Prepare locked validation source
+        id: validation_provenance
+        working-directory: upstream-codex/codex-rs
+        shell: bash
+        run: |
+          set -euo pipefail
+          perl -0pi -e 's/version = "0\.0\.0"/version = "0.152.0"/g' Cargo.lock
+          compiled_lock_sha256=$(shasum -a 256 Cargo.lock | awk '{print $1}')
+          printf 'compiled_lock_sha256=%s\n' "$compiled_lock_sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Cache validation Cargo downloads
+        continue-on-error: true
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-downloads-v1-${{ runner.os }}-${{ runner.arch }}-rust1.95.0-${{ steps.validation_provenance.outputs.compiled_lock_sha256 }}
+          restore-keys: |
+            cargo-downloads-v1-${{ runner.os }}-${{ runner.arch }}-rust1.95.0-
+
+      - name: Resolve the checksum-verified Codex V8 pair
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CODEX_REPO_ROOT="$GITHUB_WORKSPACE/upstream-codex"
+          export PYTHONPATH="$CODEX_REPO_ROOT/scripts"
+          python3 - "$GITHUB_ENV" <<'PY'
+          import sys
+
+          from codex_package.targets import TARGET_SPECS
+          from codex_package.v8 import resolve_codex_v8_cargo_env
+
+          values = resolve_codex_v8_cargo_env(
+              TARGET_SPECS["aarch64-apple-darwin"]
+          )
+          with open(sys.argv[1], "a", encoding="utf-8") as github_env:
+              for name, value in values.items():
+                  assert "\n" not in value
+                  github_env.write(f"{name}={value}\n")
+          PY
+
+      - name: Run focused runtime and terminal tests
+        working-directory: upstream-codex/codex-rs
+        shell: bash
+        env:
+          RUST_MIN_STACK: 16777216
+        run: |
+          set -euo pipefail
+          cargo test --locked -p codex-app-server-protocol
+          cargo test --locked -p codex-app-server-transport
+          cargo test --locked -p codex-app-server-daemon
+          cargo test --locked -p codex-app-server-client supervised
+          cargo test --locked -p codex-app-server --lib session_runtime
+          cargo test --locked -p codex-tui scrollback
+          cargo test --locked -p codex-tui resize_reflow
+
   build:
     name: rust-v0.152.0 / macOS arm64
     runs-on: macos-15
@@ -29,7 +121,7 @@ jobs:
       SCCACHE_IDLE_TIMEOUT: "0"
       SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
       SOURCE_COMMIT: 316795b3cf2a45e90d121d9f46499d4658b2645c
-      PATCH_TREE: 7d877940c1fd9eac1ae6251ce521547b46458402
+      PATCH_TREE: 0ae3e26557a912bcf78ad7102c01b5a63276874f
 
     steps:
       - name: Check out patch repository
@@ -173,21 +265,6 @@ jobs:
                   assert "\n" not in value
                   github_env.write(f"{name}={value}\n")
           PY
-
-      - name: Run focused runtime and terminal tests
-        working-directory: upstream-codex/codex-rs
-        shell: bash
-        env:
-          RUST_MIN_STACK: 16777216
-        run: |
-          set -euo pipefail
-          cargo test --locked -p codex-app-server-protocol
-          cargo test --locked -p codex-app-server-transport
-          cargo test --locked -p codex-app-server-daemon
-          cargo test --locked -p codex-app-server-client supervised
-          cargo test --locked -p codex-app-server --lib session_runtime
-          cargo test --locked -p codex-tui scrollback
-          cargo test --locked -p codex-tui resize_reflow
 
       - name: Compute exact build identity
         id: build_identity

@@ -16,7 +16,7 @@ on:
         required: true
         type: string
       patched_tree:
-        description: Exact U01-U15 source tree recorded by the artifact
+        description: Exact U01-U21 source tree recorded by the artifact
         required: true
         type: string
       artifact_digest:
@@ -195,7 +195,7 @@ jobs:
           import selectors
           import subprocess
 
-          invocation_id = "u15-artifact-smoke"
+          invocation_id = "u21-artifact-smoke"
           env = {
               "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
               "HOME": os.environ["SMOKE_HOME"],
@@ -675,7 +675,7 @@ jobs:
       - name: Upload installation-ready release candidate
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: canonical-control-u15-${{ steps.artifact.outputs.patched_tree }}-smoke-${{ github.run_id }}
+          name: canonical-control-u21-${{ steps.artifact.outputs.patched_tree }}-smoke-${{ github.run_id }}
           path: ${{ runner.temp }}/canonical-control-dist/
           if-no-files-found: error
           retention-days: 14

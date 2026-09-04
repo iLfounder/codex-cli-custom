@@ -23,7 +23,7 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
       CARGO_TERM_COLOR: always
       SOURCE_COMMIT: 316795b3cf2a45e90d121d9f46499d4658b2645c
-      PATCH_TREE: 7d877940c1fd9eac1ae6251ce521547b46458402
+      PATCH_TREE: 0ae3e26557a912bcf78ad7102c01b5a63276874f
       TARGET: x86_64-pc-windows-msvc
 
     steps:
@@ -35,7 +35,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Fetch exact upstream and apply 15-patch series
+      - name: Fetch exact upstream and apply 21-patch series
         shell: bash
         run: |
           set -euo pipefail
@@ -132,18 +132,30 @@ jobs:
         run: |
           set -euo pipefail
           binary_dir="$CARGO_TARGET_DIR/$TARGET/release"
+          primary_package_dir="$RUNNER_TEMP/codex-package-$TARGET"
           mkdir -p dist
           export CODEX_REPO_ROOT="$GITHUB_WORKSPACE/upstream-codex"
           python upstream-codex/scripts/build_codex_package.py \
             --target "$TARGET" \
             --variant codex \
             --package-version 0.152.0 \
-            --package-dir "$RUNNER_TEMP/codex-package-$TARGET" \
-            --archive-output "$GITHUB_WORKSPACE/dist/codex-package-$TARGET.zip" \
+            --package-dir "$primary_package_dir" \
             --entrypoint-bin "$binary_dir/codex.exe" \
             --code-mode-host-bin "$binary_dir/codex-code-mode-host.exe" \
             --codex-command-runner-bin "$binary_dir/codex-command-runner.exe" \
             --codex-windows-sandbox-setup-bin "$binary_dir/codex-windows-sandbox-setup.exe"
+          cp upstream-codex/codex-rs/cli/scripts/codex-remote-mac.ps1 \
+            "$primary_package_dir/bin/codex-remote-mac.ps1"
+          PYTHONPATH="$GITHUB_WORKSPACE/upstream-codex/scripts" python - \
+            "$primary_package_dir" \
+            "$GITHUB_WORKSPACE/dist/codex-package-$TARGET.zip" <<'PY'
+          import sys
+          from pathlib import Path
+
+          from codex_package.archive import write_archive
+
+          write_archive(Path(sys.argv[1]), Path(sys.argv[2]), force=False)
+          PY
           python upstream-codex/scripts/build_codex_package.py \
             --target "$TARGET" \
             --variant codex-app-server \
@@ -177,6 +189,7 @@ jobs:
           import os
           from pathlib import Path
           import queue
+          import socket
           import subprocess
           import sys
           import threading
@@ -191,6 +204,13 @@ jobs:
               archive.extractall(primary)
           with zipfile.ZipFile(app_server_zip) as archive:
               archive.extractall(app_server)
+
+          launcher = primary / "bin/codex-remote-mac.ps1"
+          assert launcher.is_file()
+          assert not (app_server / "bin/codex-remote-mac.ps1").exists()
+          launcher_text = launcher.read_text(encoding="utf-8")
+          assert "$PSScriptRoot" in launcher_text
+          assert "'codex.exe'" in launcher_text
 
           expected_metadata = (
               (primary / "codex-package.json", "codex", "bin/codex.exe"),
@@ -222,6 +242,36 @@ jobs:
               timeout=30,
           )
           assert "0.152.0" in version.stdout
+
+          occupied = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+          occupied.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+          occupied.bind(("127.0.0.1", 0))
+          occupied.listen()
+          occupied_port = occupied.getsockname()[1]
+          try:
+              occupied_result = subprocess.run(
+                  [
+                      "powershell.exe",
+                      "-NoProfile",
+                      "-File",
+                      str(launcher),
+                      "-RemoteSocket",
+                      "/tmp/codex-remote-smoke.sock",
+                      "-LocalPort",
+                      str(occupied_port),
+                      "-ReadyTimeoutSeconds",
+                      "1",
+                  ],
+                  capture_output=True,
+                  text=True,
+                  timeout=30,
+              )
+          finally:
+              occupied.close()
+          assert occupied_result.returncode != 0
+          assert "already occupied" in (
+              occupied_result.stdout + occupied_result.stderr
+          )
 
           env = os.environ.copy()
           env.update(
@@ -307,6 +357,10 @@ jobs:
               json.dumps(
                   {
                       "packagedCli": True,
+                      "packagedRemoteLauncher": True,
+                      "remoteLauncherUsesSiblingCodex": True,
+                      "remoteLauncherRejectsOccupiedPort": True,
+                      "appServerPackageExcludesRemoteLauncher": True,
                       "directAppServer": True,
                       "sessionRuntimeCapabilities": True,
                       "providerCalled": False,

@@ -33,6 +33,8 @@ The fork makes account selection, thread ownership, session handoff, and externa
 | U17 | Shared owner-root binding to the canonical default account without exposing credential identity. |
 | U18 | Admitted-turn response stream disconnects remain outcome-unknown/no-replay `turn.failed` events. |
 | U19 | Production wiring from App-accepted runtime/inventory state into the semantic footer, plus restoration of the legacy top-level post-ready JSONL error wire. |
+| U20 | A Windows-native TUI can connect through an SSH loopback tunnel to the canonical macOS app-server while preserving remote filesystem and runtime authority, continuing work after disconnect, and re-entering loaded or persisted threads through `/agents` and `/resume`. |
+| U21 | Declarative multi-row footer layouts with ordered left/right lanes, a terminal-safe color palette, and live model, effort, account, session, thread, runtime, and context projections. |
 
 The app-server exposes opaque account references and sanitized session state. It never stores external workflow roles, group IDs, or user handles.
 Session-runtime identity keeps only a source kind and the literal `<workspace>` marker; it does not
@@ -67,6 +69,14 @@ current slot exactly matches the current authoritative sanitized inventory. Epoc
 thread fences leave mismatches and stale state empty; config reloads update the live footer while
 preserving the existing account and official-status-line projections.
 
+U21 adds ordered declarative rows with independent left and right lanes. Supported variables are
+`model`, `reasoning_effort`, `account_email`, `account_plan`, `account_slot`,
+`account_slot_label`, `account_slot_health`, `quota`, `session_id`, `session_id_short`,
+`session_name`, `handle`, `thread_id`, `thread_name`, `display_handle`, `runtime_state`,
+`rotation_state`, and `context_usage`. Missing values render as `N/A`; unknown variable or color
+names are configuration errors. The finite color palette is `plain`, `dim`, `red`, `green`,
+`yellow`, `blue`, `magenta`, `cyan`, `white`, and `gray`.
+
 Example configuration:
 
 ```toml
@@ -75,11 +85,20 @@ enabled = true
 max_rows = 3
 border = "rounded"       # none, plain, rounded, or double
 layout = "stacked"       # stacked or compact
-adapter_ids = ["official-statusline", "account", "session", "quota"]
+rows = [
+  { left = ["model", "reasoning_effort"], right = ["account_slot"] },
+  { left = ["display_handle", "session_id_short"], right = ["account_plan"] },
+]
+
+[tui.footer.colors]
+model = "cyan"
+reasoning_effort = "magenta"
+account_slot = "green"
 ```
 
-`max_rows` may be increased for additional rows; a disabled footer leaves the native status
-line unchanged.
+When `rows` is absent, the existing `adapter_ids` configuration and output remain unchanged.
+Configured rows take precedence when present. `max_rows` may be increased for additional rows;
+a disabled footer leaves the native status line unchanged.
 
 ## `codex exec --json` terminal errors
 
@@ -107,14 +126,14 @@ same model/reasoning effort, prewarm setting, proxy/TLS path, and concurrency wh
 
 ## Apply and build
 
-Apply the nineteen logical patches only to the exact upstream commit:
+Apply the twenty-one logical patches only to the exact upstream commit:
 
 ```sh
 git checkout 316795b3cf2a45e90d121d9f46499d4658b2645c
 /path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD" rust-v0.152.0
 ```
 
-The applier requires a clean tree, verifies every patch digest, applies U01–U19 in order, and
+The applier requires a clean tree, verifies every patch digest, applies U01–U21 in order, and
 verifies the final Git tree. The historical `rust-v0.149.0` and `rust-v0.148.0` series remain
 available by passing their series name explicitly. The script needs a POSIX shell, Git, `sed`,
 `awk`, and either `shasum` or `sha256sum`.
@@ -178,7 +197,7 @@ Stop every older TUI and app-server sharing the store. Start the 0.152 build onc
 
 ## Repository layout
 
-- `custom-patches/rust-v0.152.0/`: current nineteen-patch ordered series and digest manifest
+- `custom-patches/rust-v0.152.0/`: current twenty-one-patch ordered series and digest manifest
 - `custom-patches/rust-v0.151.0/`: preserved historical fifteen-patch series
 - `custom-patches/rust-v0.149.0/`: preserved historical ordered series
 - `custom-patches/rust-v0.148.0/`: previous series retained for reproducibility

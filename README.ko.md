@@ -33,6 +33,8 @@
 | U17 | Credential identity를 노출하지 않고 shared owner root를 canonical default account에 binding한다. |
 | U18 | Admitted-turn response stream disconnect를 outcome-unknown/no-replay `turn.failed`로 보존한다. |
 | U19 | App가 수락한 runtime/inventory state를 semantic footer에 production wiring하고 기존 top-level post-ready JSONL error wire를 복원한다. |
+| U20 | Windows native TUI가 SSH loopback tunnel을 통해 macOS canonical app-server에 접속하면서 remote filesystem/runtime authority를 보존하고, 연결이 끊긴 뒤에도 작업을 계속하며 `/agents`와 `/resume`으로 loaded/persisted thread에 재진입할 수 있게 한다. |
+| U21 | 선언형 다중 행 footer에서 순서가 보존되는 left/right lane, terminal-safe 색상, model·effort·account·session·thread·runtime·context의 live projection을 제공한다. |
 
 App-server는 opaque account reference와 sanitize된 session state만 노출한다. 외부 workflow role, group ID, 사용자 handle은 저장하지 않는다.
 Session-runtime identity도 source 종류와 literal `<workspace>` marker만 유지하며, 로컬 파일시스템
@@ -66,16 +68,33 @@ U19는 accepted runtime의 current slot이 현재 authoritative sanitized invent
 fence를 통과하지 못한 값은 비우고, config reload는 기존 account와 official-status-line
 projection을 보존하면서 live footer 설정을 갱신한다.
 
+U21은 독립적인 left/right lane을 갖는 선언형 행을 순서대로 배치한다. 지원 변수는
+`model`, `reasoning_effort`, `account_email`, `account_plan`, `account_slot`,
+`account_slot_label`, `account_slot_health`, `quota`, `session_id`, `session_id_short`,
+`session_name`, `handle`, `thread_id`, `thread_name`, `display_handle`, `runtime_state`,
+`rotation_state`, `context_usage`다. 값이 없으면 `N/A`로 표시하고 알 수 없는 변수나 색상은
+설정 오류로 처리한다. 색상은 `plain`, `dim`, `red`, `green`, `yellow`, `blue`, `magenta`,
+`cyan`, `white`, `gray`만 허용한다.
+
 ```toml
 [tui.footer]
 enabled = true
 max_rows = 3
 border = "rounded"       # none, plain, rounded, double
 layout = "stacked"       # stacked 또는 compact
-adapter_ids = ["official-statusline", "account", "session", "quota"]
+rows = [
+  { left = ["model", "reasoning_effort"], right = ["account_slot"] },
+  { left = ["display_handle", "session_id_short"], right = ["account_plan"] },
+]
+
+[tui.footer.colors]
+model = "cyan"
+reasoning_effort = "magenta"
+account_slot = "green"
 ```
 
-Footer를 끄면 native status line만 그대로 사용한다.
+`rows`가 없으면 기존 `adapter_ids` 설정과 출력이 그대로 유지되고, `rows`가 있으면 이를
+우선한다. Footer를 끄면 native status line만 그대로 사용한다.
 
 ## `codex exec --json` terminal error
 
@@ -104,14 +123,14 @@ snapshot hashing을 async executor 밖으로 옮겼지만 revision·identity 검
 
 ## 적용과 build
 
-정확한 upstream commit에만 19개의 logical patch를 적용한다.
+정확한 upstream commit에만 21개의 logical patch를 적용한다.
 
 ```sh
 git checkout 316795b3cf2a45e90d121d9f46499d4658b2645c
 /path/to/codex-cli-custom/custom-patches/apply-series.sh "$PWD" rust-v0.152.0
 ```
 
-Applier는 clean tree를 요구하고 각 patch digest를 검증한 뒤 U01–U19를 순서대로 적용하고
+Applier는 clean tree를 요구하고 각 patch digest를 검증한 뒤 U01–U21을 순서대로 적용하고
 최종 Git tree를 확인한다. 과거 `rust-v0.149.0`, `rust-v0.148.0` series는 이름을 명시해
 재현할 수 있다. POSIX shell, Git, `sed`, `awk`, `shasum` 또는 `sha256sum`이 필요하다.
 
@@ -174,7 +193,7 @@ Workflow는 두 package layout을 검사하고, 양쪽에 동일한 build의 Cod
 
 ## 저장소 구성
 
-- `custom-patches/rust-v0.152.0/`: 현재 19개 logical patch와 digest manifest
+- `custom-patches/rust-v0.152.0/`: 현재 21개 logical patch와 digest manifest
 - `custom-patches/rust-v0.151.0/`: 재현성을 위해 보존한 이전 15개 patch series
 - `custom-patches/rust-v0.149.0/`: 재현성을 위해 보존한 이전 series
 - `custom-patches/rust-v0.148.0/`: 재현성을 위해 보존한 이전 series
