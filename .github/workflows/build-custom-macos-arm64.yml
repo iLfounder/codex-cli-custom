@@ -21,7 +21,7 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
       CARGO_TERM_COLOR: always
       SOURCE_COMMIT: 316795b3cf2a45e90d121d9f46499d4658b2645c
-      PATCH_TREE: 41ac72b8331ad6c013451e6a49a61c1af21bbbe4
+      PATCH_TREE: e204b64d4f63511eb9d9bad38d754f2fad9349ad
 
     steps:
       - name: Check out patch repository
@@ -121,7 +121,7 @@ jobs:
       SCCACHE_IDLE_TIMEOUT: "0"
       SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
       SOURCE_COMMIT: 316795b3cf2a45e90d121d9f46499d4658b2645c
-      PATCH_TREE: 41ac72b8331ad6c013451e6a49a61c1af21bbbe4
+      PATCH_TREE: e204b64d4f63511eb9d9bad38d754f2fad9349ad
 
     steps:
       - name: Check out patch repository

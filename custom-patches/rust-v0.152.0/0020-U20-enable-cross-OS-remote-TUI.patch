@@ -1,4 +1,4 @@
-From 6683ea7ec1fc03827a954689889f129199cb4f23 Mon Sep 17 00:00:00 2001
+From eab66f9f10d3861a66e90ca35ec5471e3baedfc4 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 4 Sep 2026 03:28:12 +0900
 Subject: [PATCH 20/21] feat: support cross-platform remote TUI sessions
@@ -211,7 +211,7 @@ Subject: [PATCH 20/21] feat: support cross-platform remote TUI sessions
  .../src/transport/unix_socket_tests.rs        |  13 +-
  codex-rs/app-server/README.md                 |   2 +-
  codex-rs/app-server/src/account_registry.rs   |  45 +-
- .../account_registry/global/token_manager.rs  |   3 +-
+ .../account_registry/global/token_manager.rs  |   6 +-
  .../app-server/src/account_registry_tests.rs  |   3 -
  .../app-server/src/bespoke_event_handling.rs  |  11 +-
  codex-rs/app-server/src/config_layer.rs       |  17 +-
@@ -461,7 +461,7 @@ Subject: [PATCH 20/21] feat: support cross-platform remote TUI sessions
  codex-rs/tui/src/workspace_command.rs         |  30 +-
  .../src/unified_exec/tests.rs                 | 174 ++--
  scripts/remote-smoke-authority.py             | 496 +++++++++++
- 457 files changed, 9384 insertions(+), 3972 deletions(-)
+ 457 files changed, 9387 insertions(+), 3972 deletions(-)
  rename codex-rs/app-server-protocol/schema/typescript/{ => v2}/ImageGenerationItem.ts (67%)
  create mode 100644 codex-rs/cli/scripts/codex-remote-mac.ps1
  create mode 100644 codex-rs/tui/src/cli_tests.rs
@@ -26093,18 +26093,18 @@ index 58c7acdef2..7fa14d2f5e 100644
  
  #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 diff --git a/codex-rs/app-server/src/account_registry/global/token_manager.rs b/codex-rs/app-server/src/account_registry/global/token_manager.rs
-index 37d94b6ea3..7d37e62c8d 100644
+index 37d94b6ea3..abaa88a2c3 100644
 --- a/codex-rs/app-server/src/account_registry/global/token_manager.rs
 +++ b/codex-rs/app-server/src/account_registry/global/token_manager.rs
-@@ -18,7 +18,6 @@ use codex_http_client::HttpClientFactory;
+@@ -18,6 +18,7 @@ use codex_http_client::HttpClientFactory;
  use codex_login::ExternalAuthFuture;
  use codex_login::auth::ReadOnlyAuthRefresh;
  use serde::Deserialize;
--use serde::Serialize;
++#[cfg(unix)]
+ use serde::Serialize;
  use serde_json::Value;
  use thiserror::Error;
- use tokio::sync::mpsc;
-@@ -429,7 +428,7 @@ impl TokenManagerLifecycle {
+@@ -429,11 +430,12 @@ impl TokenManagerLifecycle {
  
      // Consumed by the serial global lifecycle authority after this primitive lands.
      #[allow(dead_code)]
@@ -26112,6 +26112,12 @@ index 37d94b6ea3..7d37e62c8d 100644
 +    pub(crate) async fn commit(self) -> Result<(), CatalogError> {
          tokio::task::spawn_blocking(move || {
              #[cfg(unix)]
+             {
+-                self.commit_sync()
++                let mut lifecycle = self;
++                lifecycle.commit_sync()
+             }
+             #[cfg(not(unix))]
              {
 diff --git a/codex-rs/app-server/src/account_registry_tests.rs b/codex-rs/app-server/src/account_registry_tests.rs
 index a4fad57477..a356972215 100644
