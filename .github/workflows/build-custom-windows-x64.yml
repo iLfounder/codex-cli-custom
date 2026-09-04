@@ -23,7 +23,7 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
       CARGO_TERM_COLOR: always
       SOURCE_COMMIT: 316795b3cf2a45e90d121d9f46499d4658b2645c
-      PATCH_TREE: 0ae3e26557a912bcf78ad7102c01b5a63276874f
+      PATCH_TREE: 41ac72b8331ad6c013451e6a49a61c1af21bbbe4
       TARGET: x86_64-pc-windows-msvc
 
     steps:

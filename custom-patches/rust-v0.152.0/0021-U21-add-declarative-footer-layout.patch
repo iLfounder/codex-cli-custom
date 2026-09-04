@@ -1,4 +1,4 @@
-From a880fedeb7c15f10a3407a94df4dbae62420888a Mon Sep 17 00:00:00 2001
+From 710a688cd9c6a362136d16c8ac57667fdb3729d7 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 4 Sep 2026 03:28:38 +0900
 Subject: [PATCH 21/21] feat(tui): add declarative footer rows
