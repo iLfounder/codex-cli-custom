@@ -225,6 +225,36 @@ async fn activation_fixture(models: Vec<ModelInfo>) -> ActivationFixture {
     }
 }
 
+#[tokio::test]
+async fn activation_resolves_model_metadata_from_the_captured_execution_account() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let mut account_models = activation_models();
+    account_models[1].display_name = "Captured account model".to_string();
+    let expected_display_name = account_models[1].display_name.clone();
+    // The bootstrap catalog intentionally has no entry for the requested model.
+    session.services.models_manager = Arc::new(StaticModelsManager::new(
+        /*auth_manager*/ None,
+        ModelsResponse { models: Vec::new() },
+    ));
+    turn.execution_account = Arc::new(crate::execution_account::ExecutionAccountContext {
+        models_manager: Arc::new(StaticModelsManager::new(
+            /*auth_manager*/ None,
+            ModelsResponse { models: account_models },
+        )),
+        ..turn.execution_account.as_ref().clone()
+    });
+    let current = turn.current_settings.load_full();
+    let updated = session.prepare_step_settings_activation(
+        &turn,
+        &current,
+        &StepSettingsUpdate { model: Some(MODEL_B.to_string()), ..Default::default() },
+    ).await.expect("resolve using captured account catalog");
+    assert_eq!(
+        (&updated.model_info.slug, &updated.model_info.display_name),
+        (&MODEL_B.to_string(), &expected_display_name),
+    );
+}
+
 fn step_values(
     step: &StepContext,
 ) -> (

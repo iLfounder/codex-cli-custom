@@ -2132,7 +2132,7 @@ impl Session {
             &turn_context.session_source,
             SessionSource::SubAgent(SubAgentSource::Other(name))
                 if name == crate::guardian::GUARDIAN_REVIEWER_NAME
-        ) && self.services.analytics_events_client.is_enabled()
+        ) && turn_context.analytics_events_client.is_enabled()
             && turn_context.parent_thread_id.is_some()
             && self
                 .state
@@ -2141,7 +2141,7 @@ impl Session {
                 .session_configuration
                 .trusted_guardian_reviewer
         {
-            self.services
+            turn_context
                 .analytics_events_client
                 .track_guardian_session_event(self.thread_id, &event);
         }

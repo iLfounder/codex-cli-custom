@@ -4,6 +4,89 @@ use rmcp::model::ElicitationSchema;
 use rmcp::model::PrimitiveSchemaDefinition;
 use serde_json::json;
 
+struct AccountMcpContributor(McpServerConfig);
+
+impl codex_extension_api::McpServerContributor<Config> for AccountMcpContributor {
+    fn id(&self) -> &'static str {
+        "account_mcp_projection_test"
+    }
+
+    fn contribute<'a>(
+        &'a self,
+        _context: codex_extension_api::McpServerContributionContext<'a, Config>,
+    ) -> codex_extension_api::ExtensionFuture<'a, Vec<codex_extension_api::McpServerContribution>>
+    {
+        Box::pin(async move {
+            vec![codex_extension_api::McpServerContribution::Set {
+                name: "account-marker".to_string(),
+                config: Box::new(self.0.clone()),
+            }]
+        })
+    }
+}
+
+fn mcp_account_runtime(
+    session: &Session,
+    slot_id: &str,
+    server: McpServerConfig,
+) -> Arc<crate::execution_account::ExecutionAccountRuntime> {
+    let mut extensions = codex_extension_api::ExtensionRegistryBuilder::new();
+    extensions.mcp_server_contributor(Arc::new(AccountMcpContributor(server)));
+    let mut runtime = crate::session::tests::default_execution_account_runtime(
+        &session.services.auth_manager,
+        &session.services.models_manager,
+        &session.services,
+    )
+    .into_inner();
+    let mutable = Arc::get_mut(&mut runtime).expect("unshared account runtime");
+    Arc::make_mut(&mut mutable.execution_account).binding.slot_id = slot_id.to_string();
+    mutable.services.mcp_manager = Arc::new(McpManager::new_with_extensions(
+        Arc::clone(&mutable.services.plugins_manager),
+        Arc::new(extensions.build()),
+        codex_connectors::ConnectorRuntimeManager::default(),
+    ));
+    runtime
+}
+
+#[tokio::test]
+async fn mcp_config_projection_uses_published_and_captured_account_managers() {
+    let (session, turn_context) = crate::session::tests::make_session_and_context().await;
+    let published_server: McpServerConfig = serde_json::from_value(json!({
+        "url": "http://127.0.0.1/published-account",
+    }))
+    .expect("published account MCP config");
+    let candidate_server: McpServerConfig = serde_json::from_value(json!({
+        "url": "http://127.0.0.1/candidate-account",
+    }))
+    .expect("candidate account MCP config");
+    let published = mcp_account_runtime(&session, "published", published_server.clone());
+    let candidate = mcp_account_runtime(&session, "candidate", candidate_server.clone());
+    session.execution_account_runtime.store(published);
+
+    let (published_config, _) = session
+        .runtime_mcp_config_and_context(&turn_context.config)
+        .await;
+    // A provisional attempt must project its candidate without publishing it first.
+    let (candidate_config, _) = session
+        .runtime_mcp_config_and_context_for_account(&turn_context.config, &candidate)
+        .await;
+
+    pretty_assertions::assert_eq!(
+        (
+            codex_mcp::configured_mcp_servers(&published_config)
+                .remove("account-marker"),
+            codex_mcp::configured_mcp_servers(&candidate_config)
+                .remove("account-marker"),
+            session.execution_account().binding.slot_id.clone(),
+        ),
+        (
+            Some(published_server),
+            Some(candidate_server),
+            "published".to_string(),
+        ),
+    );
+}
+
 fn meta(value: Value) -> Option<RequestMetaObject> {
     let Value::Object(map) = value else {
         panic!("metadata must be an object");

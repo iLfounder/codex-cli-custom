@@ -87,7 +87,7 @@ impl GoalService {
         };
         let previous_goal = PreviousGoalSnapshot::from(&current);
         if let Some(runtime) = runtime.as_ref() {
-            runtime.invalidate_turn_lineage().await;
+            runtime.clear_pending_turn_start_options().await;
         }
         fill_empty_thread_preview_if_possible(state_db, thread_id, &goal).await;
         drop(goal_state_permit);

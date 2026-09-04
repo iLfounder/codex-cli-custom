@@ -97,6 +97,17 @@ impl Session {
         &self,
         config: &Config,
     ) -> (McpConfig, McpRuntimeContext) {
+        let account_runtime = self.execution_account_runtime();
+        self.runtime_mcp_config_and_context_for_account(config, &account_runtime)
+            .await
+    }
+
+    // Provisional attempts supply their unpublished runtime; session queries capture the current one.
+    async fn runtime_mcp_config_and_context_for_account(
+        &self,
+        config: &Config,
+        account_runtime: &crate::execution_account::ExecutionAccountRuntime,
+    ) -> (McpConfig, McpRuntimeContext) {
         let originator = self.originator().await;
         let (session_source, host_fallback_cwd) = {
             let state = self.state.lock().await;
@@ -118,7 +129,7 @@ impl Session {
                 &environments,
             )
             .await;
-        let mcp_projection = self
+        let mcp_projection = account_runtime
             .services
             .mcp_manager
             .runtime_config_for_step(
@@ -140,6 +151,7 @@ impl Session {
                 config,
                 &environments,
                 mcp_projection,
+                &account_runtime.session_telemetry,
             )
             .await
             .config;
@@ -302,14 +314,17 @@ impl Session {
                 &desired.config,
                 &desired.environments,
                 mcp_projection,
+                &account_runtime.session_telemetry,
             )
             .await;
         let selected_plugins = mcp_projection.selected_plugins.clone();
-        let input = self.build_mcp_runtime_input(
+        let input = self.build_mcp_runtime_input_for_account(
             &desired,
             mcp_projection,
             &ready_selected_capability_roots,
             Some(self.mcp_elicitation_reviewer()),
+            &account_runtime.services,
+            &account_runtime.execution_account.auth_manager,
         );
         anyhow::ensure!(
             input.mcp_servers.contains_key(CODEX_APPS_MCP_SERVER_NAME),
@@ -350,7 +365,10 @@ impl Session {
             {
                 return binding;
             }
-            let config = Arc::new(self.runtime_mcp_config(&turn_context.config).await);
+            let (config, _) = self
+                .runtime_mcp_config_and_context_for_account(&turn_context.config, &account_runtime)
+                .await;
+            let config = Arc::new(config);
             return Arc::new(codex_mcp::McpBinding::empty(config));
         }
         let account_runtime = self.execution_account_runtime();
@@ -389,7 +407,10 @@ impl Session {
         {
             return binding;
         }
-        let config = Arc::new(self.runtime_mcp_config(&turn_context.config).await);
+        let (config, _) = self
+            .runtime_mcp_config_and_context_for_account(&turn_context.config, &account_runtime)
+            .await;
+        let config = Arc::new(config);
         Arc::new(codex_mcp::McpBinding::empty(config))
     }
 

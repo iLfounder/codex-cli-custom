@@ -147,6 +147,7 @@ impl Session {
         config: &'a Config,
         environments: &'a TurnEnvironmentSnapshot,
         mut projection: McpRuntimeProjection,
+        session_telemetry: &'a SessionTelemetry,
     ) -> BoxFuture<'a, McpRuntimeProjection> {
         Box::pin(async move {
             if crate::guardian::is_basic_session_source(session_source) {
@@ -172,7 +173,7 @@ impl Session {
                 };
                 // Count completed discovery attempts, including refreshes, before host policy
                 // or MCP startup determines whether the server's tools become available.
-                self.services.session_telemetry.counter(
+                session_telemetry.counter(
                     "codex.mcp.executor_discovery",
                     /*inc*/ 1,
                     &[("outcome", outcome)],
@@ -194,7 +195,7 @@ impl Session {
                     } else {
                         "unavailable"
                     };
-                    self.services.session_telemetry.counter(
+                    session_telemetry.counter(
                         "codex.mcp.executor_discovery.server",
                         /*inc*/ 1,
                         &[("server_name", name.as_str()), ("outcome", outcome)],
@@ -304,15 +305,16 @@ impl Session {
         ready_selected_capability_roots: &[SelectedCapabilityRoot],
         elicitation_reviewer: Option<ElicitationReviewerHandle>,
     ) {
+        let account_runtime = self.execution_account_runtime();
         let mcp_projection = self
             .project_selected_environment_mcp_servers(
                 &desired.session_source,
                 &desired.config,
                 &desired.environments,
                 mcp_projection,
+                &account_runtime.session_telemetry,
             )
             .await;
-        let account_runtime = self.execution_account_runtime();
         let selected_plugins = mcp_projection.selected_plugins.clone();
         let input = self.build_mcp_runtime_input_for_account(
             desired,
@@ -326,25 +328,7 @@ impl Session {
         self.services.thread_extension_data.insert(selected_plugins);
     }
 
-    pub(super) fn build_mcp_runtime_input(
-        &self,
-        desired: &McpDesiredState,
-        mcp_projection: McpRuntimeProjection,
-        ready_selected_capability_roots: &[SelectedCapabilityRoot],
-        elicitation_reviewer: Option<ElicitationReviewerHandle>,
-    ) -> McpRuntimeInput {
-        let runtime = self.execution_account_runtime();
-        self.build_mcp_runtime_input_for_account(
-            desired,
-            mcp_projection,
-            ready_selected_capability_roots,
-            elicitation_reviewer,
-            &runtime.services,
-            &runtime.execution_account.auth_manager,
-        )
-    }
-
-    fn build_mcp_runtime_input_for_account(
+    pub(super) fn build_mcp_runtime_input_for_account(
         &self,
         desired: &McpDesiredState,
         mcp_projection: McpRuntimeProjection,

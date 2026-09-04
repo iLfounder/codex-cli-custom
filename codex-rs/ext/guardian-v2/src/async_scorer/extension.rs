@@ -160,7 +160,9 @@ impl PreparedExecutionAccountRuntime for PreparedGuardianV2AccountRuntime {
                     metrics: self.target_metrics.clone(),
                     ..Default::default()
                 });
-                thread_store.insert(GuardianV2Enabled);
+                thread_store.insert(GuardianV2Enabled {
+                    computer_use_only: config.review_scope == GuardianV2ReviewScope::ComputerUseOnly,
+                });
             }
             _ => {
                 thread_store.remove::<LunaSampler>();
