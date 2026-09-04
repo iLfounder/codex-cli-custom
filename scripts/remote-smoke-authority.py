@@ -3,6 +3,10 @@
 
 The fixture is intentionally stdlib-only.  It writes only below a new, disposable
 owner home, binds numeric loopback listeners, and never logs credential payloads.
+
+With --hold-first-response, poll first_request_url until observed, disconnect the
+remote client, then POST release_first_response_url. The hold expires after 120s;
+the default 0.25s delay alone does not establish that a disconnect happened.
 """
 
 from __future__ import annotations
@@ -29,6 +33,9 @@ ACCOUNT_ID = "smoke-chatgpt-account"
 ACCOUNT_LABEL = "C1"
 MODEL_ID = "remote-smoke-model"
 SOURCE_REF_CONTEXT = b"llm-bridge.subscription-source-ref/v1\0codex-cli\0"
+RESPONSE_SEQUENCE = (
+    "pwd", "first_turn_complete", "get_goal", "update_goal", "goal_complete"
+)
 
 
 def _b64url(value: bytes) -> str:
@@ -134,12 +141,40 @@ requires_openai_auth = true
     }
 
 
-def response_events(index: int) -> list[dict[str, Any]]:
+def goal_tool_result(
+    tool_outputs: list[dict[str, Any]], call_id: str
+) -> dict[str, Any]:
+    outputs = [item["output"] for item in tool_outputs if item.get("call_id") == call_id]
+    if len(outputs) != 1:
+        raise ValueError(f"expected one tool result for {call_id}")
+    result = json.loads(outputs[0])
+    if (
+        not isinstance(result, dict)
+        or not isinstance(result.get("goalId"), str)
+        or not result["goalId"]
+        or type(result.get("revision")) is not int
+        or result["revision"] < 1
+        or not isinstance(result.get("goal"), dict)
+    ):
+        raise ValueError(f"expected a versioned goal result for {call_id}")
+    return result
+
+
+def response_events(
+    index: int, tool_outputs: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    if not 1 <= index <= len(RESPONSE_SEQUENCE):
+        raise ValueError("fixture response sequence is already complete")
+    phase = RESPONSE_SEQUENCE[index - 1]
+    if phase == "first_turn_complete" and not any(
+        item.get("call_id") == "remote-smoke-pwd" for item in tool_outputs
+    ):
+        raise ValueError("expected pwd tool result before completing the first turn")
     response_id = f"remote-smoke-response-{index}"
     events: list[dict[str, Any]] = [
         {"type": "response.created", "response": {"id": response_id}}
     ]
-    if index == 1:
+    if phase == "pwd":
         events.append(
             {
                 "type": "response.output_item.done",
@@ -151,22 +186,40 @@ def response_events(index: int) -> list[dict[str, Any]]:
                 },
             }
         )
-    elif index == 3:
+    elif phase in {"get_goal", "update_goal"}:
+        arguments: dict[str, Any] = {}
+        if phase == "update_goal":
+            goal = goal_tool_result(tool_outputs, "remote-smoke-goal-read")
+            if goal["goal"].get("status") != "active":
+                raise ValueError("expected an active goal before update_goal")
+            arguments = {
+                "expected_goal_id": goal["goalId"],
+                "expected_revision": goal["revision"],
+                "status": "complete",
+            }
         events.append(
             {
                 "type": "response.output_item.done",
                 "item": {
                     "type": "function_call",
-                    "call_id": "remote-smoke-goal-complete",
-                    "name": "update_goal",
-                    "arguments": json.dumps({"status": "complete"}),
+                    "call_id": (
+                        "remote-smoke-goal-read"
+                        if phase == "get_goal"
+                        else "remote-smoke-goal-complete"
+                    ),
+                    "name": phase,
+                    "arguments": json.dumps(arguments),
                 },
             }
         )
     else:
+        if phase == "goal_complete":
+            goal = goal_tool_result(tool_outputs, "remote-smoke-goal-complete")
+            if goal["goal"].get("status") != "complete":
+                raise ValueError("expected successful update_goal before final response")
         text = (
             "remote smoke first turn complete"
-            if index == 2
+            if phase == "first_turn_complete"
             else "remote smoke goal complete"
         )
         events.append(
@@ -220,7 +273,9 @@ def find_tool_outputs(value: Any) -> list[dict[str, Any]]:
 
 
 class FixtureState:
-    def __init__(self, source_ref: str, records_file: Path) -> None:
+    def __init__(
+        self, source_ref: str, records_file: Path, *, hold_first_response: bool = False
+    ) -> None:
         now = int(time.time())
         self.snapshot = {
             "label": ACCOUNT_LABEL,
@@ -247,6 +302,10 @@ class FixtureState:
         self.records: list[dict[str, Any]] = []
         self.response_count = 0
         self.lock = threading.Lock()
+        self.first_request_observed = threading.Event()
+        self.first_response_release = threading.Event()
+        if not hold_first_response:
+            self.first_response_release.set()
 
     def record_response_request(self, body: dict[str, Any], headers: Any) -> int:
         with self.lock:
@@ -267,12 +326,19 @@ class FixtureState:
             self.records.append(
                 {
                     "exchange": index,
+                    "phase": (
+                        RESPONSE_SEQUENCE[index - 1]
+                        if index <= len(RESPONSE_SEQUENCE)
+                        else "unexpected"
+                    ),
                     "response_id": f"remote-smoke-response-{index}",
                     "turn_id": turn_id,
                     "tool_outputs": find_tool_outputs(body.get("input", [])),
                 }
             )
             private_write(self.records_file, json.dumps(self.records, indent=2) + "\n")
+            if index == 1:
+                self.first_request_observed.set()
             return index
 
 
@@ -292,6 +358,14 @@ def handler_for(state: FixtureState, role: str) -> type[BaseHTTPRequestHandler]:
             self.wfile.write(payload)
 
         def do_GET(self) -> None:  # noqa: N802
+            if role == "responses" and self.path == "/fixture/first-request":
+                self.send_json(
+                    {
+                        "observed": state.first_request_observed.is_set(),
+                        "released": state.first_response_release.is_set(),
+                    }
+                )
+                return
             if role != "token" or self.path not in {"/snapshots", "/events"}:
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
@@ -319,6 +393,15 @@ def handler_for(state: FixtureState, role: str) -> type[BaseHTTPRequestHandler]:
                 return
 
         def do_POST(self) -> None:  # noqa: N802
+            if role == "responses" and self.path == "/fixture/release-first-response":
+                if not state.first_request_observed.is_set():
+                    self.send_error(
+                        HTTPStatus.CONFLICT, "first request has not been observed"
+                    )
+                    return
+                state.first_response_release.set()
+                self.send_json({"released": True})
+                return
             if role != "responses" or not self.path.rstrip("/").endswith("/responses"):
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
@@ -333,16 +416,25 @@ def handler_for(state: FixtureState, role: str) -> type[BaseHTTPRequestHandler]:
                 self.send_error(HTTPStatus.BAD_REQUEST)
                 return
             index = state.record_response_request(body, self.headers)
-            if index > 4:
+            try:
+                events = response_events(
+                    index, find_tool_outputs(body.get("input", []))
+                )
+            except (ValueError, TypeError, KeyError):
                 self.send_error(
-                    HTTPStatus.CONFLICT, "fixture has exactly four exchanges"
+                    HTTPStatus.CONFLICT, "request does not match fixture tool sequence"
                 )
                 return
             if index == 1:
+                if not state.first_response_release.wait(timeout=120):
+                    self.send_error(
+                        HTTPStatus.GATEWAY_TIMEOUT, "first response was not released"
+                    )
+                    return
                 time.sleep(0.25)
             payload = "".join(
                 f"event: {event['type']}\ndata: {json.dumps(event, separators=(',', ':'))}\n\n"
-                for event in response_events(index)
+                for event in events
             ).encode()
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/event-stream")
@@ -424,6 +516,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--token-manager-port", type=int, default=0)
     parser.add_argument("--responses-port", type=int, default=0)
     parser.add_argument("--ready-file", type=Path)
+    parser.add_argument(
+        "--hold-first-response",
+        action="store_true",
+        help="wait up to 120 seconds for POST /fixture/release-first-response before the first response",
+    )
     return parser.parse_args()
 
 
@@ -442,7 +539,11 @@ def main() -> int:
     responses_port = probe.server_address[1]
     probe.server_close()
     prepared = prepare_owner_home(owner_home, responses_port, args.primary_binary)
-    state = FixtureState(prepared["source_ref"], Path(prepared["records_file"]))
+    state = FixtureState(
+        prepared["source_ref"],
+        Path(prepared["records_file"]),
+        hold_first_response=args.hold_first_response,
+    )
     responses = loopback_server(responses_port, handler_for(state, "responses"))
     token_manager = loopback_server(
         args.token_manager_port, handler_for(state, "token")
@@ -456,6 +557,8 @@ def main() -> int:
         "model": MODEL_ID,
         "token_manager_url": f"http://127.0.0.1:{token_manager.server_address[1]}/",
         "responses_url": f"http://127.0.0.1:{responses.server_address[1]}/v1",
+        "first_request_url": f"http://127.0.0.1:{responses.server_address[1]}/fixture/first-request",
+        "release_first_response_url": f"http://127.0.0.1:{responses.server_address[1]}/fixture/release-first-response",
     }
     if args.ready_file is not None:
         private_write(args.ready_file, json.dumps(ready, indent=2) + "\n")
