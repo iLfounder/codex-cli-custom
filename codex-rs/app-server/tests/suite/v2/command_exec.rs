@@ -259,7 +259,9 @@ async fn assert_command_exec_apply_patch_rollout(
             disable_output_cap: false,
             disable_timeout: false,
             timeout_ms: None,
-            cwd: Some(workspace.path().to_path_buf()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                workspace.path(),
+            )),
             env: Some(HashMap::from([(
                 CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS_ENV_VAR.to_string(),
                 Some(client_override.to_string()),
@@ -377,7 +379,9 @@ async fn command_exec_enforces_managed_deny_read_requirements() -> Result<()> {
         disable_output_cap: false,
         disable_timeout: false,
         timeout_ms: None,
-        cwd: Some(codex_home.path().to_path_buf()),
+        cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+            codex_home.path(),
+        )),
         env: None,
         size: None,
         sandbox_policy: Some(SandboxPolicy::ReadOnly {
@@ -411,7 +415,9 @@ async fn command_exec_enforces_managed_deny_read_requirements() -> Result<()> {
     for sandbox_policy in [
         SandboxPolicy::DangerFullAccess,
         SandboxPolicy::WorkspaceWrite {
-            writable_roots: vec![nested_root.try_into()?],
+            writable_roots: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                &nested_root,
+            )],
             network_access: false,
             exclude_tmpdir_env_var: false,
             exclude_slash_tmp: false,
@@ -579,7 +585,9 @@ async fn command_exec_permission_profile_project_roots_use_command_cwd() -> Resu
             disable_output_cap: false,
             disable_timeout: false,
             timeout_ms: None,
-            cwd: Some("command-cwd".into()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_string(
+                "command-cwd",
+            )),
             env: None,
             size: None,
             sandbox_policy: None,

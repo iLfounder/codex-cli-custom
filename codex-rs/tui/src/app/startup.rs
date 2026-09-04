@@ -27,13 +27,15 @@ fn spawn_startup_thread_start(
 ) {
     let request_handle = app_server.request_handle();
     let thread_params_mode = app_server.thread_params_mode();
-    let remote_cwd_override = app_server.remote_cwd_override().map(Path::to_path_buf);
+    let remote_invocation_overrides = app_server.remote_invocation_overrides().cloned();
+    let remote_cwd_override = app_server.remote_cwd_override().cloned();
     let thread_tool_transport = app_server.thread_tool_transport();
     tokio::spawn(async move {
         let result = crate::app_server_session::start_thread_with_request_handle(
             request_handle,
             config,
             thread_params_mode,
+            remote_invocation_overrides,
             remote_cwd_override,
             thread_tool_transport,
         )
@@ -159,7 +161,12 @@ impl App {
                 &harness_overrides,
             );
         }
-        let mut model = config.model.clone().unwrap_or(bootstrap.default_model);
+        let uses_remote_workspace = app_server.uses_remote_workspace();
+        let mut model = if uses_remote_workspace {
+            bootstrap.default_model
+        } else {
+            config.model.clone().unwrap_or(bootstrap.default_model)
+        };
         let available_models = bootstrap.available_models;
         let remote_connection = crate::status::remote_connection::remote_connection_status_value(
             &app_server_target,
@@ -168,14 +175,18 @@ impl App {
         if let Err(err) = startup_draft.flush_pending_events(tui).await {
             return shutdown_on_startup_error(app_server, err).await;
         }
-        let exit_info = handle_model_migration_prompt_if_needed(
-            tui,
-            &mut config,
-            model.as_str(),
-            &app_event_tx,
-            &available_models,
-        )
-        .await?;
+        let exit_info = if uses_remote_workspace {
+            None
+        } else {
+            handle_model_migration_prompt_if_needed(
+                tui,
+                &mut config,
+                model.as_str(),
+                &app_event_tx,
+                &available_models,
+            )
+            .await?
+        };
         if let Some(exit_info) = exit_info {
             app_server
                 .shutdown()
@@ -186,7 +197,7 @@ impl App {
                 .ok();
             return Ok(exit_info);
         }
-        if let Some(updated_model) = config.model.clone() {
+        if !uses_remote_workspace && let Some(updated_model) = config.model.clone() {
             model = updated_model;
         }
         let dynamic_tool_status_updates = tokio::sync::broadcast::channel(/*capacity*/ 64).0;
@@ -236,19 +247,25 @@ impl App {
 
         let status_line_invalid_items_warned = Arc::new(AtomicBool::new(false));
         let terminal_title_invalid_items_warned = Arc::new(AtomicBool::new(false));
-        let workspace_command_runner: WorkspaceCommandRunner = Arc::new(
-            AppServerWorkspaceCommandRunner::new(app_server.request_handle()),
-        );
+        let workspace_command_runner: WorkspaceCommandRunner =
+            Arc::new(AppServerWorkspaceCommandRunner::new(
+                app_server.request_handle(),
+                uses_remote_workspace,
+            ));
         let runtime_model_provider_started_at = Instant::now();
-        let runtime_model_provider_base_url = match startup_draft
-            .run_until(
-                tui,
-                resolve_runtime_model_provider_base_url(&config.model_provider),
-            )
-            .await
-        {
-            Ok(base_url) => base_url,
-            Err(err) => return shutdown_on_startup_error(app_server, err).await,
+        let runtime_model_provider_base_url = if uses_remote_workspace {
+            None
+        } else {
+            match startup_draft
+                .run_until(
+                    tui,
+                    resolve_runtime_model_provider_base_url(&config.model_provider),
+                )
+                .await
+            {
+                Ok(base_url) => base_url,
+                Err(err) => return shutdown_on_startup_error(app_server, err).await,
+            }
         };
         let runtime_model_provider_ms = runtime_model_provider_started_at.elapsed().as_millis();
 
@@ -313,6 +330,7 @@ impl App {
                     is_first_run,
                     status_account_display: status_account_display.clone(),
                     runtime_model_provider_base_url: runtime_model_provider_base_url.clone(),
+                    runtime_requires_openai_auth: requires_openai_auth,
                     initial_plan_type,
                     model: Some(model.clone()),
                     startup_tooltip_override,
@@ -384,6 +402,7 @@ impl App {
                     is_first_run,
                     status_account_display: status_account_display.clone(),
                     runtime_model_provider_base_url: runtime_model_provider_base_url.clone(),
+                    runtime_requires_openai_auth: requires_openai_auth,
                     initial_plan_type,
                     model: config.model.clone(),
                     startup_tooltip_override: None,
@@ -445,6 +464,7 @@ impl App {
                     is_first_run,
                     status_account_display: status_account_display.clone(),
                     runtime_model_provider_base_url: runtime_model_provider_base_url.clone(),
+                    runtime_requires_openai_auth: requires_openai_auth,
                     initial_plan_type,
                     model: config.model.clone(),
                     startup_tooltip_override: None,
@@ -494,6 +514,7 @@ See the Codex keymap documentation for supported actions and examples."
             runtime_approval_policy_override: None,
             runtime_permission_profile_override: None,
             file_search,
+            remote_file_search_session: None,
             enhanced_keys_supported,
             keymap: runtime_keymap,
             key_chord_matcher: KeyChordMatcher::default(),
@@ -614,8 +635,9 @@ See the Codex keymap documentation for supported actions and examples."
         #[cfg(target_os = "windows")]
         {
             let startup_permission_profile = app.config.permissions.effective_permission_profile();
-            let should_check = crate::windows_sandbox::level_from_config(&app.config)
-                != WindowsSandboxLevel::Disabled
+            let should_check = !uses_remote_workspace
+                && crate::windows_sandbox::level_from_config(&app.config)
+                    != WindowsSandboxLevel::Disabled
                 && managed_filesystem_sandbox_is_restricted(&startup_permission_profile)
                 && !app
                     .config
@@ -750,7 +772,7 @@ See the Codex keymap documentation for supported actions and examples."
                         app.app_server_target.clone(),
                         app.config.clone(),
                         app.current_displayed_thread_id(),
-                        app_server.remote_cwd_override().map(Path::to_path_buf),
+                        app_server.remote_cwd_override().cloned(),
                         app_server.thread_tool_transport(),
                         app.reconnect.presentation,
                     )));

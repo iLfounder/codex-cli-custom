@@ -109,7 +109,10 @@ fn stage_windows_sandbox_helpers() -> anyhow::Result<()> {
             // A sandbox helper can briefly remain alive after the sandboxed
             // command exits. Bazel may retry the test while that process still
             // has the staged executable open, so keep the already-staged copy.
-            if err.kind() == std::io::ErrorKind::PermissionDenied && destination.exists() {
+            if (err.kind() == std::io::ErrorKind::PermissionDenied
+                || err.raw_os_error() == Some(32))
+                && destination.exists()
+            {
                 continue;
             }
             return Err(err).with_context(|| {

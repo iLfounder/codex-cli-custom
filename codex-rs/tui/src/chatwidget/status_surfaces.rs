@@ -162,10 +162,10 @@ impl ChatWidget {
             self.status_line_branch_pending = false;
             self.status_line_branch_lookup_complete = false;
         } else {
-            let cwd = self.status_line_cwd().to_path_buf();
+            let cwd = self.server_cwd();
             self.sync_status_line_branch_state(&cwd);
             if !self.status_line_branch_lookup_complete {
-                self.request_status_line_branch(cwd);
+                self.request_status_line_branch(cwd, self.status_line_local_cwd().to_path_buf());
             }
         }
 
@@ -174,10 +174,13 @@ impl ChatWidget {
             self.status_line_git_summary_pending = false;
             self.status_line_git_summary_lookup_complete = false;
         } else {
-            let cwd = self.status_line_cwd().to_path_buf();
+            let cwd = self.server_cwd();
             self.sync_status_line_git_summary_state(&cwd);
             if !self.status_line_git_summary_lookup_complete {
-                self.request_status_line_git_summary(cwd);
+                self.request_status_line_git_summary(
+                    cwd,
+                    self.status_line_local_cwd().to_path_buf(),
+                );
             }
         }
 
@@ -400,9 +403,9 @@ impl ChatWidget {
         if !selections.uses_git_branch() {
             return;
         }
-        let cwd = self.status_line_cwd().to_path_buf();
+        let cwd = self.server_cwd();
         self.sync_status_line_branch_state(&cwd);
-        self.request_status_line_branch(cwd);
+        self.request_status_line_branch(cwd, self.status_line_local_cwd().to_path_buf());
     }
 
     pub(super) fn request_status_line_git_summary_refresh(&mut self) {
@@ -410,9 +413,9 @@ impl ChatWidget {
         if !selections.uses_git_summary() {
             return;
         }
-        let cwd = self.status_line_cwd().to_path_buf();
+        let cwd = self.server_cwd();
         self.sync_status_line_git_summary_state(&cwd);
-        self.request_status_line_git_summary(cwd);
+        self.request_status_line_git_summary(cwd, self.status_line_local_cwd().to_path_buf());
     }
 
     /// Parses configured status-line ids into known items and collects unknown ids.
@@ -448,10 +451,17 @@ impl ChatWidget {
         })
     }
 
-    fn status_line_cwd(&self) -> &Path {
+    fn status_line_local_cwd(&self) -> &Path {
         self.current_cwd
             .as_deref()
             .unwrap_or(self.config.cwd.as_path())
+    }
+
+    fn status_line_cwd_display(&self) -> String {
+        self.remote_runtime_status.as_ref().map_or_else(
+            || format_directory_display(self.status_line_local_cwd(), /*max_width*/ None),
+            crate::status::RemoteRuntimeStatus::directory_display,
+        )
     }
 
     /// Resolves the project root associated with `cwd`.
@@ -485,7 +495,11 @@ impl ChatWidget {
 
     /// Returns a cached project-root display name for the active cwd.
     fn status_line_project_root_name(&mut self) -> Option<String> {
-        let cwd = self.status_line_cwd().to_path_buf();
+        if let Some(remote_runtime_status) = self.remote_runtime_status.as_ref() {
+            return remote_runtime_status.project_root_name();
+        }
+
+        let cwd = self.status_line_local_cwd().to_path_buf();
         if let Some(cache) = &self.status_line_project_root_name_cache
             && cache.cwd == cwd
         {
@@ -506,7 +520,7 @@ impl ChatWidget {
     /// directory name when no project root can be inferred.
     fn terminal_title_project_name(&mut self) -> Option<String> {
         let project = self.status_line_project_root_name().or_else(|| {
-            let cwd = self.status_line_cwd();
+            let cwd = self.status_line_local_cwd();
             Some(
                 cwd.file_name()
                     .map(|name| name.to_string_lossy().to_string())
@@ -522,7 +536,7 @@ impl ChatWidget {
     ///
     /// The branch cache is keyed by cwd because branch lookup is performed relative to that path.
     /// Keeping stale branch values across cwd changes would surface incorrect repository context.
-    fn sync_status_line_branch_state(&mut self, cwd: &Path) {
+    fn sync_status_line_branch_state(&mut self, cwd: &codex_utils_path_uri::LegacyAppPathString) {
         if self
             .status_line_branch_cwd
             .as_ref()
@@ -530,17 +544,20 @@ impl ChatWidget {
         {
             return;
         }
-        self.status_line_branch_cwd = Some(cwd.to_path_buf());
+        self.status_line_branch_cwd = Some(cwd.clone());
         self.status_line_branch = None;
         self.status_line_branch_pending = false;
         self.status_line_branch_lookup_complete = false;
     }
 
-    fn sync_status_line_git_summary_state(&mut self, cwd: &Path) {
-        if self.status_line_git_summary_cwd.as_deref() == Some(cwd) {
+    fn sync_status_line_git_summary_state(
+        &mut self,
+        cwd: &codex_utils_path_uri::LegacyAppPathString,
+    ) {
+        if self.status_line_git_summary_cwd.as_ref() == Some(cwd) {
             return;
         }
-        self.status_line_git_summary_cwd = Some(cwd.to_path_buf());
+        self.status_line_git_summary_cwd = Some(cwd.clone());
         self.status_line_git_summary = None;
         self.status_line_git_summary_pending = false;
         self.status_line_git_summary_lookup_complete = false;
@@ -550,7 +567,11 @@ impl ChatWidget {
     ///
     /// The resulting `StatusLineBranchUpdated` event carries the lookup cwd so callers can reject
     /// stale completions after directory changes.
-    fn request_status_line_branch(&mut self, cwd: PathBuf) {
+    fn request_status_line_branch(
+        &mut self,
+        cwd: codex_utils_path_uri::LegacyAppPathString,
+        command_cwd: PathBuf,
+    ) {
         if self.status_line_branch_pending {
             return;
         }
@@ -561,12 +582,16 @@ impl ChatWidget {
         self.status_line_branch_pending = true;
         let tx = self.app_event_tx.clone();
         tokio::spawn(async move {
-            let branch = branch_summary::current_branch_name(runner.as_ref(), &cwd).await;
+            let branch = branch_summary::current_branch_name(runner.as_ref(), &command_cwd).await;
             tx.send(AppEvent::StatusLineBranchUpdated { cwd, branch });
         });
     }
 
-    fn request_status_line_git_summary(&mut self, cwd: PathBuf) {
+    fn request_status_line_git_summary(
+        &mut self,
+        cwd: codex_utils_path_uri::LegacyAppPathString,
+        command_cwd: PathBuf,
+    ) {
         if self.status_line_git_summary_pending {
             return;
         }
@@ -577,7 +602,8 @@ impl ChatWidget {
         self.status_line_git_summary_pending = true;
         let tx = self.app_event_tx.clone();
         tokio::spawn(async move {
-            let summary = branch_summary::status_line_git_summary(runner.as_ref(), &cwd).await;
+            let summary =
+                branch_summary::status_line_git_summary(runner.as_ref(), &command_cwd).await;
             tx.send(AppEvent::StatusLineGitSummaryUpdated { cwd, summary });
         });
     }
@@ -671,12 +697,7 @@ impl ChatWidget {
             StatusLineItem::ModelName => Some(self.model_display_name().to_string()),
             StatusLineItem::ModelWithReasoning => Some(self.model_with_reasoning_display_name()),
             StatusLineItem::Reasoning => Some(self.reasoning_display_name()),
-            StatusLineItem::CurrentDir => {
-                Some(format_directory_display(
-                    self.status_line_cwd(),
-                    /*max_width*/ None,
-                ))
-            }
+            StatusLineItem::CurrentDir => Some(self.status_line_cwd_display()),
             StatusLineItem::ProjectRoot => self.status_line_project_root_name(),
             StatusLineItem::Hostname => os_host_name(),
             StatusLineItem::GitBranch => self.status_line_branch.clone(),
@@ -697,8 +718,14 @@ impl ChatWidget {
                     }
                 }),
             StatusLineItem::Status => Some(self.run_state_status_text()),
-            StatusLineItem::Permissions => Some(permissions_display(&self.config)),
-            StatusLineItem::ApprovalMode => Some(approval_mode_display(&self.config)),
+            StatusLineItem::Permissions => Some(self.remote_runtime_status.as_ref().map_or_else(
+                || permissions_display(&self.config),
+                crate::status::RemoteRuntimeStatus::compact_permissions_label,
+            )),
+            StatusLineItem::ApprovalMode => Some(self.remote_runtime_status.as_ref().map_or_else(
+                || approval_mode_display(&self.config),
+                crate::status::RemoteRuntimeStatus::approval_mode_label,
+            )),
             StatusLineItem::UsedTokens => {
                 let usage = self.status_line_total_usage();
                 let total = usage.blended_total();
@@ -848,7 +875,7 @@ impl ChatWidget {
             TerminalTitleItem::AppName => Some("codex".to_string()),
             TerminalTitleItem::Project => self.terminal_title_project_name(),
             TerminalTitleItem::CurrentDir => Some(Self::truncate_terminal_title_part(
-                format_directory_display(self.status_line_cwd(), /*max_width*/ None),
+                self.status_line_cwd_display(),
                 /*max_chars*/ 32,
             )),
             TerminalTitleItem::Spinner => self.terminal_title_spinner_text_at(now),

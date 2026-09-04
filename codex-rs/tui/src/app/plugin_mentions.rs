@@ -13,7 +13,7 @@ use codex_plugin::PluginCapabilitySummary;
 
 pub(super) async fn fetch_plugin_mentions(
     request_handle: AppServerRequestHandle,
-    cwd: PathBuf,
+    cwd: LegacyAppPathString,
 ) -> Result<Vec<PluginCapabilitySummary>> {
     let response = request_plugin_list(request_handle, cwd).await?;
     Ok(plugin_mentions_from_list_response(response))

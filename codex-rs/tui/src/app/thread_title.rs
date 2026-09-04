@@ -53,11 +53,12 @@ impl App {
             self.chat_widget.current_model().to_string()
         };
         let effort = (model == THREAD_TITLE_MODEL).then_some(ReasoningEffort::Low);
+        let cwd = self.chat_widget.server_cwd();
         let config = self.chat_widget.config_ref();
         let options = TemporaryStructuredThreadOptions {
             model,
             model_provider: config.model_provider_id.clone(),
-            cwd: config.cwd.display().to_string(),
+            cwd,
             active_permission_profile: config
                 .permissions
                 .active_permission_profile()

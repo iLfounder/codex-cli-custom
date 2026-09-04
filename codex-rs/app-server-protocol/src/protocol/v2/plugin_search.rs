@@ -1,7 +1,7 @@
 use super::PluginSummary;
 use crate::JsonSchema;
 use crate::TS;
-use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -13,7 +13,7 @@ pub struct PluginSearchParams {
     #[ts(optional = nullable)]
     pub scope: Option<PluginSearchScope>,
     #[ts(optional = nullable)]
-    pub cwds: Option<Vec<AbsolutePathBuf>>,
+    pub cwds: Option<Vec<LegacyAppPathString>>,
     #[ts(optional = nullable)]
     pub cursor: Option<String>,
     #[ts(optional = nullable)]
@@ -35,7 +35,7 @@ pub enum PluginSearchScope {
 pub struct PluginSearchResult {
     pub plugin: PluginSummary,
     pub marketplace_name: String,
-    pub marketplace_path: Option<AbsolutePathBuf>,
+    pub marketplace_path: Option<LegacyAppPathString>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

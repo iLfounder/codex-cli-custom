@@ -335,7 +335,7 @@ fn app_server_request_permissions_preserves_file_system_permissions() {
         item_id: "item-1".to_string(),
         environment_id: Some("remote".to_string()),
         started_at_ms: 0,
-        cwd: cwd.clone(),
+        cwd: cwd.clone().into(),
         reason: Some("Select a workspace root".to_string()),
         permissions: codex_app_server_protocol::RequestPermissionProfile {
             network: Some(AppServerAdditionalNetworkPermissions {
@@ -365,6 +365,32 @@ fn app_server_request_permissions_preserves_file_system_permissions() {
     );
     assert_eq!(request.cwd, Some(cwd));
     assert_eq!(request.environment_id.as_deref(), Some("remote"));
+}
+
+#[test]
+fn app_server_request_permissions_accepts_foreign_cwd_without_localizing_it() {
+    let foreign_cwd = if cfg!(windows) {
+        "/Users/daniel/project"
+    } else {
+        r"C:\Users\Daniel\project"
+    };
+
+    let request = request_permissions_from_params(AppServerPermissionsRequestApprovalParams {
+        thread_id: "thread-1".to_string(),
+        turn_id: "turn-1".to_string(),
+        item_id: "item-1".to_string(),
+        environment_id: Some("remote".to_string()),
+        started_at_ms: 0,
+        cwd: LegacyAppPathString::from_string(foreign_cwd),
+        reason: None,
+        permissions: codex_app_server_protocol::RequestPermissionProfile {
+            network: None,
+            file_system: None,
+        },
+    })
+    .expect("foreign absolute cwd should remain valid");
+
+    assert_eq!(request.cwd, None);
 }
 
 #[tokio::test]

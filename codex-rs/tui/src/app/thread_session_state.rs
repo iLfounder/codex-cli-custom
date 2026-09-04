@@ -6,6 +6,17 @@ use codex_app_server_protocol::Thread;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::PermissionProfile;
+use codex_utils_path_uri::LegacyAppPathString;
+
+fn legacy_api_path(path: &impl serde::Serialize) -> LegacyAppPathString {
+    let value = serde_json::to_value(path).expect("app-server paths must serialize");
+    LegacyAppPathString::from_string(
+        value
+            .as_str()
+            .expect("app-server paths serialize as strings")
+            .to_string(),
+    )
+}
 
 impl App {
     pub(super) async fn sync_active_thread_service_tier_to_cached_session(&mut self) {
@@ -53,7 +64,7 @@ impl App {
         let update_session = |session: &mut ThreadSessionState| {
             session.approval_policy = approval_policy;
             session.approvals_reviewer = approvals_reviewer;
-            session.permission_profile = permission_profile.clone();
+            session.set_native_permission_profile(permission_profile.clone());
             session.active_permission_profile = active_permission_profile.clone();
         };
 
@@ -78,6 +89,7 @@ impl App {
     ) -> ThreadSessionState {
         let permission_profile = self.current_permission_profile();
         let active_permission_profile = self.current_active_permission_profile();
+        let uses_remote_workspace = self.app_server_target.uses_remote_workspace();
         let mut session = if let Some(mut session) = self.primary_session_configured.clone() {
             if session.thread_id != thread_id {
                 // `thread/read` does not include thread settings, so do not carry
@@ -87,6 +99,30 @@ impl App {
             }
             session
         } else {
+            let execution_context = if uses_remote_workspace {
+                crate::session_state::SessionExecutionContext::Remote {
+                    cwd: legacy_api_path(&thread.cwd),
+                    runtime_workspace_roots: Vec::new(),
+                    sandbox: codex_app_server_protocol::SandboxPolicy::ReadOnly {
+                        network_access: false,
+                    },
+                    rollout_path: thread.path.as_ref().map(legacy_api_path),
+                }
+            } else {
+                crate::session_state::SessionExecutionContext::native(
+                    legacy_api_path(&thread.cwd)
+                        .to_inferred_abs_path()
+                        .expect("local app-server must return a native cwd"),
+                    self.config.workspace_roots.clone(),
+                    permission_profile.clone(),
+                    thread.path.as_ref().map(|path| {
+                        legacy_api_path(path)
+                            .to_inferred_abs_path()
+                            .expect("local app-server must return a native rollout path")
+                            .into_path_buf()
+                    }),
+                )
+            };
             ThreadSessionState {
                 thread_id,
                 forked_from_id: None,
@@ -99,32 +135,50 @@ impl App {
                     self.config.permissions.approval_policy.value(),
                 ),
                 approvals_reviewer: self.config.approvals_reviewer,
-                permission_profile: permission_profile.clone(),
                 active_permission_profile: active_permission_profile.clone(),
-                cwd: thread.cwd.clone(),
-                runtime_workspace_roots: self.config.workspace_roots.clone(),
+                execution_context,
                 instruction_source_paths: Vec::new(),
                 reasoning_effort: self.chat_widget.current_reasoning_effort(),
                 collaboration_mode: None,
                 personality: None,
                 message_history: None,
                 network_proxy: None,
-                rollout_path: thread.path.clone(),
             }
         };
         session.thread_id = thread_id;
         session.thread_name = thread.name.clone();
         session.model_provider_id = thread.model_provider.clone();
-        session.set_cwd_retargeting_implicit_runtime_workspace_root(thread.cwd.clone());
-        session.permission_profile = permission_profile;
+        if uses_remote_workspace {
+            session.set_remote_cwd_and_rollout(
+                legacy_api_path(&thread.cwd),
+                thread.path.as_ref().map(legacy_api_path),
+            );
+        } else {
+            session.set_cwd_retargeting_implicit_runtime_workspace_root(
+                legacy_api_path(&thread.cwd)
+                    .to_inferred_abs_path()
+                    .expect("local app-server must return a native cwd"),
+            );
+            session.set_native_permission_profile(permission_profile);
+            session.set_native_rollout_path(thread.path.as_ref().map(|path| {
+                legacy_api_path(path)
+                    .to_inferred_abs_path()
+                    .expect("local app-server must return a native rollout path")
+                    .into_path_buf()
+            }));
+        }
         session.active_permission_profile = active_permission_profile;
         session.instruction_source_paths = Vec::new();
-        session.rollout_path = thread.path.clone();
-        if let Some(model) =
-            read_session_model(self.state_db.as_deref(), thread_id, thread.path.as_deref()).await
+        if !uses_remote_workspace
+            && let Some(model) = read_session_model(
+                self.state_db.as_deref(),
+                thread_id,
+                session.native_rollout_path(),
+            )
+            .await
         {
             session.model = model;
-        } else if thread.path.is_some() {
+        } else if !uses_remote_workspace && thread.path.is_some() {
             session.model.clear();
         }
         session.message_history = None;
@@ -181,17 +235,19 @@ mod tests {
             service_tier: None,
             approval_policy: AskForApproval::Never,
             approvals_reviewer: ApprovalsReviewer::User,
-            permission_profile: PermissionProfile::read_only(),
+            execution_context: crate::session_state::SessionExecutionContext::native(
+                cwd.abs(),
+                vec![cwd.abs()],
+                PermissionProfile::read_only(),
+                Some(PathBuf::new()),
+            ),
             active_permission_profile: None,
-            cwd: cwd.abs(),
-            runtime_workspace_roots: vec![cwd.abs()],
             instruction_source_paths: Vec::new(),
             reasoning_effort: None,
             collaboration_mode: None,
             personality: None,
             message_history: None,
             network_proxy: None,
-            rollout_path: Some(PathBuf::new()),
         }
     }
 
@@ -205,8 +261,8 @@ mod tests {
         let main_session = test_thread_session(main_thread_id, test_path_buf("/tmp/main"));
         let side_session = ThreadSessionState {
             approval_policy: AskForApproval::OnRequest,
-            permission_profile: PermissionProfile::workspace_write(),
             ..test_thread_session(side_thread_id, test_path_buf("/tmp/side"))
+                .with_native_permission_profile(PermissionProfile::workspace_write())
         };
 
         app.primary_thread_id = Some(main_thread_id);
@@ -254,9 +310,8 @@ mod tests {
         let expected_main_session = ThreadSessionState {
             approval_policy: AskForApproval::OnRequest,
             approvals_reviewer: ApprovalsReviewer::AutoReview,
-            permission_profile: expected_permission_profile,
             active_permission_profile: Some(expected_active_permission_profile),
-            ..main_session
+            ..main_session.with_native_permission_profile(expected_permission_profile)
         };
         assert_eq!(
             app.primary_session_configured,
@@ -314,8 +369,8 @@ mod tests {
             },
         };
         let session = ThreadSessionState {
-            permission_profile: profile.clone(),
             ..test_thread_session(thread_id, test_path_buf("/tmp/main"))
+                .with_native_permission_profile(profile.clone())
         };
 
         app.primary_thread_id = Some(thread_id);
@@ -334,8 +389,7 @@ mod tests {
 
         let expected_session = ThreadSessionState {
             approval_policy: AskForApproval::OnRequest,
-            permission_profile: profile,
-            ..session
+            ..session.with_native_permission_profile(profile)
         };
         assert_eq!(
             app.primary_session_configured,
@@ -406,8 +460,8 @@ mod tests {
         let read_thread_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000405").expect("valid thread");
         let primary_session = ThreadSessionState {
-            permission_profile: PermissionProfile::workspace_write(),
             ..test_thread_session(primary_thread_id, test_path_buf("/tmp/primary"))
+                .with_native_permission_profile(PermissionProfile::workspace_write())
         };
         let read_thread = Thread {
             id: read_thread_id.to_string(),
@@ -429,7 +483,7 @@ mod tests {
             recency_at: Some(2),
             status: codex_app_server_protocol::ThreadStatus::Idle,
             path: None,
-            cwd: test_path_buf("/tmp/read").abs(),
+            cwd: test_path_buf("/tmp/read").abs().into(),
             cli_version: "0.0.0".to_string(),
             source: codex_app_server_protocol::SessionSource::Unknown,
             can_accept_direct_input: None,
@@ -454,10 +508,13 @@ mod tests {
             .permissions
             .permission_profile()
             .clone();
-        assert_eq!(session.permission_profile, expected_permission_profile);
+        assert_eq!(
+            session.native_permission_profile(),
+            Some(&expected_permission_profile)
+        );
         assert_ne!(
-            session.permission_profile,
-            app.config.permissions.permission_profile().clone(),
+            session.native_permission_profile(),
+            Some(app.config.permissions.permission_profile()),
             "thread/read fallback must use the active widget permissions rather than stale app \
              config defaults"
         );

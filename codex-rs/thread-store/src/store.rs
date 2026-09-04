@@ -538,7 +538,7 @@ pub trait ThreadStore: Any + Send + Sync {
     fn activate_prepared_thread_resume(
         &self,
         _authority: PreparedThreadResumeAuthority,
-        _metadata: crate::ThreadPersistenceMetadata,
+        _params: ResumeThreadParams,
     ) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async {
             Err(ThreadStoreError::Unsupported {

@@ -9,10 +9,9 @@ use codex_app_server_protocol::HooksListParams;
 use codex_app_server_protocol::HooksListResponse;
 use codex_app_server_protocol::MergeStrategy;
 use codex_app_server_protocol::RequestId;
+use codex_utils_path_uri::LegacyAppPathString;
 use color_eyre::eyre::Result;
 use color_eyre::eyre::WrapErr;
-use std::path::Path;
-use std::path::PathBuf;
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -23,7 +22,7 @@ pub(crate) struct HookTrustUpdate {
 
 pub(crate) async fn fetch_hooks_list(
     request_handle: AppServerRequestHandle,
-    cwd: PathBuf,
+    cwd: LegacyAppPathString,
 ) -> Result<HooksListResponse> {
     let request_id = RequestId::String(format!("hooks-list-{}", Uuid::new_v4()));
     request_handle
@@ -35,13 +34,16 @@ pub(crate) async fn fetch_hooks_list(
         .wrap_err("hooks/list failed in TUI")
 }
 
-pub(crate) fn hooks_list_entry_for_cwd(response: HooksListResponse, cwd: &Path) -> HooksListEntry {
+pub(crate) fn hooks_list_entry_for_cwd(
+    response: HooksListResponse,
+    cwd: &LegacyAppPathString,
+) -> HooksListEntry {
     response
         .data
         .into_iter()
-        .find(|entry| entry.cwd.as_path() == cwd)
+        .find(|entry| &entry.cwd == cwd)
         .unwrap_or_else(|| HooksListEntry {
-            cwd: cwd.to_path_buf(),
+            cwd: cwd.clone(),
             hooks: Vec::new(),
             warnings: Vec::new(),
             errors: Vec::new(),

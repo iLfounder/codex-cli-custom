@@ -159,18 +159,20 @@ impl AgentsOverviewView {
                     "{} {} {}",
                     row.thread.name.as_deref().unwrap_or_default(),
                     row.thread.preview,
-                    row.thread.cwd.display(),
+                    row.thread.cwd.render_for_ui(),
                 )
                 .to_lowercase();
                 (search.is_empty() || searchable.contains(&search)).then_some(index)
             })
             .collect::<Vec<_>>();
         if !state.status_grouping {
-            visible.sort_by_key(|index| {
-                (
-                    &self.rows[*index].thread.cwd,
-                    std::cmp::Reverse(self.rows[*index].thread.updated_at),
-                )
+            visible.sort_by(|left, right| {
+                let left = &self.rows[*left].thread;
+                let right = &self.rows[*right].thread;
+                left.cwd
+                    .as_str()
+                    .cmp(right.cwd.as_str())
+                    .then_with(|| right.updated_at.cmp(&left.updated_at))
             });
         }
         visible
@@ -298,7 +300,7 @@ impl AgentsOverviewView {
             }
             let row = &self.rows[index];
             let group = if project_grouping {
-                row.thread.cwd.display().to_string()
+                row.thread.cwd.render_for_ui()
             } else {
                 row.group.label().to_string()
             };
@@ -367,7 +369,7 @@ impl AgentsOverviewView {
             Line::from(vec![dot, " ".into(), status.into()]),
             Line::default(),
             Line::from("Project".dim()),
-            Line::from(row.thread.cwd.display().to_string()),
+            Line::from(row.thread.cwd.render_for_ui()),
         ];
         if let Some(branch) = row
             .thread

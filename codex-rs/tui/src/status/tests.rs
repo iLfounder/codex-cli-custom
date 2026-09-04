@@ -754,6 +754,7 @@ async fn status_model_provider_uses_bedrock_runtime_base_url_and_gates_usage_lin
     let (composite, _handle) = new_status_output_with_rate_limits_handle(
         &config,
         Some(runtime_base_url),
+        /*runtime_display*/ None,
         /*remote_connection*/ None,
         test_status_account_display().as_ref(),
         /*token_info*/ None,
@@ -795,6 +796,7 @@ async fn status_model_provider_uses_bedrock_runtime_base_url_and_gates_usage_lin
     let (composite, _handle) = new_status_output_with_rate_limits_handle(
         &config,
         /*runtime_model_provider_base_url*/ None,
+        /*runtime_display*/ None,
         /*remote_connection*/ None,
         test_status_account_display().as_ref(),
         /*token_info*/ None,
@@ -1641,6 +1643,7 @@ async fn status_snapshot_uses_default_reasoning_when_config_empty() {
     let (composite, _) = new_status_output_with_rate_limits_handle(
         &config,
         /*runtime_model_provider_base_url*/ None,
+        /*runtime_display*/ None,
         Some(&remote_connection),
         account_display.as_ref(),
         Some(&token_info),
@@ -1750,6 +1753,7 @@ async fn transcript_overlay_remeasures_status_after_rate_limit_refresh() {
     let (status, handle) = new_status_output_with_rate_limits_handle(
         &config,
         /*runtime_model_provider_base_url*/ None,
+        /*runtime_display*/ None,
         /*remote_connection*/ None,
         /*account_display*/ None,
         /*token_info*/ None,

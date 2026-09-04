@@ -116,9 +116,13 @@
               "type": "string"
             },
             "path": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/LegacyAppPathString"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "type": {
@@ -142,9 +146,13 @@
               "type": "string"
             },
             "path": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/LegacyAppPathString"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "query": {

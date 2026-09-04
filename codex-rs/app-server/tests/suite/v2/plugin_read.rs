@@ -102,9 +102,9 @@ async fn plugin_read_rejects_multiple_read_sources() -> Result<()> {
 
     let request_id = mcp
         .send_plugin_read_request(PluginReadParams {
-            marketplace_path: Some(AbsolutePathBuf::try_from(
-                codex_home.path().join("marketplace.json"),
-            )?),
+            marketplace_path: Some(
+                AbsolutePathBuf::try_from(codex_home.path().join("marketplace.json"))?.into(),
+            ),
             remote_marketplace_name: Some("openai-curated-remote".to_string()),
             plugin_name: "sample-plugin".to_string(),
         })
@@ -990,7 +990,7 @@ enabled = true
         AbsolutePathBuf::try_from(repo_root.join(".agents/plugins/marketplace.json"))?;
     let request_id = mcp
         .send_plugin_read_request(PluginReadParams {
-            marketplace_path: Some(marketplace_path.clone()),
+            marketplace_path: Some(marketplace_path.clone().into()),
             remote_marketplace_name: None,
             plugin_name: "demo-plugin".to_string(),
         })
@@ -1005,7 +1005,10 @@ enabled = true
     let response: PluginReadResponse = to_response(response)?;
 
     assert_eq!(response.plugin.marketplace_name, "openai-curated");
-    assert_eq!(response.plugin.marketplace_path, Some(marketplace_path));
+    assert_eq!(
+        response.plugin.marketplace_path,
+        Some(marketplace_path.into())
+    );
     assert_eq!(response.plugin.summary.id, "demo-plugin@openai-curated");
     assert_eq!(response.plugin.summary.name, "demo-plugin");
     Ok(())
@@ -1096,9 +1099,12 @@ async fn plugin_read_returns_share_context_for_shared_local_plugin() -> Result<(
 
     let request_id = mcp
         .send_plugin_read_request(PluginReadParams {
-            marketplace_path: Some(AbsolutePathBuf::try_from(
-                repo_root.path().join(".agents/plugins/marketplace.json"),
-            )?),
+            marketplace_path: Some(
+                AbsolutePathBuf::try_from(
+                    repo_root.path().join(".agents/plugins/marketplace.json"),
+                )?
+                .into(),
+            ),
             remote_marketplace_name: None,
             plugin_name: "demo-plugin".to_string(),
         })
@@ -1225,9 +1231,12 @@ async fn plugin_read_keeps_remote_version_when_share_principals_are_missing() ->
 
     let request_id = mcp
         .send_plugin_read_request(PluginReadParams {
-            marketplace_path: Some(AbsolutePathBuf::try_from(
-                repo_root.path().join(".agents/plugins/marketplace.json"),
-            )?),
+            marketplace_path: Some(
+                AbsolutePathBuf::try_from(
+                    repo_root.path().join(".agents/plugins/marketplace.json"),
+                )?
+                .into(),
+            ),
             remote_marketplace_name: None,
             plugin_name: "demo-plugin".to_string(),
         })
@@ -1280,9 +1289,12 @@ async fn plugin_read_falls_back_to_local_share_context_without_remote_auth() -> 
 
     let request_id = mcp
         .send_plugin_read_request(PluginReadParams {
-            marketplace_path: Some(AbsolutePathBuf::try_from(
-                repo_root.path().join(".agents/plugins/marketplace.json"),
-            )?),
+            marketplace_path: Some(
+                AbsolutePathBuf::try_from(
+                    repo_root.path().join(".agents/plugins/marketplace.json"),
+                )?
+                .into(),
+            ),
             remote_marketplace_name: None,
             plugin_name: "demo-plugin".to_string(),
         })
@@ -1337,9 +1349,12 @@ async fn plugin_read_fails_on_malformed_share_mapping() -> Result<()> {
 
     let request_id = mcp
         .send_plugin_read_request(PluginReadParams {
-            marketplace_path: Some(AbsolutePathBuf::try_from(
-                repo_root.path().join(".agents/plugins/marketplace.json"),
-            )?),
+            marketplace_path: Some(
+                AbsolutePathBuf::try_from(
+                    repo_root.path().join(".agents/plugins/marketplace.json"),
+                )?
+                .into(),
+            ),
             remote_marketplace_name: None,
             plugin_name: "demo-plugin".to_string(),
         })
@@ -1396,9 +1411,12 @@ async fn plugin_read_agent_plugin_excludes_nested_skills() -> Result<()> {
         .await?;
     let request_id = mcp
         .send_plugin_read_request(PluginReadParams {
-            marketplace_path: Some(AbsolutePathBuf::try_from(
-                repo_root.path().join(".agents/plugins/marketplace.json"),
-            )?),
+            marketplace_path: Some(
+                AbsolutePathBuf::try_from(
+                    repo_root.path().join(".agents/plugins/marketplace.json"),
+                )?
+                .into(),
+            ),
             remote_marketplace_name: None,
             plugin_name: "demo-plugin".to_string(),
         })
@@ -1413,9 +1431,9 @@ async fn plugin_read_agent_plugin_excludes_nested_skills() -> Result<()> {
             description: "Direct skill".to_string(),
             short_description: None,
             interface: None,
-            path: Some(AbsolutePathBuf::try_from(std::fs::canonicalize(
-                direct_skill_path
-            )?)?),
+            path: Some(
+                AbsolutePathBuf::try_from(std::fs::canonicalize(direct_skill_path)?)?.into()
+            ),
             enabled: true,
         }]
     );
@@ -1605,7 +1623,7 @@ enabled = false
         AbsolutePathBuf::try_from(repo_root.path().join(".agents/plugins/marketplace.json"))?;
     let request_id = mcp
         .send_plugin_read_request(PluginReadParams {
-            marketplace_path: Some(marketplace_path.clone()),
+            marketplace_path: Some(marketplace_path.clone().into()),
             remote_marketplace_name: None,
             plugin_name: "demo-plugin".to_string(),
         })
@@ -1615,7 +1633,10 @@ enabled = false
         timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
 
     assert_eq!(response.plugin.marketplace_name, "codex-curated");
-    assert_eq!(response.plugin.marketplace_path, Some(marketplace_path));
+    assert_eq!(
+        response.plugin.marketplace_path,
+        Some(marketplace_path.into())
+    );
     assert_eq!(response.plugin.summary.id, "demo-plugin@codex-curated");
     assert_eq!(response.plugin.summary.name, "demo-plugin");
     assert_eq!(
@@ -1669,10 +1690,10 @@ enabled = false
             .interface
             .as_ref()
             .and_then(|interface| interface.logo_dark.as_ref()),
-        Some(
+        Some(&codex_utils_path_uri::LegacyAppPathString::from_abs_path(
             &AbsolutePathBuf::try_from(plugin_root.join("assets/logo-dark.png"))
-                .expect("absolute dark logo path")
-        )
+                .expect("absolute dark logo path"),
+        ))
     );
     assert_eq!(
         response.plugin.summary.keywords,
@@ -1783,7 +1804,7 @@ async fn plugin_read_batches_large_app_metadata_requests() -> Result<()> {
 
     let request_id = mcp
         .send_plugin_read_request(PluginReadParams {
-            marketplace_path: Some(marketplace_path),
+            marketplace_path: Some(marketplace_path.into()),
             remote_marketplace_name: None,
             plugin_name: "sample-plugin".to_string(),
         })
@@ -1887,7 +1908,7 @@ async fn plugin_read_stops_batching_after_app_metadata_failure() -> Result<()> {
 
     let request_id = mcp
         .send_plugin_read_request(PluginReadParams {
-            marketplace_path: Some(marketplace_path),
+            marketplace_path: Some(marketplace_path.into()),
             remote_marketplace_name: None,
             plugin_name: "sample-plugin".to_string(),
         })
@@ -1993,7 +2014,7 @@ async fn plugin_read_hides_apps_for_api_key_auth() -> Result<()> {
 
     let request_id = mcp
         .send_plugin_read_request(PluginReadParams {
-            marketplace_path: Some(marketplace_path),
+            marketplace_path: Some(marketplace_path.into()),
             remote_marketplace_name: None,
             plugin_name: "sample-plugin".to_string(),
         })
@@ -2052,9 +2073,12 @@ async fn plugin_read_accepts_legacy_string_default_prompt() -> Result<()> {
 
     let request_id = mcp
         .send_plugin_read_request(PluginReadParams {
-            marketplace_path: Some(AbsolutePathBuf::try_from(
-                repo_root.path().join(".agents/plugins/marketplace.json"),
-            )?),
+            marketplace_path: Some(
+                AbsolutePathBuf::try_from(
+                    repo_root.path().join(".agents/plugins/marketplace.json"),
+                )?
+                .into(),
+            ),
             remote_marketplace_name: None,
             plugin_name: "demo-plugin".to_string(),
         })
@@ -2113,9 +2137,12 @@ async fn plugin_read_describes_uninstalled_git_source_without_cloning() -> Resul
 
     let request_id = mcp
         .send_plugin_read_request(PluginReadParams {
-            marketplace_path: Some(AbsolutePathBuf::try_from(
-                repo_root.path().join(".agents/plugins/marketplace.json"),
-            )?),
+            marketplace_path: Some(
+                AbsolutePathBuf::try_from(
+                    repo_root.path().join(".agents/plugins/marketplace.json"),
+                )?
+                .into(),
+            ),
             remote_marketplace_name: None,
             plugin_name: "toolkit".to_string(),
         })
@@ -2175,9 +2202,12 @@ async fn plugin_read_returns_invalid_request_when_plugin_is_missing() -> Result<
 
     let request_id = mcp
         .send_plugin_read_request(PluginReadParams {
-            marketplace_path: Some(AbsolutePathBuf::try_from(
-                repo_root.path().join(".agents/plugins/marketplace.json"),
-            )?),
+            marketplace_path: Some(
+                AbsolutePathBuf::try_from(
+                    repo_root.path().join(".agents/plugins/marketplace.json"),
+                )?
+                .into(),
+            ),
             remote_marketplace_name: None,
             plugin_name: "missing-plugin".to_string(),
         })
@@ -2231,9 +2261,12 @@ async fn plugin_read_returns_invalid_request_when_plugin_manifest_is_missing() -
 
     let request_id = mcp
         .send_plugin_read_request(PluginReadParams {
-            marketplace_path: Some(AbsolutePathBuf::try_from(
-                repo_root.path().join(".agents/plugins/marketplace.json"),
-            )?),
+            marketplace_path: Some(
+                AbsolutePathBuf::try_from(
+                    repo_root.path().join(".agents/plugins/marketplace.json"),
+                )?
+                .into(),
+            ),
             remote_marketplace_name: None,
             plugin_name: "demo-plugin".to_string(),
         })

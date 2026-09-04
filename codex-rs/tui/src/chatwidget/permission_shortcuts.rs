@@ -25,6 +25,11 @@ impl ChatWidget {
             self.add_error_message(PARENT_OWNED_INPUT_MESSAGE.to_string());
             return true;
         }
+        if self.current_remote_cwd.is_some() {
+            self.app_event_tx
+                .send(AppEvent::OpenRemotePermissionProfiles);
+            return true;
+        }
         let Some(thread_id) = self.thread_id else {
             return true;
         };

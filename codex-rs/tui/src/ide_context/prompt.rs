@@ -193,7 +193,6 @@ mod tests {
     use super::super::Range;
     use super::*;
     use pretty_assertions::assert_eq;
-    use std::path::PathBuf;
 
     fn descriptor(label: &str, path: &str) -> FileDescriptor {
         FileDescriptor {
@@ -268,7 +267,7 @@ mod tests {
         let text = "Ask $figma".to_string();
         let mut items = vec![
             UserInput::LocalImage {
-                path: PathBuf::from("/tmp/screenshot.png"),
+                path: codex_utils_path_uri::LegacyAppPathString::from_string("/tmp/screenshot.png"),
                 detail: None,
             },
             UserInput::Text {
@@ -288,7 +287,9 @@ mod tests {
             items,
             vec![
                 UserInput::LocalImage {
-                    path: PathBuf::from("/tmp/screenshot.png"),
+                    path: codex_utils_path_uri::LegacyAppPathString::from_string(
+                        "/tmp/screenshot.png",
+                    ),
                     detail: None,
                 },
                 UserInput::Text {

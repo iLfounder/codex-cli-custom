@@ -1,6 +1,6 @@
+use codex_utils_path_uri::LegacyAppPathString;
 #[cfg(test)]
 use std::path::Path;
-use std::path::PathBuf;
 
 use crate::JSONRPCNotification;
 use crate::JSONRPCRequest;
@@ -130,7 +130,7 @@ pub enum ClientRequestSerializationScope {
     Global(&'static str),
     GlobalSharedRead(&'static str),
     Thread { thread_id: String },
-    ThreadPath { path: PathBuf },
+    ThreadPath { path: LegacyAppPathString },
     CommandExecProcess { process_id: String },
     Process { process_handle: String },
     FuzzyFileSearchSession { session_id: String },
@@ -2348,7 +2348,9 @@ mod tests {
             request_id: request_id(),
             params: v2::ThreadResumeParams {
                 thread_id: thread_id.clone(),
-                path: Some(PathBuf::from("/tmp/resume-thread.jsonl")),
+                path: Some(LegacyAppPathString::from_path(Path::new(
+                    "/tmp/resume-thread.jsonl",
+                ))),
                 ..Default::default()
             },
         };
@@ -2363,7 +2365,9 @@ mod tests {
             request_id: request_id(),
             params: v2::ThreadForkParams {
                 thread_id: thread_id.clone(),
-                path: Some(PathBuf::from("/tmp/source-thread.jsonl")),
+                path: Some(LegacyAppPathString::from_path(Path::new(
+                    "/tmp/source-thread.jsonl",
+                ))),
                 ..Default::default()
             },
         };
@@ -2416,7 +2420,7 @@ mod tests {
             request_id: request_id(),
             params: v2::FsWatchParams {
                 watch_id: "watch-1".to_string(),
-                path: absolute_path("/tmp/repo"),
+                path: absolute_path("/tmp/repo").into(),
             },
         };
         assert_eq!(
@@ -2429,7 +2433,7 @@ mod tests {
         let plugin_install = ClientRequest::PluginInstall {
             request_id: request_id(),
             params: v2::PluginInstallParams {
-                marketplace_path: Some(absolute_path("/tmp/marketplace")),
+                marketplace_path: Some(absolute_path("/tmp/marketplace").into()),
                 remote_marketplace_name: None,
                 install_attempt_id: None,
                 plugin_name: "plugin-a".to_string(),
@@ -2465,7 +2469,7 @@ mod tests {
         let skills_extra_roots_set = ClientRequest::SkillsExtraRootsSet {
             request_id: request_id(),
             params: v2::SkillsExtraRootsSetParams {
-                extra_roots: vec![absolute_path("/tmp/skills")],
+                extra_roots: vec![absolute_path("/tmp/skills").into()],
             },
         };
         assert_eq!(
@@ -2486,7 +2490,7 @@ mod tests {
         let plugin_read = ClientRequest::PluginRead {
             request_id: request_id(),
             params: v2::PluginReadParams {
-                marketplace_path: Some(absolute_path("/tmp/marketplace")),
+                marketplace_path: Some(absolute_path("/tmp/marketplace").into()),
                 remote_marketplace_name: None,
                 plugin_name: "plugin-a".to_string(),
             },
@@ -2692,7 +2696,7 @@ mod tests {
         let fs_read = ClientRequest::FsReadFile {
             request_id: request_id(),
             params: v2::FsReadFileParams {
-                path: absolute_path("/tmp/file.txt"),
+                path: absolute_path("/tmp/file.txt").into(),
             },
         };
         assert_eq!(fs_read.serialization_scope(), None);
@@ -3284,7 +3288,7 @@ mod tests {
 
     #[test]
     fn serialize_client_response() -> Result<()> {
-        let cwd = absolute_path("/tmp");
+        let cwd: codex_utils_path_uri::LegacyAppPathString = absolute_path("/tmp").into();
         let response = ClientResponse::ThreadStart {
             request_id: RequestId::Integer(7),
             response: v2::ThreadStartResponse {
@@ -3928,7 +3932,7 @@ mod tests {
         let request = ClientRequest::FsGetMetadata {
             request_id: RequestId::Integer(10),
             params: v2::FsGetMetadataParams {
-                path: absolute_path("tmp/example"),
+                path: absolute_path("tmp/example").into(),
             },
         };
         assert_eq!(
@@ -3950,7 +3954,7 @@ mod tests {
             request_id: RequestId::Integer(10),
             params: v2::FsWatchParams {
                 watch_id: "watch-git".to_string(),
-                path: absolute_path("tmp/repo/.git"),
+                path: absolute_path("tmp/repo/.git").into(),
             },
         };
         assert_eq!(
@@ -4586,7 +4590,7 @@ mod tests {
             ServerNotification::ThreadSettingsUpdated(v2::ThreadSettingsUpdatedNotification {
                 thread_id: "thr_123".to_string(),
                 thread_settings: v2::ThreadSettings {
-                    cwd: absolute_path("/tmp/repo"),
+                    cwd: absolute_path("/tmp/repo").into(),
                     approval_policy: v2::AskForApproval::Never,
                     approvals_reviewer: v2::ApprovalsReviewer::User,
                     sandbox_policy: v2::SandboxPolicy::DangerFullAccess,

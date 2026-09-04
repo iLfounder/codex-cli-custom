@@ -259,7 +259,7 @@ fn process_spawn_params(
     Ok(ProcessSpawnParams {
         command,
         process_handle,
-        cwd: AbsolutePathBuf::try_from(cwd)?,
+        cwd: AbsolutePathBuf::try_from(cwd)?.into(),
         tty: false,
         stream_stdin: false,
         stream_stdout_stderr: false,

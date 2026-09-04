@@ -219,7 +219,9 @@ async fn projects_persist_and_assign_threads() -> Result<()> {
             request_id,
             params: ProjectCreateParams {
                 name: "  Work  ".to_string(),
-                roots: vec![ProjectRoot { path: root.clone() }],
+                roots: vec![ProjectRoot {
+                    path: root.clone().into(),
+                }],
                 metadata: Some(BTreeMap::from([("color".to_string(), "blue".to_string())])),
                 idempotency_key: "projects-persist-primary".to_string(),
             },
@@ -245,15 +247,8 @@ async fn projects_persist_and_assign_threads() -> Result<()> {
             ..Default::default()
         })
         .await?;
-    let JSONRPCMessage::Response(response) = server.read_next_message().await? else {
-        panic!("thread/start must respond before lifecycle notifications");
-    };
-    assert_eq!(response.id, RequestId::Integer(started_id));
-    let started: ThreadStartResponse = serde_json::from_value(response.result)?;
-    let JSONRPCMessage::Notification(thread_started) = server.read_next_message().await? else {
-        panic!("thread/start must emit thread/started");
-    };
-    assert_eq!(thread_started.method, "thread/started");
+    let started: ThreadStartResponse = server.read_response(started_id).await?;
+    let _: serde_json::Value = server.read_notification("thread/started").await?;
     assert_eq!(started.thread.project_id, Some(created.project.id.clone()));
 
     server.clear_message_buffer();

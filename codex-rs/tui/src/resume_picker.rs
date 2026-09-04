@@ -48,7 +48,9 @@ use codex_app_server_protocol::ThreadUnarchiveParams;
 use codex_app_server_protocol::ThreadUnarchiveResponse;
 use codex_config::types::SessionPickerViewMode;
 use codex_protocol::ThreadId;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path as path_utils;
+use codex_utils_path_uri::LegacyAppPathString;
 use color_eyre::eyre::Result;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -167,7 +169,7 @@ struct PageLoadRequest {
     request_token: usize,
     search_token: Option<usize>,
     mode: PageLoadMode,
-    cwd_filter: Option<PathBuf>,
+    cwd_filter: Option<LegacyAppPathString>,
     status: SessionStatus,
     provider_filter: ProviderFilter,
     sort_key: ThreadSortKey,
@@ -203,7 +205,7 @@ enum SessionFilterMode {
 }
 
 impl SessionFilterMode {
-    fn from_show_all(show_all: bool, filter_cwd: Option<&Path>) -> Self {
+    fn from_show_all(show_all: bool, filter_cwd: Option<&LegacyAppPathString>) -> Self {
         if show_all || filter_cwd.is_none() {
             Self::All
         } else {
@@ -211,7 +213,7 @@ impl SessionFilterMode {
         }
     }
 
-    fn toggle(self, filter_cwd: Option<&Path>) -> Self {
+    fn toggle(self, filter_cwd: Option<&LegacyAppPathString>) -> Self {
         match self {
             Self::Cwd => Self::All,
             Self::All if filter_cwd.is_some() => Self::Cwd,
@@ -330,7 +332,7 @@ struct SessionPickerViewPersistence {
 
 struct SessionPickerRunOptions {
     show_all: bool,
-    filter_cwd: Option<PathBuf>,
+    filter_cwd: Option<LegacyAppPathString>,
     local_filter_cwd: Option<PathBuf>,
     action: SessionPickerAction,
     launch_context: SessionPickerLaunchContext,
@@ -612,13 +614,13 @@ fn raw_reasoning_visibility(config: &Config) -> RawReasoningVisibility {
 }
 
 fn local_picker_cwd_filter(
-    cwd_filter: &Option<PathBuf>,
+    cwd_filter: &Option<LegacyAppPathString>,
     uses_remote_workspace: bool,
 ) -> Option<PathBuf> {
     if uses_remote_workspace {
         None
     } else {
-        cwd_filter.clone()
+        cwd_filter.as_ref().map(|cwd| PathBuf::from(cwd.as_str()))
     }
 }
 
@@ -639,14 +641,14 @@ fn picker_cwd_filter(
     config_cwd: &Path,
     show_all: bool,
     uses_remote_workspace: bool,
-    remote_cwd_override: Option<&Path>,
-) -> Option<PathBuf> {
+    remote_cwd_override: Option<&LegacyAppPathString>,
+) -> Option<LegacyAppPathString> {
     if show_all {
         None
     } else if uses_remote_workspace {
-        remote_cwd_override.map(Path::to_path_buf)
+        remote_cwd_override.cloned()
     } else {
-        Some(config_cwd.to_path_buf())
+        Some(LegacyAppPathString::from_path(config_cwd))
     }
 }
 
@@ -668,7 +670,7 @@ fn spawn_app_server_page_loader(
                     let cursor = request.cursor.map(|PageCursor::AppServer(cursor)| cursor);
                     let params = thread_list_params(
                         cursor,
-                        request.cwd_filter.as_deref(),
+                        request.cwd_filter.as_ref(),
                         request.status,
                         request.provider_filter,
                         request.sort_key,
@@ -735,7 +737,11 @@ fn spawn_app_server_page_loader(
                         })
                         .await
                         .map(|response| SessionTarget {
-                            path: response.thread.path,
+                            path: response
+                                .thread
+                                .path
+                                .and_then(|path| path.to_inferred_abs_path())
+                                .map(AbsolutePathBuf::into_path_buf),
                             thread_id,
                             history_mode: Some(response.thread.history_mode),
                         })
@@ -804,7 +810,7 @@ struct PickerState {
     provider_filter: ProviderFilter,
     filter_mode: SessionFilterMode,
     status: SessionStatus,
-    filter_cwd: Option<PathBuf>,
+    filter_cwd: Option<LegacyAppPathString>,
     local_filter_cwd: Option<PathBuf>,
     toolbar_focus: ToolbarControl,
     density: SessionListDensity,
@@ -975,7 +981,7 @@ impl PickerState {
         picker_loader: PickerLoader,
         provider_filter: ProviderFilter,
         show_all: bool,
-        filter_cwd: Option<PathBuf>,
+        filter_cwd: Option<LegacyAppPathString>,
         action: SessionPickerAction,
     ) -> Self {
         Self {
@@ -998,9 +1004,9 @@ impl PickerState {
             view_rows: None,
             view_width: None,
             provider_filter,
-            filter_mode: SessionFilterMode::from_show_all(show_all, filter_cwd.as_deref()),
+            filter_mode: SessionFilterMode::from_show_all(show_all, filter_cwd.as_ref()),
             status: SessionStatus::Active,
-            local_filter_cwd: filter_cwd.clone(),
+            local_filter_cwd: filter_cwd.as_ref().map(|cwd| PathBuf::from(cwd.as_str())),
             filter_cwd,
             toolbar_focus: ToolbarControl::Filter,
             density: SessionListDensity::Comfortable,
@@ -1783,7 +1789,7 @@ impl PickerState {
     }
 
     fn toggle_filter_mode(&mut self) {
-        let next_filter_mode = self.filter_mode.toggle(self.filter_cwd.as_deref());
+        let next_filter_mode = self.filter_mode.toggle(self.filter_cwd.as_ref());
         if self.filter_mode == next_filter_mode {
             return;
         }
@@ -1799,7 +1805,7 @@ impl PickerState {
         self.start_initial_load();
     }
 
-    fn active_cwd_filter(&self) -> Option<PathBuf> {
+    fn active_cwd_filter(&self) -> Option<LegacyAppPathString> {
         match self.filter_mode {
             SessionFilterMode::Cwd => self.filter_cwd.clone(),
             SessionFilterMode::All => None,
@@ -1957,8 +1963,14 @@ fn row_from_app_server_thread(thread: Thread) -> Option<Row> {
         }
     };
     let preview = thread.preview.trim();
+    let path = thread
+        .path
+        .as_ref()
+        .map(crate::app_server_session::app_server_path_string)
+        .map(|path| PathBuf::from(path.into_string()));
+    let cwd = crate::app_server_session::app_server_path_string(&thread.cwd);
     Some(Row {
-        path: thread.path,
+        path,
         preview: if preview.is_empty() {
             String::from("(no message yet)")
         } else {
@@ -1970,14 +1982,14 @@ fn row_from_app_server_thread(thread: Thread) -> Option<Row> {
             .map(|dt| dt.with_timezone(&Utc)),
         updated_at: chrono::DateTime::from_timestamp(thread.updated_at, 0)
             .map(|dt| dt.with_timezone(&Utc)),
-        cwd: Some(thread.cwd.to_path_buf()),
+        cwd: Some(PathBuf::from(cwd.into_string())),
         git_branch: thread.git_info.and_then(|git_info| git_info.branch),
     })
 }
 
 fn thread_list_params(
     cursor: Option<String>,
-    cwd_filter: Option<&Path>,
+    cwd_filter: Option<&LegacyAppPathString>,
     status: SessionStatus,
     provider_filter: ProviderFilter,
     sort_key: ThreadSortKey,
@@ -1999,7 +2011,11 @@ fn thread_list_params(
         project_id: None,
         parent_thread_id: None,
         ancestor_thread_id: None,
-        cwd: cwd_filter.map(|cwd| ThreadListCwdFilter::One(cwd.to_string_lossy().into_owned())),
+        cwd: cwd_filter.map(|cwd| {
+            ThreadListCwdFilter::One(crate::app_server_session::app_server_request_path(
+                cwd.clone(),
+            ))
+        }),
         use_state_db_only,
         search_term: None,
     }
@@ -3591,7 +3607,7 @@ mod tests {
         );
         let params = thread_list_params(
             Some(String::from("cursor-1")),
-            cwd_filter.as_deref(),
+            cwd_filter.as_ref(),
             SessionStatus::Active,
             ProviderFilter::MatchDefault(String::from("openai")),
             ThreadSortKey::UpdatedAt,
@@ -3600,8 +3616,8 @@ mod tests {
         );
 
         assert_eq!(
-            params.cwd,
-            Some(ThreadListCwdFilter::One(String::from("/tmp/project")))
+            serde_json::to_value(&params.cwd).expect("serialize cwd filter"),
+            serde_json::json!("/tmp/project")
         );
         assert!(params.use_state_db_only);
     }
@@ -3969,9 +3985,10 @@ mod tests {
 
     #[test]
     fn remote_thread_list_params_omit_provider_filter() {
+        let cwd_filter = LegacyAppPathString::from_string("~/repo/on/server");
         let params = thread_list_params(
             Some(String::from("cursor-1")),
-            Some(Path::new("repo/on/server")),
+            Some(&cwd_filter),
             SessionStatus::Active,
             ProviderFilter::Any,
             ThreadSortKey::UpdatedAt,
@@ -3986,8 +4003,8 @@ mod tests {
             Some(vec![ThreadSourceKind::Cli, ThreadSourceKind::VsCode])
         );
         assert_eq!(
-            params.cwd,
-            Some(ThreadListCwdFilter::One(String::from("repo/on/server")))
+            serde_json::to_value(&params.cwd).expect("serialize cwd filter"),
+            serde_json::json!("~/repo/on/server")
         );
     }
 
@@ -4016,7 +4033,7 @@ mod tests {
         let loader = page_only_loader(move |req: PageLoadRequest| {
             request_sink.lock().unwrap().push(req);
         });
-        let remote_cwd = Some(PathBuf::from("/srv/link-project"));
+        let remote_cwd = Some(LegacyAppPathString::from_string("/srv/link-project"));
         let mut state = PickerState::new(
             FrameRequester::test_dummy(),
             loader,
@@ -5130,7 +5147,7 @@ session_picker_view = "dense"
             loader,
             ProviderFilter::MatchDefault(String::from("openai")),
             /*show_all*/ false,
-            Some(PathBuf::from("/tmp/project")),
+            Some(LegacyAppPathString::from_string("/tmp/project")),
             SessionPickerAction::Resume,
         );
 
@@ -5160,7 +5177,7 @@ session_picker_view = "dense"
             loader,
             ProviderFilter::MatchDefault(String::from("openai")),
             /*show_all*/ false,
-            Some(PathBuf::from("/tmp/project")),
+            Some(LegacyAppPathString::from_string("/tmp/project")),
             SessionPickerAction::Resume,
         );
 
@@ -5193,7 +5210,7 @@ session_picker_view = "dense"
 
     fn render_dense_row_snapshot(
         show_all: bool,
-        filter_cwd: Option<PathBuf>,
+        filter_cwd: Option<LegacyAppPathString>,
         width: u16,
     ) -> String {
         use crate::custom_terminal::Terminal;
@@ -5235,7 +5252,7 @@ session_picker_view = "dense"
             "resume_picker_dense_cwd",
             render_dense_row_snapshot(
                 /*show_all*/ false,
-                Some(PathBuf::from(
+                Some(LegacyAppPathString::from_string(
                     "/Users/felipe.coury/code/codex.fcoury-session-picker/codex-rs"
                 )),
                 /*width*/ 100,
@@ -5394,7 +5411,7 @@ session_picker_view = "dense"
             loader,
             ProviderFilter::MatchDefault(String::from("openai")),
             /*show_all*/ false,
-            Some(PathBuf::from(
+            Some(LegacyAppPathString::from_string(
                 "/Users/felipe.coury/code/codex.fcoury-session-picker/codex-rs",
             )),
             SessionPickerAction::Resume,
@@ -5873,7 +5890,7 @@ session_picker_view = "dense"
             loader,
             ProviderFilter::MatchDefault(String::from("openai")),
             /*show_all*/ false,
-            Some(PathBuf::from("/tmp/project")),
+            Some(LegacyAppPathString::from_string("/tmp/project")),
             SessionPickerAction::Resume,
         );
 
@@ -5881,7 +5898,10 @@ session_picker_view = "dense"
         {
             let guard = recorded_requests.lock().unwrap();
             assert_eq!(guard.len(), 1);
-            assert_eq!(guard[0].cwd_filter, Some(PathBuf::from("/tmp/project")));
+            assert_eq!(
+                guard[0].cwd_filter,
+                Some(LegacyAppPathString::from_string("/tmp/project"))
+            );
         }
 
         state
@@ -5907,7 +5927,7 @@ session_picker_view = "dense"
             loader,
             ProviderFilter::MatchDefault(String::from("openai")),
             /*show_all*/ true,
-            Some(PathBuf::from("/tmp/project")),
+            Some(LegacyAppPathString::from_string("/tmp/project")),
             SessionPickerAction::Resume,
         );
 
@@ -5925,7 +5945,10 @@ session_picker_view = "dense"
 
         let guard = recorded_requests.lock().unwrap();
         assert_eq!(guard.len(), 2);
-        assert_eq!(guard[1].cwd_filter, Some(PathBuf::from("/tmp/project")));
+        assert_eq!(
+            guard[1].cwd_filter,
+            Some(LegacyAppPathString::from_string("/tmp/project"))
+        );
     }
 
     #[tokio::test]
@@ -6267,7 +6290,7 @@ session_picker_view = "dense"
             recency_at: Some(2),
             status: codex_app_server_protocol::ThreadStatus::Idle,
             path: None,
-            cwd: test_path_buf("/tmp").abs(),
+            cwd: test_path_buf("/tmp").abs().into(),
             cli_version: String::from("0.0.0"),
             source: codex_app_server_protocol::SessionSource::Cli,
             can_accept_direct_input: None,
@@ -6311,7 +6334,7 @@ session_picker_view = "dense"
             recency_at: Some(2),
             status: codex_app_server_protocol::ThreadStatus::Idle,
             path: None,
-            cwd: test_path_buf("/tmp").abs(),
+            cwd: test_path_buf("/tmp").abs().into(),
             cli_version: String::from("0.0.0"),
             source: codex_app_server_protocol::SessionSource::Cli,
             can_accept_direct_input: None,
@@ -6395,7 +6418,7 @@ session_picker_view = "dense"
             recency_at: Some(2),
             status: codex_app_server_protocol::ThreadStatus::Idle,
             path: None,
-            cwd: test_path_buf("/tmp").abs(),
+            cwd: test_path_buf("/tmp").abs().into(),
             cli_version: String::from("0.0.0"),
             source: codex_app_server_protocol::SessionSource::Cli,
             can_accept_direct_input: None,
@@ -6470,7 +6493,7 @@ session_picker_view = "dense"
             recency_at: Some(2),
             status: codex_app_server_protocol::ThreadStatus::Idle,
             path: None,
-            cwd: test_path_buf("/tmp").abs(),
+            cwd: test_path_buf("/tmp").abs().into(),
             cli_version: String::from("0.0.0"),
             source: codex_app_server_protocol::SessionSource::Cli,
             can_accept_direct_input: None,

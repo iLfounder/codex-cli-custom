@@ -42,6 +42,14 @@ impl PluginRequestProcessor {
             return Ok(empty_response());
         }
 
+        let cwds = cwds
+            .map(|cwds| {
+                cwds.into_iter()
+                    .map(|cwd| resolve_absolute_api_path(cwd, "plugin/search cwd"))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
+
         let config = self
             .load_catalog_config(cwds.as_deref().unwrap_or_default())
             .await?;
@@ -268,7 +276,7 @@ fn plugin_search_result(
     PluginSearchResult {
         plugin,
         marketplace_name,
-        marketplace_path,
+        marketplace_path: marketplace_path.map(Into::into),
     }
 }
 

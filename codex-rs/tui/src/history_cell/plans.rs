@@ -58,7 +58,15 @@ pub(crate) fn new_plan_update(update: UpdatePlanArgs) -> PlanUpdateCell {
 pub(crate) fn new_proposed_plan(plan_markdown: String, cwd: &Path) -> ProposedPlanCell {
     ProposedPlanCell {
         plan_markdown,
-        cwd: cwd.to_path_buf(),
+        cwd: Some(cwd.to_path_buf()),
+        rendered_lines: MarkdownRenderCache::default(),
+    }
+}
+
+pub(crate) fn new_proposed_plan_without_cwd(plan_markdown: String) -> ProposedPlanCell {
+    ProposedPlanCell {
+        plan_markdown,
+        cwd: None,
         rendered_lines: MarkdownRenderCache::default(),
     }
 }
@@ -85,7 +93,7 @@ pub(crate) fn new_proposed_plan_stream(
 pub(crate) struct ProposedPlanCell {
     plan_markdown: String,
     /// Session cwd used to keep local file-link display aligned with live streamed plan rendering.
-    cwd: PathBuf,
+    cwd: Option<PathBuf>,
     rendered_lines: MarkdownRenderCache,
 }
 
@@ -118,7 +126,7 @@ impl HistoryCell for ProposedPlanCell {
             let mut body = crate::markdown::render_markdown_agent_with_links_and_cwd(
                 &self.plan_markdown,
                 Some(wrap_width),
-                Some(self.cwd.as_path()),
+                self.cwd.as_deref(),
             );
             if body.is_empty() {
                 body.push(HyperlinkLine::new(Line::from("(empty)".dim().italic())));

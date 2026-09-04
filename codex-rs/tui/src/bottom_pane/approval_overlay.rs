@@ -55,7 +55,6 @@ use codex_features::Features;
 use codex_protocol::ThreadId;
 use codex_protocol::request_permissions::PermissionGrantScope;
 use codex_protocol::request_permissions::RequestPermissionProfile;
-use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::LegacyAppPathString;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -108,7 +107,7 @@ pub(crate) struct ApplyPatchApprovalRequest {
     pub thread_label: Option<String>,
     pub id: String,
     pub reason: Option<String>,
-    pub cwd: AbsolutePathBuf,
+    pub cwd: LegacyAppPathString,
     pub changes: HashMap<PathBuf, FileChange>,
 }
 
@@ -2170,7 +2169,7 @@ mod tests {
             thread_label: Some("Banach [worker]".to_string()),
             id: "test".to_string(),
             reason: None,
-            cwd: test_path_buf("/tmp").abs(),
+            cwd: LegacyAppPathString::from_abs_path(&test_path_buf("/tmp").abs()),
             changes,
         });
         let keymap = crate::keymap::RuntimeKeymap::defaults();
@@ -2203,7 +2202,7 @@ mod tests {
             thread_label: None,
             id: "test".to_string(),
             reason: None,
-            cwd: absolute_path("/tmp"),
+            cwd: LegacyAppPathString::from_abs_path(&absolute_path("/tmp")),
             changes: HashMap::new(),
         });
         let view = make_overlay(request, tx, Features::with_defaults());
@@ -2211,6 +2210,43 @@ mod tests {
             "approval_overlay_patch_destination_unavailable",
             normalize_snapshot_paths(render_overlay_lines(&view, /*width*/ 120))
         );
+    }
+
+    #[test]
+    fn apply_patch_prompt_joins_relative_paths_to_foreign_cwd() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx);
+        #[cfg(windows)]
+        let (cwd, expected_path, expected_move_path) = (
+            "/Users/daniel/project",
+            "/Users/daniel/project/src/old.rs",
+            "/Users/daniel/project/src/new.rs",
+        );
+        #[cfg(not(windows))]
+        let (cwd, expected_path, expected_move_path) = (
+            r"C:\Users\Daniel\project",
+            r"C:\Users\Daniel\project\src\old.rs",
+            r"C:\Users\Daniel\project\src\new.rs",
+        );
+        let request = ApprovalRequest::ApplyPatch(ApplyPatchApprovalRequest {
+            thread_id: ThreadId::new(),
+            thread_label: None,
+            id: "test".to_string(),
+            reason: None,
+            cwd: LegacyAppPathString::from_string(cwd),
+            changes: HashMap::from([(
+                PathBuf::from("src/old.rs"),
+                FileChange::Update {
+                    unified_diff: String::new(),
+                    move_path: Some(PathBuf::from("src/new.rs")),
+                },
+            )]),
+        });
+        let view = make_overlay(request, tx, Features::with_defaults());
+        let rendered = render_overlay_lines(&view, /*width*/ 120);
+
+        assert!(rendered.contains(&format!("Destination: {expected_path}")));
+        assert!(rendered.contains(&format!("Destination: {expected_move_path}")));
     }
 
     #[test]

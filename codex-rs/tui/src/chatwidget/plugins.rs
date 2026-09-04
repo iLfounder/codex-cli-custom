@@ -5,7 +5,7 @@ use super::plugin_catalog::marketplace_display_name;
 use super::plugin_catalog::marketplace_is_user_configured;
 use super::plugin_catalog::marketplace_is_user_configured_git;
 use super::plugin_catalog::marketplace_tab_id;
-use super::plugin_catalog::marketplace_tab_id_from_path;
+use super::plugin_catalog::marketplace_tab_id_from_server_path;
 use super::plugin_catalog::marketplace_tab_id_matching_saved_id;
 use super::plugin_catalog::merge_remote_marketplaces;
 use super::plugin_catalog::plugin_detail_hint_line;
@@ -284,6 +284,7 @@ impl ChatWidget {
         self.plugins_active_tab_id = Some(ADD_MARKETPLACE_TAB_ID.to_string());
         let tx = self.app_event_tx.clone();
         let cwd = self.config.cwd.to_path_buf();
+        let remote_cwd = self.current_remote_cwd.clone();
         let view = CustomPromptView::new(
             "Add marketplace".to_string(),
             "owner/repo, git URL, or local marketplace path".to_string(),
@@ -299,6 +300,7 @@ impl ChatWidget {
                 });
                 tx.send(AppEvent::FetchMarketplaceAdd {
                     cwd: cwd.clone(),
+                    remote_cwd: remote_cwd.clone(),
                     source,
                 });
             }),
@@ -506,16 +508,18 @@ impl ChatWidget {
     pub(crate) fn on_marketplace_add_loaded(
         &mut self,
         cwd: PathBuf,
+        remote_cwd: Option<codex_utils_path_uri::LegacyAppPathString>,
         _source: String,
         result: Result<MarketplaceAddResponse, String>,
     ) {
-        if self.config.cwd.as_path() != cwd.as_path() {
+        if self.config.cwd.as_path() != cwd.as_path() || self.current_remote_cwd != remote_cwd {
             return;
         }
 
         match result {
             Ok(response) => {
-                let marketplace_tab_id = marketplace_tab_id_from_path(&response.installed_root);
+                let marketplace_tab_id =
+                    marketplace_tab_id_from_server_path(&response.installed_root);
                 self.plugins_active_tab_id = Some(marketplace_tab_id.clone());
                 self.newly_installed_marketplace_tab_id =
                     (!response.already_added).then_some(marketplace_tab_id);
@@ -531,7 +535,7 @@ impl ChatWidget {
                     message,
                     Some(format!(
                         "Marketplace root: {}",
-                        response.installed_root.as_path().display()
+                        response.installed_root.render_for_ui()
                     )),
                 );
             }
@@ -567,7 +571,7 @@ impl ChatWidget {
                     format!("Removed marketplace {marketplace_display_name}."),
                     Some(match response.installed_root {
                         Some(installed_root) => {
-                            format!("Marketplace root: {}", installed_root.as_path().display())
+                            format!("Marketplace root: {}", installed_root.render_for_ui())
                         }
                         None => format!(
                             "Removed marketplace config for {}.",
@@ -608,8 +612,9 @@ impl ChatWidget {
         match result {
             Ok(response) => {
                 if response.upgraded_roots.len() == 1 {
-                    self.plugins_active_tab_id =
-                        Some(marketplace_tab_id_from_path(&response.upgraded_roots[0]));
+                    self.plugins_active_tab_id = Some(marketplace_tab_id_from_server_path(
+                        &response.upgraded_roots[0],
+                    ));
                 }
 
                 let selected_count = response.selected_marketplaces.len();
@@ -657,7 +662,7 @@ impl ChatWidget {
                             response
                                 .upgraded_roots
                                 .iter()
-                                .map(|root| root.as_path().display().to_string())
+                                .map(codex_utils_path_uri::LegacyAppPathString::render_for_ui)
                                 .collect::<Vec<_>>()
                                 .join(", ")
                         )),

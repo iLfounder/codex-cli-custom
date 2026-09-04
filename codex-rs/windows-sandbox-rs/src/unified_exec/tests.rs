@@ -102,23 +102,37 @@ fn powershell_literal(path: &Path) -> String {
     path.to_string_lossy().replace('\'', "''")
 }
 
-fn start_powershell_child(
-    pwsh: &Path,
-    stdio_dir: &Path,
-    child_command: &str,
-    parent_tail: &str,
-) -> String {
-    let encoded = BASE64.encode(
-        child_command
+fn encode_powershell_command(command: &str) -> String {
+    BASE64.encode(
+        command
             .encode_utf16()
             .flat_map(u16::to_le_bytes)
             .collect::<Vec<_>>(),
+    )
+}
+
+fn start_powershell_child(
+    pwsh: &Path,
+    stdio_dir: &Path,
+    parent_pid_marker: &Path,
+    spawned_pid_marker: &Path,
+    ready_marker: &Path,
+    child_command: &str,
+    parent_tail: &str,
+) -> String {
+    let child_command = format!(
+        "$ErrorActionPreference = 'Stop'; Set-Content -LiteralPath '{}' -Value $PID -ErrorAction Stop; {child_command}",
+        powershell_literal(ready_marker),
     );
+    let encoded = encode_powershell_command(&child_command);
     format!(
-        "Start-Process -WindowStyle Hidden -FilePath '{}' -ArgumentList '-NoProfile','-EncodedCommand','{encoded}' -RedirectStandardOutput '{}' -RedirectStandardError '{}'; {parent_tail}",
+        "$ErrorActionPreference = 'Stop'; Set-Content -LiteralPath '{}' -Value $PID -ErrorAction Stop; $descendant = Start-Process -PassThru -WindowStyle Hidden -FilePath '{}' -ArgumentList '-NoProfile','-EncodedCommand','{encoded}' -RedirectStandardOutput '{}' -RedirectStandardError '{}' -ErrorAction Stop; Set-Content -LiteralPath '{}' -Value $descendant.Id -ErrorAction Stop; $readyDeadline = (Get-Date).AddSeconds(10); while (-not (Test-Path -LiteralPath '{}')) {{ if ((Get-Date) -ge $readyDeadline) {{ throw 'descendant did not become ready' }}; Start-Sleep -Milliseconds 25 }}; {parent_tail}",
+        powershell_literal(parent_pid_marker),
         powershell_literal(pwsh),
         powershell_literal(&stdio_dir.join("descendant.stdout")),
         powershell_literal(&stdio_dir.join("descendant.stderr")),
+        powershell_literal(spawned_pid_marker),
+        powershell_literal(ready_marker),
     )
 }
 
@@ -610,25 +624,30 @@ fn legacy_capture_emits_output_and_preserves_descendant_after_normal_exit() {
         return;
     };
     let _guard = legacy_process_test_guard();
-    let cwd = sandbox_cwd();
+    let test_root = TempDir::new_in(sandbox_cwd()).expect("create legacy lifecycle test root");
+    let cwd = test_root.path().to_path_buf();
     let codex_home = sandbox_home("legacy-capture-pwsh");
     println!("capture pwsh codex_home={}", codex_home.path().display());
-    let ready_marker = codex_home.path().join("descendant-started");
-    let release_marker = codex_home.path().join("release-descendant");
-    let survival_marker = codex_home.path().join("descendant-survived");
+    let parent_pid_marker = cwd.join("parent.pid");
+    let spawned_pid_marker = cwd.join("descendant-spawned");
+    let ready_marker = cwd.join("descendant-started");
+    let survival_marker = cwd.join("descendant-survived");
     let descendant_command = format!(
-        "$deadline=(Get-Date).AddSeconds(30); Set-Content -LiteralPath '{}' -Value $PID; while (-not (Test-Path -LiteralPath '{}')) {{ if ((Get-Date) -ge $deadline) {{ exit 3 }}; Start-Sleep -Milliseconds 25 }}; Set-Content -LiteralPath '{}' -Value survived",
-        powershell_literal(&ready_marker),
-        powershell_literal(&release_marker),
+        "$rootProcessId = [int](Get-Content -LiteralPath '{}'); $deadline = (Get-Date).AddSeconds(10); while (Get-Process -Id $rootProcessId -ErrorAction SilentlyContinue) {{ if ((Get-Date) -ge $deadline) {{ exit 3 }}; Start-Sleep -Milliseconds 25 }}; Set-Content -LiteralPath '{}' -Value survived",
+        powershell_literal(&parent_pid_marker),
         powershell_literal(&survival_marker),
-    );
-    let parent_tail = format!(
-        "while (-not (Test-Path -LiteralPath '{}')) {{ Start-Sleep -Milliseconds 25 }}",
-        powershell_literal(&ready_marker),
     );
     let parent_command = format!(
         "Write-Output LEGACY-CAPTURE-DIRECT; {}",
-        start_powershell_child(&pwsh, codex_home.path(), &descendant_command, &parent_tail,),
+        start_powershell_child(
+            &pwsh,
+            cwd.as_path(),
+            &parent_pid_marker,
+            &spawned_pid_marker,
+            &ready_marker,
+            &descendant_command,
+            "",
+        ),
     );
     let permission_profile = PermissionProfile::workspace_write();
     let result = run_windows_sandbox_capture(
@@ -638,8 +657,8 @@ fn legacy_capture_emits_output_and_preserves_descendant_after_normal_exit() {
         vec![
             pwsh.display().to_string(),
             "-NoProfile".to_string(),
-            "-Command".to_string(),
-            parent_command,
+            "-EncodedCommand".to_string(),
+            encode_powershell_command(&parent_command),
         ],
         cwd.as_path(),
         HashMap::new(),
@@ -648,14 +667,6 @@ fn legacy_capture_emits_output_and_preserves_descendant_after_normal_exit() {
         /*use_private_desktop*/ true,
     )
     .expect("run legacy capture powershell");
-    let descendant_pid = fs::read_to_string(&ready_marker)
-        .expect("read descendant pid")
-        .trim()
-        .parse()
-        .expect("parse descendant pid");
-    let descendant_process = open_process_for_wait(descendant_pid);
-    fs::write(&release_marker, "release").expect("release descendant after root exit");
-    let descendant_process = descendant_process.expect("open descendant after normal capture exit");
 
     println!("capture pwsh exit_code={}", result.exit_code);
     println!("capture pwsh timed_out={}", result.timed_out);
@@ -667,12 +678,25 @@ fn legacy_capture_emits_output_and_preserves_descendant_after_normal_exit() {
         stdout.contains("LEGACY-CAPTURE-DIRECT"),
         "stdout={stdout:?}"
     );
-    assert!(
-        wait_for_path(&survival_marker, Duration::from_secs(10)),
-        "sandbox descendant did not survive normal capture exit"
-    );
-    wait_for_process_exit(&descendant_process, Duration::from_secs(10))
-        .expect("sandbox descendant did not exit after release");
+    if !wait_for_path(&survival_marker, Duration::from_secs(10)) {
+        let spawned_pid = fs::read_to_string(&spawned_pid_marker)
+            .unwrap_or_else(|err| format!("failed to read spawned pid: {err}"));
+        let descendant_stderr = fs::read_to_string(cwd.join("descendant.stderr"))
+            .unwrap_or_else(|err| format!("failed to read descendant stderr: {err}"));
+        panic!(
+            "sandbox descendant did not survive normal capture exit; spawned_pid={spawned_pid:?}; descendant_stderr={descendant_stderr:?}\n{}",
+            sandbox_log(codex_home.path())
+        );
+    }
+    let descendant_pid = fs::read_to_string(&ready_marker)
+        .expect("read descendant pid")
+        .trim()
+        .parse()
+        .expect("parse descendant pid");
+    if let Ok(descendant_process) = open_process_for_wait(descendant_pid) {
+        wait_for_process_exit(&descendant_process, Duration::from_secs(10))
+            .expect("sandbox descendant did not exit after survival marker");
+    }
 }
 
 #[test]
@@ -792,18 +816,23 @@ fn legacy_capture_cancellation_terminates_descendants_without_timeout() {
         return;
     };
     let _guard = legacy_process_test_guard();
-    let cwd = sandbox_cwd();
+    let test_root = TempDir::new_in(sandbox_cwd()).expect("create legacy lifecycle test root");
+    let cwd = test_root.path().to_path_buf();
     let codex_home = sandbox_home("legacy-capture-cancel");
-    let descendant_marker = codex_home.path().join("descendant-survived");
-    let ready_marker = codex_home.path().join("descendant-started");
+    let descendant_marker = cwd.join("descendant-survived");
+    let parent_pid_marker = cwd.join("parent.pid");
+    let spawned_pid_marker = cwd.join("descendant-spawned");
+    let ready_marker = cwd.join("descendant-started");
     let descendant_command = format!(
-        "Set-Content -LiteralPath '{}' -Value $PID; Start-Sleep -Seconds 1; Set-Content -LiteralPath '{}' -Value survived",
-        powershell_literal(&ready_marker),
+        "Start-Sleep -Seconds 1; Set-Content -LiteralPath '{}' -Value survived",
         powershell_literal(&descendant_marker),
     );
     let parent_command = start_powershell_child(
         &pwsh,
-        codex_home.path(),
+        cwd.as_path(),
+        &parent_pid_marker,
+        &spawned_pid_marker,
+        &ready_marker,
         &descendant_command,
         "Start-Sleep -Seconds 30",
     );
@@ -835,8 +864,8 @@ fn legacy_capture_cancellation_terminates_descendants_without_timeout() {
         vec![
             pwsh.display().to_string(),
             "-NoProfile".to_string(),
-            "-Command".to_string(),
-            parent_command,
+            "-EncodedCommand".to_string(),
+            encode_powershell_command(&parent_command),
         ],
         cwd.as_path(),
         HashMap::new(),
@@ -878,35 +907,37 @@ async fn assert_legacy_tty_descendant_lifecycle(
     pwsh: &Path,
     lifecycle: LegacyTtyDescendantLifecycle,
 ) {
-    let cwd = sandbox_cwd();
+    let test_root = TempDir::new_in(sandbox_cwd()).expect("create legacy lifecycle test root");
+    let cwd = test_root.path().to_path_buf();
     let codex_home = sandbox_home(match lifecycle {
         LegacyTtyDescendantLifecycle::Terminate => "legacy-tty-descendant-terminate",
         LegacyTtyDescendantLifecycle::Preserve => "legacy-tty-descendant-preserve",
     });
-    let ready_marker = codex_home.path().join("descendant-started");
-    let release_marker = codex_home.path().join("release-descendant");
-    let survival_marker = codex_home.path().join("descendant-survived");
+    let parent_pid_marker = cwd.join("parent.pid");
+    let spawned_pid_marker = cwd.join("descendant-spawned");
+    let ready_marker = cwd.join("descendant-started");
+    let survival_marker = cwd.join("descendant-survived");
     let child_tail = match lifecycle {
         LegacyTtyDescendantLifecycle::Terminate => "Start-Sleep -Seconds 30".to_string(),
         LegacyTtyDescendantLifecycle::Preserve => format!(
-            "$deadline=(Get-Date).AddSeconds(30); while (-not (Test-Path -LiteralPath '{}')) {{ if ((Get-Date) -ge $deadline) {{ exit 3 }}; Start-Sleep -Milliseconds 25 }}; Set-Content -LiteralPath '{}' -Value survived",
-            powershell_literal(&release_marker),
+            "$rootProcessId = [int](Get-Content -LiteralPath '{}'); $deadline = (Get-Date).AddSeconds(10); while (Get-Process -Id $rootProcessId -ErrorAction SilentlyContinue) {{ if ((Get-Date) -ge $deadline) {{ exit 3 }}; Start-Sleep -Milliseconds 25 }}; Set-Content -LiteralPath '{}' -Value survived",
+            powershell_literal(&parent_pid_marker),
             powershell_literal(&survival_marker),
         ),
     };
-    let child_command = format!(
-        "Set-Content -LiteralPath '{}' -Value $PID; {child_tail}",
-        powershell_literal(&ready_marker),
-    );
     let parent_tail = match lifecycle {
         LegacyTtyDescendantLifecycle::Terminate => "Start-Sleep -Seconds 30".to_string(),
-        LegacyTtyDescendantLifecycle::Preserve => format!(
-            "while (-not (Test-Path -LiteralPath '{}')) {{ Start-Sleep -Milliseconds 25 }}",
-            powershell_literal(&ready_marker),
-        ),
+        LegacyTtyDescendantLifecycle::Preserve => String::new(),
     };
-    let parent_command =
-        start_powershell_child(pwsh, codex_home.path(), &child_command, &parent_tail);
+    let parent_command = start_powershell_child(
+        pwsh,
+        cwd.as_path(),
+        &parent_pid_marker,
+        &spawned_pid_marker,
+        &ready_marker,
+        &child_tail,
+        &parent_tail,
+    );
     let permission_profile = PermissionProfile::workspace_write();
     let spawned = spawn_windows_sandbox_session_legacy(
         &permission_profile,
@@ -915,8 +946,8 @@ async fn assert_legacy_tty_descendant_lifecycle(
         vec![
             pwsh.display().to_string(),
             "-NoProfile".to_string(),
-            "-Command".to_string(),
-            parent_command,
+            "-EncodedCommand".to_string(),
+            encode_powershell_command(&parent_command),
         ],
         cwd.as_path(),
         HashMap::new(),
@@ -924,15 +955,25 @@ async fn assert_legacy_tty_descendant_lifecycle(
         &[],
         &[],
         /*tty*/ true,
-        /*stdin_open*/ false,
+        /*stdin_open*/ true,
         /*use_private_desktop*/ true,
     )
     .await
     .expect("spawn legacy sandbox ConPTY lifecycle test");
-    assert!(
-        wait_for_path(&ready_marker, Duration::from_secs(10)),
-        "{lifecycle:?} descendant did not start"
-    );
+    if !wait_for_path(&ready_marker, Duration::from_secs(10)) {
+        spawned.session.request_terminate();
+        let (stdout, exit_code) =
+            collect_stdout_and_exit(spawned, codex_home.path(), Duration::from_secs(15)).await;
+        let stdout = String::from_utf8_lossy(&stdout);
+        let spawned_pid = fs::read_to_string(&spawned_pid_marker)
+            .unwrap_or_else(|err| format!("failed to read spawned pid: {err}"));
+        let descendant_stderr = fs::read_to_string(cwd.join("descendant.stderr"))
+            .unwrap_or_else(|err| format!("failed to read descendant stderr: {err}"));
+        panic!(
+            "{lifecycle:?} descendant did not start; exit_code={exit_code}; stdout={stdout:?}; spawned_pid={spawned_pid:?}; descendant_stderr={descendant_stderr:?}\n{}",
+            sandbox_log(codex_home.path())
+        );
+    }
     let descendant_pid = fs::read_to_string(&ready_marker)
         .expect("read descendant pid")
         .trim()
@@ -945,9 +986,6 @@ async fn assert_legacy_tty_descendant_lifecycle(
     }
     let (_, exit_code) =
         collect_stdout_and_exit(spawned, codex_home.path(), Duration::from_secs(15)).await;
-    if matches!(lifecycle, LegacyTtyDescendantLifecycle::Preserve) {
-        fs::write(&release_marker, "release").expect("release preserved descendant");
-    }
     let descendant_process = descendant_process.expect("open sandbox ConPTY descendant");
 
     match lifecycle {

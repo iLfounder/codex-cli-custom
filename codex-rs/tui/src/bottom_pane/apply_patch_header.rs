@@ -1,9 +1,9 @@
 //! Render file-change approval descriptions and cross-platform destinations.
 
 use super::approval_overlay::ApplyPatchApprovalRequest;
+use crate::app_server_approval_conversions::file_update_destination_for_display;
 use crate::diff_model::FileChange;
 use crate::render::renderable::Renderable;
-use codex_utils_path_uri::LegacyAppPathString;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
@@ -49,12 +49,7 @@ pub(super) fn build_header(request: &ApplyPatchApprovalRequest) -> Box<dyn Rende
             };
             std::iter::once(path).chain(move_destination)
         })
-        .map(|path| {
-            LegacyAppPathString::from_path(path)
-                .to_inferred_path_uri()
-                .map(|path| path.inferred_native_path_string())
-                .unwrap_or_else(|| request.cwd.join(path).display().to_string())
-        })
+        .map(|path| file_update_destination_for_display(&request.cwd, path))
         .collect();
     destinations.sort();
     destinations.dedup();

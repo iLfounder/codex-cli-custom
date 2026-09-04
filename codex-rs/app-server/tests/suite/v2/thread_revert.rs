@@ -77,7 +77,7 @@ async fn thread_revert_preserves_fork_cutoff_after_cold_resume() -> Result<()> {
         let completed = mcp
             .start_turn_and_wait_for_completion(TurnStartParams {
                 thread_id: parent.id.clone(),
-                cwd: Some(parent.cwd.as_path().to_path_buf()),
+                cwd: Some(parent.cwd.clone()),
                 input: vec![UserInput::Text {
                     text: text.to_string(),
                     text_elements: Vec::new(),
@@ -92,40 +92,45 @@ async fn thread_revert_preserves_fork_cutoff_after_cold_resume() -> Result<()> {
             request_id,
             params: ThreadForkParams {
                 thread_id: parent.id.clone(),
-                cwd: Some(codex_home.path().to_string_lossy().into_owned()),
+                cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                    codex_home.path(),
+                )),
                 ..Default::default()
             },
         })
         .await?;
-    let child_meta = read_session_meta_line(child.path.as_ref().expect("child rollout"))
-        .await?
-        .meta;
+    let child_rollout =
+        AbsolutePathBuf::try_from(child.path.as_ref().expect("child rollout").clone())?;
+    let child_meta = read_session_meta_line(child_rollout.as_path()).await?.meta;
     let fork_cutoff = child_meta
         .history_base
         .expect("fork history base")
         .end_ordinal_exclusive;
     assert_eq!(child_meta.forked_from_ordinal_exclusive, Some(fork_cutoff));
-    let inherited_revert_cutoff =
-        std::fs::read_to_string(parent.path.as_ref().expect("parent rollout"))?
-            .lines()
-            .map(serde_json::from_str::<RolloutLine>)
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .find_map(|line| match line.item {
-                RolloutItem::EventMsg(EventMsg::TurnStarted(turn))
-                    if turn.turn_id == parent_turns[1] =>
-                {
-                    line.ordinal
-                }
-                _ => None,
-            })
-            .expect("inherited turn start ordinal");
+    let parent_rollout =
+        AbsolutePathBuf::try_from(parent.path.as_ref().expect("parent rollout").clone())?;
+    let inherited_revert_cutoff = std::fs::read_to_string(parent_rollout.as_path())?
+        .lines()
+        .map(serde_json::from_str::<RolloutLine>)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .find_map(|line| match line.item {
+            RolloutItem::EventMsg(EventMsg::TurnStarted(turn))
+                if turn.turn_id == parent_turns[1] =>
+            {
+                line.ordinal
+            }
+            _ => None,
+        })
+        .expect("inherited turn start ordinal");
     let mut child_turns = Vec::new();
     for text in ["child first", "child second"] {
         let completed = mcp
             .start_turn_and_wait_for_completion(TurnStartParams {
                 thread_id: child.id.clone(),
-                cwd: Some(saved_cwd.clone()),
+                cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                    &saved_cwd,
+                )),
                 input: vec![UserInput::Text {
                     text: text.to_string(),
                     text_elements: Vec::new(),
@@ -152,7 +157,9 @@ async fn thread_revert_preserves_fork_cutoff_after_cold_resume() -> Result<()> {
                 },
             })
             .await?;
-        let meta = read_session_meta_line(reverted.path.as_ref().expect("reverted rollout"))
+        let reverted_rollout =
+            AbsolutePathBuf::try_from(reverted.path.as_ref().expect("reverted rollout").clone())?;
+        let meta = read_session_meta_line(reverted_rollout.as_path())
             .await?
             .meta;
         assert_eq!(meta.forked_from_ordinal_exclusive, Some(expected_cutoff));
@@ -182,10 +189,16 @@ async fn thread_revert_preserves_fork_cutoff_after_cold_resume() -> Result<()> {
             })
             .await?;
         if expected_cutoff == fork_cutoff {
-            assert_eq!(cwd.as_path(), saved_cwd);
+            assert_eq!(
+                cwd,
+                codex_utils_path_uri::LegacyAppPathString::from_path(&saved_cwd)
+            );
         } else {
             // Only parent-owned snapshots remain after reverting into inherited history.
-            assert_eq!(cwd.as_path(), child_meta.cwd);
+            assert_eq!(
+                cwd,
+                codex_utils_path_uri::LegacyAppPathString::from_path(&child_meta.cwd)
+            );
         }
         mcp.start_turn_and_wait_for_completion(TurnStartParams {
             thread_id: child.id.clone(),

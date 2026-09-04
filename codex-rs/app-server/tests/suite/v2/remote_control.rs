@@ -213,9 +213,7 @@ async fn explicit_remote_control_startup_fails_when_disabled_by_requirements() -
         "allow_remote_control = false\n",
     )?;
     let managed_config_path = codex_home.path().join("managed_config.toml");
-    let socket_path = codex_home.path().join("app-server.sock");
-    let transport =
-        AppServerTransport::from_listen_url(&format!("unix://{}", socket_path.display()))?;
+    let transport = AppServerTransport::from_listen_url("ws://127.0.0.1:0")?;
     let _codex_home_guard = EnvVarGuard::set("CODEX_HOME", codex_home.path().as_os_str());
 
     let result = timeout(
@@ -248,7 +246,6 @@ async fn explicit_remote_control_startup_fails_when_disabled_by_requirements() -
         err.to_string(),
         REMOTE_CONTROL_DISABLED_BY_REQUIREMENTS_MESSAGE
     );
-    assert!(!socket_path.exists());
     Ok(())
 }
 

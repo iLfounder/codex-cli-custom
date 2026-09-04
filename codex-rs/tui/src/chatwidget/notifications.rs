@@ -1,6 +1,7 @@
 //! Desktop notification coalescing for `ChatWidget`.
 
 use super::*;
+use crate::app_server_approval_conversions::file_update_destination_for_display;
 
 impl ChatWidget {
     pub(super) fn notify(&mut self, notification: Notification) {
@@ -25,11 +26,22 @@ impl ChatWidget {
 
 #[derive(Debug)]
 pub(super) enum Notification {
-    AgentTurnComplete { response: String },
-    ExecApprovalRequested { command: String },
-    EditApprovalRequested { cwd: PathBuf, changes: Vec<PathBuf> },
-    ElicitationRequested { server_name: String },
-    PlanModePrompt { title: String },
+    AgentTurnComplete {
+        response: String,
+    },
+    ExecApprovalRequested {
+        command: String,
+    },
+    EditApprovalRequested {
+        cwd: LegacyAppPathString,
+        changes: Vec<PathBuf>,
+    },
+    ElicitationRequested {
+        server_name: String,
+    },
+    PlanModePrompt {
+        title: String,
+    },
 }
 
 impl Notification {
@@ -50,7 +62,7 @@ impl Notification {
                     "Codex wants to edit {}",
                     if changes.len() == 1 {
                         #[allow(clippy::unwrap_used)]
-                        display_path_for(changes.first().unwrap(), cwd)
+                        file_update_destination_for_display(cwd, changes.first().unwrap())
                     } else {
                         format!("{} files", changes.len())
                     }

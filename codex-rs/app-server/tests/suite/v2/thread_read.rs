@@ -147,8 +147,13 @@ async fn thread_read_returns_summary_without_turns() -> Result<()> {
     assert_eq!(thread.preview, preview);
     assert_eq!(thread.model_provider, "mock_provider");
     assert!(!thread.ephemeral, "stored rollouts should not be ephemeral");
-    assert!(thread.path.as_ref().expect("thread path").is_absolute());
-    assert_eq!(thread.cwd, test_absolute_path("/"));
+    assert!(
+        codex_utils_absolute_path::AbsolutePathBuf::try_from(
+            thread.path.as_ref().expect("thread path").clone()
+        )
+        .is_ok()
+    );
+    assert_eq!(thread.cwd, test_absolute_path("/").into());
     assert_eq!(thread.cli_version, "0.0.0");
     assert_eq!(thread.source, SessionSource::Cli);
     assert_eq!(thread.git_info, None);
@@ -920,7 +925,7 @@ async fn thread_read_loaded_include_turns_reads_store_history_without_rollout_pa
                 url: "https://example.com/recording.mp3".to_string(),
             },
             UserInput::LocalAudio {
-                path: "recording.wav".into(),
+                path: codex_utils_path_uri::LegacyAppPathString::from_string("recording.wav"),
             },
         ]
     );
@@ -1056,8 +1061,12 @@ async fn thread_read_can_return_archived_threads_by_id() -> Result<()> {
 
     assert_eq!(thread.id, conversation_id);
     assert_eq!(thread.preview, preview);
-    let path = thread.path.expect("thread path");
-    assert_eq!(path.canonicalize()?, archived_rollout_path.canonicalize()?);
+    let path =
+        codex_utils_absolute_path::AbsolutePathBuf::try_from(thread.path.expect("thread path"))?;
+    assert_eq!(
+        path.into_path_buf().canonicalize()?,
+        archived_rollout_path.canonicalize()?
+    );
 
     Ok(())
 }
@@ -1264,9 +1273,11 @@ async fn thread_read_loaded_thread_returns_precomputed_path_before_materializati
         .await?;
     let ThreadStartResponse { thread, .. } =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(start_id)).await??;
-    let thread_path = thread.path.clone().expect("thread path");
+    let thread_path = codex_utils_absolute_path::AbsolutePathBuf::try_from(
+        thread.path.clone().expect("thread path"),
+    )?;
     assert!(
-        !thread_path.exists(),
+        !thread_path.as_path().exists(),
         "fresh thread rollout should not be materialized yet"
     );
 
@@ -1280,7 +1291,12 @@ async fn thread_read_loaded_thread_returns_precomputed_path_before_materializati
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(read_id)).await??;
 
     assert_eq!(read.id, thread.id);
-    assert_eq!(read.path, Some(thread_path));
+    assert_eq!(
+        read.path,
+        Some(codex_utils_path_uri::LegacyAppPathString::from_abs_path(
+            &thread_path,
+        ))
+    );
     assert!(read.preview.is_empty());
     assert_eq!(read.turns.len(), 0);
     assert_eq!(read.status, ThreadStatus::Idle);
@@ -1468,9 +1484,11 @@ async fn thread_read_include_turns_rejects_unmaterialized_loaded_thread() -> Res
         .await?;
     let ThreadStartResponse { thread, .. } =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(start_id)).await??;
-    let thread_path = thread.path.clone().expect("thread path");
+    let thread_path = codex_utils_absolute_path::AbsolutePathBuf::try_from(
+        thread.path.clone().expect("thread path"),
+    )?;
     assert!(
-        !thread_path.exists(),
+        !thread_path.as_path().exists(),
         "fresh thread rollout should not be materialized yet"
     );
 
@@ -1517,9 +1535,11 @@ async fn thread_turns_list_rejects_unmaterialized_loaded_thread() -> Result<()> 
         .await?;
     let ThreadStartResponse { thread, .. } =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(start_id)).await??;
-    let thread_path = thread.path.clone().expect("thread path");
+    let thread_path = codex_utils_absolute_path::AbsolutePathBuf::try_from(
+        thread.path.clone().expect("thread path"),
+    )?;
     assert!(
-        !thread_path.exists(),
+        !thread_path.as_path().exists(),
         "fresh thread rollout should not be materialized yet"
     );
 

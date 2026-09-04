@@ -525,7 +525,7 @@ fn image_generation_call_renders_saved_path() {
         "call-image-generation".to_string(),
         "completed",
         Some("A tiny blue square".to_string()),
-        Some(saved_path),
+        Some(saved_path.into()),
     );
 
     assert_eq!(
@@ -549,17 +549,19 @@ fn session_configured_event(model: &str) -> ThreadSessionState {
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
-        permission_profile: PermissionProfile::read_only(),
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            test_path_buf("/tmp/project").abs(),
+            Vec::new(),
+            PermissionProfile::read_only(),
+            Some(PathBuf::new()),
+        ),
         active_permission_profile: None,
-        cwd: test_path_buf("/tmp/project").abs(),
-        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: Some(PathBuf::new()),
     }
 }
 

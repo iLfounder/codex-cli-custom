@@ -1246,17 +1246,19 @@ async fn bang_shell_enter_while_task_running_submits_run_user_shell_command() {
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        permission_profile: PermissionProfile::read_only(),
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            test_path_buf("/home/user/project").abs(),
+            Vec::new(),
+            PermissionProfile::read_only(),
+            Some(rollout_file.path().to_path_buf()),
+        ),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
-        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: Some(rollout_file.path().to_path_buf()),
     };
     chat.handle_thread_session(configured);
     drain_insert_history(&mut rx);
@@ -1517,7 +1519,9 @@ async fn approval_modal_patch_snapshot() -> anyhow::Result<()> {
         turn_id: "turn-approve-patch".into(),
         changes,
         reason: Some("The model wants to apply changes".into()),
-        grant_root: Some(test_path_buf("/tmp/project")),
+        grant_root: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+            &test_path_buf("/tmp/project"),
+        )),
     };
     handle_apply_patch_approval_request(&mut chat, "sub-approve-patch", ev);
 

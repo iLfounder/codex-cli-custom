@@ -15,11 +15,15 @@
     "ExternalAgentConfigMigrationItem": {
       "properties": {
         "cwd": {
-          "description": "Null or empty means home-scoped migration; non-empty means repo-scoped migration.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LegacyAppPathString"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Null or empty means home-scoped migration; non-empty means repo-scoped migration."
         },
         "description": {
           "type": "string"
@@ -97,6 +101,9 @@
         "name"
       ],
       "type": "object"
+    },
+    "LegacyAppPathString": {
+      "type": "string"
     },
     "McpServerMigration": {
       "properties": {
@@ -190,10 +197,10 @@
     "SessionMigration": {
       "properties": {
         "cwd": {
-          "type": "string"
+          "$ref": "#/definitions/LegacyAppPathString"
         },
         "path": {
-          "type": "string"
+          "$ref": "#/definitions/LegacyAppPathString"
         },
         "title": {
           "type": [

@@ -15,6 +15,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::time::Duration;
 
 use codex_app_server_client::AppServerRequestHandle;
@@ -22,6 +23,7 @@ use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::CommandExecParams;
 use codex_app_server_protocol::CommandExecResponse;
 use codex_app_server_protocol::RequestId;
+use codex_utils_path_uri::LegacyAppPathString;
 use uuid::Uuid;
 
 /// Shared handle for running workspace commands from TUI components.
@@ -135,6 +137,8 @@ impl std::error::Error for WorkspaceCommandError {}
 /// Implementations decide where the workspace lives. Callers provide argv/cwd/env and should not
 /// branch on local versus remote execution.
 pub(crate) trait WorkspaceCommandExecutor: Send + Sync {
+    fn set_remote_cwd(&self, _cwd: Option<LegacyAppPathString>) {}
+
     /// Runs a workspace command and returns captured output or an app-server request error.
     ///
     /// Callers should treat errors as infrastructure failures and should treat successful output
@@ -152,16 +156,31 @@ pub(crate) trait WorkspaceCommandExecutor: Send + Sync {
 #[derive(Clone)]
 pub(crate) struct AppServerWorkspaceCommandRunner {
     request_handle: AppServerRequestHandle,
+    remote_workspace: bool,
+    remote_cwd: Arc<RwLock<Option<LegacyAppPathString>>>,
 }
 
 impl AppServerWorkspaceCommandRunner {
     /// Creates a runner from an app-server request handle owned by the current TUI session.
-    pub(crate) fn new(request_handle: AppServerRequestHandle) -> Self {
-        Self { request_handle }
+    pub(crate) fn new(request_handle: AppServerRequestHandle, remote_workspace: bool) -> Self {
+        Self {
+            request_handle,
+            remote_workspace,
+            remote_cwd: Arc::new(RwLock::new(None)),
+        }
     }
 }
 
 impl WorkspaceCommandExecutor for AppServerWorkspaceCommandRunner {
+    fn set_remote_cwd(&self, cwd: Option<LegacyAppPathString>) {
+        if !self.remote_workspace {
+            return;
+        }
+        if let Ok(mut remote_cwd) = self.remote_cwd.write() {
+            *remote_cwd = cwd;
+        }
+    }
+
     /// Sends the command as a one-off app-server `command/exec` request.
     ///
     /// The request is non-tty, does not stream stdin/stdout/stderr, and uses the caller's timeout
@@ -180,6 +199,11 @@ impl WorkspaceCommandExecutor for AppServerWorkspaceCommandRunner {
             } else {
                 Some(command.env)
             };
+            let cwd = if self.remote_workspace {
+                self.remote_cwd.read().ok().and_then(|cwd| cwd.clone())
+            } else {
+                command.cwd.as_deref().map(LegacyAppPathString::from_path)
+            };
             let response: CommandExecResponse = self
                 .request_handle
                 .request_typed(ClientRequest::OneOffCommandExec {
@@ -195,7 +219,7 @@ impl WorkspaceCommandExecutor for AppServerWorkspaceCommandRunner {
                         disable_output_cap: command.disable_output_cap,
                         disable_timeout: false,
                         timeout_ms: Some(timeout_ms),
-                        cwd: command.cwd,
+                        cwd,
                         env,
                         size: None,
                         sandbox_policy: None,

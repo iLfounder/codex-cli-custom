@@ -199,6 +199,7 @@ pub(super) async fn make_chatwidget_manual_with_auth(
         is_first_run: true,
         status_account_display: None,
         runtime_model_provider_base_url: None,
+        runtime_requires_openai_auth: false,
         initial_plan_type: None,
         model: Some(resolved_model.clone()),
         startup_tooltip_override: None,
@@ -626,10 +627,16 @@ fn file_update_changes_from_tui(changes: HashMap<PathBuf, FileChange>) -> Vec<Fi
                 FileChange::Update {
                     unified_diff,
                     move_path,
-                } => (PatchChangeKind::Update { move_path }, unified_diff),
+                } => (
+                    PatchChangeKind::Update {
+                        move_path: move_path
+                            .map(|path| LegacyAppPathString::from_path(path.as_path())),
+                    },
+                    unified_diff,
+                ),
             };
             FileUpdateChange {
-                path: path.display().to_string(),
+                path: LegacyAppPathString::from_path(&path),
                 kind,
                 diff,
             }
@@ -718,7 +725,7 @@ pub(super) fn handle_image_generation_end(
                 result: String::new(),
                 transparent_background: None,
                 failure: None,
-                saved_path,
+                saved_path: saved_path.map(Into::into),
                 imagegen_request_id: None,
             }),
         }),
@@ -1295,11 +1302,17 @@ pub(super) fn plugins_test_absolute_path(path: &str) -> AbsolutePathBuf {
         .abs()
 }
 
-pub(super) fn plugins_test_personal_marketplace_path() -> AbsolutePathBuf {
-    dirs::home_dir()
-        .expect("home directory should be available")
-        .join(".agents/plugins/marketplace.json")
-        .abs()
+pub(super) fn plugins_test_server_path(path: &str) -> codex_utils_path_uri::LegacyAppPathString {
+    codex_utils_path_uri::LegacyAppPathString::from_abs_path(&plugins_test_absolute_path(path))
+}
+
+pub(super) fn plugins_test_personal_marketplace_path() -> codex_utils_path_uri::LegacyAppPathString
+{
+    codex_utils_path_uri::LegacyAppPathString::from_path(
+        &dirs::home_dir()
+            .expect("home directory should be available")
+            .join(".agents/plugins/marketplace.json"),
+    )
 }
 
 pub(super) fn plugins_test_interface(
@@ -1347,7 +1360,7 @@ pub(super) fn plugins_test_summary(
         name: name.to_string(),
         share_context: None,
         source: PluginSource::Local {
-            path: plugins_test_absolute_path(&format!("plugins/{name}")),
+            path: plugins_test_server_path(&format!("plugins/{name}")),
         },
         installed,
         installed_at: None,
@@ -1422,7 +1435,7 @@ pub(super) fn plugins_test_curated_marketplace(
 ) -> PluginMarketplaceEntry {
     PluginMarketplaceEntry {
         name: OPENAI_CURATED_MARKETPLACE_NAME.to_string(),
-        path: Some(plugins_test_absolute_path("marketplaces/chatgpt")),
+        path: Some(plugins_test_server_path("marketplaces/chatgpt")),
         interface: Some(MarketplaceInterface {
             display_name: Some("ChatGPT Marketplace".to_string()),
         }),
@@ -1433,7 +1446,7 @@ pub(super) fn plugins_test_curated_marketplace(
 pub(super) fn plugins_test_repo_marketplace(plugins: Vec<PluginSummary>) -> PluginMarketplaceEntry {
     PluginMarketplaceEntry {
         name: "repo".to_string(),
-        path: Some(plugins_test_absolute_path("marketplaces/repo")),
+        path: Some(plugins_test_server_path("marketplaces/repo")),
         interface: Some(MarketplaceInterface {
             display_name: Some("Repo Marketplace".to_string()),
         }),
@@ -1483,7 +1496,7 @@ pub(super) fn plugins_test_detail(
 ) -> PluginDetail {
     PluginDetail {
         marketplace_name: "ChatGPT Marketplace".to_string(),
-        marketplace_path: Some(plugins_test_absolute_path("marketplaces/chatgpt")),
+        marketplace_path: Some(plugins_test_server_path("marketplaces/chatgpt")),
         summary,
         share_url: None,
         description: description.map(str::to_string),
@@ -1494,9 +1507,7 @@ pub(super) fn plugins_test_detail(
                 description: format!("{name} description"),
                 short_description: None,
                 interface: None,
-                path: Some(plugins_test_absolute_path(&format!(
-                    "skills/{name}/SKILL.md"
-                ))),
+                path: Some(plugins_test_server_path(&format!("skills/{name}/SKILL.md"))),
                 enabled: true,
             })
             .collect(),
@@ -1612,7 +1623,9 @@ pub(super) fn hook_run(
         handler_type: codex_app_server_protocol::HookHandlerType::Command,
         execution_mode: codex_app_server_protocol::HookExecutionMode::Sync,
         scope: codex_app_server_protocol::HookScope::Turn,
-        source_path: PathBuf::from(test_path_display("/tmp/hooks.json")).abs(),
+        source_path: codex_utils_path_uri::LegacyAppPathString::from_path(&PathBuf::from(
+            test_path_display("/tmp/hooks.json"),
+        )),
         source: codex_app_server_protocol::HookSource::User,
         display_order: 0,
         status,

@@ -11,9 +11,6 @@ use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::protocol::AdditionalContextEntry as CoreAdditionalContextEntry;
 use codex_protocol::protocol::AdditionalContextKind as CoreAdditionalContextKind;
 use codex_protocol::protocol::ExecutionAccountBinding;
-use codex_protocol::protocol::MultiAgentVersion;
-use codex_protocol::protocol::SessionSource;
-use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::TurnSettingsUpdate;
 use codex_protocol::protocol::TurnSettingsUpdateOutcome;
 use codex_skills::system_cache_root_dir;
@@ -580,7 +577,8 @@ impl TurnRequestProcessor {
         }
         let runtime_workspace_roots = params
             .runtime_workspace_roots
-            .map(resolve_runtime_workspace_roots);
+            .map(resolve_runtime_workspace_roots)
+            .transpose()?;
         let environment_selections =
             resolve_turn_environment_selections(self.thread_manager.as_ref(), params.environments)?;
         let expected_execution_account = params.expected_execution_account;
@@ -606,8 +604,9 @@ impl TurnRequestProcessor {
                 content: params
                     .input
                     .into_iter()
-                    .map(V2UserInput::into_core)
-                    .collect(),
+                    .map(V2UserInput::try_into_core)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| invalid_request(error.to_string()))?,
                 client_id: params.client_user_message_id,
             }
         };
@@ -876,7 +875,10 @@ impl TurnRequestProcessor {
             approval_policy.map(codex_app_server_protocol::AskForApproval::to_core);
         let approvals_reviewer =
             approvals_reviewer.map(codex_app_server_protocol::ApprovalsReviewer::to_core);
-        let sandbox_policy = sandbox_policy.map(|policy| policy.to_core());
+        let sandbox_policy = sandbox_policy
+            .map(|policy| policy.try_to_core())
+            .transpose()
+            .map_err(|error| invalid_request(error.to_string()))?;
         let (permission_profile, active_permission_profile, profile_workspace_roots) =
             if let Some(permissions) = permissions {
                 let Some(snapshot) = snapshot.as_ref() else {
@@ -1101,8 +1103,9 @@ impl TurnRequestProcessor {
         let mapped_items: Vec<CoreInputItem> = params
             .input
             .into_iter()
-            .map(V2UserInput::into_core)
-            .collect();
+            .map(V2UserInput::try_into_core)
+            .collect::<Result<_, _>>()
+            .map_err(|error| invalid_request(error.to_string()))?;
         let additional_context = map_additional_context(params.additional_context);
         let expected_execution_account = params.expected_execution_account;
 

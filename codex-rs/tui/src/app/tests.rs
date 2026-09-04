@@ -580,6 +580,7 @@ async fn enqueue_primary_thread_session_replays_turns_before_initial_prompt_subm
         is_first_run: false,
         status_account_display: None,
         runtime_model_provider_base_url: None,
+        runtime_requires_openai_auth: false,
         initial_plan_type: None,
         model: Some(model),
         startup_tooltip_override: None,
@@ -2195,7 +2196,7 @@ fn open_agent_picker_marks_loaded_threads_open() -> Result<()> {
 #[test]
 fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -> Result<()> {
     const WORKER_THREADS: usize = 1;
-    const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
+    const TEST_STACK_SIZE_BYTES: usize = 16 * 1024 * 1024;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(WORKER_THREADS)
@@ -2308,13 +2309,9 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
                 agent_path: "/root/child-0".to_string(),
                 is_running_hint: true,
             });
-        app.thread_event_channels.remove(&child_thread_ids[1]);
         let backfill = app.backfill_loaded_subagent_threads(&mut app_server).await;
         assert!(backfill.completed);
-        assert_eq!(
-            backfill.refreshed_thread_ids,
-            [child_thread_ids[1]].into_iter().collect()
-        );
+        assert!(backfill.refreshed_thread_ids.is_empty());
         assert_eq!(
             app.agent_navigation.get(&child_thread_ids[0]),
             Some(&AgentPickerThreadEntry {
@@ -2343,6 +2340,8 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
 
         app.select_agent_thread(&mut tui, &mut app_server, child_thread_ids[1])
             .await?;
+        assert_eq!(app.active_thread_id, Some(child_thread_ids[1]));
+        assert!(app.agent_navigation.is_parent_owned(child_thread_ids[1]));
         while app_event_rx.try_recv().is_ok() {}
         app.chat_widget
             .restore_user_message_to_composer("v2 stays view-only".into());
@@ -2356,7 +2355,17 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
                 .any(|event| matches!(event, AppEvent::CodexOp(Op::UserTurn { .. })))
         );
 
-        let resumed = app_server
+        app_server.shutdown().await?;
+        let mut resumed_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref()).await?;
+        let _root = resumed_server
+            .resume_thread(
+                app.config.clone(),
+                root_thread_id,
+                crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
+            )
+            .await?;
+        let resumed = resumed_server
             .resume_thread(
                 app.config.clone(),
                 child_thread_ids[1],
@@ -2383,6 +2392,7 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
             !std::iter::from_fn(|| app_event_rx.try_recv().ok())
                 .any(|event| matches!(event, AppEvent::CodexOp(Op::UserTurn { .. })))
         );
+        resumed_server.shutdown().await?;
         Ok(())
     })
 }
@@ -3271,9 +3281,9 @@ async fn inactive_thread_approval_bubbles_into_active_view() -> Result<()> {
             /*capacity*/ 1,
             ThreadSessionState {
                 approval_policy: AskForApproval::OnRequest,
-                permission_profile: PermissionProfile::workspace_write(),
-                rollout_path: Some(test_path_buf("/tmp/agent-rollout.jsonl")),
                 ..test_thread_session(agent_thread_id, test_path_buf("/tmp/agent"))
+                    .with_native_permission_profile(PermissionProfile::workspace_write())
+                    .with_native_rollout_path(Some(test_path_buf("/tmp/agent-rollout.jsonl")))
             },
             Vec::new(),
         ),
@@ -3432,9 +3442,9 @@ async fn side_defers_subagent_approval_overlay_until_side_exits() -> Result<()> 
             /*capacity*/ 4,
             ThreadSessionState {
                 approval_policy: AskForApproval::OnRequest,
-                permission_profile: PermissionProfile::workspace_write(),
-                rollout_path: Some(test_path_buf("/tmp/agent-rollout.jsonl")),
                 ..test_thread_session(agent_thread_id, test_path_buf("/tmp/agent"))
+                    .with_native_permission_profile(PermissionProfile::workspace_write())
+                    .with_native_rollout_path(Some(test_path_buf("/tmp/agent-rollout.jsonl")))
             },
             Vec::new(),
         ),
@@ -3616,7 +3626,7 @@ async fn inactive_thread_file_change_approval_recovers_buffered_changes() {
             item: ThreadItem::FileChange {
                 id: "patch-approval".to_string(),
                 changes: vec![FileUpdateChange {
-                    path: "README.md".to_string(),
+                    path: codex_utils_path_uri::LegacyAppPathString::from_string("README.md"),
                     kind: PatchChangeKind::Add,
                     diff: "hello\n".to_string(),
                 }],
@@ -3687,7 +3697,9 @@ async fn active_thread_file_change_approval_recovers_buffered_changes() {
             item: ThreadItem::FileChange {
                 id: "patch-active-approval".to_string(),
                 changes: vec![FileUpdateChange {
-                    path: "visible-target.md".to_string(),
+                    path: codex_utils_path_uri::LegacyAppPathString::from_string(
+                        "visible-target.md",
+                    ),
                     kind: PatchChangeKind::Add,
                     diff: "hello\n".to_string(),
                 }],
@@ -3761,7 +3773,9 @@ async fn replayed_file_change_approval_recovers_snapshot_changes() {
                 vec![ThreadItem::FileChange {
                     id: "patch-replayed-approval".to_string(),
                     changes: vec![FileUpdateChange {
-                        path: "visible-target.md".to_string(),
+                        path: codex_utils_path_uri::LegacyAppPathString::from_string(
+                            "visible-target.md",
+                        ),
                         kind: PatchChangeKind::Add,
                         diff: "hello\n".to_string(),
                     }],
@@ -3805,7 +3819,7 @@ async fn inactive_thread_permissions_approval_preserves_file_system_permissions(
             item_id: "call-approval".to_string(),
             environment_id: Some("remote".to_string()),
             started_at_ms: 0,
-            cwd: test_absolute_path("/tmp"),
+            cwd: test_absolute_path("/tmp").into(),
             reason: Some("Need access to .git".to_string()),
             permissions: codex_app_server_protocol::RequestPermissionProfile {
                 network: Some(AdditionalNetworkPermissions {
@@ -3942,9 +3956,9 @@ async fn inactive_thread_approval_badge_clears_after_turn_completion_notificatio
             /*capacity*/ 4,
             ThreadSessionState {
                 approval_policy: AskForApproval::OnRequest,
-                permission_profile: PermissionProfile::workspace_write(),
-                rollout_path: Some(test_path_buf("/tmp/agent-rollout.jsonl")),
                 ..test_thread_session(agent_thread_id, test_path_buf("/tmp/agent"))
+                    .with_native_permission_profile(PermissionProfile::workspace_write())
+                    .with_native_rollout_path(Some(test_path_buf("/tmp/agent-rollout.jsonl")))
             },
             Vec::new(),
         ),
@@ -3997,9 +4011,12 @@ async fn inactive_thread_started_notification_initializes_replay_session() -> Re
     let shared_root = test_path_buf("/tmp/shared").abs();
     let primary_session = ThreadSessionState {
         approval_policy: AskForApproval::OnRequest,
-        permission_profile: PermissionProfile::workspace_write(),
-        runtime_workspace_roots: vec![primary_cwd.clone(), shared_root.clone()],
         ..test_thread_session(main_thread_id, primary_cwd.to_path_buf())
+            .with_native_permission_profile(PermissionProfile::workspace_write())
+            .with_native_cwd_and_roots(
+                primary_cwd.clone(),
+                vec![primary_cwd.clone(), shared_root.clone()],
+            )
     };
 
     app.primary_thread_id = Some(main_thread_id);
@@ -4049,8 +4066,10 @@ async fn inactive_thread_started_notification_initializes_replay_session() -> Re
                 updated_at: 2,
                 recency_at: Some(2),
                 status: codex_app_server_protocol::ThreadStatus::Idle,
-                path: Some(rollout_path.clone()),
-                cwd: test_path_buf("/tmp/agent").abs(),
+                path: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                    &rollout_path,
+                )),
+                cwd: test_path_buf("/tmp/agent").abs().into(),
                 cli_version: "0.0.0".to_string(),
                 source: codex_app_server_protocol::SessionSource::Unknown,
                 can_accept_direct_input: None,
@@ -4080,12 +4099,15 @@ async fn inactive_thread_started_notification_initializes_replay_session() -> Re
     assert_eq!(session.model, "gpt-agent");
     assert_eq!(session.model_provider_id, "agent-provider");
     assert_eq!(session.approval_policy, primary_session.approval_policy);
-    assert_eq!(session.cwd.as_path(), test_path_buf("/tmp/agent").as_path());
     assert_eq!(
-        session.runtime_workspace_roots,
-        vec![test_path_buf("/tmp/agent").abs(), shared_root]
+        session.native_cwd().map(AbsolutePathBuf::as_path),
+        Some(test_path_buf("/tmp/agent").as_path())
     );
-    assert_eq!(session.rollout_path, Some(rollout_path));
+    assert_eq!(
+        session.native_runtime_workspace_roots(),
+        Some(&[test_path_buf("/tmp/agent").abs(), shared_root][..])
+    );
+    assert_eq!(session.native_rollout_path(), Some(rollout_path.as_path()));
     assert_eq!(
         app.agent_navigation.get(&agent_thread_id),
         Some(&AgentPickerThreadEntry {
@@ -4111,9 +4133,9 @@ async fn inactive_thread_started_notification_preserves_primary_model_when_path_
     let primary_cwd = test_path_buf("/tmp/main").abs();
     let primary_session = ThreadSessionState {
         approval_policy: AskForApproval::OnRequest,
-        permission_profile: PermissionProfile::workspace_write(),
-        runtime_workspace_roots: vec![primary_cwd.clone()],
         ..test_thread_session(main_thread_id, primary_cwd.to_path_buf())
+            .with_native_permission_profile(PermissionProfile::workspace_write())
+            .with_native_cwd_and_roots(primary_cwd.clone(), vec![primary_cwd.clone()])
     };
 
     app.primary_thread_id = Some(main_thread_id);
@@ -4151,7 +4173,7 @@ async fn inactive_thread_started_notification_preserves_primary_model_when_path_
                 recency_at: Some(2),
                 status: codex_app_server_protocol::ThreadStatus::Idle,
                 path: None,
-                cwd: test_path_buf("/tmp/agent").abs(),
+                cwd: test_path_buf("/tmp/agent").abs().into(),
                 cli_version: "0.0.0".to_string(),
                 source: codex_app_server_protocol::SessionSource::Unknown,
                 can_accept_direct_input: None,
@@ -4193,9 +4215,9 @@ async fn thread_read_session_state_does_not_reuse_primary_permission_profile() {
     let primary_cwd = test_path_buf("/tmp/main").abs();
     let primary_session = ThreadSessionState {
         approval_policy: AskForApproval::OnRequest,
-        permission_profile: PermissionProfile::workspace_write(),
-        runtime_workspace_roots: vec![primary_cwd.clone()],
         ..test_thread_session(main_thread_id, primary_cwd.to_path_buf())
+            .with_native_permission_profile(PermissionProfile::workspace_write())
+            .with_native_cwd_and_roots(primary_cwd.clone(), vec![primary_cwd.clone()])
     };
     app.primary_session_configured = Some(primary_session);
 
@@ -4219,7 +4241,7 @@ async fn thread_read_session_state_does_not_reuse_primary_permission_profile() {
         recency_at: Some(2),
         status: codex_app_server_protocol::ThreadStatus::Idle,
         path: None,
-        cwd: test_path_buf("/tmp/read").abs(),
+        cwd: test_path_buf("/tmp/read").abs().into(),
         cli_version: "0.0.0".to_string(),
         source: codex_app_server_protocol::SessionSource::Unknown,
         can_accept_direct_input: None,
@@ -4236,10 +4258,13 @@ async fn thread_read_session_state_does_not_reuse_primary_permission_profile() {
         .await;
 
     assert_eq!(session.thread_id, read_thread_id);
-    assert_eq!(session.cwd.as_path(), test_path_buf("/tmp/read").as_path());
     assert_eq!(
-        session.runtime_workspace_roots,
-        vec![test_path_buf("/tmp/read").abs()]
+        session.native_cwd().map(AbsolutePathBuf::as_path),
+        Some(test_path_buf("/tmp/read").as_path())
+    );
+    assert_eq!(
+        session.native_runtime_workspace_roots(),
+        Some(&[test_path_buf("/tmp/read").abs()][..])
     );
     let expected_permission_profile = app
         .chat_widget
@@ -4248,7 +4273,8 @@ async fn thread_read_session_state_does_not_reuse_primary_permission_profile() {
         .permission_profile()
         .clone();
     assert_eq!(
-        session.permission_profile, expected_permission_profile,
+        session.native_permission_profile(),
+        Some(&expected_permission_profile),
         "thread/read does not return fresh server permissions; the fallback profile must use the \
          active widget permissions rather than reusing the cached primary session profile"
     );
@@ -4703,8 +4729,8 @@ async fn side_thread_snapshot_does_not_refresh_from_fork_history() {
 
     let snapshot = ThreadEventSnapshot {
         session: Some(ThreadSessionState {
-            rollout_path: None,
             ..test_thread_session(side_thread_id, test_path_buf("/tmp/side"))
+                .with_native_rollout_path(None)
         }),
         turns: Vec::new(),
         events: Vec::new(),
@@ -5342,17 +5368,19 @@ async fn render_clear_ui_header_after_long_transcript_for_snapshot() -> String {
             service_tier: None,
             approval_policy: AskForApproval::Never,
             approvals_reviewer: ApprovalsReviewer::User,
-            permission_profile: PermissionProfile::read_only(),
+            execution_context: crate::session_state::SessionExecutionContext::native(
+                test_path_buf("/tmp/project").abs(),
+                Vec::new(),
+                PermissionProfile::read_only(),
+                Some(PathBuf::new()),
+            ),
             active_permission_profile: None,
-            cwd: test_path_buf("/tmp/project").abs(),
-            runtime_workspace_roots: Vec::new(),
             instruction_source_paths: Vec::new(),
             reasoning_effort: Some(ReasoningEffortConfig::High),
             collaboration_mode: None,
             personality: None,
             message_history: None,
             network_proxy: None,
-            rollout_path: Some(PathBuf::new()),
         };
         Arc::new(new_session_info(
             app.chat_widget.config_ref(),
@@ -5482,6 +5510,7 @@ async fn make_test_app() -> App {
         runtime_approval_policy_override: None,
         runtime_permission_profile_override: None,
         file_search,
+        remote_file_search_session: None,
         transcript_cells: Vec::new(),
         last_rendered_history_tail: None,
         last_thread_usage_status_cell: None,
@@ -5582,6 +5611,7 @@ async fn make_test_app_with_channels() -> (
             runtime_approval_policy_override: None,
             runtime_permission_profile_override: None,
             file_search,
+            remote_file_search_session: None,
             transcript_cells: Vec::new(),
             last_rendered_history_tail: None,
             last_thread_usage_status_cell: None,
@@ -6045,17 +6075,19 @@ fn test_thread_session(thread_id: ThreadId, cwd: PathBuf) -> ThreadSessionState 
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        permission_profile: PermissionProfile::read_only(),
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            cwd.abs(),
+            Vec::new(),
+            PermissionProfile::read_only(),
+            Some(PathBuf::new()),
+        ),
         active_permission_profile: None,
-        cwd: cwd.abs(),
-        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: Some(PathBuf::new()),
     }
 }
 
@@ -6882,17 +6914,19 @@ async fn backtrack_selection_preserves_selected_prompt_and_requests_branch() {
             service_tier: None,
             approval_policy: AskForApproval::Never,
             approvals_reviewer: ApprovalsReviewer::User,
-            permission_profile: PermissionProfile::read_only(),
+            execution_context: crate::session_state::SessionExecutionContext::native(
+                test_path_buf("/home/user/project").abs(),
+                Vec::new(),
+                PermissionProfile::read_only(),
+                Some(PathBuf::new()),
+            ),
             active_permission_profile: None,
-            cwd: test_path_buf("/home/user/project").abs(),
-            runtime_workspace_roots: Vec::new(),
             instruction_source_paths: Vec::new(),
             reasoning_effort: None,
             collaboration_mode: None,
             personality: None,
             message_history: None,
             network_proxy: None,
-            rollout_path: Some(PathBuf::new()),
         };
         Arc::new(new_session_info(
             app.chat_widget.config_ref(),
@@ -6953,17 +6987,19 @@ async fn backtrack_selection_preserves_selected_prompt_and_requests_branch() {
             service_tier: None,
             approval_policy: AskForApproval::Never,
             approvals_reviewer: ApprovalsReviewer::User,
-            permission_profile: PermissionProfile::read_only(),
+            execution_context: crate::session_state::SessionExecutionContext::native(
+                test_path_buf("/home/user/project").abs(),
+                Vec::new(),
+                PermissionProfile::read_only(),
+                Some(PathBuf::new()),
+            ),
             active_permission_profile: None,
-            cwd: test_path_buf("/home/user/project").abs(),
-            runtime_workspace_roots: Vec::new(),
             instruction_source_paths: Vec::new(),
             reasoning_effort: None,
             collaboration_mode: None,
             personality: None,
             message_history: None,
             network_proxy: None,
-            rollout_path: Some(PathBuf::new()),
         });
 
     app.backtrack.base_id = Some(base_id);
@@ -7165,11 +7201,7 @@ async fn remote_resume_keeps_server_only_cwd_out_of_local_config() -> Result<()>
         .rebuild_config_for_cwd(local_cwd.clone())
         .await?
         .workspace_roots;
-    let remote_cwd = if cfg!(windows) {
-        PathBuf::from("/srv/remote/project")
-    } else {
-        PathBuf::from(r"C:\remote\project")
-    };
+    let remote_cwd = codex_utils_path_uri::LegacyAppPathString::from_string("/srv/remote/project");
     let filename_timestamp = "2025-01-05T12-00-00";
     let thread_id = app_test_support::create_fake_rollout(
         app.config.codex_home.as_path(),
@@ -7209,7 +7241,7 @@ async fn remote_resume_keeps_server_only_cwd_out_of_local_config() -> Result<()>
         .await?;
 
     assert!(matches!(control, AppRunControl::Continue));
-    assert_eq!(app_server.remote_cwd_override(), Some(remote_cwd.as_path()));
+    assert_eq!(app_server.remote_cwd_override(), Some(&remote_cwd));
     assert!(!crate::session_resume::cwds_differ(
         app.config.cwd.as_path(),
         &local_cwd,
@@ -7503,6 +7535,7 @@ async fn prompt_edit_forks_before_selected_prompt_and_preserves_source() -> Resu
     .expect("materialized rollout should be created");
     let source_path =
         app_test_support::rollout_path(config.codex_home.as_path(), filename_ts, &source_thread_id);
+    let local_image_path = test_path_buf("/tmp/fake-image.png").abs().into_path_buf();
     let session_meta = std::fs::read_to_string(&source_path)?
         .lines()
         .next()
@@ -7515,7 +7548,7 @@ async fn prompt_edit_forks_before_selected_prompt_and_preserves_source() -> Resu
             "turn-2",
             "selected prompt [Image #1]",
             Some(vec!["https://example.com/backtrack.png".to_string()]),
-            vec![PathBuf::from("/tmp/fake-image.png")],
+            vec![local_image_path.clone()],
         ),
     ] {
         for item in [
@@ -7594,7 +7627,7 @@ async fn prompt_edit_forks_before_selected_prompt_and_preserves_source() -> Resu
         text: "selected prompt [Image #1]".to_string(),
         local_images: vec![crate::bottom_pane::LocalImageAttachment {
             placeholder: "[Image #1]".to_string(),
-            path: PathBuf::from("/tmp/fake-image.png"),
+            path: local_image_path,
         }],
         remote_image_urls: vec!["https://example.com/backtrack.png".to_string()],
         text_elements: Vec::new(),
@@ -7853,6 +7886,7 @@ async fn replace_chat_widget_reseeds_collab_agent_metadata_for_replay() {
             .chat_widget
             .runtime_model_provider_base_url()
             .map(str::to_string),
+        runtime_requires_openai_auth: app.chat_widget.runtime_requires_openai_auth(),
         initial_plan_type: app.chat_widget.current_plan_type(),
         model: Some(app.chat_widget.current_model().to_string()),
         startup_tooltip_override: None,
@@ -7933,10 +7967,10 @@ async fn refreshed_snapshot_session_persists_resumed_turns() {
         }],
     )];
     let resumed_session = ThreadSessionState {
-        cwd: test_path_buf("/tmp/refreshed").abs(),
-        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
-        ..initial_session.clone()
+        ..initial_session
+            .clone()
+            .with_native_cwd_and_roots(test_path_buf("/tmp/refreshed").abs(), Vec::new())
     };
     let mut snapshot = ThreadEventSnapshot {
         session: Some(initial_session),
@@ -8028,17 +8062,19 @@ async fn new_session_requests_shutdown_for_previous_conversation() {
             service_tier: None,
             approval_policy: AskForApproval::Never,
             approvals_reviewer: ApprovalsReviewer::User,
-            permission_profile: PermissionProfile::read_only(),
+            execution_context: crate::session_state::SessionExecutionContext::native(
+                test_path_buf("/home/user/project").abs(),
+                Vec::new(),
+                PermissionProfile::read_only(),
+                Some(PathBuf::new()),
+            ),
             active_permission_profile: None,
-            cwd: test_path_buf("/home/user/project").abs(),
-            runtime_workspace_roots: Vec::new(),
             instruction_source_paths: Vec::new(),
             reasoning_effort: None,
             collaboration_mode: None,
             personality: None,
             message_history: None,
             network_proxy: None,
-            rollout_path: Some(PathBuf::new()),
         };
 
         app.chat_widget.handle_thread_session(event);
@@ -8609,6 +8645,39 @@ async fn thread_setting_update_params_sync_model_and_default_reasoning() {
 }
 
 #[tokio::test]
+async fn remote_thread_setting_update_params_are_explicit_only() {
+    let mut app = make_test_app().await;
+    let thread_id = ThreadId::new();
+    app.active_thread_id = Some(thread_id);
+    app.app_server_target = crate::AppServerTarget::Remote {
+        endpoint: crate::RemoteAppServerEndpoint::WebSocket {
+            websocket_url: "ws://127.0.0.1:4500".to_string(),
+            auth_token: None,
+        },
+    };
+
+    let model = app
+        .active_thread_model_setting_update_params("gpt-5.4".to_string())
+        .expect("active thread should produce model params");
+    assert_eq!(model.model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(model.effort, None);
+    assert_eq!(model.collaboration_mode, None);
+    assert_eq!(model.permissions, None);
+    assert_eq!(model.approval_policy, None);
+    assert_eq!(model.approvals_reviewer, None);
+    assert_eq!(model.personality, None);
+
+    let effort = app
+        .active_thread_reasoning_setting_update_params(Some(ReasoningEffortConfig::High))
+        .expect("active thread should produce effort params");
+    assert_eq!(effort.model, None);
+    assert_eq!(effort.effort, Some(ReasoningEffortConfig::High));
+    assert_eq!(effort.collaboration_mode, None);
+    assert_eq!(effort.permissions, None);
+    assert_eq!(effort.personality, None);
+}
+
+#[tokio::test]
 async fn inactive_thread_settings_notification_updates_cached_collaboration_mode() {
     let mut app = make_test_app().await;
     let primary_thread_id = ThreadId::new();
@@ -8647,7 +8716,7 @@ async fn inactive_thread_settings_notification_updates_cached_collaboration_mode
     let notification = ThreadSettingsUpdatedNotification {
         thread_id: inactive_thread_id.to_string(),
         thread_settings: ThreadSettings {
-            cwd: test_absolute_path("/tmp/thread-settings"),
+            cwd: test_absolute_path("/tmp/thread-settings").into(),
             approval_policy: AskForApproval::OnRequest,
             approvals_reviewer: codex_app_server_protocol::ApprovalsReviewer::AutoReview,
             sandbox_policy: codex_app_server_protocol::SandboxPolicy::ReadOnly {
@@ -8725,17 +8794,19 @@ async fn clear_only_ui_reset_preserves_chat_session_state() {
             service_tier: None,
             approval_policy: AskForApproval::Never,
             approvals_reviewer: ApprovalsReviewer::User,
-            permission_profile: PermissionProfile::read_only(),
+            execution_context: crate::session_state::SessionExecutionContext::native(
+                test_path_buf("/tmp/project").abs(),
+                Vec::new(),
+                PermissionProfile::read_only(),
+                Some(PathBuf::new()),
+            ),
             active_permission_profile: None,
-            cwd: test_path_buf("/tmp/project").abs(),
-            runtime_workspace_roots: Vec::new(),
             instruction_source_paths: Vec::new(),
             reasoning_effort: None,
             collaboration_mode: None,
             personality: None,
             message_history: None,
             network_proxy: None,
-            rollout_path: Some(PathBuf::new()),
         });
     app.chat_widget
         .apply_external_edit("draft prompt".to_string());
@@ -8773,7 +8844,9 @@ async fn clear_only_ui_reset_preserves_chat_session_state() {
 async fn clear_only_ui_reset_allows_active_skill_warning_to_render_again() {
     let mut app = make_test_app().await;
     let error = SkillErrorInfo {
-        path: test_path_buf("/tmp/project/.codex/skills/abc/SKILL.md"),
+        path: codex_utils_path_uri::LegacyAppPathString::from_path(&test_path_buf(
+            "/tmp/project/.codex/skills/abc/SKILL.md",
+        )),
         message: "invalid description".to_string(),
     };
 

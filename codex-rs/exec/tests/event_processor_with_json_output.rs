@@ -36,6 +36,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_utils_absolute_path::test_support::PathBufExt;
 use codex_utils_absolute_path::test_support::test_path_buf;
+use codex_utils_path_uri::LegacyAppPathString;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 
@@ -827,17 +828,17 @@ fn file_change_completion_maps_change_kinds() {
                 id: "patch-1".to_string(),
                 changes: vec![
                     ApiFileUpdateChange {
-                        path: "a/added.txt".to_string(),
+                        path: LegacyAppPathString::from_string("a/added.txt"),
                         kind: ApiPatchChangeKind::Add,
                         diff: String::new(),
                     },
                     ApiFileUpdateChange {
-                        path: "b/deleted.txt".to_string(),
+                        path: LegacyAppPathString::from_string("b/deleted.txt"),
                         kind: ApiPatchChangeKind::Delete,
                         diff: String::new(),
                     },
                     ApiFileUpdateChange {
-                        path: "c/modified.txt".to_string(),
+                        path: LegacyAppPathString::from_string("c/modified.txt"),
                         kind: ApiPatchChangeKind::Update { move_path: None },
                         diff: "@@ -1 +1 @@".to_string(),
                     },
@@ -889,7 +890,7 @@ fn file_change_declined_maps_to_failed_status() {
             item: ThreadItem::FileChange {
                 id: "patch-2".to_string(),
                 changes: vec![ApiFileUpdateChange {
-                    path: "file.txt".to_string(),
+                    path: LegacyAppPathString::from_string("file.txt"),
                     kind: ApiPatchChangeKind::Update { move_path: None },
                     diff: "@@ -1 +1 @@".to_string(),
                 }],

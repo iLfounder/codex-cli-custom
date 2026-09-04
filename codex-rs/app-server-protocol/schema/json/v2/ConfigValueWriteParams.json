@@ -1,6 +1,9 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
+    "LegacyAppPathString": {
+      "type": "string"
+    },
     "MergeStrategy": {
       "enum": [
         "replace",
@@ -17,11 +20,15 @@
       ]
     },
     "filePath": {
-      "description": "Path to the config file to write; defaults to the user's `config.toml` when omitted.",
-      "type": [
-        "string",
-        "null"
-      ]
+      "anyOf": [
+        {
+          "$ref": "#/definitions/LegacyAppPathString"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Path to the config file to write; defaults to the user's `config.toml` when omitted."
     },
     "keyPath": {
       "type": "string"

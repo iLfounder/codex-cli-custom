@@ -25,7 +25,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
@@ -192,12 +191,12 @@ pub struct TurnStartParams {
     pub environments: Option<Vec<TurnEnvironmentParams>>,
     /// Override the working directory for this turn and subsequent turns.
     #[ts(optional = nullable)]
-    pub cwd: Option<PathBuf>,
+    pub cwd: Option<LegacyAppPathString>,
     /// Replace the thread's runtime workspace roots for this turn and
     /// subsequent turns. Paths must be absolute.
     #[experimental("turn/start.runtimeWorkspaceRoots")]
     #[ts(optional = nullable)]
-    pub runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
+    pub runtime_workspace_roots: Option<Vec<LegacyAppPathString>>,
     /// Override the approval policy for this turn and subsequent turns.
     #[experimental(nested)]
     #[ts(optional = nullable)]
@@ -415,27 +414,29 @@ pub enum UserInput {
         #[serde(default)]
         #[ts(optional)]
         detail: Option<ImageDetail>,
-        path: PathBuf,
+        path: LegacyAppPathString,
     },
     Audio {
         url: String,
     },
     LocalAudio {
-        path: PathBuf,
+        path: LegacyAppPathString,
     },
     Skill {
         name: String,
-        path: PathBuf,
+        path: LegacyAppPathString,
     },
     Mention {
         name: String,
-        path: String,
+        path: LegacyAppPathString,
     },
 }
 
 impl UserInput {
-    pub fn into_core(self) -> CoreUserInput {
-        match self {
+    pub fn try_into_core(
+        self,
+    ) -> Result<CoreUserInput, codex_utils_path_uri::LegacyAppPathStringError> {
+        Ok(match self {
             UserInput::Text {
                 text,
                 text_elements,
@@ -447,12 +448,23 @@ impl UserInput {
                 image_url: url,
                 detail,
             },
-            UserInput::LocalImage { path, detail } => CoreUserInput::LocalImage { path, detail },
+            UserInput::LocalImage { path, detail } => CoreUserInput::LocalImage {
+                path: AbsolutePathBuf::try_from(path)?.to_path_buf(),
+                detail,
+            },
             UserInput::Audio { url } => CoreUserInput::Audio { audio_url: url },
-            UserInput::LocalAudio { path } => CoreUserInput::LocalAudio { path },
-            UserInput::Skill { name, path } => CoreUserInput::Skill { name, path },
-            UserInput::Mention { name, path } => CoreUserInput::Mention { name, path },
-        }
+            UserInput::LocalAudio { path } => CoreUserInput::LocalAudio {
+                path: AbsolutePathBuf::try_from(path)?.to_path_buf(),
+            },
+            UserInput::Skill { name, path } => CoreUserInput::Skill {
+                name,
+                path: AbsolutePathBuf::try_from(path)?.to_path_buf(),
+            },
+            UserInput::Mention { name, path } => CoreUserInput::Mention {
+                name,
+                path: path.into_string(),
+            },
+        })
     }
 }
 
@@ -470,11 +482,22 @@ impl From<CoreUserInput> for UserInput {
                 url: image_url,
                 detail,
             },
-            CoreUserInput::LocalImage { path, detail } => UserInput::LocalImage { path, detail },
+            CoreUserInput::LocalImage { path, detail } => UserInput::LocalImage {
+                path: LegacyAppPathString::from_path(&path),
+                detail,
+            },
             CoreUserInput::Audio { audio_url } => UserInput::Audio { url: audio_url },
-            CoreUserInput::LocalAudio { path } => UserInput::LocalAudio { path },
-            CoreUserInput::Skill { name, path } => UserInput::Skill { name, path },
-            CoreUserInput::Mention { name, path } => UserInput::Mention { name, path },
+            CoreUserInput::LocalAudio { path } => UserInput::LocalAudio {
+                path: LegacyAppPathString::from_path(&path),
+            },
+            CoreUserInput::Skill { name, path } => UserInput::Skill {
+                name,
+                path: LegacyAppPathString::from_path(&path),
+            },
+            CoreUserInput::Mention { name, path } => UserInput::Mention {
+                name,
+                path: LegacyAppPathString::from_string(path),
+            },
             _ => unreachable!("unsupported user input variant"),
         }
     }

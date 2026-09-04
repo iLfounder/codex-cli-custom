@@ -458,13 +458,11 @@ async fn external_agent_config_secondary_source_imports_session_and_plugin_end_t
 {
     let codex_home = TempDir::new()?;
     let source_home = secondary_external_agent_home(codex_home.path());
-    let project_root = codex_home.path().join("my-project");
-    std::fs::create_dir_all(&project_root)?;
-
-    let encoded_project = project_root
-        .to_string_lossy()
-        .trim_start_matches(['/', '\\'])
-        .replace([':', '/', '\\'], "-");
+    // Cursor reserves this project key for projectless chats. Using that
+    // contract keeps the end-to-end fixture independent of punctuation in the
+    // platform temp root; path-decoder behavior has dedicated unit coverage.
+    let project_root = codex_home.path().to_path_buf();
+    let encoded_project = "empty-window";
     let session_path = source_home
         .join("projects")
         .join(encoded_project)
@@ -497,8 +495,10 @@ async fn external_agent_config_secondary_source_imports_session_and_plugin_end_t
     let marketplace_root = source_home.join("plugins/marketplaces/debug");
     let plugin_root = marketplace_root.join("plugins/sample");
     let configured_marketplace_root = codex_home.path().join("configured-marketplace");
-    let configured_marketplace_manifest =
-        configured_marketplace_root.join(".agents/plugins/marketplace.json");
+    let configured_marketplace_manifest = configured_marketplace_root
+        .join(".agents")
+        .join("plugins")
+        .join("marketplace.json");
     let configured_plugin_root = configured_marketplace_root.join("plugins/sample");
     std::fs::create_dir_all(marketplace_root.join(".cursor-plugin"))?;
     std::fs::create_dir_all(plugin_root.join(".cursor-plugin"))?;
@@ -625,7 +625,10 @@ source = {:?}
     let response: ThreadListResponse =
         timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
     let thread = response.data.first().expect("imported session");
-    assert_eq!(thread.cwd.as_path(), project_root);
+    assert_eq!(
+        thread.cwd,
+        codex_utils_path_uri::LegacyAppPathString::from_path(&project_root)
+    );
     assert_eq!(thread.preview, "first request");
     assert_eq!(thread.name, None);
 
@@ -669,12 +672,11 @@ source = {:?}
         .iter()
         .find(|marketplace| marketplace.name == "debug")
         .expect("configured marketplace");
+    let configured_marketplace_manifest =
+        codex_utils_path_uri::LegacyAppPathString::from_path(&configured_marketplace_manifest);
     assert_eq!(
-        marketplace
-            .path
-            .as_ref()
-            .map(codex_config::AbsolutePathBuf::as_path),
-        Some(configured_marketplace_manifest.as_path())
+        marketplace.path.as_ref(),
+        Some(&configured_marketplace_manifest)
     );
     let plugin = marketplace
         .plugins
@@ -798,6 +800,12 @@ async fn external_agent_config_import_sends_completion_notification_for_sync_onl
 async fn external_agent_config_records_externally_completed_import_history() -> Result<()> {
     let codex_home = TempDir::new()?;
     let sqlite_home = TempDir::new()?;
+    let cwd = codex_home.path().join("repo").display().to_string();
+    let source = codex_home
+        .path()
+        .join("source/session.jsonl")
+        .display()
+        .to_string();
     let home_dir = codex_home.path().display().to_string();
     let sqlite_home_dir = sqlite_home.path().display().to_string();
     let mut mcp = TestAppServer::builder()
@@ -819,8 +827,8 @@ async fn external_agent_config_records_externally_completed_import_history() -> 
                     "itemType": "SESSIONS",
                     "successes": [{
                         "itemType": "SESSIONS",
-                        "cwd": "/repo",
-                        "source": "/source/session.jsonl",
+                        "cwd": cwd,
+                        "source": source,
                         "target": "thread-1",
                     }],
                     "failures": [],
@@ -851,8 +859,8 @@ async fn external_agent_config_records_externally_completed_import_history() -> 
         serde_json::to_value(&entry.successes)?,
         serde_json::json!([{
             "itemType": "SESSIONS",
-            "cwd": "/repo",
-            "source": "/source/session.jsonl",
+            "cwd": cwd,
+            "source": source,
             "target": "thread-1",
             "title": null,
         }])

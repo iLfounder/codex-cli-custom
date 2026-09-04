@@ -330,7 +330,7 @@ async fn thread_resume_paginated_model_context_preserves_original_metadata() -> 
         cwd,
         ..
     } = timeout(DEFAULT_READ_TIMEOUT, primary.read_response(resume_id)).await??;
-    assert_eq!(cwd.as_path(), saved_cwd);
+    assert_eq!(cwd, LegacyAppPathString::from_path(&saved_cwd));
     assert_eq!(resumed.id, conversation_id);
     assert_eq!(resumed.history_mode, ThreadHistoryMode::Paginated);
     assert_eq!(resumed.preview, "Saved user message");
@@ -358,7 +358,7 @@ async fn thread_resume_paginated_model_context_preserves_original_metadata() -> 
     let resume_id = secondary
         .send_thread_resume_request(ThreadResumeParams {
             thread_id: conversation_id.clone(),
-            path: Some(path),
+            path: Some(LegacyAppPathString::from_path(&path)),
             exclude_turns: true,
             ..Default::default()
         })
@@ -370,7 +370,7 @@ async fn thread_resume_paginated_model_context_preserves_original_metadata() -> 
     } = timeout(DEFAULT_READ_TIMEOUT, secondary.read_response(resume_id)).await??;
     // The completed turn now permits a bounded replay ending at the compaction,
     // so the earlier settings snapshot is outside the normal resume window.
-    assert_eq!(cwd.as_path(), startup_cwd);
+    assert_eq!(cwd, LegacyAppPathString::from_path(&startup_cwd));
     assert_eq!(resumed.preview, "Saved user message");
     assert!(resumed.turns.is_empty());
 
@@ -658,7 +658,7 @@ async fn thread_resume_with_empty_path_uses_running_thread_id() -> Result<()> {
     let resume_id = mcp
         .send_thread_resume_request(ThreadResumeParams {
             thread_id: thread.id.clone(),
-            path: Some(PathBuf::new()),
+            path: Some(LegacyAppPathString::from_string("")),
             exclude_turns: true,
             ..Default::default()
         })
@@ -694,7 +694,7 @@ async fn thread_resume_running_thread_uses_cached_instruction_sources() -> Resul
 
     let start_id = mcp
         .send_thread_start_request(ThreadStartParams {
-            cwd: Some(workspace.path().display().to_string()),
+            cwd: Some(LegacyAppPathString::from_path(workspace.path())),
             ..Default::default()
         })
         .await?;
@@ -780,8 +780,8 @@ async fn turn_start_updates_runtime_workspace_roots_for_loaded_thread() -> Resul
                 text_elements: Vec::new(),
             }],
             runtime_workspace_roots: Some(vec![
-                AbsolutePathBuf::from_absolute_path(&extra_root)?,
-                AbsolutePathBuf::from_absolute_path(extra_root.join("."))?,
+                AbsolutePathBuf::from_absolute_path(&extra_root)?.into(),
+                AbsolutePathBuf::from_absolute_path(extra_root.join("."))?.into(),
             ]),
             ..Default::default()
         })
@@ -811,7 +811,7 @@ async fn turn_start_updates_runtime_workspace_roots_for_loaded_thread() -> Resul
 
     assert_eq!(
         runtime_workspace_roots,
-        vec![AbsolutePathBuf::from_absolute_path(extra_root)?]
+        vec![LegacyAppPathString::from_path(&extra_root)]
     );
 
     Ok(())
@@ -1052,7 +1052,7 @@ async fn thread_resume_preserves_goal_first_and_fork_approvals_reviewer() -> Res
             .await?;
         let ThreadStartResponse { thread, .. } =
             timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(start_id)).await??;
-        let rollout_path = thread.path.clone().expect("thread path");
+        let rollout_path = AbsolutePathBuf::try_from(thread.path.clone().expect("thread path"))?;
 
         for objective in [
             "keep auto review after restart",
@@ -1077,7 +1077,7 @@ async fn thread_resume_preserves_goal_first_and_fork_approvals_reviewer() -> Res
             .await??;
         }
 
-        let persisted_rollout = std::fs::read_to_string(rollout_path)?;
+        let persisted_rollout = std::fs::read_to_string(rollout_path.as_path())?;
         assert_eq!(
             persisted_rollout
                 .matches(r#""type":"thread_settings_applied""#)
@@ -1099,9 +1099,9 @@ async fn thread_resume_preserves_goal_first_and_fork_approvals_reviewer() -> Res
         } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(fork_id)).await??;
         assert_eq!(approvals_reviewer, ApprovalsReviewer::User);
         timeout(DEFAULT_READ_TIMEOUT, mcp.shutdown_gracefully()).await??;
-        let (items, _, _) =
-            RolloutRecorder::load_rollout_items(fork_thread.path.as_ref().expect("fork rollout"))
-                .await?;
+        let fork_rollout =
+            AbsolutePathBuf::try_from(fork_thread.path.as_ref().expect("fork rollout").clone())?;
+        let (items, _, _) = RolloutRecorder::load_rollout_items(fork_rollout.as_path()).await?;
         assert_eq!(
             items
                 .into_iter()
@@ -1226,7 +1226,7 @@ async fn thread_resume_preserves_acknowledged_model_effort_and_approvals_reviewe
                 model: Some("gpt-5.2-codex".to_string()),
                 effort: Some(ReasoningEffort::Ultra),
                 approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
-                cwd: Some(persisted_cwd.clone()),
+                cwd: Some(LegacyAppPathString::from_path(&persisted_cwd)),
                 ..Default::default()
             })
             .await?;
@@ -1246,7 +1246,7 @@ async fn thread_resume_preserves_acknowledged_model_effort_and_approvals_reviewe
             .await?;
         let ThreadReadResponse { thread: read } =
             timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(read_id)).await??;
-        assert_eq!(read.cwd.as_path(), persisted_cwd);
+        assert_eq!(read.cwd, LegacyAppPathString::from_path(&persisted_cwd));
 
         let list_id = mcp
             .send_raw_request(
@@ -1265,6 +1265,7 @@ async fn thread_resume_preserves_acknowledged_model_effort_and_approvals_reviewe
 
         (thread.id, read.path.expect("materialized rollout path"))
     };
+    let rollout_path = AbsolutePathBuf::try_from(rollout_path)?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -1273,7 +1274,7 @@ async fn thread_resume_preserves_acknowledged_model_effort_and_approvals_reviewe
     let resume_id = mcp
         .send_thread_resume_request(ThreadResumeParams {
             thread_id: thread_id.clone(),
-            cwd: Some(live_cwd.to_string_lossy().into_owned()),
+            cwd: Some(LegacyAppPathString::from_path(&live_cwd)),
             ..Default::default()
         })
         .await?;
@@ -1289,13 +1290,13 @@ async fn thread_resume_preserves_acknowledged_model_effort_and_approvals_reviewe
     assert_eq!(model, "gpt-5.2-codex");
     assert_eq!(reasoning_effort, Some(ReasoningEffort::Ultra));
     assert_eq!(approvals_reviewer, ApprovalsReviewer::AutoReview);
-    assert_eq!(thread.cwd.as_path(), persisted_cwd);
-    assert_eq!(cwd.as_path(), live_cwd);
+    assert_eq!(thread.cwd, LegacyAppPathString::from_path(&persisted_cwd));
+    assert_eq!(cwd, LegacyAppPathString::from_path(&live_cwd));
 
     let update_id = mcp
         .send_thread_settings_update_request(ThreadSettingsUpdateParams {
             thread_id: thread_id.clone(),
-            cwd: Some(persisted_cwd.clone()),
+            cwd: Some(LegacyAppPathString::from_path(&persisted_cwd)),
             collaboration_mode: Some(CollaborationMode {
                 mode: ModeKind::Default,
                 settings: Settings {
@@ -1317,12 +1318,12 @@ async fn thread_resume_preserves_acknowledged_model_effort_and_approvals_reviewe
     timeout(DEFAULT_READ_TIMEOUT, mcp.shutdown_gracefully()).await??;
 
     // Older rollouts can retain a frozen turn context after an accepted settings update.
-    let (items, _, _) = RolloutRecorder::load_rollout_items(&rollout_path).await?;
+    let (items, _, _) = RolloutRecorder::load_rollout_items(rollout_path.as_path()).await?;
     let frozen_context = items
         .into_iter()
         .find(|item| matches!(item, RolloutItem::TurnContext(_)))
         .expect("initial turn context");
-    append_rollout_item_to_path(&rollout_path, &frozen_context).await?;
+    append_rollout_item_to_path(rollout_path.as_path(), &frozen_context).await?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -1340,7 +1341,7 @@ async fn thread_resume_preserves_acknowledged_model_effort_and_approvals_reviewe
         ..
     } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
     assert_eq!(reasoning_effort, None);
-    assert_eq!(cwd.as_path(), persisted_cwd);
+    assert_eq!(cwd, LegacyAppPathString::from_path(&persisted_cwd));
 
     Ok(())
 }
@@ -1363,9 +1364,9 @@ async fn cold_resume_reresolves_persisted_active_permission_profile() -> Result<
                 DEFAULT_READ_TIMEOUT,
                 mcp.start_turn_and_wait_for_completion(TurnStartParams {
                     thread_id: thread_id.clone(),
-                    runtime_workspace_roots: Some(vec![AbsolutePathBuf::from_absolute_path(
-                        previous_workspace_root.path(),
-                    )?]),
+                    runtime_workspace_roots: Some(vec![
+                        AbsolutePathBuf::from_absolute_path(previous_workspace_root.path())?.into(),
+                    ]),
                     input: vec![UserInput::Text {
                         text: "update runtime workspace roots".to_string(),
                         text_elements: Vec::new(),
@@ -1405,9 +1406,9 @@ async fn cold_resume_reresolves_persisted_active_permission_profile() -> Result<
             })
         );
         assert!(
-            !runtime_workspace_roots.contains(&AbsolutePathBuf::from_absolute_path(
-                previous_workspace_root.path(),
-            )?)
+            !runtime_workspace_roots.contains(&LegacyAppPathString::from_path(
+                previous_workspace_root.path()
+            ))
         );
     }
     Ok(())
@@ -2057,7 +2058,7 @@ async fn goal_first_live_thread_appears_in_state_db_thread_list() -> Result<()> 
                 "modelProviders": ["mock_provider"],
                 "sourceKinds": ["vscode"],
                 "archived": false,
-                "cwd": cwd.as_path().to_string_lossy().to_string(),
+                "cwd": cwd.render_for_ui(),
                 "useStateDbOnly": true,
             })),
         )
@@ -2294,9 +2295,9 @@ async fn thread_resume_returns_rollout_history() -> Result<()> {
     assert_eq!(thread.id, conversation_id);
     assert_eq!(thread.preview, preview);
     assert_eq!(thread.model_provider, "mock_provider");
-    assert!(thread.path.as_ref().expect("thread path").is_absolute());
-    assert_eq!(thread.cwd.as_path(), saved_cwd);
-    assert_eq!(cwd, test_absolute_path("/"));
+    assert!(AbsolutePathBuf::try_from(thread.path.as_ref().expect("thread path").clone()).is_ok());
+    assert_eq!(thread.cwd, LegacyAppPathString::from_path(&saved_cwd));
+    assert_eq!(cwd, test_absolute_path("/").into());
     assert_eq!(thread.cli_version, "0.0.0");
     assert_eq!(thread.source, SessionSource::Cli);
     assert_eq!(thread.git_info, None);
@@ -3218,7 +3219,7 @@ async fn thread_goal_keeps_original_root_until_external_objective_edit() -> Resu
             responses::ev_function_call(
                 "create-original-goal-call",
                 "create_goal",
-                r#"{"objective":"keep its original owner","token_budget":100}"#,
+                r#"{"expected_revision":0,"objective":"keep its original owner","token_budget":100}"#,
             ),
             responses::ev_completed_with_tokens("create-original-goal", /*total_tokens*/ 5),
         ])),
@@ -4485,14 +4486,19 @@ async fn thread_resume_defers_updated_at_until_turn_start() -> Result<()> {
     let resume_id = mcp
         .send_thread_resume_request(ThreadResumeParams {
             thread_id: "not-a-valid-thread-id".to_string(),
-            path: Some(normalized_existing_path(&rollout.rollout_file_path)?),
-            cwd: Some(codex_home.path().to_string_lossy().to_string()),
+            path: Some(LegacyAppPathString::from_path(&normalized_existing_path(
+                &rollout.rollout_file_path,
+            )?)),
+            cwd: Some(LegacyAppPathString::from_path(codex_home.path())),
             ..Default::default()
         })
         .await?;
     let ThreadResumeResponse { cwd, .. } =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
-    assert_eq!(cwd, AbsolutePathBuf::from_absolute_path(codex_home.path())?);
+    assert_eq!(
+        cwd,
+        AbsolutePathBuf::from_absolute_path(codex_home.path())?.into()
+    );
 
     let turn_id = mcp
         .send_turn_start_request(TurnStartParams {
@@ -4825,7 +4831,7 @@ async fn thread_resume_rejects_mismatched_path_for_running_thread_id() -> Result
     #[cfg(windows)]
     {
         let active_path = thread.path.as_ref().expect("thread should have path");
-        let active_path_display = active_path.as_os_str().to_string_lossy();
+        let active_path_display = active_path.as_str();
         let equivalent_path = if let Some(path) = active_path_display.strip_prefix(r"\\?\UNC\") {
             PathBuf::from(format!(r"\\{path}"))
         } else if let Some(path) = active_path_display.strip_prefix(r"\\?\") {
@@ -4838,7 +4844,7 @@ async fn thread_resume_rejects_mismatched_path_for_running_thread_id() -> Result
         let normalized_resume_id = primary
             .send_thread_resume_request(ThreadResumeParams {
                 thread_id: thread_id.clone(),
-                path: Some(equivalent_path),
+                path: Some(LegacyAppPathString::from_path(&equivalent_path)),
                 ..Default::default()
             })
             .await?;
@@ -4886,7 +4892,7 @@ async fn thread_resume_rejects_mismatched_path_for_running_thread_id() -> Result
     let stale_resume_id = primary
         .send_thread_resume_request(ThreadResumeParams {
             thread_id: thread_id.clone(),
-            path: Some(stale_path),
+            path: Some(LegacyAppPathString::from_path(&stale_path)),
             ..Default::default()
         })
         .await?;
@@ -4996,7 +5002,7 @@ async fn thread_resume_rejoins_running_paginated_thread_with_initial_page() -> R
         .send_thread_resume_request(ThreadResumeParams {
             thread_id: thread.id.clone(),
             model: Some("not-the-running-model".to_string()),
-            cwd: Some("/tmp".to_string()),
+            cwd: Some(LegacyAppPathString::from_string("/tmp")),
             initial_turns_page: Some(ThreadResumeInitialTurnsPageParams {
                 limit: Some(1),
                 sort_direction: Some(SortDirection::Desc),
@@ -5338,7 +5344,7 @@ async fn thread_resume_replays_pending_file_change_request_approval() -> Result<
     let start_id = primary
         .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("gpt-5.4".to_string()),
-            cwd: Some(workspace.to_string_lossy().into_owned()),
+            cwd: Some(LegacyAppPathString::from_path(&workspace)),
             ..Default::default()
         })
         .await?;
@@ -5353,7 +5359,7 @@ async fn thread_resume_replays_pending_file_change_request_approval() -> Result<
                 text: "seed history".to_string(),
                 text_elements: Vec::new(),
             }],
-            cwd: Some(workspace.clone()),
+            cwd: Some(LegacyAppPathString::from_path(&workspace)),
             ..Default::default()
         })
         .await?;
@@ -5377,7 +5383,7 @@ async fn thread_resume_replays_pending_file_change_request_approval() -> Result<
                 text: "apply patch".to_string(),
                 text_elements: Vec::new(),
             }],
-            cwd: Some(workspace.clone()),
+            cwd: Some(LegacyAppPathString::from_path(&workspace)),
             approval_policy: Some(AskForApproval::UnlessTrusted),
             ..Default::default()
         })
@@ -5405,7 +5411,7 @@ async fn thread_resume_replays_pending_file_change_request_approval() -> Result<
     let expected_file_change = ThreadItem::FileChange {
         id: "patch-call".to_string(),
         changes: vec![codex_app_server_protocol::FileUpdateChange {
-            path: expected_readme_path.to_string_lossy().into_owned(),
+            path: LegacyAppPathString::from_path(&expected_readme_path),
             kind: PatchChangeKind::Add,
             diff: "new line\n".to_string(),
         }],
@@ -5704,7 +5710,7 @@ async fn thread_resume_uses_path_over_non_running_thread_id() -> Result<()> {
     let resume_id = mcp
         .send_thread_resume_request(ThreadResumeParams {
             thread_id: ThreadId::new().to_string(),
-            path: Some(rollout_file_path),
+            path: Some(LegacyAppPathString::from_path(&rollout_file_path)),
             ..Default::default()
         })
         .await?;
@@ -5740,7 +5746,7 @@ async fn thread_resume_can_load_source_by_external_path() -> Result<()> {
     let resume_id = mcp
         .send_thread_resume_request(ThreadResumeParams {
             thread_id: "not-a-valid-thread-id".to_string(),
-            path: Some(thread_path.clone()),
+            path: Some(LegacyAppPathString::from_path(&thread_path)),
             ..Default::default()
         })
         .await?;
@@ -5751,7 +5757,11 @@ async fn thread_resume_can_load_source_by_external_path() -> Result<()> {
     assert_eq!(resumed.id, thread_id);
     let resumed_path = resumed.path.as_ref().expect("resumed thread path");
     assert_eq!(
-        normalized_existing_path(resumed_path)?,
+        normalized_existing_path(
+            resumed_path
+                .to_inferred_abs_path()
+                .expect("app-server should return a native absolute thread path"),
+        )?,
         normalized_existing_path(&thread_path)?
     );
     assert_eq!(resumed.preview, "external path history");
@@ -5864,6 +5874,7 @@ async fn start_materialized_thread_and_restart(
     let rollout_file_path = thread
         .path
         .ok_or_else(|| anyhow::anyhow!("thread path missing from thread/start response"))?;
+    let rollout_file_path = AbsolutePathBuf::try_from(rollout_file_path)?.into_path_buf();
     let updated_at = thread.updated_at;
 
     drop(first_mcp);
@@ -5876,7 +5887,7 @@ async fn start_materialized_thread_and_restart(
     Ok(RestartedThreadFixture {
         mcp: second_mcp,
         thread_id,
-        rollout_file_path: rollout_file_path.to_path_buf(),
+        rollout_file_path,
         updated_at,
     })
 }

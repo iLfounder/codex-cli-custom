@@ -555,6 +555,7 @@ async fn start_or_steer(
                     SubmittedTurnInput::UserInput { content, .. } if !content.is_empty()
                 )
                 && session.can_admit_root_user_turn().await
+                && session.conversation.running_state().await.is_none()
             {
                 Some(
                     prepare_root_execution_account_admission(session, initial_binding.clone())
@@ -676,7 +677,8 @@ async fn start_if_idle(
     let should_select_execution_account = kind == TurnStartKind::User
         && has_user_input
         && can_start_root_turn
-        && session.can_admit_root_user_turn().await;
+        && session.can_admit_root_user_turn().await
+        && session.conversation.running_state().await.is_none();
     if session.input_queue.has_trigger_turn_mailbox_items().await {
         return Ok(TurnInputSubmission::NotSubmitted {
             reason: NotSubmittedReason::PendingTriggerTurn,
@@ -689,6 +691,12 @@ async fn start_if_idle(
     {
         return Ok(TurnInputSubmission::NotSubmitted {
             reason: NotSubmittedReason::PlanMode,
+        });
+    }
+    // Preserve the typed idle rejection before account selection; reservation rechecks this state.
+    if session.active_turn.lock().await.is_some() {
+        return Ok(TurnInputSubmission::NotSubmitted {
+            reason: NotSubmittedReason::NotIdle,
         });
     }
 

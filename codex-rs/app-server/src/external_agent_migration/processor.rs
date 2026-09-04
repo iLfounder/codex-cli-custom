@@ -47,6 +47,7 @@ use codex_rollout::StateDbHandle;
 use codex_state::ExternalAgentConfigImportFailureRecord;
 use codex_state::ExternalAgentConfigImportSuccessRecord;
 use codex_thread_store::ThreadStore;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -141,10 +142,22 @@ impl ExternalAgentConfigRequestProcessor {
                     .map(|max_sessions| max_sessions as usize)
                     .unwrap_or(default_session_import_limits.max_sessions),
             });
+        let cwds = params
+            .cwds
+            .map(|cwds| {
+                cwds.into_iter()
+                    .map(|cwd| {
+                        AbsolutePathBuf::try_from(cwd)
+                            .map(AbsolutePathBuf::into_path_buf)
+                            .map_err(|error| invalid_request(error.to_string()))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
         let options = ExternalAgentConfigDetectOptions {
             include_home: params.include_home,
             include_memory: self.external_agent_memory_import_enabled().await,
-            cwds: params.cwds,
+            cwds,
         };
         let items = migration_service
             .detect(options)
@@ -209,10 +222,10 @@ impl ExternalAgentConfigRequestProcessor {
             )
         });
         let (pending_session_imports, session_validation_result) =
-            self.validate_pending_session_imports(&params, &migration_service);
+            self.validate_pending_session_imports(&params, &migration_service)?;
         let import_outcome = self
             .import_external_agent_config(params, &migration_service)
-            .await;
+            .await?;
         if needs_runtime_refresh {
             self.config_processor.handle_config_mutation().await;
         }
@@ -449,7 +462,7 @@ impl ExternalAgentConfigRequestProcessor {
         &self,
         params: &ExternalAgentConfigImportParams,
         migration_service: &ExternalAgentConfigService,
-    ) -> (Vec<CoreSessionMigration>, Option<CoreImportItemResult>) {
+    ) -> Result<(Vec<CoreSessionMigration>, Option<CoreImportItemResult>), JSONRPCErrorError> {
         let sessions = params
             .migration_items
             .iter()
@@ -461,14 +474,20 @@ impl ExternalAgentConfigRequestProcessor {
             })
             .filter_map(|item| item.details.as_ref())
             .flat_map(|details| details.sessions.clone())
-            .map(|session| CoreSessionMigration {
-                path: session.path,
-                cwd: session.cwd,
-                title: session.title,
+            .map(|session| {
+                Ok(CoreSessionMigration {
+                    path: AbsolutePathBuf::try_from(session.path)
+                        .map_err(|error| invalid_request(error.to_string()))?
+                        .into_path_buf(),
+                    cwd: AbsolutePathBuf::try_from(session.cwd)
+                        .map_err(|error| invalid_request(error.to_string()))?
+                        .into_path_buf(),
+                    title: session.title,
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, JSONRPCErrorError>>()?;
         if sessions.is_empty() {
-            return (Vec::new(), None);
+            return Ok((Vec::new(), None));
         }
         let mut item_result = CoreImportItemResult::new(
             CoreMigrationItemType::Sessions,
@@ -509,23 +528,23 @@ impl ExternalAgentConfigRequestProcessor {
                 selected_sessions.push(session);
             }
         }
-        (selected_sessions, Some(item_result))
+        Ok((selected_sessions, Some(item_result)))
     }
 
     async fn import_external_agent_config(
         &self,
         params: ExternalAgentConfigImportParams,
         migration_service: &ExternalAgentConfigService,
-    ) -> CoreImportOutcome {
-        migration_service
+    ) -> Result<CoreImportOutcome, JSONRPCErrorError> {
+        Ok(migration_service
             .import(core_migration_items(
                 params
                     .migration_items
                     .into_iter()
                     .filter(|item| item.item_type != ExternalAgentConfigMigrationItemType::Sessions)
                     .collect(),
-            ))
-            .await
+            )?)
+            .await)
     }
 }
 
@@ -679,7 +698,12 @@ async fn record_import_history(
         .map(|success| {
             Ok(ExternalAgentConfigImportSuccessRecord {
                 item_type: serde_json::from_value(serde_json::to_value(success.item_type)?)?,
-                cwd: success.cwd.clone(),
+                cwd: success
+                    .cwd
+                    .clone()
+                    .map(AbsolutePathBuf::try_from)
+                    .transpose()?
+                    .map(AbsolutePathBuf::into_path_buf),
                 source: success.source.clone(),
                 target: success.target.clone(),
                 title: success.title.clone(),
@@ -696,7 +720,12 @@ async fn record_import_history(
                 sub_error_type: failure.sub_error_type.clone(),
                 failure_stage: failure.failure_stage.clone(),
                 message: failure.message.clone(),
-                cwd: failure.cwd.clone(),
+                cwd: failure
+                    .cwd
+                    .clone()
+                    .map(AbsolutePathBuf::try_from)
+                    .transpose()?
+                    .map(AbsolutePathBuf::into_path_buf),
                 source: failure.source.clone(),
             })
         })

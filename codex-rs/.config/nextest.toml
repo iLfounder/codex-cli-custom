@@ -63,9 +63,9 @@ filter = 'package(codex-core) & kind(test) & test(apply_patch_cli)'
 test-group = 'core_apply_patch_cli_integration'
 
 [[profile.default.overrides]]
-# These tests create restricted-token Windows child processes and private desktops.
+# These tests create sandbox child processes and private desktops.
 # Serialize them to avoid exhausting Windows session/global desktop resources in CI.
-filter = 'package(codex-windows-sandbox) & test(legacy_)'
+filter = 'package(codex-windows-sandbox) & (test(legacy_) | test(elevated_non_tty_cmd_forwards_env_output_and_exit))'
 test-group = 'windows_sandbox_legacy_sessions'
 
 [[profile.default.overrides]]

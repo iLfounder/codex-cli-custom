@@ -18,6 +18,28 @@ impl App {
             return;
         }
         let result: Result<()> = async {
+            if self.app_server_target.uses_remote_workspace() {
+                if !app_server
+                    .thread_settings_update(ThreadSettingsUpdateParams {
+                        thread_id: thread_id.to_string(),
+                        permissions: Some(selection.profile_id),
+                        ..Default::default()
+                    })
+                    .await?
+                {
+                    color_eyre::eyre::bail!(
+                        "the remote app server does not support confirmed permission changes"
+                    );
+                }
+                self.insert_history_cell(
+                    tui,
+                    Box::new(history_cell::new_info_event(
+                        format!("Permissions updated to {}", selection.display_label),
+                        /*hint*/ None,
+                    )),
+                );
+                return Ok(());
+            }
             let active_profile = ActivePermissionProfile::new(selection.profile_id.clone());
             let profile = builtin_permission_profile_for_active_permission_profile(&active_profile)
                 .ok_or_else(|| color_eyre::eyre::eyre!("unknown built-in permission profile"))?;

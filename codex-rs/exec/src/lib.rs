@@ -966,8 +966,15 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                     thread_id: source_thread_id,
                     model: config.model.clone(),
                     model_provider: Some(config.model_provider_id.clone()),
-                    cwd: Some(config.cwd.to_string_lossy().to_string()),
-                    runtime_workspace_roots: Some(config.workspace_roots.clone()),
+                    cwd: Some(config.cwd.clone().into()),
+                    runtime_workspace_roots: Some(
+                        config
+                            .workspace_roots
+                            .iter()
+                            .cloned()
+                            .map(Into::into)
+                            .collect(),
+                    ),
                     approval_policy: Some(config.permissions.approval_policy.value().into()),
                     approvals_reviewer: resume_approvals_reviewer_override,
                     sandbox: sandbox.flatten(),
@@ -984,6 +991,16 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         )
         .await
         .map_err(anyhow::Error::msg)?;
+        let rollout_path = response
+            .thread
+            .path
+            .clone()
+            .map(AbsolutePathBuf::try_from)
+            .transpose()
+            .map_err(|err| anyhow::anyhow!("thread rollout path is not host-native: {err}"))?
+            .map(AbsolutePathBuf::into_path_buf);
+        let cwd = AbsolutePathBuf::try_from(response.cwd)
+            .map_err(|err| anyhow::anyhow!("thread cwd is not host-native: {err}"))?;
         let session_configured = session_configured_from_thread_response(
             &response.thread.session_id,
             &response.thread.id,
@@ -991,7 +1008,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
             response.thread.parent_thread_id.as_deref(),
             response.thread.thread_source.clone().map(Into::into),
             response.thread.name.clone(),
-            response.thread.path.clone(),
+            rollout_path,
             response.model,
             response.model_provider,
             response.service_tier,
@@ -999,7 +1016,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
             response.approvals_reviewer.to_core(),
             config.permissions.effective_permission_profile(),
             response.active_permission_profile.map(Into::into),
-            response.cwd,
+            cwd,
             response.reasoning_effort,
         )
         .map_err(anyhow::Error::msg)?;
@@ -1021,23 +1038,21 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
 
     if let Some(account_rotation) = account_rotation
         && !matches!(&initial_operation, InitialOperation::UserTurn { .. })
-    {
-        if let Err(err) = bootstrap_account_rotation(
+        && let Err(err) = bootstrap_account_rotation(
             &client,
             &mut request_ids,
             primary_thread_id_for_span.as_str(),
             account_rotation,
         )
         .await
-        {
-            if handshake_enabled {
-                return Err(post_ready_failure(
-                    event_processor.as_mut(),
-                    BOOTSTRAP_FAILED,
-                ));
-            }
-            return Err(anyhow::Error::msg(err));
+    {
+        if handshake_enabled {
+            return Err(post_ready_failure(
+                event_processor.as_mut(),
+                BOOTSTRAP_FAILED,
+            ));
         }
+        return Err(anyhow::Error::msg(err));
     }
 
     exec_span.record("thread.id", primary_thread_id_for_span.as_str());
@@ -1092,7 +1107,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                     responsesapi_client_metadata: None,
                     additional_context: None,
                     environments: None,
-                    cwd: Some(default_cwd),
+                    cwd: Some(config.cwd.clone().into()),
                     runtime_workspace_roots: None,
                     approval_policy: Some(default_approval_policy.into()),
                     approvals_reviewer: None,
@@ -1532,8 +1547,15 @@ fn thread_start_params_from_config(
     ThreadStartParams {
         model: config.model.clone(),
         model_provider: Some(config.model_provider_id.clone()),
-        cwd: Some(config.cwd.to_string_lossy().to_string()),
-        runtime_workspace_roots: Some(config.workspace_roots.clone()),
+        cwd: Some(config.cwd.clone().into()),
+        runtime_workspace_roots: Some(
+            config
+                .workspace_roots
+                .iter()
+                .cloned()
+                .map(Into::into)
+                .collect(),
+        ),
         approval_policy: Some(config.permissions.approval_policy.value().into()),
         approvals_reviewer: Some(config.approvals_reviewer.into()),
         sandbox: sandbox.flatten(),
@@ -1562,8 +1584,15 @@ fn thread_resume_params_from_config(
         thread_id,
         model: config.model.clone(),
         model_provider: Some(config.model_provider_id.clone()),
-        cwd: Some(config.cwd.to_string_lossy().to_string()),
-        runtime_workspace_roots: Some(config.workspace_roots.clone()),
+        cwd: Some(config.cwd.clone().into()),
+        runtime_workspace_roots: Some(
+            config
+                .workspace_roots
+                .iter()
+                .cloned()
+                .map(Into::into)
+                .collect(),
+        ),
         approval_policy: Some(config.permissions.approval_policy.value().into()),
         approvals_reviewer: approvals_reviewer_override,
         sandbox: sandbox.flatten(),
@@ -1637,6 +1666,16 @@ fn session_configured_from_thread_start_response(
     response: &ThreadStartResponse,
     config: &Config,
 ) -> Result<SessionConfiguredEvent, String> {
+    let rollout_path = response
+        .thread
+        .path
+        .clone()
+        .map(AbsolutePathBuf::try_from)
+        .transpose()
+        .map_err(|err| format!("thread rollout path is not host-native: {err}"))?
+        .map(AbsolutePathBuf::into_path_buf);
+    let cwd = AbsolutePathBuf::try_from(response.cwd.clone())
+        .map_err(|err| format!("thread cwd is not host-native: {err}"))?;
     session_configured_from_thread_response(
         &response.thread.session_id,
         &response.thread.id,
@@ -1644,7 +1683,7 @@ fn session_configured_from_thread_start_response(
         response.thread.parent_thread_id.as_deref(),
         response.thread.thread_source.clone().map(Into::into),
         response.thread.name.clone(),
-        response.thread.path.clone(),
+        rollout_path,
         response.model.clone(),
         response.model_provider.clone(),
         response.service_tier.clone(),
@@ -1652,7 +1691,7 @@ fn session_configured_from_thread_start_response(
         response.approvals_reviewer.to_core(),
         config.permissions.effective_permission_profile(),
         response.active_permission_profile.clone().map(Into::into),
-        response.cwd.clone(),
+        cwd,
         response.reasoning_effort.clone(),
     )
 }
@@ -1661,6 +1700,16 @@ fn session_configured_from_thread_resume_response(
     response: &ThreadResumeResponse,
     config: &Config,
 ) -> Result<SessionConfiguredEvent, String> {
+    let rollout_path = response
+        .thread
+        .path
+        .clone()
+        .map(AbsolutePathBuf::try_from)
+        .transpose()
+        .map_err(|err| format!("thread rollout path is not host-native: {err}"))?
+        .map(AbsolutePathBuf::into_path_buf);
+    let cwd = AbsolutePathBuf::try_from(response.cwd.clone())
+        .map_err(|err| format!("thread cwd is not host-native: {err}"))?;
     session_configured_from_thread_response(
         &response.thread.session_id,
         &response.thread.id,
@@ -1668,7 +1717,7 @@ fn session_configured_from_thread_resume_response(
         response.thread.parent_thread_id.as_deref(),
         response.thread.thread_source.clone().map(Into::into),
         response.thread.name.clone(),
-        response.thread.path.clone(),
+        rollout_path,
         response.model.clone(),
         response.model_provider.clone(),
         response.service_tier.clone(),
@@ -1676,7 +1725,7 @@ fn session_configured_from_thread_resume_response(
         response.approvals_reviewer.to_core(),
         config.permissions.effective_permission_profile(),
         response.active_permission_profile.clone().map(Into::into),
-        response.cwd.clone(),
+        cwd,
         response.reasoning_effort.clone(),
     )
 }
@@ -1897,13 +1946,17 @@ fn all_thread_source_kinds() -> Vec<ThreadSourceKind> {
     ]
 }
 
-async fn latest_thread_cwd(thread: &AppServerThread) -> PathBuf {
-    if let Some(path) = thread.path.as_deref()
-        && let Some(cwd) = parse_latest_turn_context_cwd(path).await
-    {
-        return cwd;
+async fn latest_thread_cwd(thread: &AppServerThread) -> anyhow::Result<PathBuf> {
+    if let Some(path) = thread.path.clone() {
+        let path = AbsolutePathBuf::try_from(path)
+            .map_err(|err| anyhow::anyhow!("thread rollout path is not host-native: {err}"))?;
+        if let Some(cwd) = parse_latest_turn_context_cwd(path.as_path()).await {
+            return Ok(cwd);
+        }
     }
-    thread.cwd.to_path_buf()
+    AbsolutePathBuf::try_from(thread.cwd.clone())
+        .map(AbsolutePathBuf::into_path_buf)
+        .map_err(|err| anyhow::anyhow!("thread cwd is not host-native: {err}"))
 }
 
 async fn parse_latest_turn_context_cwd(path: &Path) -> Option<PathBuf> {
@@ -1969,15 +2022,18 @@ async fn resolve_resume_thread_id(
             .await
             .map_err(anyhow::Error::msg)?;
             for thread in response.data {
-                if use_state_db_only && let Some(path) = thread.path.as_deref() {
-                    let Ok(session_meta) = read_session_meta_line(path).await else {
+                if use_state_db_only && let Some(path) = thread.path.clone() {
+                    let path = AbsolutePathBuf::try_from(path).map_err(|err| {
+                        anyhow::anyhow!("thread rollout path is not host-native: {err}")
+                    })?;
+                    let Ok(session_meta) = read_session_meta_line(path.as_path()).await else {
                         continue;
                     };
                     if session_meta.meta.id.to_string() != thread.id {
                         continue;
                     }
                 }
-                let latest_cwd = latest_thread_cwd(&thread).await;
+                let latest_cwd = latest_thread_cwd(&thread).await?;
                 if args.all || cwds_match(config.cwd.as_path(), latest_cwd.as_path()) {
                     // A usable SQLite candidate is authoritative. Scanning is reserved for a
                     // complete miss so successful `--last` lookups avoid auditing every rollout.
@@ -2057,7 +2113,7 @@ async fn resolve_resume_thread_id(
             if thread.name.as_deref() != Some(session_id) {
                 continue;
             }
-            let latest_cwd = latest_thread_cwd(&thread).await;
+            let latest_cwd = latest_thread_cwd(&thread).await?;
             if args.all || cwds_match(config.cwd.as_path(), latest_cwd.as_path()) {
                 return Ok(Some(thread.id));
             }

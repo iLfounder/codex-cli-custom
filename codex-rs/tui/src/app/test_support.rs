@@ -94,6 +94,7 @@ pub(super) async fn make_test_app_with_channels() -> (
         runtime_approval_policy_override: None,
         runtime_permission_profile_override: None,
         file_search,
+        remote_file_search_session: None,
         transcript_cells: Vec::new(),
         last_rendered_history_tail: None,
         last_thread_usage_status_cell: None,

@@ -208,7 +208,7 @@ impl EventProcessorWithJsonOutput {
                     changes: changes
                         .into_iter()
                         .map(|change| FileUpdateChange {
-                            path: change.path,
+                            path: change.path.to_string(),
                             kind: match change.kind {
                                 PatchChangeKind::Add => ExecPatchChangeKind::Add,
                                 PatchChangeKind::Delete => ExecPatchChangeKind::Delete,

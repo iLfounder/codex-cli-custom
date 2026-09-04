@@ -2616,6 +2616,13 @@ async fn run_interactive_tui(
     remote_auth_token_env: Option<String>,
     arg0_paths: Arg0DispatchPaths,
 ) -> std::io::Result<AppExitInfo> {
+    if remote.is_some() {
+        let overrides = match codex_tui::capture_remote_invocation_overrides(&interactive) {
+            Ok(overrides) => overrides,
+            Err(error) => return Ok(AppExitInfo::fatal(error)),
+        };
+        interactive.remote_invocation_overrides = Some(overrides);
+    }
     if let Some(prompt) = interactive.prompt.take() {
         // Normalize CRLF/CR to LF so CLI-provided text can't leak `\r` into TUI state.
         interactive.prompt = Some(prompt.replace("\r\n", "\n").replace('\r', "\n"));

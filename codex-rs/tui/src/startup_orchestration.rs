@@ -256,10 +256,15 @@ pub(super) async fn run_main_inner(
         launch_disposition,
         canonical_projection.unwrap_or_default(),
     )?;
-    let remote_cwd_override = cli
-        .cwd
-        .clone()
-        .filter(|_| app_server_target.uses_remote_workspace());
+    let remote_cwd_override = app_server_target
+        .uses_remote_workspace()
+        .then(|| {
+            cli.remote_invocation_overrides
+                .as_ref()
+                .and_then(RemoteInvocationOverrides::cwd)
+                .cloned()
+        })
+        .flatten();
 
     let local_runtime_paths = ExecServerRuntimePaths::from_optional_paths(
         arg0_paths.codex_self_exe.clone(),

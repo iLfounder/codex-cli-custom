@@ -1221,12 +1221,6 @@ async fn spawn_internal_session_preserves_parent_lineage_without_forking_history
         text: "parent user instructions must not be inherited".to_string(),
         source: config.codex_home.join("AGENTS.md"),
     };
-    let mut manager = ThreadManager::with_models_provider_and_home_for_tests(
-        CodexAuth::from_api_key("dummy"),
-        config.model_provider.clone(),
-        config.codex_home.to_path_buf(),
-        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
-    );
     let observed_mcp_sources = Arc::new(std::sync::Mutex::new(Vec::new()));
     let parent_contributor = Arc::new(ParentLifecycleContributor {
         observed_mcp_sources: Arc::clone(&observed_mcp_sources),
@@ -1234,15 +1228,25 @@ async fn spawn_internal_session_preserves_parent_lineage_without_forking_history
     let mut extensions = codex_extension_api::ExtensionRegistryBuilder::new();
     extensions.thread_lifecycle_contributor(parent_contributor.clone());
     extensions.mcp_server_contributor(parent_contributor);
-    let manager_state = Arc::get_mut(&mut manager.state).expect("unshared thread manager state");
-    manager_state.extensions = Arc::new(extensions.build());
-    manager_state.mcp_manager = Arc::new(McpManager::new_with_extensions(
-        Arc::clone(&manager_state.plugins_manager),
-        Arc::clone(&manager_state.extensions),
-        manager_state.mcp_manager.codex_apps_tools_cache(),
-    ));
-    manager_state.user_instructions_provider =
-        Arc::new(ParentInstructionsProvider(parent_instructions.clone()));
+    let extensions = Arc::new(extensions.build());
+    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
+    set_thread_manager_test_mode_for_tests(/*enabled*/ true);
+    let manager = ThreadManager::new(
+        &config,
+        Arc::clone(&auth_manager),
+        build_models_manager(&config, auth_manager),
+        crate::CodexAppsToolsCache::default(),
+        SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        extensions,
+        Arc::new(ParentInstructionsProvider(parent_instructions.clone())),
+        /*analytics_events_client*/ None,
+        thread_store_from_config(&config, /*state_db*/ None),
+        /*agent_graph_store*/ None,
+        TEST_INSTALLATION_ID.to_string(),
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    );
     let parent = manager
         .start_thread(StartThreadOptions {
             metrics_service_name: Some("codex_work_desktop".to_string()),

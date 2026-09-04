@@ -1086,8 +1086,13 @@ async fn list_apps_force_refetch_preserves_previous_cache_on_failure() -> Result
         plugin_display_names: Vec::new(),
     }];
     let tools = vec![connector_tool("beta", "Beta App")?];
-    let (server_url, server_handle) =
-        start_apps_server_with_delays(connectors, tools, Duration::ZERO, Duration::ZERO).await?;
+    let (server_url, server_handle, server_control) = start_apps_server_with_delays_and_control(
+        connectors,
+        tools,
+        Duration::ZERO,
+        Duration::ZERO,
+    )
+    .await?;
 
     let codex_home = TempDir::new()?;
     write_connectors_config(codex_home.path(), &server_url)?;
@@ -1122,7 +1127,7 @@ async fn list_apps_force_refetch_preserves_previous_cache_on_failure() -> Result
     assert_eq!(initial_data.len(), 1);
     assert!(initial_data.iter().all(|app| app.is_accessible));
 
-    server_handle.abort();
+    server_control.set_directory_status(StatusCode::INTERNAL_SERVER_ERROR);
 
     let refetch_request = mcp
         .send_apps_list_request(AppsListParams {
@@ -1154,6 +1159,7 @@ async fn list_apps_force_refetch_preserves_previous_cache_on_failure() -> Result
 
     assert_eq!(cached_data, initial_data);
     assert!(cached_next_cursor.is_none());
+    server_handle.abort();
     Ok(())
 }
 
@@ -1449,6 +1455,7 @@ struct AppsServerState {
     expected_bearer: String,
     expected_account_id: String,
     response: Arc<StdMutex<serde_json::Value>>,
+    directory_status: Arc<StdMutex<StatusCode>>,
     directory_delay: Duration,
 }
 
@@ -1468,6 +1475,7 @@ impl AppListMcpServer {
 struct AppsServerControl {
     response: Arc<StdMutex<serde_json::Value>>,
     tools: Arc<StdMutex<Vec<Tool>>>,
+    directory_status: Arc<StdMutex<StatusCode>>,
 }
 
 impl AppsServerControl {
@@ -1485,6 +1493,14 @@ impl AppsServerControl {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         *tools_guard = tools;
+    }
+
+    fn set_directory_status(&self, status: StatusCode) {
+        let mut status_guard = self
+            .directory_status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *status_guard = status;
     }
 }
 
@@ -1553,16 +1569,19 @@ async fn start_apps_server_with_delays_and_control_inner(
         json!({ "apps": connectors, "next_token": null }),
     ));
     let tools = Arc::new(StdMutex::new(tools));
+    let directory_status = Arc::new(StdMutex::new(StatusCode::OK));
     let state = AppsServerState {
         expected_bearer: format!("Bearer {expected_bearer}"),
         expected_account_id: "account-123".to_string(),
         response: response.clone(),
+        directory_status: directory_status.clone(),
         directory_delay,
     };
     let state = Arc::new(state);
     let server_control = AppsServerControl {
         response,
         tools: tools.clone(),
+        directory_status,
     };
 
     let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -1600,6 +1619,14 @@ async fn list_directory_connectors(
 ) -> Result<impl axum::response::IntoResponse, StatusCode> {
     if state.directory_delay > Duration::ZERO {
         tokio::time::sleep(state.directory_delay).await;
+    }
+
+    let directory_status = *state
+        .directory_status
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !directory_status.is_success() {
+        return Err(directory_status);
     }
 
     let bearer_ok = headers

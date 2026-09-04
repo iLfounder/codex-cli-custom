@@ -75,6 +75,7 @@ use codex_protocol::dynamic_tools::normalize_dynamic_tool_specs;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::W3cTraceContext;
 use codex_utils_cli::CliConfigOverrides;
+use codex_utils_path_uri::LegacyAppPathString;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -1451,7 +1452,7 @@ fn live_elicitation_timeout_pause(
         approval_policy: Some(AskForApproval::Never),
         sandbox_policy: Some(SandboxPolicy::DangerFullAccess),
         effort: Some(ReasoningEffort::High),
-        cwd: Some(workspace),
+        cwd: Some(LegacyAppPathString::from_path(&workspace)),
         ..Default::default()
     })?;
     println!("< turn/start response: {turn_response:?}");
@@ -2263,8 +2264,8 @@ impl CodexClient {
         if let Some(reason) = reason.as_deref() {
             println!("< reason: {reason}");
         }
-        if let Some(grant_root) = grant_root.as_deref() {
-            println!("< grant root: {}", grant_root.display());
+        if let Some(grant_root) = grant_root.as_ref() {
+            println!("< grant root: {}", grant_root.render_for_ui());
         }
 
         let response = FileChangeRequestApprovalResponse {

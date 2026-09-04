@@ -251,6 +251,7 @@ export type { HookTrustStatus } from "./HookTrustStatus";
 export type { HooksListEntry } from "./HooksListEntry";
 export type { HooksListParams } from "./HooksListParams";
 export type { HooksListResponse } from "./HooksListResponse";
+export type { ImageGenerationItem } from "./ImageGenerationItem";
 export type { InAppBrowserRequirements } from "./InAppBrowserRequirements";
 export type { InstalledApp } from "./InstalledApp";
 export type { ItemCompletedNotification } from "./ItemCompletedNotification";

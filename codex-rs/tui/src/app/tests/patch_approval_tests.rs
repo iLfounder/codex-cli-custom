@@ -14,17 +14,17 @@ const ITEM_ID: &str = "exec-patch-approval";
 fn changes() -> Vec<FileUpdateChange> {
     vec![
         FileUpdateChange {
-            path: "a-added.txt".to_string(),
+            path: codex_utils_path_uri::LegacyAppPathString::from_string("a-added.txt"),
             kind: PatchChangeKind::Add,
             diff: "alpha\nbeta\n".to_string(),
         },
         FileUpdateChange {
-            path: "m-updated.txt".to_string(),
+            path: codex_utils_path_uri::LegacyAppPathString::from_string("m-updated.txt"),
             kind: PatchChangeKind::Update { move_path: None },
             diff: "@@ -1 +1 @@\n-old\n+new\n".to_string(),
         },
         FileUpdateChange {
-            path: "z-deleted.txt".to_string(),
+            path: codex_utils_path_uri::LegacyAppPathString::from_string("z-deleted.txt"),
             kind: PatchChangeKind::Delete,
             diff: "removed\n".to_string(),
         },
@@ -80,6 +80,32 @@ fn request(thread_id: ThreadId) -> ServerRequest {
 async fn enqueue_pending_patch(app: &mut App, thread_id: ThreadId) -> Result<()> {
     let cwd = app.chat_widget.config_ref().cwd.to_path_buf();
     app.enqueue_primary_thread_session(test_thread_session(thread_id, cwd), Vec::new())
+        .await?;
+    app.enqueue_thread_notification(
+        thread_id,
+        ServerNotification::ItemStarted(ItemStartedNotification {
+            thread_id: thread_id.to_string(),
+            turn_id: TURN_ID.to_string(),
+            started_at_ms: 0,
+            item: patch_item(),
+        }),
+    )
+    .await?;
+    let request = request(thread_id);
+    assert_eq!(
+        app.pending_app_server_requests
+            .note_server_request(&request),
+        None
+    );
+    app.enqueue_thread_request(thread_id, request).await
+}
+
+async fn enqueue_pending_patch_with_session(
+    app: &mut App,
+    thread_id: ThreadId,
+    session: ThreadSessionState,
+) -> Result<()> {
+    app.enqueue_primary_thread_session(session, Vec::new())
         .await?;
     app.enqueue_thread_notification(
         thread_id,
@@ -216,6 +242,73 @@ async fn active_patch_approval_pager_preserves_changes_and_accepts_once() -> Res
         &mut rx,
         thread_id,
         FileChangeApprovalDecision::Accept,
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn active_remote_patch_approval_uses_server_cwd() -> Result<()> {
+    let (mut app, mut rx, _op_rx) = make_test_app_with_channels().await;
+    let thread_id = ThreadId::new();
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    #[cfg(windows)]
+    let remote_cwd = "/Users/daniel/project";
+    #[cfg(not(windows))]
+    let remote_cwd = r"C:\Users\Daniel\project";
+    let remote_cwd = codex_utils_path_uri::LegacyAppPathString::from_string(remote_cwd);
+    let mut session =
+        test_thread_session(thread_id, app.chat_widget.config_ref().cwd.to_path_buf());
+    session.execution_context = crate::session_state::SessionExecutionContext::Remote {
+        cwd: remote_cwd.clone(),
+        runtime_workspace_roots: Vec::new(),
+        sandbox: codex_app_server_protocol::SandboxPolicy::DangerFullAccess,
+        rollout_path: None,
+    };
+    enqueue_pending_patch_with_session(&mut app, thread_id, session).await?;
+    drain_pending_patch(&mut app, &mut tui).await?;
+
+    assert_eq!(open_patch(&mut app, &mut rx).cwd, remote_cwd);
+    Ok(())
+}
+
+#[tokio::test]
+async fn inactive_remote_patch_without_cached_session_keeps_relative_display_paths() -> Result<()> {
+    let (mut app, _rx, _op_rx) = make_test_app_with_channels().await;
+    app.app_server_target = AppServerTarget::Remote {
+        endpoint: crate::RemoteAppServerEndpoint::WebSocket {
+            websocket_url: "ws://127.0.0.1:4500".to_string(),
+            auth_token: None,
+        },
+    };
+    app.active_thread_id = Some(ThreadId::new());
+    let inactive_thread_id = ThreadId::new();
+    app.enqueue_thread_notification(
+        inactive_thread_id,
+        ServerNotification::ItemStarted(ItemStartedNotification {
+            thread_id: inactive_thread_id.to_string(),
+            turn_id: TURN_ID.to_string(),
+            started_at_ms: 0,
+            item: patch_item(),
+        }),
+    )
+    .await?;
+    assert_eq!(app.thread_server_cwd(inactive_thread_id).await, None);
+
+    let request = app
+        .interactive_request_for_thread_request(inactive_thread_id, &request(inactive_thread_id))
+        .await?
+        .expect("file change approval should be interactive");
+    let ThreadInteractiveRequest::Approval(ApprovalRequest::ApplyPatch(request)) = request else {
+        panic!("expected an apply-patch approval");
+    };
+
+    assert_eq!(request.cwd.as_str(), "");
+    assert_eq!(
+        crate::app_server_approval_conversions::file_update_path_for_display(
+            &request.cwd,
+            Path::new("a-added.txt"),
+        ),
+        "a-added.txt"
     );
     Ok(())
 }

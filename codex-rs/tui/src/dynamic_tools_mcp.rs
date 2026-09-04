@@ -111,6 +111,9 @@ impl DynamicToolMcpServer {
         status_updates: broadcast::Sender<ThreadStatusChangedNotification>,
         managed_requirement: Option<&McpServerRequirement>,
     ) -> std::io::Result<Self> {
+        // Child threads created through this server receive tools through the
+        // MCP transport below, so do not also inject the typed TUI controls.
+        thread_start_params.dynamic_tools = None;
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let authorization = Arc::new(format!("Bearer {}", Uuid::new_v4()));

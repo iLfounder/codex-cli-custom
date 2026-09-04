@@ -222,7 +222,7 @@ fn command_assessment_action(
     GuardianAssessmentAction::Command {
         source,
         command: codex_shell_command::parse_command::shlex_join(command),
-        cwd: cwd.clone(),
+        cwd: cwd.clone().into(),
     }
 }
 
@@ -434,12 +434,12 @@ pub(crate) fn guardian_assessment_action(
             source: *source,
             program: program.clone(),
             argv: argv.clone(),
-            cwd: cwd.clone(),
+            cwd: cwd.clone().into(),
         },
         GuardianApprovalRequest::ApplyPatch { cwd, files, .. } => {
             GuardianAssessmentAction::ApplyPatch {
-                cwd: cwd.clone(),
-                files: files.clone(),
+                cwd: cwd.clone().into(),
+                files: files.iter().cloned().map(Into::into).collect(),
             }
         }
         GuardianApprovalRequest::NetworkAccess {

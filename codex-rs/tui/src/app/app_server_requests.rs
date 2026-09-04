@@ -121,11 +121,19 @@ impl PendingAppServerRequests {
                 None
             }
             ServerRequest::PermissionsRequestApproval { request_id, params } => {
-                // TODO(anp): Remove this duplicate validation once core permission paths remain
-                // PathUri after crossing the app-server boundary. Native permission paths do not
-                // yet have an ingress validation step, so validate them here before recording the
-                // request as pending. Discovering an invalid path later in a UI delivery path
-                // would leave the app-server RPC waiting without a clean rejection path.
+                // Validate every path before recording the request as pending. Foreign absolute
+                // paths are valid API values and remain PathUri-backed; only malformed path text
+                // is rejected here. Discovering it later in a UI delivery path would leave the
+                // app-server RPC waiting without a clean rejection path.
+                if params.cwd.to_inferred_path_uri().is_none() {
+                    return Some(UnsupportedAppServerRequest {
+                        request_id: request_id.clone(),
+                        message: format!(
+                            "permission request cwd is not an absolute path: {}",
+                            params.cwd.render_for_ui()
+                        ),
+                    });
+                }
                 if let Err(err) = CoreRequestPermissionProfile::try_from(params.permissions.clone())
                 {
                     return Some(UnsupportedAppServerRequest {
@@ -466,6 +474,7 @@ mod tests {
     use codex_protocol::models::NetworkPermissions;
     use codex_protocol::request_permissions::RequestPermissionProfile;
     use codex_utils_absolute_path::AbsolutePathBuf;
+    use codex_utils_path_uri::LegacyAppPathString;
     use pretty_assertions::assert_eq;
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -626,7 +635,7 @@ mod tests {
                     item_id: "perm-1".to_string(),
                     environment_id: None,
                     started_at_ms: 0,
-                    cwd,
+                    cwd: cwd.into(),
                     reason: None,
                     permissions,
                 },
@@ -638,6 +647,38 @@ mod tests {
                 ),
             })
         );
+    }
+
+    #[test]
+    fn rejects_permissions_with_relative_cwd_before_tracking() {
+        let mut pending = PendingAppServerRequests::default();
+        let request_id = AppServerRequestId::Integer(7);
+        let request = ServerRequest::PermissionsRequestApproval {
+            request_id: request_id.clone(),
+            params: PermissionsRequestApprovalParams {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                item_id: "perm-1".to_string(),
+                environment_id: None,
+                started_at_ms: 0,
+                cwd: LegacyAppPathString::from_string("relative/path"),
+                reason: None,
+                permissions: codex_app_server_protocol::RequestPermissionProfile {
+                    network: None,
+                    file_system: None,
+                },
+            },
+        };
+
+        assert_eq!(
+            pending.note_server_request(&request),
+            Some(UnsupportedAppServerRequest {
+                request_id,
+                message: "permission request cwd is not an absolute path: relative/path"
+                    .to_string(),
+            })
+        );
+        assert!(!pending.contains_server_request(&request));
     }
 
     #[test]
@@ -666,7 +707,7 @@ mod tests {
                     item_id: "perm-1".to_string(),
                     environment_id: None,
                     started_at_ms: 0,
-                    cwd: absolute_path(if cfg!(windows) { r"C:\tmp" } else { "/tmp" }),
+                    cwd: absolute_path(if cfg!(windows) { r"C:\tmp" } else { "/tmp" }).into(),
                     reason: None,
                     permissions: serde_json::from_value(json!({
                         "network": { "enabled": null }

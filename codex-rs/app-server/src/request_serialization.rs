@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::future::Future;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use codex_app_server_protocol::ClientRequestSerializationScope;
 use codex_diagnostics::Gauge;
 use codex_diagnostics::GaugeGuard;
+use codex_utils_path_uri::LegacyAppPathString;
 use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
 use tokio::sync::Mutex;
@@ -28,7 +28,7 @@ pub(crate) enum RequestSerializationQueueKey {
         thread_id: String,
     },
     ThreadPath {
-        path: PathBuf,
+        path: LegacyAppPathString,
     },
     CommandExecProcess {
         connection_id: ConnectionId,

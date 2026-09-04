@@ -3131,7 +3131,7 @@ async fn slash_cd_changes_current_session_after_replay_and_defaults_to_home() {
         assert_matches!(
             rx.try_recv(),
             Ok(AppEvent::ChangeWorkingDirectory { thread_id: actual, requested_cwd })
-                if actual == thread_id && requested_cwd == std::path::Path::new(expected)
+                if actual == thread_id && requested_cwd == expected
         );
     }
     assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));

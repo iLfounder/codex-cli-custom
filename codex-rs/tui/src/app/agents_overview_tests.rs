@@ -58,7 +58,7 @@ fn overview_thread(
         recency_at: Some(*OVERVIEW_TIMESTAMP),
         status,
         path: None,
-        cwd: test_path_buf("/tmp/project").abs(),
+        cwd: test_path_buf("/tmp/project").abs().into(),
         cli_version: "0.0.0".to_string(),
         source: parent_thread_id.map_or(SessionSource::Cli, |parent_thread_id| {
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
@@ -502,7 +502,7 @@ async fn shared_overview_shows_only_root_sessions() {
         event_rx.try_recv(),
         Ok(AppEvent::DispatchAgentsOverviewTask { prompt, cwd: Some(cwd) })
             if prompt == "Fix the flaky tests after all retries complete"
-                && cwd == test_path_buf("/tmp/project").abs()
+                && cwd == test_path_buf("/tmp/project").abs().into()
     ));
     assert!(action_view.handle_paste("   ".to_string()));
     action_view.handle_key_event(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
@@ -567,9 +567,11 @@ async fn shared_overview_shows_only_root_sessions() {
             }
             candidate.updated_at = index;
             candidate.cwd = if index == 0 {
-                test_path_buf("/tmp/project-selected").abs()
+                test_path_buf("/tmp/project-selected").abs().into()
             } else {
-                test_path_buf(&format!("/tmp/project-{}", index % 3)).abs()
+                test_path_buf(&format!("/tmp/project-{}", index % 3))
+                    .abs()
+                    .into()
             };
             candidate
         })
@@ -823,7 +825,7 @@ async fn overview_selection_applies_user_permissions_only_to_unloaded_threads() 
     for (thread_id, expected_permissions, expected_approval) in [
         (
             loaded.thread_id,
-            loaded.permission_profile,
+            loaded.native_permission_profile().expect("native session").clone(),
             loaded.approval_policy,
         ),
         (
@@ -871,7 +873,7 @@ async fn overview_selection_applies_user_permissions_only_to_unloaded_threads() 
         assert_eq!(
             (
                 app.primary_thread_id,
-                observed.permission_profile,
+                observed.native_permission_profile().expect("native session").clone(),
                 observed.approval_policy,
                 observed.approvals_reviewer,
             ),
@@ -969,7 +971,7 @@ async fn overview_cold_resume_honors_working_directory_selection() -> Result<()>
             .await?
             .session;
         assert_eq!(
-            (app.config.cwd.clone(), observed.cwd),
+            (app.config.cwd.clone(), observed.native_cwd().expect("native session").clone()),
             (expected_cwd.clone(), expected_cwd),
         );
         app_server.shutdown().await?;

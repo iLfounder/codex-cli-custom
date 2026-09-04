@@ -1426,9 +1426,7 @@ impl Session {
         IdleExecutionAccountReservation,
         crate::execution_account::ExecutionAccountSwitchError,
     > {
-        if self.execution_control_is_closing()
-            || *self.services.elicitations.subscribe().borrow()
-            || self.conversation.running_state().await.is_some()
+        if self.execution_control_is_closing() || self.conversation.running_state().await.is_some()
         {
             return Err(crate::execution_account::ExecutionAccountSwitchError::ThreadBusy);
         }

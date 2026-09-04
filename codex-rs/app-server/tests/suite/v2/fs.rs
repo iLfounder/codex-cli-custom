@@ -15,7 +15,7 @@ use codex_app_server_protocol::FsWriteFileParams;
 use codex_app_server_protocol::JSONRPCNotification;
 use codex_app_server_protocol::RequestId;
 use codex_exec_server::CODEX_EXEC_SERVER_URL_ENV_VAR;
-use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::path::PathBuf;
@@ -60,13 +60,13 @@ async fn expect_error_message(
     Ok(())
 }
 
-fn absolute_path(path: PathBuf) -> AbsolutePathBuf {
+fn absolute_path(path: PathBuf) -> LegacyAppPathString {
     assert!(
         path.is_absolute(),
         "path must be absolute: {}",
         path.display()
     );
-    AbsolutePathBuf::try_from(path).expect("path should be absolute")
+    LegacyAppPathString::from_path(&path)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -411,7 +411,7 @@ async fn fs_methods_reject_relative_paths() -> Result<()> {
     expect_error_message(
         &mut mcp,
         read_id,
-        "Invalid request: AbsolutePathBuf deserialized without a base path",
+        "invalid path: path `relative.txt` is not absolute",
     )
     .await?;
 
@@ -427,7 +427,7 @@ async fn fs_methods_reject_relative_paths() -> Result<()> {
     expect_error_message(
         &mut mcp,
         write_id,
-        "Invalid request: AbsolutePathBuf deserialized without a base path",
+        "invalid path: path `relative.txt` is not absolute",
     )
     .await?;
 
@@ -443,7 +443,7 @@ async fn fs_methods_reject_relative_paths() -> Result<()> {
     expect_error_message(
         &mut mcp,
         create_directory_id,
-        "Invalid request: AbsolutePathBuf deserialized without a base path",
+        "invalid path: path `relative-dir` is not absolute",
     )
     .await?;
 
@@ -453,7 +453,7 @@ async fn fs_methods_reject_relative_paths() -> Result<()> {
     expect_error_message(
         &mut mcp,
         get_metadata_id,
-        "Invalid request: AbsolutePathBuf deserialized without a base path",
+        "invalid path: path `relative.txt` is not absolute",
     )
     .await?;
 
@@ -463,7 +463,7 @@ async fn fs_methods_reject_relative_paths() -> Result<()> {
     expect_error_message(
         &mut mcp,
         read_directory_id,
-        "Invalid request: AbsolutePathBuf deserialized without a base path",
+        "invalid path: path `relative-dir` is not absolute",
     )
     .await?;
 
@@ -480,7 +480,7 @@ async fn fs_methods_reject_relative_paths() -> Result<()> {
     expect_error_message(
         &mut mcp,
         remove_id,
-        "Invalid request: AbsolutePathBuf deserialized without a base path",
+        "invalid path: path `relative.txt` is not absolute",
     )
     .await?;
 
@@ -497,7 +497,7 @@ async fn fs_methods_reject_relative_paths() -> Result<()> {
     expect_error_message(
         &mut mcp,
         copy_source_id,
-        "Invalid request: AbsolutePathBuf deserialized without a base path",
+        "invalid sourcePath: path `relative.txt` is not absolute",
     )
     .await?;
 
@@ -514,7 +514,7 @@ async fn fs_methods_reject_relative_paths() -> Result<()> {
     expect_error_message(
         &mut mcp,
         copy_destination_id,
-        "Invalid request: AbsolutePathBuf deserialized without a base path",
+        "invalid destinationPath: path `relative-copy.txt` is not absolute",
     )
     .await?;
 
@@ -842,7 +842,7 @@ async fn fs_watch_rejects_relative_paths() -> Result<()> {
     expect_error_message(
         &mut mcp,
         watch_id,
-        "Invalid request: AbsolutePathBuf deserialized without a base path",
+        "invalid path: path `relative-path` is not absolute",
     )
     .await?;
 

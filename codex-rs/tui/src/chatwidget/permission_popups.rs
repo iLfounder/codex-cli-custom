@@ -15,6 +15,11 @@ impl ChatWidget {
 
     /// Open a popup to choose the permissions mode.
     pub(crate) fn open_permissions_popup(&mut self) {
+        if self.current_remote_cwd.is_some() {
+            self.app_event_tx
+                .send(AppEvent::OpenRemotePermissionProfiles);
+            return;
+        }
         if self.config.explicit_permission_profile_mode {
             self.open_permission_profiles_popup();
             return;

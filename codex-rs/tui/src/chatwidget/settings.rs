@@ -190,6 +190,10 @@ impl ChatWidget {
         self.runtime_model_provider_base_url.as_deref()
     }
 
+    pub(crate) fn runtime_requires_openai_auth(&self) -> bool {
+        self.runtime_requires_openai_auth
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn model_catalog(&self) -> Arc<ModelCatalog> {
         self.model_catalog.clone()
@@ -470,37 +474,72 @@ impl ChatWidget {
     }
 
     fn apply_thread_settings(&mut self, mut settings: ThreadSettings) {
-        let cwd_changed = self.config.cwd != settings.cwd;
-        self.apply_thread_settings_cwd(settings.cwd.clone());
+        let server_cwd = crate::app_server_session::app_server_path_string(&settings.cwd);
+        let remote = self.current_remote_cwd.is_some();
+        let cwd_changed = if remote {
+            self.current_remote_cwd.as_ref() != Some(&server_cwd)
+        } else {
+            self.current_cwd.as_deref() != server_cwd.to_inferred_abs_path().as_deref()
+        };
+        if remote {
+            self.current_remote_cwd = Some(server_cwd.clone());
+            if let Some(runner) = &self.workspace_command_runner {
+                runner.set_remote_cwd(self.current_remote_cwd.clone());
+            }
+            if let Some(runtime_status) = self.remote_runtime_status.as_mut() {
+                runtime_status.update(
+                    server_cwd,
+                    settings.sandbox_policy.clone(),
+                    settings.active_permission_profile.clone().map(Into::into),
+                    settings.approval_policy,
+                    settings.approvals_reviewer.to_core(),
+                    settings.model_provider.clone(),
+                );
+            }
+        } else if let Some(cwd) = server_cwd.to_inferred_abs_path() {
+            self.apply_thread_settings_cwd(cwd);
+        } else {
+            tracing::warn!("local app server returned a non-native thread settings cwd");
+        }
         self.config.model_provider_id = settings.model_provider.clone();
         self.set_service_tier(settings.service_tier.clone());
-        self.set_approval_policy(settings.approval_policy);
-        self.set_approvals_reviewer(settings.approvals_reviewer.to_core());
-        self.config.personality = settings.personality;
+        if !remote {
+            self.set_approval_policy(settings.approval_policy);
+            self.set_approvals_reviewer(settings.approvals_reviewer.to_core());
+            self.config.personality = settings.personality;
 
-        let permission_profile = PermissionProfile::from_legacy_sandbox_policy_for_cwd(
-            &settings.sandbox_policy.to_core(),
-            settings.cwd.as_path(),
-        );
-        let permission_snapshot = PermissionProfileSnapshot::from_session_snapshot(
-            permission_profile,
-            settings.active_permission_profile.take().map(Into::into),
-        );
-        if let Err(err) = self
-            .config
-            .permissions
-            .set_permission_profile_from_session_snapshot(permission_snapshot.clone())
-        {
-            tracing::warn!(%err, "failed to sync permissions from ThreadSettingsUpdated");
-            if let Err(replace_err) = self
-                .config
-                .permissions
-                .replace_permission_profile_from_session_snapshot(permission_snapshot)
-            {
-                tracing::error!(
-                    %replace_err,
-                    "failed to replace permissions from ThreadSettingsUpdated after constraint fallback"
-                );
+            match settings.sandbox_policy.try_to_core() {
+                Ok(sandbox_policy) => {
+                    let permission_profile = PermissionProfile::from_legacy_sandbox_policy_for_cwd(
+                        &sandbox_policy,
+                        self.config.cwd.as_path(),
+                    );
+                    let permission_snapshot = PermissionProfileSnapshot::from_session_snapshot(
+                        permission_profile,
+                        settings.active_permission_profile.take().map(Into::into),
+                    );
+                    if let Err(err) = self
+                        .config
+                        .permissions
+                        .set_permission_profile_from_session_snapshot(permission_snapshot.clone())
+                    {
+                        tracing::warn!(%err, "failed to sync permissions from ThreadSettingsUpdated");
+                        if let Err(replace_err) = self
+                            .config
+                            .permissions
+                            .replace_permission_profile_from_session_snapshot(permission_snapshot)
+                        {
+                            tracing::error!(
+                                %replace_err,
+                                "failed to replace permissions from ThreadSettingsUpdated after constraint fallback"
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "local app server returned non-native sandbox paths");
+                    self.add_error_message(format!("Failed to apply thread permissions: {error}"));
+                }
             }
         }
 
@@ -513,8 +552,10 @@ impl ChatWidget {
         self.sync_personality_command_enabled();
         if cwd_changed {
             self.invalidate_connector_scope();
-            self.refresh_skills_for_current_cwd(/*force_reload*/ true);
-            self.refresh_connector_mentions(/*force_refresh*/ false);
+            if !remote {
+                self.refresh_skills_for_current_cwd(/*force_reload*/ true);
+                self.refresh_connector_mentions(/*force_refresh*/ false);
+            }
         }
         self.refresh_plugin_mentions();
         self.request_redraw();

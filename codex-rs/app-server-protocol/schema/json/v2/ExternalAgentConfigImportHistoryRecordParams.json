@@ -4,9 +4,13 @@
     "ExternalAgentConfigImportHistoryRecordSuccessParams": {
       "properties": {
         "cwd": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LegacyAppPathString"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "itemType": {
@@ -66,9 +70,13 @@
     "ExternalAgentConfigImportItemTypeFailure": {
       "properties": {
         "cwd": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LegacyAppPathString"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "errorType": {
@@ -119,6 +127,9 @@
         "MEMORY",
         "SESSIONS"
       ],
+      "type": "string"
+    },
+    "LegacyAppPathString": {
       "type": "string"
     }
   },

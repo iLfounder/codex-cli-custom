@@ -216,8 +216,9 @@ async fn thread_start_warns_for_exec_policy_parse_failure_after_initialize() -> 
         )
     );
     let path = path.context("warning should include a path")?;
+    let path = codex_utils_absolute_path::AbsolutePathBuf::try_from(path)?;
     assert_eq!(
-        normalize_path_for_comparison(path),
+        normalize_path_for_comparison(path.as_path()),
         normalize_path_for_comparison(&rules_path)
     );
     let details = details.context("warning should include details")?;
@@ -430,10 +431,15 @@ async fn thread_start_creates_thread_and_emits_started() -> Result<()> {
     );
     assert_eq!(thread.status, ThreadStatus::Idle);
     assert_eq!(thread.thread_source, Some(ThreadSource::User));
-    let thread_path = thread.path.clone().expect("thread path should be present");
-    assert!(thread_path.is_absolute(), "thread path should be absolute");
+    let thread_path = codex_utils_absolute_path::AbsolutePathBuf::try_from(
+        thread.path.clone().expect("thread path should be present"),
+    )?;
     assert!(
-        !thread_path.exists(),
+        thread_path.as_path().is_absolute(),
+        "thread path should be absolute"
+    );
+    assert!(
+        !thread_path.as_path().exists(),
         "fresh thread rollout should not be materialized until first user message"
     );
 
@@ -576,8 +582,8 @@ async fn thread_start_accepts_absolute_runtime_workspace_roots() -> Result<()> {
 
     let req_id = mcp
         .send_thread_start_request(ThreadStartParams {
-            cwd: Some(cwd.to_string_lossy().to_string()),
-            runtime_workspace_roots: Some(vec![extra_root.abs()]),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(&cwd)),
+            runtime_workspace_roots: Some(vec![extra_root.abs().into()]),
             sandbox: Some(SandboxMode::WorkspaceWrite),
             ..Default::default()
         })
@@ -590,8 +596,11 @@ async fn thread_start_accepts_absolute_runtime_workspace_roots() -> Result<()> {
         ..
     } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(req_id)).await??;
 
-    assert_eq!(response_cwd, cwd.abs());
-    assert_eq!(runtime_workspace_roots, vec![extra_root.abs()]);
+    assert_eq!(
+        response_cwd,
+        codex_utils_path_uri::LegacyAppPathString::from_path(&cwd.abs())
+    );
+    assert_eq!(runtime_workspace_roots, vec![extra_root.abs().into()]);
     #[cfg(windows)]
     let _ = sandbox;
     #[cfg(not(windows))]
@@ -611,7 +620,7 @@ async fn thread_start_accepts_absolute_runtime_workspace_roots() -> Result<()> {
     environment.runtime_workspace_roots = Some(vec![environment_root.abs().into()]);
     let req_id = mcp
         .send_thread_start_request(ThreadStartParams {
-            runtime_workspace_roots: Some(vec![extra_root.abs()]),
+            runtime_workspace_roots: Some(vec![extra_root.abs().into()]),
             environments: Some(vec![environment]),
             sandbox: Some(SandboxMode::WorkspaceWrite),
             ..Default::default()
@@ -622,7 +631,7 @@ async fn thread_start_accepts_absolute_runtime_workspace_roots() -> Result<()> {
         sandbox,
         ..
     } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(req_id)).await??;
-    assert_eq!(runtime_workspace_roots, vec![environment_root.abs()]);
+    assert_eq!(runtime_workspace_roots, vec![environment_root.abs().into()]);
     #[cfg(windows)]
     let _ = sandbox;
     #[cfg(not(windows))]
@@ -659,7 +668,9 @@ async fn thread_start_excludes_profile_workspace_roots_from_runtime_workspace_ro
 
     let req_id = mcp
         .send_thread_start_request(ThreadStartParams {
-            cwd: Some(cwd.path().to_string_lossy().to_string()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                cwd.path(),
+            )),
             ..Default::default()
         })
         .await?;
@@ -671,7 +682,9 @@ async fn thread_start_excludes_profile_workspace_roots_from_runtime_workspace_ro
 
     assert_eq!(
         runtime_workspace_roots,
-        vec![cwd.path().to_path_buf().abs()]
+        vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+            &cwd.path().to_path_buf().abs()
+        )]
     );
 
     Ok(())
@@ -695,7 +708,9 @@ async fn thread_start_rejects_unknown_environment_as_invalid_request() -> Result
 
     let request_id = mcp
         .send_thread_start_request(ThreadStartParams {
-            cwd: Some(workspace.to_string_lossy().into_owned()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                &workspace,
+            )),
             sandbox: Some(SandboxMode::WorkspaceWrite),
             environments: Some(vec![TurnEnvironmentParams {
                 environment_id: "missing".to_string(),
@@ -818,7 +833,9 @@ async fn thread_start_response_includes_loaded_instruction_sources() -> Result<(
 
     let request_id = mcp
         .send_thread_start_request(ThreadStartParams {
-            cwd: Some(workspace.path().display().to_string()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                workspace.path(),
+            )),
             ..Default::default()
         })
         .await?;
@@ -829,7 +846,7 @@ async fn thread_start_response_includes_loaded_instruction_sources() -> Result<(
 
     let instruction_sources = instruction_sources
         .into_iter()
-        .map(|path| normalize_path_for_comparison(path.as_str()))
+        .map(|path| normalize_path_for_comparison(path.into_string()))
         .collect::<Vec<_>>();
     let expected_instruction_sources = vec![
         std::fs::canonicalize(global_agents_path)?,
@@ -864,7 +881,9 @@ async fn thread_start_response_excludes_empty_project_instruction_source() -> Re
 
     let request_id = mcp
         .send_thread_start_request(ThreadStartParams {
-            cwd: Some(workspace.path().display().to_string()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                workspace.path(),
+            )),
             ..Default::default()
         })
         .await?;
@@ -875,7 +894,7 @@ async fn thread_start_response_excludes_empty_project_instruction_source() -> Re
 
     let instruction_sources = instruction_sources
         .into_iter()
-        .map(|path| normalize_path_for_comparison(path.as_str()))
+        .map(|path| normalize_path_for_comparison(path.into_string()))
         .collect::<Vec<_>>();
     let expected_instruction_sources = vec![normalize_path_for_comparison(std::fs::canonicalize(
         global_agents_path,
@@ -904,7 +923,9 @@ async fn thread_start_without_selected_environment_includes_only_global_instruct
 
     let request_id = mcp
         .send_thread_start_request(ThreadStartParams {
-            cwd: Some(workspace.path().display().to_string()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                workspace.path(),
+            )),
             environments: Some(Vec::new()),
             ..Default::default()
         })
@@ -918,7 +939,7 @@ async fn thread_start_without_selected_environment_includes_only_global_instruct
     assert_eq!(
         instruction_sources
             .into_iter()
-            .map(|path| normalize_path_for_comparison(path.as_str()))
+            .map(|path| normalize_path_for_comparison(path.into_string()))
             .collect::<Vec<_>>(),
         vec![normalize_path_for_comparison(std::fs::canonicalize(
             global_agents_path,
@@ -1040,7 +1061,9 @@ model_reasoning_effort = "high"
         reasoning_effort, ..
     } = mcp
         .start_thread(ThreadStartParams {
-            cwd: Some(workspace.path().to_string_lossy().into_owned()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                workspace.path(),
+            )),
             ..Default::default()
         })
         .await?;
@@ -1770,7 +1793,9 @@ model_reasoning_effort = "high"
 
     let first_response = mcp
         .start_thread(ThreadStartParams {
-            cwd: Some(workspace.path().display().to_string()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                workspace.path(),
+            )),
             sandbox: Some(SandboxMode::WorkspaceWrite),
             ..Default::default()
         })
@@ -1782,7 +1807,9 @@ model_reasoning_effort = "high"
         ..
     } = mcp
         .start_thread(ThreadStartParams {
-            cwd: Some(workspace.path().display().to_string()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                workspace.path(),
+            )),
             ..Default::default()
         })
         .await?;
@@ -1847,7 +1874,9 @@ required = true
 
     let request_id = mcp
         .send_thread_start_request(ThreadStartParams {
-            cwd: Some(workspace.path().display().to_string()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                workspace.path(),
+            )),
             permissions: Some(BUILT_IN_PERMISSION_PROFILE_WORKSPACE.to_string()),
             environments: Some(Vec::new()),
             ..Default::default()
@@ -1911,7 +1940,9 @@ async fn thread_start_with_nested_git_cwd_respects_effective_permissions_for_pro
 
     let ThreadStartResponse { sandbox, .. } = mcp
         .start_thread(ThreadStartParams {
-            cwd: Some(nested.display().to_string()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                &nested,
+            )),
             sandbox: Some(SandboxMode::WorkspaceWrite),
             ..Default::default()
         })
@@ -1955,7 +1986,9 @@ async fn thread_start_with_read_only_sandbox_does_not_persist_project_trust() ->
         .await?;
 
     mcp.start_thread(ThreadStartParams {
-        cwd: Some(workspace.path().display().to_string()),
+        cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+            workspace.path(),
+        )),
         ..Default::default()
     })
     .await?;
@@ -1989,7 +2022,9 @@ async fn thread_start_preserves_untrusted_project_trust() -> Result<()> {
         .await?;
 
     mcp.start_thread(ThreadStartParams {
-        cwd: Some(workspace.path().display().to_string()),
+        cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+            workspace.path(),
+        )),
         sandbox: Some(SandboxMode::WorkspaceWrite),
         ..Default::default()
     })
@@ -2031,7 +2066,9 @@ model_reasoning_effort = "high"
         ..
     } = mcp
         .start_thread(ThreadStartParams {
-            cwd: Some(workspace.path().display().to_string()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                workspace.path(),
+            )),
             sandbox: Some(SandboxMode::WorkspaceWrite),
             ..Default::default()
         })

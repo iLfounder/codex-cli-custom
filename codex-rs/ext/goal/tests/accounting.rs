@@ -9,6 +9,7 @@ use codex_extension_api::ToolCallOutcome;
 use codex_extension_api::ToolName;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::protocol::TokenUsage;
+use codex_state::GoalVersion;
 use codex_state::ThreadGoalStatus;
 use pretty_assertions::assert_eq;
 
@@ -67,7 +68,7 @@ fn execution_failures_do_not_transfer_to_a_replacement_goal() {
     ] {
         let turn_id = format!("turn-{turn}");
         state.start_turn(&turn_id, ModeKind::Default, &TokenUsage::default());
-        state.mark_turn_goal_active(&turn_id, goal_id);
+        state.mark_turn_goal_active(&turn_id, goal_version(goal_id, 1));
         state.record_tool_outcome(
             &turn_id,
             &ToolName::plain("exec"),
@@ -76,7 +77,7 @@ fn execution_failures_do_not_transfer_to_a_replacement_goal() {
             },
         );
         if let Some(replacement_goal_id) = replacement_goal_id {
-            state.mark_current_turn_goal_active(replacement_goal_id);
+            state.mark_current_turn_goal_active(goal_version(replacement_goal_id, 1));
         }
 
         assert_eq!(
@@ -102,7 +103,7 @@ fn script_errors_and_failures_before_execution_do_not_block_goals() {
         for turn in 1..=3 {
             let turn_id = format!("turn-{turn}");
             state.start_turn(&turn_id, ModeKind::Default, &TokenUsage::default());
-            state.mark_turn_goal_active(&turn_id, "goal");
+            state.mark_turn_goal_active(&turn_id, goal_version("goal", 1));
             state.record_tool_outcome(&turn_id, &ToolName::plain("exec"), outcome);
 
             assert_eq!(None, state.execution_failure_goal(&turn_id));
@@ -141,7 +142,7 @@ fn successful_tool_resets_failures_before_an_interrupted_turn_ends() {
     ] {
         let turn_id = format!("turn-{turn}");
         state.start_turn(&turn_id, ModeKind::Default, &TokenUsage::default());
-        state.mark_turn_goal_active(&turn_id, "goal");
+        state.mark_turn_goal_active(&turn_id, goal_version("goal", 1));
         state.record_tool_outcome(&turn_id, &ToolName::plain(tool_name), outcome);
         if turn != 3 {
             assert_eq!(None, state.execution_failure_goal(&turn_id));
@@ -154,7 +155,7 @@ fn successful_tool_resets_failures_before_an_interrupted_turn_ends() {
 fn goal_accounting_preserves_concurrent_descendant_usage_across_checkpoints() {
     let state = GoalAccountingState::default();
     state.start_turn("turn-1", ModeKind::Default, &TokenUsage::default());
-    state.mark_current_turn_goal_active("goal-1");
+    state.mark_current_turn_goal_active(goal_version("goal-1", 1));
     let first_usage = token_usage(
         /*input_tokens*/ 20, /*cached_input_tokens*/ 5, /*output_tokens*/ 8,
         /*reasoning_output_tokens*/ 0, /*total_tokens*/ 28,
@@ -180,6 +181,7 @@ fn goal_accounting_preserves_concurrent_descendant_usage_across_checkpoints() {
     state.mark_progress_accounted_for_status(
         "turn-1",
         &first,
+        goal_version("goal-1", 2),
         ThreadGoalStatus::Active,
         BudgetLimitedGoalDisposition::KeepActive,
     );
@@ -187,7 +189,15 @@ fn goal_accounting_preserves_concurrent_descendant_usage_across_checkpoints() {
     let second = state
         .progress_snapshot("turn-1")
         .expect("usage received during accounting should remain pending");
+    assert_eq!(goal_version("goal-1", 2), second.expected_version);
     assert_eq!(8, second.token_delta);
+}
+
+fn goal_version(goal_id: &str, revision: i64) -> GoalVersion {
+    GoalVersion {
+        goal_id: goal_id.to_string(),
+        revision,
+    }
 }
 
 fn token_usage(

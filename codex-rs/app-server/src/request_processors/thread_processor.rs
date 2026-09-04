@@ -266,19 +266,24 @@ fn collect_resume_override_mismatches(
             config_snapshot.service_tier
         ));
     }
-    if let Some(requested_cwd) = request.cwd.as_deref() {
-        let requested_cwd_path = std::path::PathBuf::from(requested_cwd);
-        if requested_cwd_path != config_snapshot.cwd().as_path() {
+    if let Some(requested_cwd) = request.cwd.as_ref() {
+        let requested_cwd_matches = resolve_request_cwd(Some(requested_cwd.clone()))
+            .ok()
+            .flatten()
+            .is_some_and(|cwd| cwd.as_path() == config_snapshot.cwd().as_path());
+        if !requested_cwd_matches {
             mismatch_details.push(format!(
                 "cwd requested={} active={}",
-                requested_cwd_path.display(),
+                requested_cwd,
                 config_snapshot.cwd().display()
             ));
         }
     }
     if let Some(requested_runtime_workspace_roots) = request.runtime_workspace_roots.as_ref() {
-        let requested_runtime_workspace_roots = requested_runtime_workspace_roots.to_vec();
-        if requested_runtime_workspace_roots != config_snapshot.workspace_roots {
+        let requested_roots_match =
+            resolve_runtime_workspace_roots(requested_runtime_workspace_roots.clone())
+                .is_ok_and(|roots| roots.as_slice() == config_snapshot.workspace_roots.as_slice());
+        if !requested_roots_match {
             mismatch_details.push(format!(
                 "runtime_workspace_roots requested={requested_runtime_workspace_roots:?} active={:?}",
                 config_snapshot.workspace_roots
@@ -402,10 +407,13 @@ fn normalize_thread_list_cwd_filters(
     };
     let mut normalized_cwds = Vec::with_capacity(cwds.len());
     for cwd in cwds {
-        let cwd = AbsolutePathBuf::relative_to_current_dir(cwd.as_str())
+        let cwd_text = cwd.into_string();
+        let cwd = AbsolutePathBuf::relative_to_current_dir(&cwd_text)
             .map(AbsolutePathBuf::into_path_buf)
             .map_err(|err| {
-                invalid_params(format!("invalid thread/list cwd filter `{cwd}`: {err}"))
+                invalid_params(format!(
+                    "invalid thread/list cwd filter `{cwd_text}`: {err}"
+                ))
             })?;
         normalized_cwds.push(cwd);
     }
@@ -1745,7 +1753,10 @@ impl ThreadRequestProcessor {
                 return Err(invalid_request(format!("project not found: {project_id}")));
             }
         }
-        let runtime_workspace_roots = runtime_workspace_roots.map(resolve_runtime_workspace_roots);
+        let runtime_workspace_roots = runtime_workspace_roots
+            .map(resolve_runtime_workspace_roots)
+            .transpose()?;
+        let cwd = resolve_request_cwd(cwd)?;
         let environments =
             resolve_turn_environment_selections(self.thread_manager.as_ref(), environments)?;
         let mut typesafe_overrides = self.build_thread_config_overrides(
@@ -1934,7 +1945,7 @@ impl ThreadRequestProcessor {
         );
 
         let sandbox = config_snapshot.sandbox_policy().into();
-        let cwd = config_snapshot.cwd().clone();
+        let cwd = config_snapshot.cwd().clone().into();
         let active_permission_profile =
             thread_response_active_permission_profile(config_snapshot.active_permission_profile);
         let thread_originator = config_snapshot.originator.clone();
@@ -1944,7 +1955,11 @@ impl ThreadRequestProcessor {
             model_provider: config_snapshot.model_provider_id,
             service_tier: config_snapshot.service_tier,
             cwd,
-            runtime_workspace_roots: config_snapshot.workspace_roots,
+            runtime_workspace_roots: config_snapshot
+                .workspace_roots
+                .into_iter()
+                .map(Into::into)
+                .collect(),
             instruction_sources,
             approval_policy: config_snapshot.approval_policy.into(),
             approvals_reviewer: config_snapshot.approvals_reviewer.into(),
@@ -2421,8 +2436,12 @@ impl ThreadRequestProcessor {
             model: config_snapshot.model,
             model_provider: config_snapshot.model_provider_id,
             service_tier: config_snapshot.service_tier,
-            cwd,
-            runtime_workspace_roots: config_snapshot.workspace_roots,
+            cwd: cwd.into(),
+            runtime_workspace_roots: config_snapshot
+                .workspace_roots
+                .into_iter()
+                .map(Into::into)
+                .collect(),
             instruction_sources,
             approval_policy: config_snapshot.approval_policy.into(),
             approvals_reviewer: config_snapshot.approvals_reviewer.into(),
@@ -2469,7 +2488,7 @@ impl ThreadRequestProcessor {
         model: Option<String>,
         model_provider: Option<String>,
         service_tier: Option<Option<String>>,
-        cwd: Option<String>,
+        cwd: Option<AbsolutePathBuf>,
         runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
         approval_policy: Option<codex_app_server_protocol::AskForApproval>,
         approvals_reviewer: Option<codex_app_server_protocol::ApprovalsReviewer>,
@@ -2483,7 +2502,7 @@ impl ThreadRequestProcessor {
             model,
             model_provider,
             service_tier,
-            cwd: cwd.map(PathBuf::from),
+            cwd: cwd.map(AbsolutePathBuf::into_path_buf),
             workspace_roots: runtime_workspace_roots,
             default_permissions: permissions,
             approval_policy: approval_policy
@@ -4439,6 +4458,9 @@ impl ThreadRequestProcessor {
         thread_id: ThreadId,
         connection_ids: Vec<ConnectionId>,
     ) {
+        let Ok(_thread_list_state_permit) = self.acquire_thread_list_state_permit().await else {
+            return;
+        };
         let mut raw_events_enabled = false;
         if let Ok(thread) = self.thread_manager.get_thread(thread_id).await {
             let config_snapshot = thread.config_snapshot().await;
@@ -4559,6 +4581,10 @@ impl ThreadRequestProcessor {
             exclude_turns,
             initial_turns_page,
         } = params;
+        let path = path
+            .map(|path| resolve_absolute_api_path(path, "thread path"))
+            .transpose()?
+            .map(AbsolutePathBuf::into_path_buf);
         let include_turns = !exclude_turns;
         let has_supplied_history = history.is_some();
 
@@ -4597,6 +4623,9 @@ impl ThreadRequestProcessor {
             && !can_accept_direct_input(thread_history.get_multi_agent_version(), &source)
         {
             let child_thread_id = resumed_history.conversation_id;
+            // The parent-owned reload path prepares its own resume authority. Release the
+            // app-server preparation first so it does not hold the same per-thread writer lock.
+            drop(prepared_resume);
             self.thread_manager
                 .ensure_multi_agent_v2_child_loaded(child_thread_id)
                 .await
@@ -4651,7 +4680,10 @@ impl ThreadRequestProcessor {
             None
         };
         let history_cwd = history_cwd.or_else(|| thread_history.session_cwd());
-        let runtime_workspace_roots = runtime_workspace_roots.map(resolve_runtime_workspace_roots);
+        let runtime_workspace_roots = runtime_workspace_roots
+            .map(resolve_runtime_workspace_roots)
+            .transpose()?;
+        let cwd = resolve_request_cwd(cwd)?;
         let mut typesafe_overrides = self.build_thread_config_overrides(
             model,
             model_provider,
@@ -4875,8 +4907,12 @@ impl ThreadRequestProcessor {
                         model: session_configured.model,
                         model_provider: session_configured.model_provider_id,
                         service_tier: session_configured.service_tier,
-                        cwd: session_configured.cwd,
-                        runtime_workspace_roots: config_snapshot.workspace_roots,
+                        cwd: session_configured.cwd.into(),
+                        runtime_workspace_roots: config_snapshot
+                            .workspace_roots
+                            .into_iter()
+                            .map(Into::into)
+                            .collect(),
                         instruction_sources,
                         approval_policy: session_configured.approval_policy.into(),
                         approvals_reviewer: session_configured.approvals_reviewer.into(),
@@ -5025,6 +5061,14 @@ impl ThreadRequestProcessor {
         app_server_client_version: Option<String>,
         cold_resume_history: Option<&[RolloutItem]>,
     ) -> Result<RunningThreadResumeResult, JSONRPCErrorError> {
+        let requested_native_path = params
+            .path
+            .as_ref()
+            .map(|path| {
+                AbsolutePathBuf::try_from(path.clone())
+                    .map_err(|err| invalid_request(format!("invalid thread resume path: {err}")))
+            })
+            .transpose()?;
         let running_thread = if params.history.is_some() {
             if let Ok(existing_thread_id) = ThreadId::from_string(&params.thread_id)
                 && self
@@ -5049,7 +5093,7 @@ impl ThreadRequestProcessor {
                 )
                 .await?;
             Some((existing_thread_id, existing_thread, source_thread))
-        } else if let Some(requested_path) = params.path.as_ref() {
+        } else if let Some(requested_path) = requested_native_path.as_ref() {
             let mut running_thread = None;
             for thread_id in self.thread_manager.list_thread_ids().await {
                 let Ok(existing_thread) = self.thread_manager.get_thread(thread_id).await else {
@@ -5085,7 +5129,8 @@ impl ThreadRequestProcessor {
             let active_path = existing_thread_rollout_path
                 .as_ref()
                 .or(source_thread.rollout_path.as_ref());
-            if let (Some(requested_path), Some(active_path)) = (params.path.as_ref(), active_path)
+            if let (Some(requested_path), Some(active_path)) =
+                (requested_native_path.as_ref(), active_path)
                 && !path_utils::paths_match_after_normalization(requested_path, active_path)
             {
                 return Err(invalid_request(format!(
@@ -5639,7 +5684,7 @@ impl ThreadRequestProcessor {
         thread.can_accept_direct_input = Some(can_accept_direct_input);
         thread.id = thread_id.to_string();
         thread.session_id = session_id;
-        thread.path = Some(rollout_path.to_path_buf());
+        thread.path = Some(LegacyAppPathString::from_path(rollout_path));
         if include_turns {
             let history_items = thread_history.get_rollout_items();
             populate_thread_turns_from_history(
@@ -5702,6 +5747,10 @@ impl ThreadRequestProcessor {
             exclude_turns,
             defer_goal_continuation,
         } = params;
+        let path = path
+            .map(|path| resolve_absolute_api_path(path, "thread path"))
+            .transpose()?
+            .map(AbsolutePathBuf::into_path_buf);
         let include_turns = !exclude_turns;
         if sandbox.is_some() && permissions.is_some() {
             return Err(invalid_request(
@@ -5821,7 +5870,10 @@ impl ThreadRequestProcessor {
         } else {
             Some(cli_overrides)
         };
-        let runtime_workspace_roots = runtime_workspace_roots.map(resolve_runtime_workspace_roots);
+        let runtime_workspace_roots = runtime_workspace_roots
+            .map(resolve_runtime_workspace_roots)
+            .transpose()?;
+        let cwd = resolve_request_cwd(cwd)?;
         let mut typesafe_overrides = self.build_thread_config_overrides(
             model,
             model_provider,
@@ -6159,8 +6211,12 @@ impl ThreadRequestProcessor {
             model: session_configured.model,
             model_provider: session_configured.model_provider_id,
             service_tier: session_configured.service_tier,
-            cwd: session_configured.cwd,
-            runtime_workspace_roots: config_snapshot.workspace_roots,
+            cwd: session_configured.cwd.into(),
+            runtime_workspace_roots: config_snapshot
+                .workspace_roots
+                .into_iter()
+                .map(Into::into)
+                .collect(),
             instruction_sources,
             approval_policy: session_configured.approval_policy.into(),
             approvals_reviewer: session_configured.approvals_reviewer.into(),
@@ -7046,8 +7102,10 @@ pub(crate) fn thread_from_stored_thread(
         updated_at: thread.updated_at.timestamp(),
         recency_at: Some(thread.recency_at.timestamp()),
         status: ThreadStatus::NotLoaded,
-        path,
-        cwd,
+        path: path
+            .as_deref()
+            .map(codex_utils_path_uri::LegacyAppPathString::from_path),
+        cwd: cwd.into(),
         cli_version: thread.cli_version,
         agent_nickname: source.get_nickname(),
         agent_role: source.get_agent_role(),
@@ -7219,8 +7277,10 @@ fn build_thread_from_snapshot(
         updated_at: now,
         recency_at: Some(now),
         status: ThreadStatus::NotLoaded,
-        path,
-        cwd: config_snapshot.cwd().clone(),
+        path: path
+            .as_deref()
+            .map(codex_utils_path_uri::LegacyAppPathString::from_path),
+        cwd: config_snapshot.cwd().clone().into(),
         cli_version: env!("CARGO_PKG_VERSION").to_string(),
         agent_nickname: config_snapshot.session_source.get_nickname(),
         agent_role: config_snapshot.session_source.get_agent_role(),

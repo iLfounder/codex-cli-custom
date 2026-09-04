@@ -4415,7 +4415,7 @@ impl ChatComposer {
                     description,
                     insert_text: format!("${skill_name}"),
                     search_terms,
-                    path: Some(skill.path.to_string_lossy().into_owned()),
+                    path: Some(skill.path.render_for_ui()),
                     category_tag: Some("[Skill]".to_string()),
                     sort_rank: 1,
                 });
@@ -7122,7 +7122,9 @@ mod tests {
             short_description: None,
             interface: None,
             dependencies: None,
-            path: test_path_buf(&format!("/tmp/{name}/SKILL.md")).abs(),
+            path: codex_utils_path_uri::LegacyAppPathString::from_abs_path(
+                &test_path_buf(&format!("/tmp/{name}/SKILL.md")).abs(),
+            ),
             scope: crate::test_support::skill_scope_user(),
             enabled: true,
             plugin_id: None,
@@ -7767,7 +7769,9 @@ mod tests {
         composer.set_text_content("$".to_string(), Vec::new(), Vec::new());
         assert!(matches!(composer.popups.active, ActivePopup::None));
 
-        let skill_path = test_path_buf("/tmp/skill/SKILL.md").abs();
+        let skill_path = codex_utils_path_uri::LegacyAppPathString::from_abs_path(
+            &test_path_buf("/tmp/skill/SKILL.md").abs(),
+        );
         composer.set_skill_mentions(Some(vec![SkillMetadata {
             name: "codex".to_string(),
             description: "Primary personal Codex repo skill.".to_string(),
@@ -7787,12 +7791,14 @@ mod tests {
             .selected_mention()
             .expect("expected skill mention to be selected");
         assert_eq!(mention.insert_text, "$codex".to_string());
-        assert_eq!(mention.path, Some(skill_path.display().to_string()));
+        assert_eq!(mention.path, Some(skill_path.render_for_ui()));
     }
 
     #[test]
     fn mention_items_keep_direct_skills_and_apps_with_unified_mentions() {
-        let skill_path = test_path_buf("/tmp/repo/google-calendar/SKILL.md").abs();
+        let skill_path = codex_utils_path_uri::LegacyAppPathString::from_abs_path(
+            &test_path_buf("/tmp/repo/google-calendar/SKILL.md").abs(),
+        );
         let (tx, _rx) = unbounded_channel::<AppEvent>();
         let sender = AppEventSender::new(tx);
         let mut composer = ChatComposer::new(
@@ -7859,7 +7865,7 @@ mod tests {
         let mentions = composer.mention_items();
         assert_eq!(mentions.len(), 3);
         assert_eq!(mentions[0].category_tag, Some("[Skill]".to_string()));
-        assert_eq!(mentions[0].path, Some(skill_path.display().to_string()));
+        assert_eq!(mentions[0].path, Some(skill_path.render_for_ui()));
         assert_eq!(mentions[0].display_name, "Google Calendar".to_string());
         assert_eq!(mentions[1].category_tag, Some("[Plugin]".to_string()));
         assert_eq!(
@@ -7879,7 +7885,7 @@ mod tests {
             vec![
                 (
                     "$google-calendar:availability".to_string(),
-                    Some(skill_path.display().to_string()),
+                    Some(skill_path.render_for_ui()),
                 ),
                 (
                     "$google-calendar".to_string(),
@@ -8154,7 +8160,9 @@ mod tests {
                         default_prompt: None,
                     }),
                     dependencies: None,
-                    path: test_path_buf("/tmp/repo/google-calendar/SKILL.md").abs(),
+                    path: codex_utils_path_uri::LegacyAppPathString::from_abs_path(
+                        &test_path_buf("/tmp/repo/google-calendar/SKILL.md").abs(),
+                    ),
                     scope: crate::test_support::skill_scope_repo(),
                     enabled: true,
                     plugin_id: None,

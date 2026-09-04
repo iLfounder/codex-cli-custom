@@ -12,7 +12,7 @@ use codex_protocol::protocol::SessionSource as CoreSessionSource;
 use codex_protocol::protocol::SubAgentSource as CoreSubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode as CoreThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource as CoreThreadSource;
-use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
 #[cfg(test)]
 use schemars::r#gen::SchemaGenerator;
 #[cfg(test)]
@@ -20,7 +20,6 @@ use schemars::schema::Schema;
 use serde::Deserialize;
 use serde::Serialize;
 use std::fmt;
-use std::path::PathBuf;
 use thiserror::Error;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -252,9 +251,9 @@ pub struct Thread {
     /// Current runtime status for the thread.
     pub status: ThreadStatus,
     /// [UNSTABLE] Path to the thread on disk.
-    pub path: Option<PathBuf>,
+    pub path: Option<LegacyAppPathString>,
     /// Working directory captured for the thread.
-    pub cwd: AbsolutePathBuf,
+    pub cwd: LegacyAppPathString,
     /// Version of the CLI that created the thread.
     pub cli_version: String,
     /// Origin of the thread (CLI, VSCode, codex exec, codex app-server, etc.).
@@ -307,8 +306,8 @@ struct ThreadCompatibility {
     updated_at: i64,
     recency_at: Option<i64>,
     status: ThreadStatus,
-    path: Option<PathBuf>,
-    cwd: AbsolutePathBuf,
+    path: Option<LegacyAppPathString>,
+    cwd: LegacyAppPathString,
     cli_version: String,
     source: SessionSource,
     can_accept_direct_input: Option<bool>,

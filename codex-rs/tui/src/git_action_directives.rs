@@ -53,12 +53,23 @@ impl ParsedAssistantMarkdown {
 }
 
 pub(crate) fn parse_assistant_markdown(markdown: &str, cwd: &Path) -> ParsedAssistantMarkdown {
+    parse_assistant_markdown_with_optional_cwd(markdown, Some(cwd))
+}
+
+pub(crate) fn parse_assistant_markdown_without_cwd(markdown: &str) -> ParsedAssistantMarkdown {
+    parse_assistant_markdown_with_optional_cwd(markdown, None)
+}
+
+fn parse_assistant_markdown_with_optional_cwd(
+    markdown: &str,
+    cwd: Option<&Path>,
+) -> ParsedAssistantMarkdown {
     let mut git_actions = Vec::new();
     let mut seen = HashSet::new();
     let mut visible_lines = Vec::new();
 
     for line in markdown.lines() {
-        if let Some(rewritten) = rewrite_code_comment_line(line, cwd) {
+        if let Some(rewritten) = cwd.and_then(|cwd| rewrite_code_comment_line(line, cwd)) {
             visible_lines.push(rewritten.trim_end().to_string());
             continue;
         }

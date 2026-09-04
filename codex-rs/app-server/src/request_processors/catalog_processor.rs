@@ -30,8 +30,14 @@ fn skills_to_info(
                     codex_app_server_protocol::SkillInterface {
                         display_name: interface.display_name,
                         short_description: interface.short_description,
-                        icon_small: interface.icon_small,
-                        icon_large: interface.icon_large,
+                        icon_small: interface
+                            .icon_small
+                            .as_deref()
+                            .map(LegacyAppPathString::from_path),
+                        icon_large: interface
+                            .icon_large
+                            .as_deref()
+                            .map(LegacyAppPathString::from_path),
                         icon_small_url: None,
                         icon_large_url: None,
                         brand_color: interface.brand_color,
@@ -54,7 +60,7 @@ fn skills_to_info(
                             .collect(),
                     }
                 }),
-                path: skill.path_to_skills_md.clone(),
+                path: LegacyAppPathString::from_abs_path(&skill.path_to_skills_md),
                 scope: skill.scope.into(),
                 enabled,
                 plugin_id: skill.plugin_id.clone(),
@@ -88,7 +94,7 @@ fn hooks_to_info(hooks: &[codex_hooks::HookListEntry]) -> Vec<HookMetadata> {
                 timeout_sec: hook.timeout_sec,
                 status_message: hook.status_message.clone(),
                 additional_context_limit: hook.additional_context_limit,
-                source_path: hook.source_path.clone(),
+                source_path: LegacyAppPathString::from_abs_path(&hook.source_path),
                 source: hook.source.into(),
                 plugin_id: hook.plugin_id.clone(),
                 display_order: hook.display_order,
@@ -107,7 +113,7 @@ fn errors_to_info(
     errors
         .iter()
         .map(|err| codex_app_server_protocol::SkillErrorInfo {
-            path: err.path.to_path_buf(),
+            path: LegacyAppPathString::from_abs_path(&err.path),
             message: err.message.clone(),
         })
         .collect()
@@ -448,9 +454,9 @@ impl CatalogRequestProcessor {
         let PermissionProfileListParams { cursor, limit, cwd } = params;
         let config_layer_stack = match cwd {
             Some(cwd) => {
-                let cwd = PathBuf::from(cwd);
+                let cwd = resolve_absolute_api_path(cwd, "permissionProfile/list cwd")?;
                 let (_, config_layer_stack) = self
-                    .resolve_cwd_config(&cwd)
+                    .resolve_cwd_config(cwd.as_path())
                     .await
                     .map_err(|err| internal_error(format!("failed to reload config: {err}")))?;
                 config_layer_stack
@@ -514,7 +520,12 @@ impl CatalogRequestProcessor {
         let cwds = if cwds.is_empty() {
             vec![self.config.cwd.to_path_buf()]
         } else {
-            cwds
+            cwds.into_iter()
+                .map(|cwd| {
+                    resolve_absolute_api_path(cwd, "skills/list cwd")
+                        .map(AbsolutePathBuf::into_path_buf)
+                })
+                .collect::<Result<Vec<_>, _>>()?
         };
 
         let (config, execution_services) =
@@ -544,10 +555,10 @@ impl CatalogRequestProcessor {
                             return (
                                 index,
                                 codex_app_server_protocol::SkillsListEntry {
-                                    cwd,
+                                    cwd: LegacyAppPathString::from_path(&cwd),
                                     skills: Vec::new(),
                                     errors: vec![codex_app_server_protocol::SkillErrorInfo {
-                                        path: error_path,
+                                        path: LegacyAppPathString::from_path(&error_path),
                                         message: error.message,
                                     }],
                                 },
@@ -573,7 +584,7 @@ impl CatalogRequestProcessor {
                     (
                         index,
                         codex_app_server_protocol::SkillsListEntry {
-                            cwd,
+                            cwd: LegacyAppPathString::from_path(&cwd),
                             skills,
                             errors,
                         },
@@ -593,6 +604,10 @@ impl CatalogRequestProcessor {
         params: SkillsExtraRootsSetParams,
     ) -> Result<SkillsExtraRootsSetResponse, JSONRPCErrorError> {
         let SkillsExtraRootsSetParams { extra_roots } = params;
+        let extra_roots = extra_roots
+            .into_iter()
+            .map(|root| resolve_absolute_api_path(root, "skills extra root"))
+            .collect::<Result<Vec<_>, _>>()?;
         self.skills_watcher
             .register_runtime_extra_roots(&extra_roots);
         self.thread_manager
@@ -615,7 +630,12 @@ impl CatalogRequestProcessor {
         let cwds = if cwds.is_empty() {
             vec![self.config.cwd.to_path_buf()]
         } else {
-            cwds
+            cwds.into_iter()
+                .map(|cwd| {
+                    resolve_absolute_api_path(cwd, "hooks/list cwd")
+                        .map(AbsolutePathBuf::into_path_buf)
+                })
+                .collect::<Result<Vec<_>, _>>()?
         };
 
         let plugins_manager = self.thread_manager.plugins_manager();
@@ -634,11 +654,11 @@ impl CatalogRequestProcessor {
                 Err(err) => {
                     let error_path = cwd.clone();
                     data.push(codex_app_server_protocol::HooksListEntry {
-                        cwd,
+                        cwd: LegacyAppPathString::from_path(&cwd),
                         hooks: Vec::new(),
                         warnings: Vec::new(),
                         errors: vec![codex_app_server_protocol::HookErrorInfo {
-                            path: error_path,
+                            path: LegacyAppPathString::from_path(&error_path),
                             message: err.to_string(),
                         }],
                     });
@@ -665,7 +685,7 @@ impl CatalogRequestProcessor {
                 ..Default::default()
             });
             data.push(codex_app_server_protocol::HooksListEntry {
-                cwd,
+                cwd: LegacyAppPathString::from_path(&cwd),
                 hooks: hooks_to_info(&hooks.hooks),
                 warnings: hooks.warnings,
                 errors: Vec::new(),
@@ -685,7 +705,7 @@ impl CatalogRequestProcessor {
         } = params;
         let edit = match (path, name) {
             (Some(path), None) => ConfigEdit::SetSkillConfig {
-                path: path.into_path_buf(),
+                path: resolve_absolute_api_path(path, "skill path")?.into_path_buf(),
                 enabled,
             },
             (None, Some(name)) if !name.trim().is_empty() => {

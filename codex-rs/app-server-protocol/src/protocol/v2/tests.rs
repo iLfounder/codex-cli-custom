@@ -70,8 +70,27 @@ fn absolute_path(path: &str) -> AbsolutePathBuf {
     test_path_buf(&path).abs()
 }
 
+fn api_path(path: &str) -> LegacyAppPathString {
+    LegacyAppPathString::from_string(absolute_path_string(path))
+}
+
 fn test_absolute_path() -> AbsolutePathBuf {
     absolute_path("readable")
+}
+
+fn assert_json_path_round_trip<T>(value: JsonValue, pointers: &[&str])
+where
+    T: serde::de::DeserializeOwned + serde::Serialize,
+{
+    let decoded: T = serde_json::from_value(value.clone()).expect("foreign paths should decode");
+    let encoded = serde_json::to_value(decoded).expect("foreign paths should encode");
+    for pointer in pointers {
+        assert_eq!(
+            encoded.pointer(pointer),
+            value.pointer(pointer),
+            "wire path changed at {pointer}"
+        );
+    }
 }
 
 #[test]
@@ -443,7 +462,7 @@ fn thread_resume_response_round_trips_initial_turns_page() {
             recency_at: Some(1),
             status: ThreadStatus::Idle,
             path: None,
-            cwd: absolute_path("tmp"),
+            cwd: api_path("tmp"),
             cli_version: "0.0.0".to_string(),
             source: SessionSource::Exec,
             can_accept_direct_input: None,
@@ -457,7 +476,7 @@ fn thread_resume_response_round_trips_initial_turns_page() {
         model: "gpt-5".to_string(),
         model_provider: "openai".to_string(),
         service_tier: None,
-        cwd: absolute_path("tmp"),
+        cwd: api_path("tmp"),
         runtime_workspace_roots: Vec::new(),
         instruction_sources: Vec::new(),
         approval_policy: AskForApproval::OnRequest,
@@ -599,7 +618,9 @@ fn thread_list_params_accepts_single_cwd() {
 
     assert_eq!(
         params.cwd,
-        Some(ThreadListCwdFilter::One("/workspace".to_string()))
+        Some(ThreadListCwdFilter::One(LegacyAppPathString::from_string(
+            "/workspace",
+        )))
     );
     assert!(!params.use_state_db_only);
 }
@@ -614,8 +635,8 @@ fn thread_list_params_accepts_multiple_cwds() {
     assert_eq!(
         params.cwd,
         Some(ThreadListCwdFilter::Many(vec![
-            "/workspace".to_string(),
-            "/other-workspace".to_string(),
+            LegacyAppPathString::from_string("/workspace"),
+            LegacyAppPathString::from_string("/other-workspace"),
         ]))
     );
 }
@@ -773,7 +794,7 @@ fn external_agent_config_plugins_details_round_trip() {
         ExternalAgentConfigMigrationItem {
             item_type: ExternalAgentConfigMigrationItemType::Plugins,
             description: "Install supported plugins from Claude settings".to_string(),
-            cwd: Some(PathBuf::from(absolute_path_string("repo"))),
+            cwd: Some(api_path("repo")),
             details: Some(MigrationDetails {
                 plugins: vec![PluginsMigration {
                     marketplace_name: "team-marketplace".to_string(),
@@ -810,7 +831,7 @@ fn external_agent_config_import_params_accept_legacy_plugin_details() {
             migration_items: vec![ExternalAgentConfigMigrationItem {
                 item_type: ExternalAgentConfigMigrationItemType::Plugins,
                 description: "Install supported plugins from Claude settings".to_string(),
-                cwd: Some(PathBuf::from(absolute_path_string("repo"))),
+                cwd: Some(api_path("repo")),
                 details: Some(MigrationDetails {
                     plugins: vec![PluginsMigration {
                         marketplace_name: "team-marketplace".to_string(),
@@ -891,7 +912,7 @@ fn permissions_request_approval_uses_request_permission_profile() {
     }))
     .expect("permissions request should deserialize");
 
-    assert_eq!(params.cwd, absolute_path("repo"));
+    assert_eq!(params.cwd, api_path("repo"));
     assert_eq!(params.environment_id.as_deref(), Some("remote"));
     assert_eq!(
         params.permissions,
@@ -1296,7 +1317,7 @@ fn thread_path_params_deserialize_empty_path_as_none() {
     .expect("thread/resume params deserialize");
     assert_eq!(
         resume_with_path.path,
-        Some(PathBuf::from("/tmp/resume-thread.jsonl"))
+        Some(LegacyAppPathString::from_string("/tmp/resume-thread.jsonl",))
     );
 }
 
@@ -1373,7 +1394,7 @@ fn fs_read_file_response_round_trips_base64_data() {
 #[test]
 fn fs_read_file_params_round_trip() {
     let params = FsReadFileParams {
-        path: absolute_path("tmp/example.txt"),
+        path: api_path("tmp/example.txt"),
     };
 
     let value = serde_json::to_value(&params).expect("serialize fs/readFile params");
@@ -1392,7 +1413,7 @@ fn fs_read_file_params_round_trip() {
 #[test]
 fn fs_create_directory_params_round_trip_with_default_recursive() {
     let params = FsCreateDirectoryParams {
-        path: absolute_path("tmp/example"),
+        path: api_path("tmp/example"),
         recursive: None,
     };
 
@@ -1413,7 +1434,7 @@ fn fs_create_directory_params_round_trip_with_default_recursive() {
 #[test]
 fn fs_write_file_params_round_trip_with_base64_data() {
     let params = FsWriteFileParams {
-        path: absolute_path("tmp/example.bin"),
+        path: api_path("tmp/example.bin"),
         data_base64: "AAE=".to_string(),
     };
 
@@ -1434,8 +1455,8 @@ fn fs_write_file_params_round_trip_with_base64_data() {
 #[test]
 fn fs_copy_params_round_trip_with_recursive_directory_copy() {
     let params = FsCopyParams {
-        source_path: absolute_path("tmp/source"),
-        destination_path: absolute_path("tmp/destination"),
+        source_path: api_path("tmp/source"),
+        destination_path: api_path("tmp/destination"),
         recursive: true,
     };
 
@@ -1513,8 +1534,8 @@ fn fs_changed_notification_round_trips() {
     let notification = FsChangedNotification {
         watch_id: "0195ec6b-1d6f-7c2e-8c7a-56f2c4a8b9d1".to_string(),
         changed_paths: vec![
-            absolute_path("tmp/repo/.git/HEAD"),
-            absolute_path("tmp/repo/.git/FETCH_HEAD"),
+            absolute_path("tmp/repo/.git/HEAD").into(),
+            absolute_path("tmp/repo/.git/FETCH_HEAD").into(),
         ],
     };
 
@@ -1556,7 +1577,7 @@ fn command_exec_params_default_optional_streaming_flags() {
             disable_output_cap: false,
             disable_timeout: false,
             timeout_ms: Some(1000),
-            cwd: Some(PathBuf::from("/tmp")),
+            cwd: Some(LegacyAppPathString::from_string("/tmp")),
             env: None,
             size: None,
             sandbox_policy: None,
@@ -1611,7 +1632,7 @@ fn process_spawn_params_round_trips_without_sandbox_policy() {
     let params = ProcessSpawnParams {
         command: vec!["sleep".to_string(), "30".to_string()],
         process_handle: "sleep-1".to_string(),
-        cwd: test_absolute_path(),
+        cwd: test_absolute_path().into(),
         tty: false,
         stream_stdin: false,
         stream_stdout_stderr: false,
@@ -1649,7 +1670,7 @@ fn process_spawn_params_distinguish_omitted_null_and_value_limits() {
     let expected_omitted = ProcessSpawnParams {
         command: vec!["sleep".to_string(), "30".to_string()],
         process_handle: "sleep-1".to_string(),
-        cwd: test_absolute_path(),
+        cwd: test_absolute_path().into(),
         tty: false,
         stream_stdin: false,
         stream_stdout_stderr: false,
@@ -2065,7 +2086,7 @@ fn sandbox_policy_round_trips_external_sandbox_network_access() {
         network_access: NetworkAccess::Enabled,
     };
 
-    let core_policy = v2_policy.to_core();
+    let core_policy = v2_policy.try_to_core().expect("native policy paths");
     assert_eq!(
         core_policy,
         codex_protocol::protocol::SandboxPolicy::ExternalSandbox {
@@ -2083,7 +2104,7 @@ fn sandbox_policy_round_trips_read_only_network_access() {
         network_access: true,
     };
 
-    let core_policy = v2_policy.to_core();
+    let core_policy = v2_policy.try_to_core().expect("native policy paths");
     assert_eq!(
         core_policy,
         codex_protocol::protocol::SandboxPolicy::ReadOnly {
@@ -2902,7 +2923,7 @@ fn sandbox_policy_round_trips_workspace_write_access() {
         exclude_slash_tmp: false,
     };
 
-    let core_policy = v2_policy.to_core();
+    let core_policy = v2_policy.try_to_core().expect("native policy paths");
     assert_eq!(
         core_policy,
         codex_protocol::protocol::SandboxPolicy::WorkspaceWrite {
@@ -2952,7 +2973,7 @@ fn sandbox_policy_deserializes_legacy_workspace_write_full_access_field() {
     assert_eq!(
         policy,
         SandboxPolicy::WorkspaceWrite {
-            writable_roots: vec![absolute_path("/workspace")],
+            writable_roots: vec![absolute_path("/workspace").into()],
             network_access: true,
             exclude_tmpdir_env_var: true,
             exclude_slash_tmp: true,
@@ -3028,13 +3049,88 @@ fn guardian_approval_review_action_round_trips_command_shape() {
         GuardianApprovalReviewAction::Command {
             source: GuardianCommandSource::Shell,
             command: "rm -rf /tmp/example.sqlite".to_string(),
-            cwd: absolute_path("tmp"),
+            cwd: api_path("tmp"),
         }
     );
     assert_eq!(
         serde_json::to_value(&action).expect("serialize guardian review action"),
         value
     );
+}
+
+#[test]
+fn guardian_path_actions_convert_foreign_path_text_to_core() {
+    #[cfg(windows)]
+    let (cwd, first_file, second_file) = (
+        "/Users/alice/work/repo",
+        "src/main.rs",
+        "/Users/alice/work/repo/src/lib.rs",
+    );
+    #[cfg(not(windows))]
+    let (cwd, first_file, second_file) = (
+        r"C:\Users\Alice\work\repo",
+        r"src\main.rs",
+        r"C:\Users\Alice\work\repo\src\lib.rs",
+    );
+
+    let cases = [
+        (
+            json!({
+                "type": "command",
+                "source": "shell",
+                "command": "pwd",
+                "cwd": cwd,
+            }),
+            CoreGuardianAssessmentAction::Command {
+                source: codex_protocol::approvals::GuardianCommandSource::Shell,
+                command: "pwd".to_string(),
+                cwd: LegacyAppPathString::from_string(cwd),
+            },
+        ),
+        (
+            json!({
+                "type": "execve",
+                "source": "unifiedExec",
+                "program": "tool",
+                "argv": ["tool", "--check"],
+                "cwd": cwd,
+            }),
+            CoreGuardianAssessmentAction::Execve {
+                source: codex_protocol::approvals::GuardianCommandSource::UnifiedExec,
+                program: "tool".to_string(),
+                argv: vec!["tool".to_string(), "--check".to_string()],
+                cwd: LegacyAppPathString::from_string(cwd),
+            },
+        ),
+        (
+            json!({
+                "type": "applyPatch",
+                "cwd": cwd,
+                "files": [first_file, second_file],
+            }),
+            CoreGuardianAssessmentAction::ApplyPatch {
+                cwd: LegacyAppPathString::from_string(cwd),
+                files: vec![
+                    LegacyAppPathString::from_string(first_file),
+                    LegacyAppPathString::from_string(second_file),
+                ],
+            },
+        ),
+    ];
+
+    for (value, expected) in cases {
+        let action: GuardianApprovalReviewAction =
+            serde_json::from_value(value.clone()).expect("foreign path review action");
+        assert_eq!(
+            serde_json::to_value(&action).expect("serialize foreign path review action"),
+            value,
+        );
+        assert_eq!(
+            CoreGuardianAssessmentAction::try_from(action)
+                .expect("convert foreign path review action"),
+            expected,
+        );
+    }
 }
 
 #[test]
@@ -3215,22 +3311,24 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
                     detail: Some(ImageDetail::Original),
                 },
                 UserInput::LocalImage {
-                    path: PathBuf::from("local/image.png"),
+                    path: LegacyAppPathString::from_path(&PathBuf::from("local/image.png")),
                     detail: Some(ImageDetail::Original),
                 },
                 UserInput::Audio {
                     url: "data:audio/wav;base64,AAA".to_string(),
                 },
                 UserInput::LocalAudio {
-                    path: PathBuf::from("local/audio.mp3"),
+                    path: LegacyAppPathString::from_path(&PathBuf::from("local/audio.mp3")),
                 },
                 UserInput::Skill {
                     name: "skill-creator".to_string(),
-                    path: PathBuf::from("/repo/.codex/skills/skill-creator/SKILL.md"),
+                    path: LegacyAppPathString::from_string(
+                        "/repo/.codex/skills/skill-creator/SKILL.md",
+                    ),
                 },
                 UserInput::Mention {
                     name: "Demo App".to_string(),
-                    path: "app://demo-app".to_string(),
+                    path: LegacyAppPathString::from_string("app://demo-app"),
                 },
             ],
         }
@@ -3291,7 +3389,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
             phase: Some(MessagePhase::FinalAnswer),
             memory_citation: Some(MemoryCitation {
                 entries: vec![MemoryCitationEntry {
-                    path: "MEMORY.md".to_string(),
+                    path: LegacyAppPathString::from_string("MEMORY.md"),
                     line_start: 1,
                     line_end: 2,
                     note: "summary".to_string(),
@@ -3580,7 +3678,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
         ThreadItem::FileChange {
             id: "patch-1".to_string(),
             changes: vec![FileUpdateChange {
-                path: "README.md".to_string(),
+                path: LegacyAppPathString::from_string("README.md"),
                 kind: PatchChangeKind::Add,
                 diff: "hello\n".to_string(),
             }],
@@ -3753,7 +3851,8 @@ fn user_input_into_core_preserves_media_fields() {
             url: "https://example.com/image.png".to_string(),
             detail: Some(ImageDetail::Original),
         }
-        .into_core(),
+        .try_into_core()
+        .expect("input has no local path"),
         CoreUserInput::Image {
             image_url: "https://example.com/image.png".to_string(),
             detail: Some(ImageDetail::Original),
@@ -3762,12 +3861,13 @@ fn user_input_into_core_preserves_media_fields() {
 
     assert_eq!(
         UserInput::LocalImage {
-            path: PathBuf::from("local/image.png"),
+            path: api_path("local/image.png"),
             detail: Some(ImageDetail::Original),
         }
-        .into_core(),
+        .try_into_core()
+        .expect("native absolute image path"),
         CoreUserInput::LocalImage {
-            path: PathBuf::from("local/image.png"),
+            path: absolute_path("local/image.png").into_path_buf(),
             detail: Some(ImageDetail::Original),
         }
     );
@@ -3776,7 +3876,8 @@ fn user_input_into_core_preserves_media_fields() {
         UserInput::Audio {
             url: "data:audio/wav;base64,AAA".to_string(),
         }
-        .into_core(),
+        .try_into_core()
+        .expect("input has no local path"),
         CoreUserInput::Audio {
             audio_url: "data:audio/wav;base64,AAA".to_string(),
         }
@@ -3784,11 +3885,12 @@ fn user_input_into_core_preserves_media_fields() {
 
     assert_eq!(
         UserInput::LocalAudio {
-            path: PathBuf::from("local/audio.mp3"),
+            path: api_path("local/audio.mp3"),
         }
-        .into_core(),
+        .try_into_core()
+        .expect("native absolute audio path"),
         CoreUserInput::LocalAudio {
-            path: PathBuf::from("local/audio.mp3"),
+            path: absolute_path("local/audio.mp3").into_path_buf(),
         }
     );
 }
@@ -3847,7 +3949,7 @@ fn skills_list_params_serialization_uses_force_reload() {
     assert_eq!(
         serde_json::to_value(SkillsListParams {
             thread_id: None,
-            cwds: vec![PathBuf::from("/repo")],
+            cwds: vec![LegacyAppPathString::from_string("/repo")],
             force_reload: true,
         })
         .unwrap(),
@@ -3863,7 +3965,7 @@ fn skills_list_params_serialization_uses_force_reload() {
 fn skills_extra_roots_set_params_serialization_uses_extra_roots() {
     assert_eq!(
         serde_json::to_value(SkillsExtraRootsSetParams {
-            extra_roots: vec![absolute_path("tmp/skills")],
+            extra_roots: vec![api_path("tmp/skills")],
         })
         .unwrap(),
         json!({
@@ -3873,11 +3975,15 @@ fn skills_extra_roots_set_params_serialization_uses_extra_roots() {
 }
 
 #[test]
-fn skills_extra_roots_set_params_rejects_relative_roots() {
+fn skills_extra_roots_set_params_preserves_relative_roots_for_server_validation() {
     let result = serde_json::from_value::<SkillsExtraRootsSetParams>(json!({
         "extraRoots": ["relative/path"],
-    }));
-    assert!(result.is_err());
+    }))
+    .expect("API path text is not host-validated during decode");
+    assert_eq!(
+        result.extra_roots,
+        vec![LegacyAppPathString::from_string("relative/path")]
+    );
 }
 
 #[test]
@@ -3889,6 +3995,7 @@ fn plugin_source_serializes_local_git_npm_and_remote_variants() {
     };
     let local_path = AbsolutePathBuf::try_from(PathBuf::from(local_path)).unwrap();
     let local_path_json = local_path.as_path().display().to_string();
+    let local_path: LegacyAppPathString = local_path.into();
 
     assert_eq!(
         serde_json::to_value(PluginSource::Local { path: local_path }).unwrap(),
@@ -3901,7 +4008,7 @@ fn plugin_source_serializes_local_git_npm_and_remote_variants() {
     assert_eq!(
         serde_json::to_value(PluginSource::Git {
             url: "https://github.com/openai/example.git".to_string(),
-            path: Some("plugins/example".to_string()),
+            path: Some(LegacyAppPathString::from_string("plugins/example")),
             ref_name: Some("main".to_string()),
             sha: Some("abc123".to_string()),
         })
@@ -3958,7 +4065,7 @@ fn marketplace_add_params_serialization_uses_optional_ref_name_and_sparse_paths(
         serde_json::to_value(MarketplaceAddParams {
             source: "owner/repo".to_string(),
             ref_name: Some("main".to_string()),
-            sparse_paths: Some(vec!["plugins/foo".to_string()]),
+            sparse_paths: Some(vec![LegacyAppPathString::from_string("plugins/foo")]),
         })
         .unwrap(),
         json!({
@@ -4047,10 +4154,10 @@ fn plugin_interface_serializes_local_paths_and_remote_urls_separately() {
         terms_of_service_url: None,
         default_prompt: None,
         brand_color: None,
-        composer_icon: Some(composer_icon),
+        composer_icon: Some(composer_icon.into()),
         composer_icon_url: Some("https://example.com/linear/icon.png".to_string()),
         logo: None,
-        logo_dark: Some(logo_dark),
+        logo_dark: Some(logo_dark.into()),
         logo_url: Some("https://example.com/linear/logo.png".to_string()),
         logo_url_dark: Some("https://example.com/linear/logo-dark.png".to_string()),
         screenshots: Vec::new(),
@@ -4174,7 +4281,7 @@ fn plugin_read_params_serialization_uses_install_source_fields() {
     let marketplace_path_json = marketplace_path.as_path().display().to_string();
     assert_eq!(
         serde_json::to_value(PluginReadParams {
-            marketplace_path: Some(marketplace_path.clone()),
+            marketplace_path: Some(marketplace_path.clone().into()),
             remote_marketplace_name: None,
             plugin_name: "gmail".to_string(),
         })
@@ -4194,7 +4301,7 @@ fn plugin_read_params_serialization_uses_install_source_fields() {
         }))
         .unwrap(),
         PluginReadParams {
-            marketplace_path: Some(marketplace_path),
+            marketplace_path: Some(marketplace_path.into()),
             remote_marketplace_name: None,
             plugin_name: "gmail".to_string(),
         },
@@ -4225,7 +4332,7 @@ fn plugin_install_params_serialization_omits_force_remote_sync() {
     let marketplace_path_json = marketplace_path.as_path().display().to_string();
     assert_eq!(
         serde_json::to_value(PluginInstallParams {
-            marketplace_path: Some(marketplace_path.clone()),
+            marketplace_path: Some(marketplace_path.clone().into()),
             remote_marketplace_name: None,
             install_attempt_id: Some("94c79f7b-cceb-4415-9a3e-b51b2f718d43".to_string()),
             plugin_name: "gmail".to_string(),
@@ -4247,7 +4354,7 @@ fn plugin_install_params_serialization_omits_force_remote_sync() {
         }))
         .unwrap(),
         PluginInstallParams {
-            marketplace_path: Some(marketplace_path),
+            marketplace_path: Some(marketplace_path.into()),
             remote_marketplace_name: None,
             install_attempt_id: None,
             plugin_name: "gmail".to_string(),
@@ -4299,7 +4406,7 @@ fn plugin_share_params_and_response_serialization_use_camel_case_fields() {
 
     assert_eq!(
         serde_json::to_value(PluginShareSaveParams {
-            plugin_path: plugin_path.clone(),
+            plugin_path: plugin_path.clone().into(),
             remote_plugin_id: None,
             discoverability: None,
             share_targets: None,
@@ -4315,7 +4422,7 @@ fn plugin_share_params_and_response_serialization_use_camel_case_fields() {
 
     assert_eq!(
         serde_json::to_value(PluginShareSaveParams {
-            plugin_path,
+            plugin_path: plugin_path.into(),
             remote_plugin_id: Some("plugins~Plugin_00000000000000000000000000000000".to_string(),),
             discoverability: Some(PluginShareDiscoverability::Private),
             share_targets: Some(vec![
@@ -4443,9 +4550,9 @@ fn plugin_share_params_and_response_serialization_use_camel_case_fields() {
             remote_plugin_id: "plugins~Plugin_00000000000000000000000000000000".to_string(),
             plugin_id: "gmail@codex-curated".to_string(),
             plugin_name: "gmail".to_string(),
-            plugin_path,
+            plugin_path: plugin_path.into(),
             marketplace_name: "codex-curated".to_string(),
-            marketplace_path,
+            marketplace_path: marketplace_path.into(),
             remote_version: Some("1.2.3".to_string()),
         })
         .unwrap(),
@@ -4659,7 +4766,7 @@ fn marketplace_remove_response_serializes_nullable_installed_root() {
     assert_eq!(
         serde_json::to_value(MarketplaceRemoveResponse {
             marketplace_name: "debug".to_string(),
-            installed_root: Some(installed_root),
+            installed_root: Some(installed_root.into()),
         })
         .unwrap(),
         json!({
@@ -4694,7 +4801,7 @@ fn marketplace_upgrade_response_serializes_camel_case_fields() {
     assert_eq!(
         serde_json::to_value(MarketplaceUpgradeResponse {
             selected_marketplaces: vec!["debug".to_string()],
-            upgraded_roots: vec![upgraded_root],
+            upgraded_roots: vec![upgraded_root.into()],
             errors: vec![MarketplaceUpgradeErrorInfo {
                 marketplace_name: "broken".to_string(),
                 message: "failed to clone".to_string(),
@@ -5339,4 +5446,165 @@ fn account_slot_list_defaults_missing_catalog_kind_to_legacy() {
     .unwrap();
 
     assert_eq!(response.catalog_kind, AccountSlotCatalogKind::Legacy);
+}
+
+#[test]
+fn lifecycle_and_thread_wire_paths_accept_posix_and_windows_text() {
+    for (cwd, root, rollout) in [
+        (
+            "/Volumes/WorkSSD/projects/codex",
+            "/Volumes/WorkSSD/projects",
+            "/Users/smoke/.codex/sessions/thread.jsonl",
+        ),
+        (
+            r"C:\Users\smoke\projects\codex",
+            r"\\server\workspaces\codex",
+            r"C:\Users\smoke\.codex\sessions\thread.jsonl",
+        ),
+    ] {
+        assert_json_path_round_trip::<ThreadStartParams>(
+            json!({ "cwd": cwd, "runtimeWorkspaceRoots": [root] }),
+            &["/cwd", "/runtimeWorkspaceRoots/0"],
+        );
+        assert_json_path_round_trip::<ThreadResumeParams>(
+            json!({
+                "threadId": "thread-1",
+                "path": rollout,
+                "cwd": cwd,
+                "runtimeWorkspaceRoots": [root]
+            }),
+            &["/path", "/cwd", "/runtimeWorkspaceRoots/0"],
+        );
+        assert_json_path_round_trip::<ThreadForkParams>(
+            json!({
+                "threadId": "thread-1",
+                "path": rollout,
+                "cwd": cwd,
+                "runtimeWorkspaceRoots": [root]
+            }),
+            &["/path", "/cwd", "/runtimeWorkspaceRoots/0"],
+        );
+        assert_json_path_round_trip::<Thread>(
+            json!({
+                "id": "thread-1",
+                "extra": null,
+                "sessionId": "session-1",
+                "forkedFromId": null,
+                "parentThreadId": null,
+                "preview": "",
+                "ephemeral": false,
+                "projectId": null,
+                "modelProvider": "fixture",
+                "createdAt": 1,
+                "updatedAt": 1,
+                "recencyAt": 1,
+                "status": { "type": "idle" },
+                "path": rollout,
+                "cwd": cwd,
+                "cliVersion": "0.0.0",
+                "source": "exec",
+                "canAcceptDirectInput": null,
+                "threadSource": null,
+                "agentNickname": null,
+                "agentRole": null,
+                "gitInfo": null,
+                "name": null,
+                "turns": []
+            }),
+            &["/path", "/cwd"],
+        );
+    }
+}
+
+#[test]
+fn nested_sandbox_and_settings_wire_paths_accept_foreign_text() {
+    for cwd in [
+        "/Volumes/WorkSSD/projects/codex",
+        r"C:\Users\smoke\projects\codex",
+    ] {
+        assert_json_path_round_trip::<SandboxPolicy>(
+            json!({
+                "type": "workspaceWrite",
+                "writableRoots": [cwd],
+                "networkAccess": false
+            }),
+            &["/writableRoots/0"],
+        );
+        assert_json_path_round_trip::<ThreadSettingsUpdatedNotification>(
+            json!({
+                "threadId": "thread-1",
+                "threadSettings": {
+                    "cwd": cwd,
+                    "approvalPolicy": "on-request",
+                    "approvalsReviewer": "user",
+                    "sandboxPolicy": {
+                        "type": "workspaceWrite",
+                        "writableRoots": [cwd],
+                        "networkAccess": false
+                    },
+                    "activePermissionProfile": null,
+                    "model": "fixture-model",
+                    "modelProvider": "fixture-provider",
+                    "serviceTier": null,
+                    "effort": null,
+                    "summary": null,
+                    "collaborationMode": {
+                        "mode": "default",
+                        "settings": { "model": "fixture-model" }
+                    },
+                    "personality": null
+                }
+            }),
+            &[
+                "/threadSettings/cwd",
+                "/threadSettings/sandboxPolicy/writableRoots/0",
+            ],
+        );
+    }
+}
+
+#[test]
+fn service_request_wire_paths_accept_foreign_text_without_client_validation() {
+    for path in [
+        "/Volumes/WorkSSD/projects/codex",
+        r"\\server\workspaces\codex",
+    ] {
+        assert_json_path_round_trip::<SkillsListParams>(json!({ "cwds": [path] }), &["/cwds/0"]);
+        assert_json_path_round_trip::<HooksListParams>(json!({ "cwds": [path] }), &["/cwds/0"]);
+        assert_json_path_round_trip::<PluginListParams>(json!({ "cwds": [path] }), &["/cwds/0"]);
+        assert_json_path_round_trip::<ConfigReadParams>(json!({ "cwd": path }), &["/cwd"]);
+        assert_json_path_round_trip::<ConfigLayerSource>(
+            json!({ "type": "packagedDefaults", "file": path }),
+            &["/file"],
+        );
+        assert_json_path_round_trip::<HookErrorInfo>(
+            json!({ "path": path, "message": "fixture" }),
+            &["/path"],
+        );
+        assert_json_path_round_trip::<PluginReadParams>(
+            json!({ "marketplacePath": path, "pluginName": "fixture" }),
+            &["/marketplacePath"],
+        );
+        assert_json_path_round_trip::<ProcessSpawnParams>(
+            json!({ "command": ["pwd"], "processHandle": "p1", "cwd": path }),
+            &["/cwd"],
+        );
+        assert_json_path_round_trip::<ProjectRoot>(json!({ "path": path }), &["/path"]);
+        assert_json_path_round_trip::<FsReadFileParams>(json!({ "path": path }), &["/path"]);
+        assert_json_path_round_trip::<PermissionsRequestApprovalParams>(
+            json!({
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "itemId": "item-1",
+                "startedAtMs": 1,
+                "cwd": path,
+                "permissions": { "network": null, "fileSystem": null }
+            }),
+            &["/cwd"],
+        );
+        assert_json_path_round_trip::<GuardianApprovalReviewAction>(
+            json!({ "type": "command", "source": "shell", "command": "pwd", "cwd": path }),
+            &["/cwd"],
+        );
+    }
 }

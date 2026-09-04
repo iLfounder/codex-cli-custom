@@ -129,7 +129,7 @@ async fn plugin_list_skips_invalid_marketplace_file_and_reports_error() -> Resul
 
     let request_id = mcp
         .send_plugin_list_request(PluginListParams {
-            cwds: Some(vec![AbsolutePathBuf::try_from(repo_root.path())?]),
+            cwds: Some(vec![AbsolutePathBuf::try_from(repo_root.path())?.into()]),
             marketplace_kinds: None,
             force_refetch: false,
         })
@@ -139,16 +139,15 @@ async fn plugin_list_skips_invalid_marketplace_file_and_reports_error() -> Resul
         timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
 
     assert!(
-        response
-            .marketplaces
-            .iter()
-            .all(|marketplace| { marketplace.path.as_ref() != Some(&marketplace_path) }),
+        response.marketplaces.iter().all(|marketplace| {
+            marketplace.path.as_ref() != Some(&marketplace_path.clone().into())
+        }),
         "invalid marketplace should be skipped"
     );
     assert_eq!(response.marketplace_load_errors.len(), 1);
     assert_eq!(
         response.marketplace_load_errors[0].marketplace_path,
-        marketplace_path
+        marketplace_path.clone().into()
     );
     assert!(
         response.marketplace_load_errors[0]
@@ -186,23 +185,20 @@ async fn plugin_rpcs_reject_repository_spoofing_openai_curated() -> Result<()> {
 
     let request_id = mcp
         .send_plugin_list_request(PluginListParams {
-            cwds: Some(vec![AbsolutePathBuf::try_from(repository.path())?]),
+            cwds: Some(vec![AbsolutePathBuf::try_from(repository.path())?.into()]),
             marketplace_kinds: None,
             force_refetch: false,
         })
         .await?;
     let response: PluginListResponse =
         timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
-    assert!(
-        response
-            .marketplaces
-            .iter()
-            .all(|marketplace| marketplace.path.as_ref() != Some(&marketplace_path))
-    );
+    assert!(response.marketplaces.iter().all(|marketplace| {
+        marketplace.path.as_ref() != Some(&marketplace_path.clone().into())
+    }));
 
     let request_id = mcp
         .send_plugin_install_request(PluginInstallParams {
-            marketplace_path: Some(marketplace_path),
+            marketplace_path: Some(marketplace_path.into()),
             remote_marketplace_name: None,
             install_attempt_id: None,
             plugin_name: "attacker".to_string(),
@@ -617,7 +613,10 @@ async fn plugin_list_rejects_relative_cwds() -> Result<()> {
     .await??;
 
     assert_eq!(err.error.code, -32600);
-    assert!(err.error.message.contains("Invalid request"));
+    assert_eq!(
+        err.error.message,
+        "invalid plugin/list cwd: path `relative-root` is not absolute"
+    );
     Ok(())
 }
 
@@ -687,8 +686,8 @@ async fn plugin_list_keeps_valid_marketplaces_when_another_marketplace_fails_to_
     let request_id = mcp
         .send_plugin_list_request(PluginListParams {
             cwds: Some(vec![
-                AbsolutePathBuf::try_from(valid_repo_root.path())?,
-                AbsolutePathBuf::try_from(invalid_repo_root.path())?,
+                AbsolutePathBuf::try_from(valid_repo_root.path())?.into(),
+                AbsolutePathBuf::try_from(invalid_repo_root.path())?.into(),
             ]),
             marketplace_kinds: None,
             force_refetch: false,
@@ -702,7 +701,7 @@ async fn plugin_list_keeps_valid_marketplaces_when_another_marketplace_fails_to_
         response.marketplaces,
         vec![PluginMarketplaceEntry {
             name: "valid-marketplace".to_string(),
-            path: Some(valid_marketplace_path),
+            path: Some(valid_marketplace_path.into()),
             interface: None,
             plugins: vec![PluginSummary {
                 id: "valid-plugin@valid-marketplace".to_string(),
@@ -712,7 +711,7 @@ async fn plugin_list_keeps_valid_marketplaces_when_another_marketplace_fails_to_
                 name: "valid-plugin".to_string(),
                 share_context: None,
                 source: PluginSource::Local {
-                    path: valid_plugin_path,
+                    path: valid_plugin_path.into(),
                 },
                 installed: false,
                 installed_at: None,
@@ -732,7 +731,7 @@ async fn plugin_list_keeps_valid_marketplaces_when_another_marketplace_fails_to_
     assert_eq!(response.marketplace_load_errors.len(), 1);
     assert_eq!(
         response.marketplace_load_errors[0].marketplace_path,
-        invalid_marketplace_path
+        invalid_marketplace_path.into()
     );
     assert!(
         response.marketplace_load_errors[0]
@@ -809,7 +808,7 @@ async fn plugin_list_uses_alternate_discoverable_manifest_and_keeps_undiscoverab
 
     let request_id = mcp
         .send_plugin_list_request(PluginListParams {
-            cwds: Some(vec![AbsolutePathBuf::try_from(repo_root.path())?]),
+            cwds: Some(vec![AbsolutePathBuf::try_from(repo_root.path())?.into()]),
             marketplace_kinds: None,
             force_refetch: false,
         })
@@ -822,7 +821,7 @@ async fn plugin_list_uses_alternate_discoverable_manifest_and_keeps_undiscoverab
         response.marketplaces,
         vec![PluginMarketplaceEntry {
             name: "alternate-marketplace".to_string(),
-            path: Some(marketplace_path),
+            path: Some(marketplace_path.into()),
             interface: None,
             plugins: vec![
                 PluginSummary {
@@ -833,7 +832,7 @@ async fn plugin_list_uses_alternate_discoverable_manifest_and_keeps_undiscoverab
                     name: "valid-plugin".to_string(),
                     share_context: None,
                     source: PluginSource::Local {
-                        path: valid_plugin_path,
+                        path: valid_plugin_path.into(),
                     },
                     installed: false,
                     installed_at: None,
@@ -878,7 +877,8 @@ async fn plugin_list_uses_alternate_discoverable_manifest_and_keeps_undiscoverab
                     source: PluginSource::Local {
                         path: AbsolutePathBuf::try_from(
                             repo_root.path().join("plugins/missing-plugin"),
-                        )?,
+                        )?
+                        .into(),
                     },
                     installed: false,
                     installed_at: None,
@@ -959,7 +959,7 @@ async fn plugin_list_omitted_cwds_excludes_server_project_config() -> Result<()>
             vec![("home-plugin@home-marketplace", true, true)],
         ),
         (
-            Some(vec![AbsolutePathBuf::try_from(codex_home.path())?]),
+            Some(vec![AbsolutePathBuf::try_from(codex_home.path())?.into()]),
             vec![
                 ("home-plugin@home-marketplace", true, false),
                 ("project-plugin@project-marketplace", false, false),
@@ -1029,7 +1029,7 @@ async fn plugin_list_returns_share_context_for_shared_local_plugin() -> Result<(
 
     let request_id = mcp
         .send_plugin_list_request(PluginListParams {
-            cwds: Some(vec![AbsolutePathBuf::try_from(repo_root.path())?]),
+            cwds: Some(vec![AbsolutePathBuf::try_from(repo_root.path())?.into()]),
             marketplace_kinds: None,
             force_refetch: false,
         })
@@ -1116,7 +1116,9 @@ enabled = true
 
     let request_id = mcp
         .send_plugin_list_request(PluginListParams {
-            cwds: Some(vec![AbsolutePathBuf::try_from(marketplace_root.path())?]),
+            cwds: Some(vec![
+                AbsolutePathBuf::try_from(marketplace_root.path())?.into(),
+            ]),
             marketplace_kinds: Some(vec![PluginListMarketplaceKind::Local]),
             force_refetch: true,
         })
@@ -1135,7 +1137,9 @@ enabled = true
 
     let request_id = mcp
         .send_plugin_list_request(PluginListParams {
-            cwds: Some(vec![AbsolutePathBuf::try_from(marketplace_root.path())?]),
+            cwds: Some(vec![
+                AbsolutePathBuf::try_from(marketplace_root.path())?.into(),
+            ]),
             marketplace_kinds: Some(vec![PluginListMarketplaceKind::Local]),
             force_refetch: true,
         })
@@ -1251,7 +1255,7 @@ async fn plugin_list_refreshes_plugins_from_each_cwd(
         .await?;
     let cwds = repos
         .iter()
-        .map(|repo| AbsolutePathBuf::try_from(repo.as_path()))
+        .map(|repo| AbsolutePathBuf::try_from(repo.as_path()).map(Into::into))
         .collect::<std::io::Result<Vec<_>>>()?;
     let id = server
         .send_plugin_list_request(PluginListParams {
@@ -1340,8 +1344,8 @@ async fn plugin_catalogs_skip_invalid_project_config_and_report_cwd_error() -> R
         .await?;
     let invalid_cwd = AbsolutePathBuf::try_from(invalid_repo.as_path())?;
     let cwds = vec![
-        invalid_cwd.clone(),
-        AbsolutePathBuf::try_from(valid_repo.as_path())?,
+        invalid_cwd.clone().into(),
+        AbsolutePathBuf::try_from(valid_repo.as_path())?.into(),
     ];
 
     let request_id = server
@@ -1365,7 +1369,7 @@ async fn plugin_catalogs_skip_invalid_project_config_and_report_cwd_error() -> R
     assert_eq!(response.marketplace_load_errors.len(), 1);
     assert_eq!(
         response.marketplace_load_errors[0].marketplace_path,
-        invalid_cwd
+        invalid_cwd.clone().into()
     );
     assert!(
         response.marketplace_load_errors[0]
@@ -1393,7 +1397,7 @@ async fn plugin_catalogs_skip_invalid_project_config_and_report_cwd_error() -> R
     assert_eq!(response.marketplace_load_errors.len(), 1);
     assert_eq!(
         response.marketplace_load_errors[0].marketplace_path,
-        invalid_cwd
+        invalid_cwd.into()
     );
     Ok(())
 }
@@ -1458,7 +1462,7 @@ enabled = false
 
     let request_id = mcp
         .send_plugin_list_request(PluginListParams {
-            cwds: Some(vec![AbsolutePathBuf::try_from(repo_root.path())?]),
+            cwds: Some(vec![AbsolutePathBuf::try_from(repo_root.path())?.into()]),
             marketplace_kinds: None,
             force_refetch: false,
         })
@@ -1476,7 +1480,8 @@ enabled = false
                     &AbsolutePathBuf::try_from(
                         repo_root.path().join(".agents/plugins/marketplace.json"),
                     )
-                    .expect("absolute marketplace path"),
+                    .expect("absolute marketplace path")
+                    .into(),
                 )
         })
         .expect("expected repo marketplace entry");
@@ -1604,8 +1609,8 @@ enabled = false
     let request_id = mcp
         .send_plugin_list_request(PluginListParams {
             cwds: Some(vec![
-                AbsolutePathBuf::try_from(workspace_enabled.path())?,
-                AbsolutePathBuf::try_from(workspace_default.path())?,
+                AbsolutePathBuf::try_from(workspace_enabled.path())?.into(),
+                AbsolutePathBuf::try_from(workspace_default.path())?.into(),
             ]),
             marketplace_kinds: None,
             force_refetch: false,
@@ -1702,7 +1707,7 @@ async fn plugin_list_returns_plugin_interface_with_absolute_asset_paths() -> Res
 
     let request_id = mcp
         .send_plugin_list_request(PluginListParams {
-            cwds: Some(vec![AbsolutePathBuf::try_from(repo_root.path())?]),
+            cwds: Some(vec![AbsolutePathBuf::try_from(repo_root.path())?.into()]),
             marketplace_kinds: None,
             force_refetch: false,
         })
@@ -1753,21 +1758,17 @@ async fn plugin_list_returns_plugin_interface_with_absolute_asset_paths() -> Res
     );
     assert_eq!(
         interface.composer_icon,
-        Some(AbsolutePathBuf::try_from(
-            plugin_root.join("assets/icon.png")
-        )?)
+        Some(AbsolutePathBuf::try_from(plugin_root.join("assets/icon.png"))?.into())
     );
     assert_eq!(
         interface.logo,
-        Some(AbsolutePathBuf::try_from(
-            plugin_root.join("assets/logo.png")
-        )?)
+        Some(AbsolutePathBuf::try_from(plugin_root.join("assets/logo.png"))?.into())
     );
     assert_eq!(
         interface.screenshots,
         vec![
-            AbsolutePathBuf::try_from(plugin_root.join("assets/screenshot1.png"))?,
-            AbsolutePathBuf::try_from(plugin_root.join("assets/screenshot2.png"))?,
+            AbsolutePathBuf::try_from(plugin_root.join("assets/screenshot1.png"))?.into(),
+            AbsolutePathBuf::try_from(plugin_root.join("assets/screenshot2.png"))?.into(),
         ]
     );
     Ok(())
@@ -1814,7 +1815,7 @@ async fn plugin_list_accepts_legacy_string_default_prompt() -> Result<()> {
 
     let request_id = mcp
         .send_plugin_list_request(PluginListParams {
-            cwds: Some(vec![AbsolutePathBuf::try_from(repo_root.path())?]),
+            cwds: Some(vec![AbsolutePathBuf::try_from(repo_root.path())?.into()]),
             marketplace_kinds: None,
             force_refetch: false,
         })
@@ -1901,7 +1902,7 @@ enabled = true
         format!("[features]\nplugins = true\n\n{user_plugin_config}"),
     )?;
     let later_repo = TempDir::new()?;
-    let mut cwds = vec![AbsolutePathBuf::try_from(repo_root.path())?];
+    let mut cwds = vec![AbsolutePathBuf::try_from(repo_root.path())?.into()];
     if configured_in_later_cwd {
         for directory in [".git", ".codex", ".agents/plugins"] {
             std::fs::create_dir_all(later_repo.path().join(directory))?;
@@ -1912,7 +1913,7 @@ enabled = true
         )?;
         std::fs::write(later_repo.path().join(".codex/config.toml"), plugin_config)?;
         set_project_trust_level(codex_home.path(), later_repo.path(), TrustLevel::Trusted)?;
-        cwds.push(AbsolutePathBuf::try_from(later_repo.path())?);
+        cwds.push(AbsolutePathBuf::try_from(later_repo.path())?.into());
     }
 
     let mut mcp = TestAppServer::builder()
@@ -1945,7 +1946,9 @@ enabled = true
         plugin.source,
         PluginSource::Git {
             url: missing_remote_repo_url,
-            path: Some("plugins/toolkit".to_string()),
+            path: Some(codex_utils_path_uri::LegacyAppPathString::from_string(
+                "plugins/toolkit",
+            )),
             ref_name: None,
             sha: None,
         }
@@ -1964,15 +1967,15 @@ enabled = true
     let canonical_cached_plugin_root = std::fs::canonicalize(&cached_plugin_root)?;
     assert_eq!(
         interface.composer_icon,
-        Some(AbsolutePathBuf::try_from(
-            canonical_cached_plugin_root.join("assets/icon.png")
-        )?)
+        Some(
+            AbsolutePathBuf::try_from(canonical_cached_plugin_root.join("assets/icon.png"))?.into()
+        )
     );
     assert_eq!(
         interface.logo,
-        Some(AbsolutePathBuf::try_from(
-            canonical_cached_plugin_root.join("assets/logo.png")
-        )?)
+        Some(
+            AbsolutePathBuf::try_from(canonical_cached_plugin_root.join("assets/logo.png"))?.into()
+        )
     );
     Ok(())
 }
@@ -2193,7 +2196,7 @@ async fn plugin_list_includes_remote_marketplaces_when_remote_plugin_enabled(
             r#"{"name":"disabled-local","plugins":[{"name":"sample","source":{"source":"local","path":"./sample"}}]}"#,
         )?;
         set_project_trust_level(codex_home.path(), repo.path(), TrustLevel::Trusted)?;
-        Some(vec![AbsolutePathBuf::try_from(repo.path())?])
+        Some(vec![AbsolutePathBuf::try_from(repo.path())?.into()])
     } else {
         None
     };
@@ -2341,7 +2344,7 @@ async fn plugin_list_includes_remote_marketplaces_when_remote_plugin_enabled(
         assert_eq!(response.marketplace_load_errors.len(), 1);
         assert_eq!(
             response.marketplace_load_errors[0].marketplace_path,
-            AbsolutePathBuf::try_from(repo.path())?
+            AbsolutePathBuf::try_from(repo.path())?.into()
         );
     } else {
         assert!(response.marketplace_load_errors.is_empty());
@@ -4849,7 +4852,7 @@ remote_plugin = true
     )?;
     write_installed_plugin(&codex_home, "local", "sample")?;
     set_project_trust_level(codex_home.path(), repo.path(), TrustLevel::Trusted)?;
-    let repo_cwd = AbsolutePathBuf::try_from(repo.path())?;
+    let repo_cwd = codex_utils_path_uri::LegacyAppPathString::from_path(repo.path());
     let cwds = project_enables_plugins.then(|| vec![repo_cwd]);
 
     let home = codex_home.path().to_string_lossy().into_owned();
@@ -5209,7 +5212,7 @@ async fn wait_for_plugin_hooks(
         loop {
             let request_id = mcp
                 .send_hooks_list_request(HooksListParams {
-                    cwds: vec![cwd.to_path_buf()],
+                    cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(cwd)],
                 })
                 .await?;
             let HooksListResponse { data } = mcp.read_response(request_id).await?;

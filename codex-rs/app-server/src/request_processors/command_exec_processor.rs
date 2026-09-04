@@ -148,7 +148,10 @@ impl CommandExecRequestProcessor {
             ));
         }
 
-        let cwd = cwd.map_or_else(|| self.config.cwd.clone(), |cwd| self.config.cwd.join(cwd));
+        let cwd = cwd.map_or_else(
+            || self.config.cwd.clone(),
+            |cwd| self.config.cwd.join(PathBuf::from(cwd.into_string())),
+        );
         let mut env = create_env(
             &self.config.permissions.shell_environment_policy,
             /*thread_id*/ None,
@@ -237,7 +240,11 @@ impl CommandExecRequestProcessor {
                 config.managed_network_requirements_enabled(),
                 config.effective_workspace_roots(),
             )
-        } else if let Some(policy) = sandbox_policy.map(|policy| policy.to_core()) {
+        } else if let Some(policy) = sandbox_policy
+            .map(|policy| policy.try_to_core())
+            .transpose()
+            .map_err(|err| invalid_request(format!("invalid sandbox policy: {err}")))?
+        {
             let mut permissions = self.config.permissions.clone();
             permissions
                 .set_legacy_sandbox_policy(policy, &sandbox_cwd)

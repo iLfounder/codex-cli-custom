@@ -197,7 +197,9 @@ async fn hooks_list_shows_discovered_hook() -> Result<()> {
 
     let request_id = mcp
         .send_hooks_list_request(HooksListParams {
-            cwds: vec![cwd.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                cwd.path(),
+            )],
         })
         .await?;
     let HooksListResponse { data } =
@@ -208,7 +210,7 @@ async fn hooks_list_shows_discovered_hook() -> Result<()> {
     assert_eq!(
         data,
         vec![HooksListEntry {
-            cwd: cwd.path().to_path_buf(),
+            cwd: codex_utils_path_uri::LegacyAppPathString::from_path(cwd.path()),
             hooks: vec![HookMetadata {
                 key: format!("{}:pre_tool_use:0:0", config_path.as_path().display()),
                 event_name: HookEventName::PreToolUse,
@@ -220,7 +222,7 @@ async fn hooks_list_shows_discovered_hook() -> Result<()> {
                 timeout_sec: 5,
                 status_message: Some("running listed hook".to_string()),
                 additional_context_limit: Some(4_096),
-                source_path: config_path,
+                source_path: config_path.into(),
                 source: HookSource::User,
                 plugin_id: None,
                 display_order: 0,
@@ -277,7 +279,9 @@ async fn hooks_list_shows_discovered_plugin_hook() -> Result<()> {
 
     let request_id = mcp
         .send_hooks_list_request(HooksListParams {
-            cwds: vec![cwd.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                cwd.path(),
+            )],
         })
         .await?;
     let HooksListResponse { data } =
@@ -290,7 +294,7 @@ async fn hooks_list_shows_discovered_plugin_hook() -> Result<()> {
     assert_eq!(
         data,
         vec![HooksListEntry {
-            cwd: cwd.path().to_path_buf(),
+            cwd: codex_utils_path_uri::LegacyAppPathString::from_path(cwd.path()),
             hooks: vec![HookMetadata {
                 key: "demo@test:hooks/hooks.json:pre_tool_use:0:0".to_string(),
                 event_name: HookEventName::PreToolUse,
@@ -302,7 +306,7 @@ async fn hooks_list_shows_discovered_plugin_hook() -> Result<()> {
                 timeout_sec: 7,
                 status_message: Some("running plugin hook".to_string()),
                 additional_context_limit: None,
-                source_path: plugin_hooks_path,
+                source_path: plugin_hooks_path.into(),
                 source: HookSource::Plugin,
                 plugin_id: Some("demo@test".to_string()),
                 display_order: 0,
@@ -368,7 +372,7 @@ async fn plugin_upgrade_refreshes_hook_runtime_for_loaded_session() -> Result<()
         AbsolutePathBuf::try_from(marketplace.path().join(".agents/plugins/marketplace.json"))?;
     let install_id = mcp
         .send_plugin_install_request(PluginInstallParams {
-            marketplace_path: Some(marketplace_path.clone()),
+            marketplace_path: Some(marketplace_path.clone().into()),
             remote_marketplace_name: None,
             install_attempt_id: None,
             plugin_name: "demo".to_string(),
@@ -379,7 +383,9 @@ async fn plugin_upgrade_refreshes_hook_runtime_for_loaded_session() -> Result<()
 
     let hooks_list_id = mcp
         .send_hooks_list_request(HooksListParams {
-            cwds: vec![codex_home.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                codex_home.path(),
+            )],
         })
         .await?;
     let HooksListResponse { data } =
@@ -466,7 +472,7 @@ async fn plugin_upgrade_refreshes_hook_runtime_for_loaded_session() -> Result<()
     )?;
     let install_id = mcp
         .send_plugin_install_request(PluginInstallParams {
-            marketplace_path: Some(marketplace_path.clone()),
+            marketplace_path: Some(marketplace_path.clone().into()),
             remote_marketplace_name: None,
             install_attempt_id: None,
             plugin_name: "demo".to_string(),
@@ -498,7 +504,9 @@ async fn plugin_upgrade_refreshes_hook_runtime_for_loaded_session() -> Result<()
 
     let hooks_list_id = mcp
         .send_hooks_list_request(HooksListParams {
-            cwds: vec![codex_home.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                codex_home.path(),
+            )],
         })
         .await?;
     let HooksListResponse { data } =
@@ -527,7 +535,7 @@ async fn plugin_upgrade_refreshes_hook_runtime_for_loaded_session() -> Result<()
     )?;
     let install_id = mcp
         .send_plugin_install_request(PluginInstallParams {
-            marketplace_path: Some(marketplace_path),
+            marketplace_path: Some(marketplace_path.into()),
             remote_marketplace_name: None,
             install_attempt_id: None,
             plugin_name: "demo".to_string(),
@@ -686,7 +694,9 @@ source = "{}"
 
     let hooks_list_id = mcp
         .send_hooks_list_request(HooksListParams {
-            cwds: vec![codex_home.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                codex_home.path(),
+            )],
         })
         .await?;
     let HooksListResponse { data } =
@@ -759,7 +769,9 @@ async fn hooks_list_shows_discovered_plugin_mcp_tool_hook() -> Result<()> {
 
     let request_id = mcp
         .send_hooks_list_request(HooksListParams {
-            cwds: vec![cwd.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                cwd.path(),
+            )],
         })
         .await?;
     let HooksListResponse { data } =
@@ -789,7 +801,7 @@ async fn hooks_list_shows_discovered_plugin_mcp_tool_hook() -> Result<()> {
     assert_eq!(
         data,
         vec![HooksListEntry {
-            cwd: cwd.path().to_path_buf(),
+            cwd: codex_utils_path_uri::LegacyAppPathString::from_path(cwd.path()),
             hooks: vec![HookMetadata {
                 key: "demo@test:hooks/hooks.json:pre_tool_use:0:0".to_string(),
                 event_name: HookEventName::PreToolUse,
@@ -801,7 +813,7 @@ async fn hooks_list_shows_discovered_plugin_mcp_tool_hook() -> Result<()> {
                 timeout_sec: 9,
                 status_message: Some("checking security policy".to_string()),
                 additional_context_limit: None,
-                source_path,
+                source_path: source_path.into(),
                 source: HookSource::Plugin,
                 plugin_id: Some("demo@test".to_string()),
                 display_order: 0,
@@ -958,7 +970,9 @@ async fn hooks_list_warms_plugin_capabilities_for_thread_start() -> Result<()> {
 
     let hooks_list_id = mcp
         .send_hooks_list_request(HooksListParams {
-            cwds: vec![cwd.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                cwd.path(),
+            )],
         })
         .await?;
     let _: HooksListResponse = timeout(DEFAULT_TIMEOUT, mcp.read_response(hooks_list_id)).await??;
@@ -1001,7 +1015,9 @@ async fn hooks_list_shows_plugin_hook_load_warnings() -> Result<()> {
 
     let request_id = mcp
         .send_hooks_list_request(HooksListParams {
-            cwds: vec![cwd.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                cwd.path(),
+            )],
         })
         .await?;
     let HooksListResponse { data } =
@@ -1057,8 +1073,8 @@ timeout = 5
     let request_id = mcp
         .send_hooks_list_request(HooksListParams {
             cwds: vec![
-                codex_home.path().to_path_buf(),
-                workspace.path().to_path_buf(),
+                codex_utils_path_uri::LegacyAppPathString::from_path(codex_home.path()),
+                codex_utils_path_uri::LegacyAppPathString::from_path(workspace.path()),
             ],
         })
         .await?;
@@ -1070,13 +1086,13 @@ timeout = 5
         data,
         vec![
             HooksListEntry {
-                cwd: codex_home.path().to_path_buf(),
+                cwd: codex_utils_path_uri::LegacyAppPathString::from_path(codex_home.path()),
                 hooks: Vec::new(),
                 warnings: Vec::new(),
                 errors: Vec::new(),
             },
             HooksListEntry {
-                cwd: workspace.path().to_path_buf(),
+                cwd: codex_utils_path_uri::LegacyAppPathString::from_path(workspace.path()),
                 hooks: vec![HookMetadata {
                     key: format!(
                         "{}:pre_tool_use:0:0",
@@ -1091,7 +1107,7 @@ timeout = 5
                     timeout_sec: 5,
                     status_message: None,
                     additional_context_limit: None,
-                    source_path: project_config_path,
+                    source_path: project_config_path.into(),
                     source: HookSource::Project,
                     plugin_id: None,
                     display_order: 0,
@@ -1147,7 +1163,10 @@ async fn hooks_list_uses_root_repo_hooks_for_linked_worktrees() -> Result<()> {
 
     let list_id = mcp
         .send_hooks_list_request(HooksListParams {
-            cwds: vec![repo_root.clone(), worktree_root.clone()],
+            cwds: vec![
+                codex_utils_path_uri::LegacyAppPathString::from_path(&repo_root),
+                codex_utils_path_uri::LegacyAppPathString::from_path(&worktree_root),
+            ],
         })
         .await?;
     let HooksListResponse { data } = timeout(DEFAULT_TIMEOUT, mcp.read_response(list_id)).await??;
@@ -1171,8 +1190,8 @@ async fn hooks_list_uses_root_repo_hooks_for_linked_worktrees() -> Result<()> {
         }
     );
     assert_eq!(repo_hook.key, worktree_hook.key);
-    assert_eq!(repo_hook.source_path, repo_config_path);
-    assert_eq!(worktree_hook.source_path, repo_config_path);
+    assert_eq!(repo_hook.source_path, repo_config_path.clone().into());
+    assert_eq!(worktree_hook.source_path, repo_config_path.into());
 
     let write_id = mcp
         .send_config_batch_write_request(ConfigBatchWriteParams {
@@ -1195,7 +1214,9 @@ async fn hooks_list_uses_root_repo_hooks_for_linked_worktrees() -> Result<()> {
 
     let list_id = mcp
         .send_hooks_list_request(HooksListParams {
-            cwds: vec![worktree_root],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                &worktree_root,
+            )],
         })
         .await?;
     let HooksListResponse { data } = timeout(DEFAULT_TIMEOUT, mcp.read_response(list_id)).await??;
@@ -1218,7 +1239,9 @@ async fn config_batch_write_toggles_user_hook() -> Result<()> {
 
     let request_id = mcp
         .send_hooks_list_request(HooksListParams {
-            cwds: vec![cwd.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                cwd.path(),
+            )],
         })
         .await?;
     let HooksListResponse { data } =
@@ -1247,7 +1270,9 @@ async fn config_batch_write_toggles_user_hook() -> Result<()> {
 
     let request_id = mcp
         .send_hooks_list_request(HooksListParams {
-            cwds: vec![cwd.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                cwd.path(),
+            )],
         })
         .await?;
     let HooksListResponse { data } =
@@ -1277,7 +1302,9 @@ async fn config_batch_write_toggles_user_hook() -> Result<()> {
 
     let request_id = mcp
         .send_hooks_list_request(HooksListParams {
-            cwds: vec![cwd.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                cwd.path(),
+            )],
         })
         .await?;
     let HooksListResponse { data } =
@@ -1337,7 +1364,9 @@ command = "python3 {}"
 
     let hook_list_id = mcp
         .send_hooks_list_request(HooksListParams {
-            cwds: vec![codex_home.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                codex_home.path(),
+            )],
         })
         .await?;
     let HooksListResponse { data } =
@@ -1394,7 +1423,9 @@ command = "python3 {}"
 
     let hook_list_id = mcp
         .send_hooks_list_request(HooksListParams {
-            cwds: vec![codex_home.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                codex_home.path(),
+            )],
         })
         .await?;
     let HooksListResponse { data } =
@@ -1453,7 +1484,9 @@ command = "python3 {}"
 
     let hook_list_id = mcp
         .send_hooks_list_request(HooksListParams {
-            cwds: vec![codex_home.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                codex_home.path(),
+            )],
         })
         .await?;
     let HooksListResponse { data } =
@@ -1540,7 +1573,9 @@ command = "python3 {}"
 
     let hook_list_id = mcp
         .send_hooks_list_request(HooksListParams {
-            cwds: vec![codex_home.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                codex_home.path(),
+            )],
         })
         .await?;
     let HooksListResponse { data } =

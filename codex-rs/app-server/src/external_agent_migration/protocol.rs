@@ -30,6 +30,15 @@ use codex_external_agent_migration::PluginsMigration as CorePluginsMigration;
 use codex_external_agent_migration::sessions::ExternalAgentSessionMigration;
 use codex_state::ExternalAgentConfigImportFailureRecord;
 use codex_state::ExternalAgentConfigImportSuccessRecord;
+use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
+use std::path::PathBuf;
+
+fn native_path(path: LegacyAppPathString) -> Result<PathBuf, JSONRPCErrorError> {
+    AbsolutePathBuf::try_from(path)
+        .map(AbsolutePathBuf::into_path_buf)
+        .map_err(|error| crate::error_code::invalid_request(error.to_string()))
+}
 
 pub(super) fn detect_response(
     items: Vec<CoreMigrationItem>,
@@ -59,7 +68,7 @@ fn protocol_migration_item(item: CoreMigrationItem) -> ExternalAgentConfigMigrat
     ExternalAgentConfigMigrationItem {
         item_type: protocol_migration_item_type(item.item_type),
         description: item.description,
-        cwd: item.cwd,
+        cwd: item.cwd.map(|path| LegacyAppPathString::from_path(&path)),
         details: item.details.map(protocol_migration_details),
     }
 }
@@ -83,8 +92,8 @@ fn protocol_migration_details(details: CoreMigrationDetails) -> MigrationDetails
             .sessions
             .into_iter()
             .map(|session| codex_app_server_protocol::SessionMigration {
-                path: session.path,
-                cwd: session.cwd,
+                path: LegacyAppPathString::from_path(&session.path),
+                cwd: LegacyAppPathString::from_path(&session.cwd),
                 title: session.title,
             })
             .collect(),
@@ -116,20 +125,24 @@ fn protocol_migration_details(details: CoreMigrationDetails) -> MigrationDetails
 
 pub(super) fn core_migration_items(
     items: Vec<ExternalAgentConfigMigrationItem>,
-) -> Vec<CoreMigrationItem> {
+) -> Result<Vec<CoreMigrationItem>, JSONRPCErrorError> {
     items
         .into_iter()
-        .map(|item| CoreMigrationItem {
-            item_type: core_migration_item_type(item.item_type),
-            description: item.description,
-            cwd: item.cwd,
-            details: item.details.map(core_migration_details),
+        .map(|item| {
+            Ok(CoreMigrationItem {
+                item_type: core_migration_item_type(item.item_type),
+                description: item.description,
+                cwd: item.cwd.map(native_path).transpose()?,
+                details: item.details.map(core_migration_details).transpose()?,
+            })
         })
         .collect()
 }
 
-fn core_migration_details(details: MigrationDetails) -> CoreMigrationDetails {
-    CoreMigrationDetails {
+fn core_migration_details(
+    details: MigrationDetails,
+) -> Result<CoreMigrationDetails, JSONRPCErrorError> {
+    Ok(CoreMigrationDetails {
         plugins: details
             .plugins
             .into_iter()
@@ -146,12 +159,14 @@ fn core_migration_details(details: MigrationDetails) -> CoreMigrationDetails {
         sessions: details
             .sessions
             .into_iter()
-            .map(|session| ExternalAgentSessionMigration {
-                path: session.path,
-                cwd: session.cwd,
-                title: session.title,
+            .map(|session| {
+                Ok(ExternalAgentSessionMigration {
+                    path: native_path(session.path)?,
+                    cwd: native_path(session.cwd)?,
+                    title: session.title,
+                })
             })
-            .collect(),
+            .collect::<Result<_, JSONRPCErrorError>>()?,
         mcp_servers: details
             .mcp_servers
             .into_iter()
@@ -175,7 +190,7 @@ fn core_migration_details(details: MigrationDetails) -> CoreMigrationDetails {
             .map(|command| NamedMigration { name: command.name })
             .collect(),
         memory: details.memory,
-    }
+    })
 }
 
 pub(super) fn protocol_migration_item_type(
@@ -244,7 +259,7 @@ fn protocol_import_success_record(
 ) -> Result<ProtocolImportSuccess, JSONRPCErrorError> {
     Ok(ProtocolImportSuccess {
         item_type: protocol_import_record_item_type(record.item_type)?,
-        cwd: record.cwd,
+        cwd: record.cwd.map(|path| LegacyAppPathString::from_path(&path)),
         source: record.source,
         target: record.target,
         title: record.title,
@@ -260,7 +275,7 @@ fn protocol_import_failure_record(
         sub_error_type: record.sub_error_type,
         failure_stage: record.failure_stage,
         message: record.message,
-        cwd: record.cwd,
+        cwd: record.cwd.map(|path| LegacyAppPathString::from_path(&path)),
         source: record.source,
     })
 }
@@ -346,7 +361,10 @@ pub(super) fn protocol_import_type_result(
 fn protocol_import_success(success: &ExternalAgentConfigImportSuccess) -> ProtocolImportSuccess {
     ProtocolImportSuccess {
         item_type: protocol_migration_item_type(success.item_type),
-        cwd: success.cwd.clone(),
+        cwd: success
+            .cwd
+            .as_ref()
+            .map(|path| LegacyAppPathString::from_path(path)),
         source: success.source.clone(),
         target: success.target.clone(),
         title: success.title.clone(),
@@ -360,7 +378,10 @@ fn protocol_import_raw_error(raw_error: &CoreImportRawError) -> ProtocolImportFa
         sub_error_type: raw_error.sub_error_type.clone(),
         failure_stage: raw_error.failure_stage.clone(),
         message: raw_error.message.clone(),
-        cwd: raw_error.cwd.clone(),
+        cwd: raw_error
+            .cwd
+            .as_ref()
+            .map(|path| LegacyAppPathString::from_path(path)),
         source: raw_error.source.clone(),
     }
 }

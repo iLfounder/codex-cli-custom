@@ -2,10 +2,10 @@ use super::SandboxPolicy;
 use crate::JsonSchema;
 use crate::TS;
 use codex_experimental_api_macros::ExperimentalApi;
+use codex_utils_path_uri::LegacyAppPathString;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 /// PTY size in character cells for `command/exec` PTY sessions.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
@@ -80,7 +80,7 @@ pub struct CommandExecParams {
     pub timeout_ms: Option<i64>,
     /// Optional working directory. Defaults to the server cwd.
     #[ts(optional = nullable)]
-    pub cwd: Option<PathBuf>,
+    pub cwd: Option<LegacyAppPathString>,
     /// Optional environment overrides merged into the server-computed
     /// environment.
     ///

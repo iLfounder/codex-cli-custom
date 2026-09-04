@@ -268,8 +268,9 @@ impl App {
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         let cwd = self.config.cwd.to_path_buf();
+        let request_cwd = self.chat_widget.server_cwd();
         tokio::spawn(async move {
-            let result = fetch_skills_list(request_handle, cwd.clone())
+            let result = fetch_skills_list(request_handle, request_cwd)
                 .await
                 .map_err(|err| format!("{err:#}"));
             app_event_tx.send(AppEvent::SkillsListLoaded { cwd, result });
@@ -306,12 +307,13 @@ impl App {
 
     pub(super) fn fetch_plugins_list(&mut self, app_server: &AppServerSession, cwd: PathBuf) {
         self.chat_widget.on_plugins_list_fetch_started(cwd.clone());
+        let request_cwd = self.chat_widget.server_cwd();
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         let plugin_sharing_enabled = self.config.features.enabled(Feature::PluginSharing);
         let remote_plugin_enabled = self.config.features.enabled(Feature::RemotePlugin);
         tokio::spawn(async move {
-            let result = fetch_plugins_list(request_handle.clone(), cwd.clone())
+            let result = fetch_plugins_list(request_handle.clone(), request_cwd.clone())
                 .await
                 .map_err(|err| err.to_string());
             let should_fetch_additional_remote_sections = result.is_ok();
@@ -322,7 +324,7 @@ impl App {
             if should_fetch_additional_remote_sections {
                 let (marketplaces, section_errors) = fetch_additional_plugin_remote_sections(
                     request_handle,
-                    cwd.clone(),
+                    request_cwd,
                     plugin_sharing_enabled,
                     remote_plugin_enabled,
                 )
@@ -339,8 +341,9 @@ impl App {
     pub(super) fn fetch_hooks_list(&mut self, app_server: &AppServerSession, cwd: PathBuf) {
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
+        let request_cwd = self.chat_widget.server_cwd();
         tokio::spawn(async move {
-            let result = fetch_hooks_list(request_handle, cwd.clone())
+            let result = fetch_hooks_list(request_handle, request_cwd)
                 .await
                 .map_err(|err| err.to_string());
             app_event_tx.send(AppEvent::HooksLoaded { cwd, result });
@@ -367,6 +370,7 @@ impl App {
         &mut self,
         app_server: &AppServerSession,
         cwd: PathBuf,
+        remote_cwd: Option<LegacyAppPathString>,
         source: String,
     ) {
         let request_handle = app_server.request_handle();
@@ -374,11 +378,12 @@ impl App {
         tokio::spawn(async move {
             let cwd_for_event = cwd.clone();
             let source_for_event = source.clone();
-            let result = fetch_marketplace_add(request_handle, cwd, source)
+            let result = fetch_marketplace_add(request_handle, cwd, remote_cwd.clone(), source)
                 .await
                 .map_err(|err| format!("Failed to add marketplace: {err}"));
             app_event_tx.send(AppEvent::MarketplaceAddLoaded {
                 cwd: cwd_for_event,
+                remote_cwd,
                 source: source_for_event,
                 result,
             });
@@ -599,6 +604,7 @@ impl App {
 
     pub(super) fn refresh_plugin_mentions(&mut self, app_server: &AppServerSession) {
         let cwd = self.config.cwd.to_path_buf();
+        let request_cwd = self.chat_widget.server_cwd();
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         if !self.config.features.enabled(Feature::Plugins) {
@@ -607,7 +613,7 @@ impl App {
         }
 
         tokio::spawn(async move {
-            match fetch_plugin_mentions(request_handle, cwd.clone()).await {
+            match fetch_plugin_mentions(request_handle, request_cwd).await {
                 Ok(plugins) => {
                     app_event_tx.send(AppEvent::PluginMentionsLoaded {
                         cwd,
@@ -918,7 +924,7 @@ pub(super) async fn send_add_credits_nudge_email(
 
 pub(super) async fn fetch_skills_list(
     request_handle: AppServerRequestHandle,
-    cwd: PathBuf,
+    cwd: LegacyAppPathString,
 ) -> Result<SkillsListResponse> {
     let request_id = RequestId::String(format!("startup-skills-list-{}", Uuid::new_v4()));
     // Use the cloneable request handle so startup can issue this RPC from a background task without
@@ -961,7 +967,7 @@ pub(super) async fn fetch_connectors_list(
 
 pub(super) async fn fetch_plugins_list(
     request_handle: AppServerRequestHandle,
-    cwd: PathBuf,
+    cwd: LegacyAppPathString,
 ) -> Result<PluginListResponse> {
     let mut response = request_plugin_list(request_handle, cwd)
         .await
@@ -972,7 +978,7 @@ pub(super) async fn fetch_plugins_list(
 
 pub(super) async fn fetch_additional_plugin_remote_sections(
     request_handle: AppServerRequestHandle,
-    cwd: PathBuf,
+    cwd: LegacyAppPathString,
     plugin_sharing_enabled: bool,
     remote_plugin_enabled: bool,
 ) -> (Vec<PluginMarketplaceEntry>, Vec<PluginRemoteSectionError>) {
@@ -1088,7 +1094,7 @@ pub(super) fn hide_cli_only_plugin_marketplaces(response: &mut PluginListRespons
 
 pub(super) async fn request_plugin_list(
     request_handle: AppServerRequestHandle,
-    cwd: PathBuf,
+    cwd: LegacyAppPathString,
 ) -> Result<PluginListResponse> {
     request_plugin_list_with_marketplace_kinds(request_handle, cwd, /*marketplace_kinds*/ None)
         .await
@@ -1096,7 +1102,7 @@ pub(super) async fn request_plugin_list(
 
 pub(super) async fn request_plugin_list_for_kinds(
     request_handle: AppServerRequestHandle,
-    cwd: PathBuf,
+    cwd: LegacyAppPathString,
     marketplace_kinds: Vec<PluginListMarketplaceKind>,
 ) -> Result<PluginListResponse> {
     request_plugin_list_with_marketplace_kinds(request_handle, cwd, Some(marketplace_kinds)).await
@@ -1104,10 +1110,9 @@ pub(super) async fn request_plugin_list_for_kinds(
 
 async fn request_plugin_list_with_marketplace_kinds(
     request_handle: AppServerRequestHandle,
-    cwd: PathBuf,
+    cwd: LegacyAppPathString,
     marketplace_kinds: Option<Vec<PluginListMarketplaceKind>>,
 ) -> Result<PluginListResponse> {
-    let cwd = AbsolutePathBuf::try_from(cwd).wrap_err("plugin list cwd must be absolute")?;
     let request_id = RequestId::String(format!("plugin-list-{}", Uuid::new_v4()));
     request_handle
         .request_typed(ClientRequest::PluginList {
@@ -1136,10 +1141,11 @@ pub(super) async fn fetch_plugin_detail(
 pub(super) async fn fetch_marketplace_add(
     request_handle: AppServerRequestHandle,
     cwd: PathBuf,
+    remote_cwd: Option<LegacyAppPathString>,
     source: String,
 ) -> Result<MarketplaceAddResponse> {
     let cwd = AbsolutePathBuf::try_from(cwd).wrap_err("marketplace/add cwd must be absolute")?;
-    let source = marketplace_add_source_for_request(cwd.as_path(), source);
+    let source = marketplace_add_source_for_request(cwd.as_path(), remote_cwd.as_ref(), source)?;
     let request_id = RequestId::String(format!("marketplace-add-{}", Uuid::new_v4()));
     request_handle
         .request_typed(ClientRequest::MarketplaceAdd {
@@ -1154,7 +1160,11 @@ pub(super) async fn fetch_marketplace_add(
         .wrap_err("marketplace/add failed in TUI")
 }
 
-fn marketplace_add_source_for_request(cwd: &std::path::Path, source: String) -> String {
+fn marketplace_add_source_for_request(
+    cwd: &std::path::Path,
+    remote_cwd: Option<&LegacyAppPathString>,
+    source: String,
+) -> Result<String> {
     let (base_source, suffix) = if let Some((base, ref_name)) = source.rsplit_once('#') {
         (base, Some(format!("#{ref_name}")))
     } else if let Some((base, ref_name)) = source.rsplit_once('@') {
@@ -1169,16 +1179,31 @@ fn marketplace_add_source_for_request(cwd: &std::path::Path, source: String) -> 
         || base_source.starts_with(".\\")
         || base_source.starts_with("..\\")
     {
-        let mut resolved = AbsolutePathBuf::resolve_path_against_base(base_source, cwd)
-            .to_string_lossy()
-            .into_owned();
+        let mut resolved = if let Some(remote_cwd) = remote_cwd {
+            let convention = remote_cwd
+                .infer_absolute_path_convention()
+                .ok_or_else(|| color_eyre::eyre::eyre!("remote marketplace cwd is not absolute"))?;
+            let base = remote_cwd
+                .to_path_uri(convention)
+                .wrap_err("failed to parse remote marketplace cwd")?;
+            let joined = base
+                .join(base_source)
+                .wrap_err("failed to resolve remote marketplace source")?;
+            LegacyAppPathString::from_path_uri(&joined, convention)
+                .wrap_err("failed to render remote marketplace source")?
+                .into_string()
+        } else {
+            AbsolutePathBuf::resolve_path_against_base(base_source, cwd)
+                .to_string_lossy()
+                .into_owned()
+        };
         if let Some(suffix) = suffix {
             resolved.push_str(&suffix);
         }
-        return resolved;
+        return Ok(resolved);
     }
 
-    source
+    Ok(source)
 }
 
 pub(super) async fn fetch_marketplace_remove(
@@ -1301,7 +1326,11 @@ pub(super) fn build_feedback_upload_params(
     include_logs: bool,
 ) -> FeedbackUploadParams {
     let extra_log_files = if include_logs {
-        rollout_path.map(|rollout_path| vec![rollout_path])
+        rollout_path.map(|rollout_path| {
+            vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                &rollout_path,
+            )]
+        })
     } else {
         None
     };
@@ -1449,6 +1478,10 @@ mod tests {
         AbsolutePathBuf::try_from(PathBuf::from(path)).expect("absolute test path")
     }
 
+    fn test_server_path(path: &str) -> LegacyAppPathString {
+        LegacyAppPathString::from_abs_path(&test_absolute_path(path))
+    }
+
     #[test]
     fn marketplace_add_source_for_request_resolves_relative_local_paths() {
         let cwd = if cfg!(windows) {
@@ -1457,19 +1490,87 @@ mod tests {
             PathBuf::from("/workspace/project")
         };
 
-        let resolved = marketplace_add_source_for_request(&cwd, "./marketplace".to_string());
+        let resolved = marketplace_add_source_for_request(
+            &cwd,
+            /*remote_cwd*/ None,
+            "./marketplace".to_string(),
+        )
+        .expect("local marketplace source should resolve");
         assert!(std::path::Path::new(&resolved).is_absolute());
         assert_eq!(resolved, cwd.join("marketplace").display().to_string());
         assert_eq!(
-            marketplace_add_source_for_request(&cwd, "./marketplace#main".to_string()),
+            marketplace_add_source_for_request(
+                &cwd,
+                /*remote_cwd*/ None,
+                "./marketplace#main".to_string(),
+            )
+            .expect("local marketplace source with ref should resolve"),
             format!("{}#main", cwd.join("marketplace").display())
         );
         assert_eq!(
-            marketplace_add_source_for_request(&cwd, "owner/repo".to_string()),
+            marketplace_add_source_for_request(
+                &cwd,
+                /*remote_cwd*/ None,
+                "owner/repo".to_string(),
+            )
+            .expect("repository source should remain unchanged"),
             "owner/repo"
         );
         assert_eq!(
-            marketplace_add_source_for_request(&cwd, "~/marketplace".to_string()),
+            marketplace_add_source_for_request(
+                &cwd,
+                /*remote_cwd*/ None,
+                "~/marketplace".to_string(),
+            )
+            .expect("home-relative source should remain unchanged"),
+            "~/marketplace"
+        );
+    }
+
+    #[test]
+    fn marketplace_add_source_for_request_preserves_remote_path_convention() {
+        let local_cwd = if cfg!(windows) {
+            PathBuf::from(r"C:\local\project")
+        } else {
+            PathBuf::from("/local/project")
+        };
+        let posix_cwd = LegacyAppPathString::from_string("/Users/daniel/project");
+        let windows_cwd = LegacyAppPathString::from_string(r"C:\workspace\project");
+
+        assert_eq!(
+            marketplace_add_source_for_request(
+                &local_cwd,
+                Some(&posix_cwd),
+                "./marketplace#main".to_string(),
+            )
+            .expect("POSIX remote marketplace source should resolve"),
+            "/Users/daniel/project/marketplace#main"
+        );
+        assert_eq!(
+            marketplace_add_source_for_request(
+                &local_cwd,
+                Some(&windows_cwd),
+                "../marketplace@dev".to_string(),
+            )
+            .expect("Windows remote marketplace source should resolve"),
+            r"C:\workspace\marketplace@dev"
+        );
+        assert_eq!(
+            marketplace_add_source_for_request(
+                &local_cwd,
+                Some(&posix_cwd),
+                "owner/repo".to_string(),
+            )
+            .expect("repository source should remain unchanged"),
+            "owner/repo"
+        );
+        assert_eq!(
+            marketplace_add_source_for_request(
+                &local_cwd,
+                Some(&posix_cwd),
+                "~/marketplace".to_string(),
+            )
+            .expect("home-relative source should remain unchanged"),
             "~/marketplace"
         );
     }
@@ -1480,13 +1581,13 @@ mod tests {
             marketplaces: vec![
                 PluginMarketplaceEntry {
                     name: "openai-bundled".to_string(),
-                    path: Some(test_absolute_path("/marketplaces/openai-bundled")),
+                    path: Some(test_server_path("/marketplaces/openai-bundled")),
                     interface: None,
                     plugins: Vec::new(),
                 },
                 PluginMarketplaceEntry {
                     name: "openai-curated".to_string(),
-                    path: Some(test_absolute_path("/marketplaces/openai-curated")),
+                    path: Some(test_server_path("/marketplaces/openai-curated")),
                     interface: None,
                     plugins: Vec::new(),
                 },
@@ -1501,7 +1602,7 @@ mod tests {
             response.marketplaces,
             vec![PluginMarketplaceEntry {
                 name: "openai-curated".to_string(),
-                path: Some(test_absolute_path("/marketplaces/openai-curated")),
+                path: Some(test_server_path("/marketplaces/openai-curated")),
                 interface: None,
                 plugins: Vec::new(),
             }]
@@ -1510,7 +1611,7 @@ mod tests {
 
     #[test]
     fn plugin_location_request_params_select_exactly_one_location() {
-        let local_path = test_absolute_path("/marketplaces/local");
+        let local_path = test_server_path("/marketplaces/local");
 
         assert_eq!(
             PluginLocation::Local {
@@ -1695,7 +1796,10 @@ mod tests {
             Some("turn-123")
         );
         assert_eq!(params.include_logs, true);
-        assert_eq!(params.extra_log_files, Some(vec![rollout_path]));
+        assert_eq!(
+            params.extra_log_files,
+            Some(vec![LegacyAppPathString::from_path(&rollout_path)])
+        );
     }
 
     #[test]

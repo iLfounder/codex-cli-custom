@@ -14,7 +14,10 @@ impl From<v1::ExecOneOffCommandParams> for v2::CommandExecParams {
             timeout_ms: value
                 .timeout_ms
                 .map(|timeout| i64::try_from(timeout).unwrap_or(60_000)),
-            cwd: value.cwd,
+            cwd: value
+                .cwd
+                .as_deref()
+                .map(codex_utils_path_uri::LegacyAppPathString::from_path),
             env: None,
             size: None,
             sandbox_policy: value.sandbox_policy.map(std::convert::Into::into),

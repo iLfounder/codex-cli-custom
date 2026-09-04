@@ -110,7 +110,7 @@ impl ChatWidget {
                                     .into_iter()
                                     .map(|entry| {
                                         codex_protocol::memory_citation::MemoryCitationEntry {
-                                            path: entry.path,
+                                            path: entry.path.into_string(),
                                             line_start: entry.line_start,
                                             line_end: entry.line_end,
                                             note: entry.note,

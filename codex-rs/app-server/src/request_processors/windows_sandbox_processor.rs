@@ -45,7 +45,9 @@ impl WindowsSandboxRequestProcessor {
         // `started` response for a Windows sandbox mode that cannot be persisted.
         let command_cwd = params
             .cwd
-            .map(PathBuf::from)
+            .map(|cwd| resolve_absolute_api_path(cwd, "cwd"))
+            .transpose()?
+            .map(AbsolutePathBuf::into_path_buf)
             .unwrap_or_else(|| self.config.cwd.to_path_buf());
         let config = self
             .config_manager

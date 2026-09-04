@@ -56,6 +56,7 @@ use codex_features::feature_for_key;
 use codex_model_provider::create_model_provider;
 use codex_plugin::PluginId;
 use codex_protocol::config_types::WebSearchMode;
+use codex_utils_path_uri::LegacyAppPathString;
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -100,7 +101,10 @@ impl ConfigRequestProcessor {
         &self,
         params: ConfigReadParams,
     ) -> Result<ConfigReadResponse, JSONRPCErrorError> {
-        let fallback_cwd = params.cwd.as_ref().map(PathBuf::from);
+        let fallback_cwd = params
+            .cwd
+            .as_ref()
+            .map(|cwd| PathBuf::from(cwd.render_for_ui()));
         let mut response = self.config_manager.read(params).await.map_err(map_error)?;
         let config = self.load_latest_config(fallback_cwd).await?;
         for feature_key in SUPPORTED_EXPERIMENTAL_FEATURE_ENABLEMENT {
@@ -605,6 +609,10 @@ fn map_hooks_requirements_to_api(hooks: ManagedHooksRequirementsToml) -> Managed
         windows_managed_dir,
         hooks,
     } = hooks;
+    let managed_dir = managed_dir.as_deref().map(LegacyAppPathString::from_path);
+    let windows_managed_dir = windows_managed_dir
+        .as_deref()
+        .map(LegacyAppPathString::from_path);
     let HookEventsToml {
         pre_tool_use,
         permission_request,

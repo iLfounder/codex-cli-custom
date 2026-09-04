@@ -1,8 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
-    "AbsolutePathBuf": {
-      "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
+    "LegacyAppPathString": {
       "type": "string"
     },
     "SkillDependencies": {
@@ -25,7 +24,7 @@
           "type": "string"
         },
         "path": {
-          "type": "string"
+          "$ref": "#/definitions/LegacyAppPathString"
         }
       },
       "required": [
@@ -57,7 +56,7 @@
         "iconLarge": {
           "anyOf": [
             {
-              "$ref": "#/definitions/AbsolutePathBuf"
+              "$ref": "#/definitions/LegacyAppPathString"
             },
             {
               "type": "null"
@@ -74,7 +73,7 @@
         "iconSmall": {
           "anyOf": [
             {
-              "$ref": "#/definitions/AbsolutePathBuf"
+              "$ref": "#/definitions/LegacyAppPathString"
             },
             {
               "type": "null"
@@ -129,7 +128,7 @@
           "type": "string"
         },
         "path": {
-          "$ref": "#/definitions/AbsolutePathBuf"
+          "$ref": "#/definitions/LegacyAppPathString"
         },
         "pluginId": {
           "description": "Owning plugin ID, matching `PluginSummary.id`, when known.",
@@ -209,7 +208,7 @@
     "SkillsListEntry": {
       "properties": {
         "cwd": {
-          "type": "string"
+          "$ref": "#/definitions/LegacyAppPathString"
         },
         "errors": {
           "items": {

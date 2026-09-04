@@ -850,30 +850,36 @@ impl ThreadHistoryBuilder {
     }
 
     fn handle_image_generation_begin(&mut self, payload: &ImageGenerationBeginEvent) {
-        let item = ThreadItem::ImageGeneration(ImageGenerationItem {
-            id: payload.call_id.clone(),
-            status: String::new(),
-            revised_prompt: None,
-            result: String::new(),
-            transparent_background: None,
-            failure: None,
-            saved_path: None,
-            imagegen_request_id: None,
-        });
+        let item = ThreadItem::ImageGeneration(
+            ImageGenerationItem {
+                id: payload.call_id.clone(),
+                status: String::new(),
+                revised_prompt: None,
+                result: String::new(),
+                transparent_background: None,
+                failure: None,
+                saved_path: None,
+                imagegen_request_id: None,
+            }
+            .into(),
+        );
         self.upsert_item_in_current_turn(item);
     }
 
     fn handle_image_generation_end(&mut self, payload: &ImageGenerationEndEvent) {
-        let item = ThreadItem::ImageGeneration(ImageGenerationItem {
-            id: payload.call_id.clone(),
-            status: payload.status.clone(),
-            revised_prompt: payload.revised_prompt.clone(),
-            result: payload.result.clone(),
-            transparent_background: payload.transparent_background,
-            failure: payload.failure.clone(),
-            saved_path: payload.saved_path.clone(),
-            imagegen_request_id: None,
-        });
+        let item = ThreadItem::ImageGeneration(
+            ImageGenerationItem {
+                id: payload.call_id.clone(),
+                status: payload.status.clone(),
+                revised_prompt: payload.revised_prompt.clone(),
+                result: payload.result.clone(),
+                transparent_background: payload.transparent_background,
+                failure: payload.failure.clone(),
+                saved_path: payload.saved_path.clone(),
+                imagegen_request_id: None,
+            }
+            .into(),
+        );
         self.upsert_item_in_current_turn(item);
     }
 
@@ -1508,7 +1514,7 @@ impl ThreadHistoryBuilder {
         }
         for (idx, path) in payload.local_images.iter().enumerate() {
             content.push(UserInput::LocalImage {
-                path: path.clone(),
+                path: codex_utils_path_uri::LegacyAppPathString::from_path(path),
                 detail: payload.local_image_details.get(idx).copied().flatten(),
             });
         }
@@ -1520,7 +1526,9 @@ impl ThreadHistoryBuilder {
                 .local_audio
                 .iter()
                 .cloned()
-                .map(|path| UserInput::LocalAudio { path }),
+                .map(|path| UserInput::LocalAudio {
+                    path: codex_utils_path_uri::LegacyAppPathString::from_path(&path),
+                }),
         );
         content
     }
@@ -1979,16 +1987,20 @@ mod tests {
     fn rebuilds_user_message_attachments_from_legacy_events() {
         let local_image_path = PathBuf::from("/tmp/local.png");
         let local_audio_path = PathBuf::from("/tmp/local.wav");
+        let local_image_api_path =
+            codex_utils_path_uri::LegacyAppPathString::from_path(&local_image_path);
+        let local_audio_api_path =
+            codex_utils_path_uri::LegacyAppPathString::from_path(&local_audio_path);
         let events = vec![RolloutItem::EventMsg(EventMsg::UserMessage(
             UserMessageEvent {
                 client_id: None,
                 message: "inspect these".into(),
                 images: Some(vec!["https://example.com/image.png".into()]),
                 image_details: vec![Some(ImageDetail::Original)],
-                local_images: vec![local_image_path.clone()],
+                local_images: vec![local_image_path],
                 local_image_details: vec![Some(ImageDetail::Original)],
                 audio: Some(vec!["https://example.com/audio.mp3".into()]),
-                local_audio: vec![local_audio_path.clone()],
+                local_audio: vec![local_audio_path],
                 text_elements: Vec::new(),
             },
         ))];
@@ -2011,14 +2023,14 @@ mod tests {
                         detail: Some(ImageDetail::Original),
                     },
                     UserInput::LocalImage {
-                        path: local_image_path,
+                        path: local_image_api_path,
                         detail: Some(ImageDetail::Original),
                     },
                     UserInput::Audio {
                         url: "https://example.com/audio.mp3".into(),
                     },
                     UserInput::LocalAudio {
-                        path: local_audio_path,
+                        path: local_audio_api_path,
                     },
                 ],
             }
@@ -2207,16 +2219,19 @@ mod tests {
 
         assert_eq!(
             turns[0].items,
-            vec![ThreadItem::ImageGeneration(ImageGenerationItem {
-                id: "image-1".to_string(),
-                status: "completed".to_string(),
-                revised_prompt: Some("A blue square".to_string()),
-                result: "cG5n".to_string(),
-                transparent_background: Some(true),
-                failure: None,
-                saved_path: Some(saved_path),
-                imagegen_request_id: None,
-            })]
+            vec![ThreadItem::ImageGeneration(
+                ImageGenerationItem {
+                    id: "image-1".to_string(),
+                    status: "completed".to_string(),
+                    revised_prompt: Some("A blue square".to_string()),
+                    result: "cG5n".to_string(),
+                    transparent_background: Some(true),
+                    failure: None,
+                    saved_path: Some(saved_path),
+                    imagegen_request_id: None,
+                }
+                .into()
+            )]
         );
     }
 
@@ -2546,7 +2561,8 @@ mod tests {
                         ),
                         saved_path: Some(test_path_buf("/tmp/ig_123.png").abs()),
                         imagegen_request_id: None,
-                    }),
+                    }
+                    .into()),
                 ],
             }
         );
@@ -3334,7 +3350,7 @@ mod tests {
             ThreadItem::FileChange {
                 id: "patch-declined".into(),
                 changes: vec![FileUpdateChange {
-                    path: "README.md".into(),
+                    path: codex_utils_path_uri::LegacyAppPathString::from_string("README.md"),
                     kind: PatchChangeKind::Add,
                     diff: "hello\n".into(),
                 }],
@@ -3767,7 +3783,7 @@ mod tests {
                 ThreadItem::FileChange {
                     id: "patch-call".into(),
                     changes: vec![FileUpdateChange {
-                        path: "README.md".into(),
+                        path: codex_utils_path_uri::LegacyAppPathString::from_string("README.md"),
                         kind: PatchChangeKind::Add,
                         diff: "hello\n".into(),
                     }],
@@ -3837,7 +3853,7 @@ mod tests {
                 ThreadItem::FileChange {
                     id: "patch-call".into(),
                     changes: vec![FileUpdateChange {
-                        path: "README.md".into(),
+                        path: codex_utils_path_uri::LegacyAppPathString::from_string("README.md"),
                         kind: PatchChangeKind::Add,
                         diff: "hello\n".into(),
                     }],

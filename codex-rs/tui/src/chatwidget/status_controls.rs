@@ -169,7 +169,11 @@ impl ChatWidget {
     ///
     /// Results are dropped when they target an out-of-date cwd to avoid rendering stale branch
     /// names after directory changes.
-    pub(crate) fn set_status_line_branch(&mut self, cwd: PathBuf, branch: Option<String>) {
+    pub(crate) fn set_status_line_branch(
+        &mut self,
+        cwd: codex_utils_path_uri::LegacyAppPathString,
+        branch: Option<String>,
+    ) {
         if self.status_line_branch_cwd.as_ref() != Some(&cwd) {
             self.status_line_branch_pending = false;
             return;
@@ -183,7 +187,7 @@ impl ChatWidget {
     /// Stores async Git summary lookup results for the current status-line cwd.
     pub(crate) fn set_status_line_git_summary(
         &mut self,
-        cwd: PathBuf,
+        cwd: codex_utils_path_uri::LegacyAppPathString,
         summary: StatusLineGitSummary,
     ) {
         if self.status_line_git_summary_cwd.as_ref() != Some(&cwd) {
@@ -230,9 +234,14 @@ impl ChatWidget {
             .collect();
         let agents_summary =
             crate::status::compose_agents_summary(&self.config, &self.instruction_source_paths);
+        let runtime_display = self
+            .remote_runtime_status
+            .as_ref()
+            .map(crate::status::RemoteRuntimeStatus::status_display);
         let (cell, handle) = crate::status::new_status_output_with_rate_limits_handle(
             &self.config,
             self.runtime_model_provider_base_url.as_deref(),
+            runtime_display.as_ref(),
             self.remote_connection.as_ref(),
             self.status_account_display.as_ref(),
             token_info,

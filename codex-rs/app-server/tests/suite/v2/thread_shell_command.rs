@@ -270,7 +270,9 @@ async fn check_thread_shell_command_in_active_turn(timeout_ms: Option<i64>) -> R
                     text: "run python".to_string(),
                     text_elements: Vec::new(),
                 }],
-                cwd: Some(workspace.clone()),
+                cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                    &workspace,
+                )),
                 ..Default::default()
             },
         })

@@ -24,17 +24,19 @@ fn plan_test_session(thread_id: ThreadId) -> crate::session_state::ThreadSession
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        permission_profile: PermissionProfile::read_only(),
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            test_path_buf("/home/user/project").abs(),
+            Vec::new(),
+            PermissionProfile::read_only(),
+            None,
+        ),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
-        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: None,
     }
 }
 
@@ -1258,17 +1260,19 @@ async fn submit_user_message_emits_structured_plugin_mentions_from_bindings() {
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        permission_profile: PermissionProfile::read_only(),
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            test_path_buf("/home/user/project").abs(),
+            Vec::new(),
+            PermissionProfile::read_only(),
+            Some(rollout_file.path().to_path_buf()),
+        ),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
-        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: Some(rollout_file.path().to_path_buf()),
     };
     chat.handle_thread_session(configured);
     chat.set_feature_enabled(Feature::Plugins, /*enabled*/ true);
@@ -1307,7 +1311,9 @@ async fn submit_user_message_emits_structured_plugin_mentions_from_bindings() {
             },
             UserInput::Mention {
                 name: "Sample Plugin".to_string(),
-                path: "plugin://sample@test".to_string(),
+                path: codex_utils_path_uri::LegacyAppPathString::from_string(
+                    "plugin://sample@test",
+                ),
             },
         ]
     );
@@ -1643,6 +1649,7 @@ async fn make_startup_chat_with_cli_overrides(
         is_first_run: true,
         status_account_display: None,
         runtime_model_provider_base_url: None,
+        runtime_requires_openai_auth: false,
         initial_plan_type: None,
         model: Some(resolved_model),
         startup_tooltip_override: None,

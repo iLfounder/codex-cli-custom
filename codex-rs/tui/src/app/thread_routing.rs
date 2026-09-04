@@ -203,7 +203,20 @@ impl App {
     pub(super) async fn thread_cwd(&self, thread_id: ThreadId) -> Option<AbsolutePathBuf> {
         let channel = self.thread_event_channels.get(&thread_id)?;
         let store = channel.store.lock().await;
-        store.session.as_ref().map(|session| session.cwd.clone())
+        store
+            .session
+            .as_ref()
+            .and_then(ThreadSessionState::native_cwd)
+            .cloned()
+    }
+
+    pub(super) async fn thread_server_cwd(
+        &self,
+        thread_id: ThreadId,
+    ) -> Option<LegacyAppPathString> {
+        let channel = self.thread_event_channels.get(&thread_id)?;
+        let store = channel.store.lock().await;
+        store.session.as_ref().map(ThreadSessionState::server_cwd)
     }
 
     pub(super) async fn interactive_request_for_thread_request(
@@ -257,9 +270,17 @@ impl App {
                     id: params.item_id.clone(),
                     reason: params.reason.clone(),
                     cwd: self
-                        .thread_cwd(thread_id)
+                        .thread_server_cwd(thread_id)
                         .await
-                        .unwrap_or_else(|| self.config.cwd.clone()),
+                        .unwrap_or_else(|| {
+                            if self.app_server_target.uses_remote_workspace()
+                                && self.active_thread_id != Some(thread_id)
+                            {
+                                LegacyAppPathString::from_string("")
+                            } else {
+                                LegacyAppPathString::from_abs_path(&self.config.cwd)
+                            }
+                        }),
                     changes: self
                         .thread_file_change_changes(thread_id, &params.turn_id, &params.item_id)
                         .await
@@ -370,11 +391,13 @@ impl App {
         if request.thread_label.is_none() || request.changes.is_empty() {
             return;
         }
+        let cwd = request
+            .cwd
+            .to_inferred_abs_path()
+            .map(codex_utils_absolute_path::AbsolutePathBuf::into_path_buf)
+            .unwrap_or_default();
         self.chat_widget
-            .add_to_history(history_cell::new_patch_event(
-                request.changes.clone(),
-                &request.cwd,
-            ));
+            .add_to_history(history_cell::new_patch_event(request.changes.clone(), &cwd));
     }
 
     pub(super) async fn pending_inactive_thread_requests(&self) -> Vec<(ThreadId, ServerRequest)> {
@@ -758,13 +781,17 @@ impl App {
                     let config = self.chat_widget.config_ref();
                     let approvals_reviewer =
                         approvals_reviewer.unwrap_or(config.approvals_reviewer);
-                    let permissions_override = Self::turn_permissions_override_from_config(
-                        config,
-                        active_permission_profile.as_ref(),
-                        self.runtime_permission_profile_override
-                            .as_ref()
-                            .and_then(RuntimePermissionProfileOverride::turn_permission_profile),
-                    );
+                    let permissions_override = if self.app_server_target.uses_remote_workspace() {
+                        TurnPermissionsOverride::Preserve
+                    } else {
+                        Self::turn_permissions_override_from_config(
+                            config,
+                            active_permission_profile.as_ref(),
+                            self.runtime_permission_profile_override.as_ref().and_then(
+                                RuntimePermissionProfileOverride::turn_permission_profile,
+                            ),
+                        )
+                    };
                     let response = app_server
                         .turn_start(
                             thread_id,
@@ -794,11 +821,21 @@ impl App {
                 Ok(true)
             }
             AppCommand::ListSkills { cwds, force_reload } => {
+                let cwds = if self.app_server_target.uses_remote_workspace() {
+                    self.thread_server_cwd(thread_id)
+                        .await
+                        .into_iter()
+                        .collect()
+                } else {
+                    cwds.iter()
+                        .map(|cwd| LegacyAppPathString::from_path(cwd))
+                        .collect()
+                };
                 self.handle_skills_list_result(
                     app_server
                         .skills_list(codex_app_server_protocol::SkillsListParams {
                             thread_id: Some(thread_id.to_string()),
-                            cwds: cwds.clone(),
+                            cwds,
                             force_reload: *force_reload,
                         })
                         .await,
@@ -1026,7 +1063,8 @@ impl App {
         }
         if let ServerNotification::ThreadSettingsUpdated(notification) = &notification {
             self.apply_thread_settings_to_cached_session(thread_id, &notification.thread_settings)
-                .await;
+                .await
+                .map_err(color_eyre::eyre::Report::msg)?;
         }
         let inferred_session = if let ServerNotification::ThreadStarted(started) = &notification
             && self.primary_session_configured.is_some()
@@ -1178,18 +1216,37 @@ impl App {
         session.thread_id = thread_id;
         session.thread_name = notification.thread.name.clone();
         session.model_provider_id = notification.thread.model_provider.clone();
-        session
-            .set_cwd_retargeting_implicit_runtime_workspace_root(notification.thread.cwd.clone());
-        let rollout_path = notification.thread.path.clone();
-        if let Some(model) =
-            read_session_model(self.state_db.as_deref(), thread_id, rollout_path.as_deref()).await
-        {
-            session.model = model;
-        } else if rollout_path.is_some() {
-            session.model.clear();
+        if self.app_server_target.uses_remote_workspace() {
+            session.set_remote_cwd_and_rollout(
+                crate::app_server_session::app_server_path_string(&notification.thread.cwd),
+                notification
+                    .thread
+                    .path
+                    .as_ref()
+                    .map(crate::app_server_session::app_server_path_string),
+            );
+        } else {
+            let cwd = crate::app_server_session::app_server_path_string(&notification.thread.cwd)
+                .to_inferred_abs_path()?;
+            session.set_cwd_retargeting_implicit_runtime_workspace_root(cwd);
+            let rollout_path = notification
+                .thread
+                .path
+                .as_ref()
+                .map(crate::app_server_session::app_server_path_string)
+                .and_then(|path| path.to_inferred_abs_path())
+                .map(AbsolutePathBuf::into_path_buf);
+            if let Some(model) =
+                read_session_model(self.state_db.as_deref(), thread_id, rollout_path.as_deref())
+                    .await
+            {
+                session.model = model;
+            } else if rollout_path.is_some() {
+                session.model.clear();
+            }
+            session.set_native_rollout_path(rollout_path);
         }
         session.message_history = None;
-        session.rollout_path = rollout_path;
         Some(session)
     }
 
@@ -1301,27 +1358,29 @@ impl App {
         turns: Vec<Turn>,
         presentation: ThreadAttachPresentation,
     ) -> Result<()> {
-        if let Err(err) = self
-            .config
-            .permissions
-            .approval_policy
-            .set(session.approval_policy.to_core())
-        {
-            tracing::warn!(%err, "failed to sync app approval policy from thread session");
+        if let Some(permission_profile) = session.native_permission_profile() {
+            if let Err(err) = self
+                .config
+                .permissions
+                .approval_policy
+                .set(session.approval_policy.to_core())
+            {
+                tracing::warn!(%err, "failed to sync app approval policy from thread session");
+            }
+            if let Err(err) = self
+                .config
+                .permissions
+                .set_permission_profile_from_session_snapshot(
+                    PermissionProfileSnapshot::from_session_snapshot(
+                        permission_profile.clone(),
+                        session.active_permission_profile.clone(),
+                    ),
+                )
+            {
+                tracing::warn!(%err, "failed to sync app permissions from thread session");
+            }
+            self.config.approvals_reviewer = session.approvals_reviewer;
         }
-        if let Err(err) = self
-            .config
-            .permissions
-            .set_permission_profile_from_session_snapshot(
-                PermissionProfileSnapshot::from_session_snapshot(
-                    session.permission_profile.clone(),
-                    session.active_permission_profile.clone(),
-                ),
-            )
-        {
-            tracing::warn!(%err, "failed to sync app permissions from thread session");
-        }
-        self.config.approvals_reviewer = session.approvals_reviewer;
 
         let thread_id = session.thread_id;
         if self.primary_thread_id != Some(thread_id) {
@@ -1342,9 +1401,7 @@ impl App {
         self.activate_thread_channel(thread_id).await;
         self.chat_widget
             .set_initial_user_message_submit_suppressed(/*suppressed*/ true);
-        if !turns.is_empty() {
-            self.chat_widget.set_token_info(/*info*/ None);
-        }
+        self.chat_widget.set_token_info(/*info*/ None);
         match presentation {
             ThreadAttachPresentation::SessionLineage => {
                 self.chat_widget.handle_thread_session(session);
@@ -1466,7 +1523,9 @@ impl App {
         !is_replay_only
             && !self.side_threads.contains_key(&thread_id)
             && snapshot.session.as_ref().is_none_or(|session| {
-                session.model.trim().is_empty() || session.rollout_path.is_none()
+                session.model.trim().is_empty()
+                    || (session.native_rollout_path().is_none()
+                        && session.remote_rollout_path().is_none())
             })
     }
 
@@ -1699,7 +1758,7 @@ impl App {
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn handle_skills_list_response(&mut self, response: SkillsListResponse) {
-        let cwd = self.chat_widget.config_ref().cwd.clone();
+        let cwd = self.chat_widget.server_cwd();
         let errors = errors_for_cwd(&cwd, &response);
         let errors = self.skill_load_warnings.newly_active_errors(&errors);
         emit_skill_load_warnings(&self.app_event_tx, &errors);

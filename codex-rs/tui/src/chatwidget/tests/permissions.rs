@@ -643,17 +643,19 @@ async fn required_windows_sandbox_setup_defers_configured_initial_prompt() {
         service_tier: None,
         approval_policy: AskForApproval::OnRequest,
         approvals_reviewer: ApprovalsReviewer::User,
-        permission_profile: PermissionProfile::workspace_write(),
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            test_project_path().abs(),
+            Vec::new(),
+            PermissionProfile::workspace_write(),
+            Some(PathBuf::new()),
+        ),
         active_permission_profile: None,
-        cwd: test_project_path().abs(),
-        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: Some(PathBuf::new()),
     });
     drain_insert_history(&mut rx);
 
@@ -1057,17 +1059,19 @@ async fn permissions_selection_marks_auto_review_current_after_session_configure
         service_tier: None,
         approval_policy: AskForApproval::OnRequest,
         approvals_reviewer: ApprovalsReviewer::AutoReview,
-        permission_profile: PermissionProfile::workspace_write(),
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            test_project_path().abs(),
+            Vec::new(),
+            PermissionProfile::workspace_write(),
+            Some(PathBuf::new()),
+        ),
         active_permission_profile: None,
-        cwd: test_project_path().abs(),
-        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: Some(PathBuf::new()),
     });
 
     chat.open_permissions_popup();
@@ -1106,17 +1110,19 @@ async fn permissions_selection_marks_auto_review_current_with_custom_workspace_w
         service_tier: None,
         approval_policy: AskForApproval::OnRequest,
         approvals_reviewer: ApprovalsReviewer::AutoReview,
-        permission_profile,
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            cwd,
+            Vec::new(),
+            permission_profile,
+            Some(PathBuf::new()),
+        ),
         active_permission_profile: None,
-        cwd,
-        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: Some(PathBuf::new()),
     });
 
     chat.open_permissions_popup();

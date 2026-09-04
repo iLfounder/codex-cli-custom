@@ -18,7 +18,7 @@ use codex_app_server_protocol::SkillsListEntry;
 use codex_app_server_protocol::SkillsListResponse;
 use codex_connectors::AppInfo;
 use codex_protocol::parse_command::ParsedCommand;
-use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
 use codex_utils_plugins::mention_syntax::TOOL_MENTION_SIGIL;
 
 impl ChatWidget {
@@ -93,7 +93,7 @@ impl ChatWidget {
         self.bottom_pane.show_view(Box::new(view));
     }
 
-    pub(crate) fn update_skill_enabled(&mut self, path: AbsolutePathBuf, enabled: bool) {
+    pub(crate) fn update_skill_enabled(&mut self, path: LegacyAppPathString, enabled: bool) {
         for skill in &mut self.skills_all {
             if skill.path == path {
                 skill.enabled = enabled;
@@ -136,7 +136,7 @@ impl ChatWidget {
     }
 
     pub(crate) fn set_skills_from_response(&mut self, response: &SkillsListResponse) {
-        let skills = skills_for_cwd(&self.config.cwd, &response.data);
+        let skills = skills_for_cwd(&self.server_cwd(), &response.data);
         self.skills_all = skills;
         self.set_skills(Some(enabled_skills_for_mentions(&self.skills_all)));
     }
@@ -161,7 +161,7 @@ impl ChatWidget {
             if let Some(skill) = self
                 .skills_all
                 .iter()
-                .find(|skill| skill.path.as_path() == path)
+                .find(|skill| skill.path.render_for_ui() == path.to_string_lossy())
             {
                 *name = format!("{name} ({} skill)", skill.name);
             }
@@ -171,10 +171,13 @@ impl ChatWidget {
     }
 }
 
-fn skills_for_cwd(cwd: &AbsolutePathBuf, skills_entries: &[SkillsListEntry]) -> Vec<SkillMetadata> {
+fn skills_for_cwd(
+    cwd: &LegacyAppPathString,
+    skills_entries: &[SkillsListEntry],
+) -> Vec<SkillMetadata> {
     skills_entries
         .iter()
-        .find(|entry| entry.cwd.as_path() == cwd.as_path())
+        .find(|entry| &entry.cwd == cwd)
         .map(|entry| entry.skills.clone())
         .unwrap_or_default()
 }
@@ -219,8 +222,8 @@ pub(crate) fn find_skill_mentions_with_tool_mentions(
         if seen_paths.contains(&skill.path) {
             continue;
         }
-        let path_str = skill.path.to_string_lossy();
-        if mention_skill_paths.contains(path_str.as_ref()) {
+        let path_str = skill.path.render_for_ui();
+        if mention_skill_paths.contains(path_str.as_str()) {
             seen_paths.insert(skill.path.clone());
             seen_names.insert(skill.name.clone());
             matches.push(skill.clone());

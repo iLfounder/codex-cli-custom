@@ -1241,45 +1241,63 @@ mod tests {
     async fn unread_lossless_notifications_do_not_block_in_process_requests() {
         let mut client =
             start_test_client_with_capacity(SessionSource::Cli, /*channel_capacity*/ 1).await;
-        let thread: ThreadStartResponse = client
-            .request_typed(ClientRequest::ThreadStart {
-                request_id: RequestId::Integer(1),
-                params: ThreadStartParams {
-                    ephemeral: Some(true),
-                    personality: Some(Personality::None),
-                    ..ThreadStartParams::default()
-                },
-            })
-            .await
-            .expect("thread/start should succeed");
         let request_handle = client.request_handle();
 
-        timeout(Duration::from_secs(2), async {
-            for (index, personality) in [
-                Personality::Friendly,
-                Personality::Pragmatic,
-                Personality::Friendly,
-                Personality::Pragmatic,
-            ]
-            .into_iter()
-            .enumerate()
-            {
+        let mut expected_thread_ids = Vec::new();
+        for request_id in 1..=4 {
+            let thread: ThreadStartResponse = request_handle
+                .request_typed(ClientRequest::ThreadStart {
+                    request_id: RequestId::Integer(request_id),
+                    params: ThreadStartParams {
+                        ephemeral: Some(true),
+                        ..ThreadStartParams::default()
+                    },
+                })
+                .await
+                .expect("thread/start should succeed");
+            timeout(Duration::from_secs(5), async {
+                loop {
+                    match client.client.next_event().await {
+                        Some(InProcessServerEvent::ServerNotification(notification))
+                            if matches!(
+                                notification.as_ref(),
+                                ServerNotification::ThreadStarted(notification)
+                                    if notification.thread.id == thread.thread.id
+                            ) =>
+                        {
+                            break;
+                        }
+                        Some(_) => {}
+                        None => panic!("in-process event stream ended before thread/started"),
+                    }
+                }
+            })
+            .await
+            .expect("thread/started should be observable before the next thread/start");
+            expected_thread_ids.push(thread.thread.id);
+        }
+
+        timeout(Duration::from_secs(5), async {
+            for (index, thread_id) in expected_thread_ids.iter().enumerate() {
                 let _: ThreadSettingsUpdateResponse = request_handle
                     .request_typed(ClientRequest::ThreadSettingsUpdate {
-                        request_id: RequestId::Integer((index + 2) as i64),
+                        request_id: RequestId::Integer((index + 10) as i64),
                         params: ThreadSettingsUpdateParams {
-                            thread_id: thread.thread.id.clone(),
-                            personality: Some(personality),
+                            thread_id: thread_id.clone(),
+                            personality: Some(Personality::Friendly),
                             ..ThreadSettingsUpdateParams::default()
                         },
                     })
                     .await
                     .expect("thread/settings/update should succeed");
+                while client.client.event_rx.len() < index + 1 {
+                    tokio::task::yield_now().await;
+                }
             }
 
             let _: ConfigRequirementsReadResponse = request_handle
                 .request_typed(ClientRequest::ConfigRequirementsRead {
-                    request_id: RequestId::Integer(10),
+                    request_id: RequestId::Integer(20),
                     params: None,
                 })
                 .await
@@ -1288,29 +1306,23 @@ mod tests {
         .await
         .expect("unread lossless notifications must not block app-server requests");
 
-        let mut personalities = Vec::new();
-        timeout(Duration::from_secs(2), async {
-            while personalities.len() < 4 {
+        let mut observed_thread_ids = Vec::new();
+        timeout(Duration::from_secs(5), async {
+            while observed_thread_ids.len() < expected_thread_ids.len() {
                 if let Some(InProcessServerEvent::ServerNotification(notification)) =
                     client.client.next_event().await
                     && let ServerNotification::ThreadSettingsUpdated(notification) =
                         notification.as_ref()
                 {
-                    personalities.push(notification.thread_settings.personality);
+                    observed_thread_ids.push(notification.thread_id.clone());
                 }
             }
         })
         .await
         .expect("queued settings notifications should remain readable");
-        assert_eq!(
-            personalities,
-            vec![
-                Some(Personality::Friendly),
-                Some(Personality::Pragmatic),
-                Some(Personality::Friendly),
-                Some(Personality::Pragmatic),
-            ]
-        );
+        expected_thread_ids.sort();
+        observed_thread_ids.sort();
+        assert_eq!(observed_thread_ids, expected_thread_ids);
 
         client.shutdown().await.expect("shutdown should complete");
     }

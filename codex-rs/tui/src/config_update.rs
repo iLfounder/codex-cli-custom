@@ -22,7 +22,6 @@ use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_features::FEATURES;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::config_types::TrustLevel;
-use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::LegacyAppPathString;
 use color_eyre::eyre::Result;
 use color_eyre::eyre::WrapErr;
@@ -191,7 +190,9 @@ pub(crate) async fn read_effective_config(
             request_id,
             params: ConfigReadParams {
                 include_layers: false,
-                cwd: Some(cwd),
+                cwd: Some(crate::app_server_session::app_server_request_path(
+                    LegacyAppPathString::from_string(cwd),
+                )),
             },
         })
         .await
@@ -200,9 +201,9 @@ pub(crate) async fn read_effective_config(
 
 pub(crate) async fn read_remote_project_trust(
     request_handle: AppServerRequestHandle,
-    cwd: &Path,
+    cwd: &LegacyAppPathString,
 ) -> Result<Option<RemoteProjectTrust>> {
-    let cwd_string = cwd.to_string_lossy().into_owned();
+    let cwd_string = cwd.as_str().to_string();
     let cwd = match LegacyAppPathString::from_string(cwd_string.clone()).to_inferred_path_uri() {
         Some(cwd) => cwd,
         None => {
@@ -231,7 +232,9 @@ pub(crate) async fn read_remote_project_trust(
             request_id,
             params: ConfigReadParams {
                 include_layers: true,
-                cwd: Some(cwd.clone()),
+                cwd: Some(crate::app_server_session::app_server_request_path(
+                    LegacyAppPathString::from_string(cwd.clone()),
+                )),
             },
         })
         .await
@@ -310,7 +313,7 @@ pub(crate) async fn read_remote_project_trust(
 
 pub(crate) async fn write_skill_enabled(
     request_handle: AppServerRequestHandle,
-    path: AbsolutePathBuf,
+    path: LegacyAppPathString,
     enabled: bool,
 ) -> Result<()> {
     let request_id = RequestId::String(format!("tui-skill-config-write-{}", Uuid::new_v4()));

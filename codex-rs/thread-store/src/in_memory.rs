@@ -653,6 +653,7 @@ fn stores_guard() -> MutexGuard<'static, HashMap<String, Arc<InMemoryThreadStore
 pub struct InMemoryThreadStoreCalls {
     pub create_thread: usize,
     pub resume_thread: usize,
+    pub prepare_thread_resume: usize,
     pub append_items: usize,
     pub persist_thread: usize,
     pub flush_thread: usize,
@@ -1644,6 +1645,7 @@ impl ThreadStore for InMemoryThreadStore {
         params: PrepareThreadResumeParams,
     ) -> ThreadStoreFuture<'_, PreparedThreadResume> {
         Box::pin(async move {
+            self.state.lock().await.calls.prepare_thread_resume += 1;
             let resolved_thread_id = match &params.target {
                 PrepareThreadResumeTarget::ThreadId(thread_id) => *thread_id,
                 PrepareThreadResumeTarget::RolloutPath(path) => {
@@ -1716,13 +1718,12 @@ impl ThreadStore for InMemoryThreadStore {
     fn activate_prepared_thread_resume(
         &self,
         authority: PreparedThreadResumeAuthority,
-        _metadata: crate::ThreadPersistenceMetadata,
+        params: ResumeThreadParams,
     ) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move {
             let mut authority = authority.downcast::<InMemoryPreparedResumeAuthority>()?;
             authority.activate();
-            self.state.lock().await.calls.resume_thread += 1;
-            Ok(())
+            InMemoryThreadStore::resume_thread(self, params).await
         })
     }
 

@@ -17,6 +17,7 @@ use codex_app_server_protocol::NetworkApprovalContext;
 use codex_app_server_protocol::NetworkPolicyAmendment;
 use codex_app_server_protocol::NetworkPolicyRuleAction;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -120,5 +121,5 @@ pub(crate) struct ApplyPatchApprovalRequestEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) grant_root: Option<PathBuf>,
+    pub(crate) grant_root: Option<LegacyAppPathString>,
 }

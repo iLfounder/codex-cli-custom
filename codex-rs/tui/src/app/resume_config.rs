@@ -16,12 +16,19 @@ impl App {
         let cwd_override = self
             .runtime_working_directory_override
             .as_deref()
-            .or(self.harness_overrides.cwd.as_deref())
-            .or_else(|| app_server.remote_cwd_override());
-        let resume_cwd_mode = crate::session_resume::effective_resume_cwd_mode(
-            self.config.tui_resume_cwd,
-            cwd_override,
-        );
+            .or(self.harness_overrides.cwd.as_deref());
+        let resume_cwd_mode = if self.app_server_target.uses_remote_workspace() {
+            if app_server.remote_cwd_override().is_some() {
+                Some(ResumeCwdMode::Current)
+            } else {
+                self.config.tui_resume_cwd
+            }
+        } else {
+            crate::session_resume::effective_resume_cwd_mode(
+                self.config.tui_resume_cwd,
+                cwd_override,
+            )
+        };
         let remembered_current_cwd = cwd_override.unwrap_or(self.launch_cwd.as_path());
         let current_cwd = if matches!(resume_cwd_mode, Some(ResumeCwdMode::Current)) {
             remembered_current_cwd.to_path_buf()

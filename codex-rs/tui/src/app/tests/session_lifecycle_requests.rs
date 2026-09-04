@@ -273,7 +273,12 @@ async fn start_recording_app_server_with_history(
                         ) || matches!(
                             &request,
                             ClientRequest::ThreadFork { params, .. }
-                                if params.cwd.as_deref().is_some_and(|cwd| cwd.ends_with("failure"))
+                                if params.cwd.as_ref().is_some_and(|cwd| {
+                                    serde_json::to_value(cwd)
+                                        .ok()
+                                        .and_then(|value| value.as_str().map(str::to_owned))
+                                        .is_some_and(|cwd| cwd.ends_with("failure"))
+                                })
                                     && { reject_detach = true; true }
                         ) || (detach && std::mem::take(&mut reject_detach));
                         if force_failure {
@@ -464,6 +469,7 @@ fn spawn_approved_task_tool_call(
     let mut thread_start_params = crate::app_server_session::thread_start_params_from_config(
         &app.config,
         app_server.thread_params_mode(),
+        app_server.remote_invocation_overrides(),
         app_server.remote_cwd_override(),
         /*session_start_source*/ None,
     );
@@ -503,6 +509,7 @@ async fn external_transport_registers_dynamic_tools_and_finds_task_mentions() ->
         app_server.request_handle(),
         app.config.clone(),
         crate::app_server_session::ThreadParamsMode::Embedded,
+        /*remote_invocation_overrides*/ None,
         /*remote_cwd_override*/ None,
         app_server.thread_tool_transport(),
     )
@@ -660,6 +667,7 @@ async fn local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths() 
         app_server.request_handle(),
         app.config.clone(),
         crate::app_server_session::ThreadParamsMode::Embedded,
+        /*remote_invocation_overrides*/ None,
         /*remote_cwd_override*/ None,
         app_server.thread_tool_transport(),
     )
@@ -1017,6 +1025,7 @@ async fn older_external_server_starts_without_unsupported_dynamic_tools_or_histo
         app_server.request_handle(),
         app.config.clone(),
         crate::app_server_session::ThreadParamsMode::Embedded,
+        /*remote_invocation_overrides*/ None,
         /*remote_cwd_override*/ None,
         app_server.thread_tool_transport(),
     )
@@ -1257,7 +1266,7 @@ async fn dynamic_tool_requests_ignore_other_namespaces_and_dispatch_tui_namespac
             params: codex_app_server_protocol::ProjectCreateParams {
                 name: "Source project".to_string(),
                 roots: vec![codex_app_server_protocol::ProjectRoot {
-                    path: app.config.cwd.clone(),
+                    path: app.config.cwd.clone().into(),
                 }],
                 metadata: None,
                 idempotency_key: "source-project".to_string(),
@@ -1442,7 +1451,7 @@ async fn dynamic_tool_requests_ignore_other_namespaces_and_dispatch_tui_namespac
     assert_matches!(
         app.handle_exit_mode(&mut app_server, ExitMode::ShutdownFirst)
             .await,
-        AppRunControl::Exit(ExitReason::UserRequested)
+        AppRunControl::Continue
     );
     let cancelled = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), async {
         loop {
@@ -1570,7 +1579,7 @@ async fn older_pagination_reconciles_review_prompts_across_page_boundaries() -> 
         .await?;
     let initial_cells = crate::thread_transcript::thread_items_to_transcript_cells(
         Some(thread_id),
-        &app.config.cwd,
+        &codex_utils_path_uri::LegacyAppPathString::from_abs_path(&app.config.cwd),
         started.turns.iter().flat_map(|turn| turn.items.clone()),
         crate::thread_transcript::RawReasoningVisibility::Hidden,
         Some(&app.config),
@@ -1741,7 +1750,7 @@ async fn transcript_home_loads_every_older_history_page() -> Result<()> {
         .await?;
     let initial_cells = crate::thread_transcript::thread_items_to_transcript_cells(
         Some(thread_id),
-        &app.config.cwd,
+        &codex_utils_path_uri::LegacyAppPathString::from_abs_path(&app.config.cwd),
         started.turns.iter().flat_map(|turn| turn.items.clone()),
         crate::thread_transcript::RawReasoningVisibility::Hidden,
         Some(&app.config),
@@ -2140,7 +2149,7 @@ async fn underfilled_scrollback_fetches_older_pages_without_opening_the_transcri
         .await?;
     let mut initial_cells = crate::thread_transcript::thread_items_to_transcript_cells(
         Some(thread_id),
-        &app.config.cwd,
+        &codex_utils_path_uri::LegacyAppPathString::from_abs_path(&app.config.cwd),
         started.turns.iter().flat_map(|turn| turn.items.clone()),
         crate::thread_transcript::RawReasoningVisibility::Hidden,
         Some(&app.config),
@@ -2779,7 +2788,6 @@ async fn changing_directory_preserves_project_trust_permissions_history_and_hook
     for (path, kind, expected) in [
         ("missing", "local", "Cannot access directory"),
         ("../config.toml", "local", "Not a directory"),
-        (r"C:\bad", "workspace", "not supported for remote"),
         ("~", "executor", "not supported for remote"),
         ("../trusted", "stale", "requires an idle primary session"),
         ("../trusted", "running", "another agent is running"),
@@ -2828,10 +2836,6 @@ async fn changing_directory_preserves_project_trust_permissions_history_and_hook
         app.runtime_permission_profile_override =
             matches!(kind, "profile" | "reviewer" | "named" | "restored").then_some(profile);
         app.app_server_target = crate::AppServerTarget::Embedded;
-        if kind == "workspace" {
-            let endpoint = crate::resolve_remote_addr("ws://127.0.0.1:8765")?;
-            app.app_server_target = crate::AppServerTarget::Remote { endpoint };
-        }
         app.environment_manager = [&local, &remote][usize::from(kind == "executor")].clone();
         requests.lock().expect("request recorder lock").clear();
         if kind == "mcp" {
@@ -2981,7 +2985,10 @@ async fn changing_directory_preserves_project_trust_permissions_history_and_hook
     let found = |id: ThreadId| removed.iter().any(|p| p["threadId"] == id.to_string());
     assert!([original, child].into_iter().all(found));
     let retained = server.thread_read(original, /*include_turns*/ false);
-    assert_eq!(retained.await?.cwd, current.abs().canonicalize()?);
+    assert_eq!(
+        retained.await?.cwd,
+        codex_utils_path_uri::LegacyAppPathString::from_abs_path(&current.abs().canonicalize()?,)
+    );
     assert_eq!(app.chat_widget.config_ref().cwd, trusted.clone().abs());
     assert!(render_bottom_popup(&app.chat_widget, /*width*/ 80).contains("SessionStart"));
     app.chat_widget

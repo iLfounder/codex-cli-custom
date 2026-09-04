@@ -29,7 +29,6 @@ use wiremock::matchers::path;
 const SECOND_SLOT_ID: &str = "11111111111141118111111111111111";
 const THIRD_SLOT_ID: &str = "22222222222242228222222222222222";
 
-#[cfg(debug_assertions)]
 #[test]
 fn token_manager_base_url_uses_fixed_default_without_test_override() {
     assert_eq!(
@@ -38,7 +37,6 @@ fn token_manager_base_url_uses_fixed_default_without_test_override() {
     );
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn token_manager_base_url_accepts_isolated_test_override() {
     for test_override in ["http://127.0.0.1:43101/", "http://[::1]:43101/"] {
@@ -49,7 +47,6 @@ fn token_manager_base_url_accepts_isolated_test_override() {
     }
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn token_manager_base_url_rejects_invalid_or_unsafe_test_override() {
     for test_override in [

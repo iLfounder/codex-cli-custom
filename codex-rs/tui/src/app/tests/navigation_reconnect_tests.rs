@@ -47,7 +47,7 @@ async fn reconnect_daemon_command_center_after_socket_replacement_without_a_conv
                 Some(RuntimePermissionProfileOverride::from_config(&app.config));
             let mut session = test_thread_session(id, app.config.cwd.to_path_buf());
             session.approval_policy = AskForApproval::OnRequest;
-            session.permission_profile = PermissionProfile::read_only();
+            session.set_native_permission_profile(PermissionProfile::read_only());
             app.primary_session_configured = Some(session.clone());
             app.chat_widget.handle_thread_session(session.clone());
             app.ensure_thread_channel(id)

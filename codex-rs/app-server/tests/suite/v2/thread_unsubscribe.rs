@@ -313,7 +313,9 @@ async fn thread_unsubscribe_preserves_cached_status_before_idle_unload() -> Resu
             request_id,
             params: ThreadResumeParams {
                 thread_id,
-                cwd: Some(codex_home.path().to_string_lossy().to_string()),
+                cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                    codex_home.path(),
+                )),
                 ..Default::default()
             },
         })

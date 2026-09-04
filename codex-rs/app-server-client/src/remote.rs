@@ -702,9 +702,15 @@ async fn connect_websocket_endpoint(
     let url = Url::parse(&websocket_url).map_err(|err| {
         IoError::new(
             ErrorKind::InvalidInput,
-            format!("invalid websocket URL `{websocket_url}`: {err}"),
+            format!("invalid websocket URL: {err}"),
         )
     })?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(IoError::new(
+            ErrorKind::InvalidInput,
+            "remote URLs must not include credentials; use an environment-variable bearer token instead",
+        ));
+    }
     if auth_token.is_some() && !websocket_url_supports_auth_token(&url) {
         return Err(IoError::new(
             ErrorKind::InvalidInput,
@@ -1031,6 +1037,7 @@ fn websocket_close_error_is_already_closed(err: &TungsteniteError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     async fn observe_unit_command(
         command_rx: &mut mpsc::Receiver<RemoteClientCommand>,
@@ -1096,6 +1103,42 @@ mod tests {
             .shutdown()
             .await
             .expect("shutdown should complete when worker exits first");
+    }
+
+    #[tokio::test]
+    async fn connect_rejects_credential_bearing_urls_without_exposing_credentials() {
+        let username = "dummy-user";
+        let password = "dummy-secret";
+        let websocket_urls = [
+            format!("wss://{username}:{password}@example.com:443"),
+            format!("wss://{username}:{password}@"),
+        ];
+
+        for websocket_url in websocket_urls {
+            let result = RemoteAppServerClient::connect(RemoteAppServerConnectArgs {
+                endpoint: RemoteAppServerEndpoint::WebSocket {
+                    websocket_url: websocket_url.clone(),
+                    auth_token: None,
+                },
+                client_name: "test-client".to_string(),
+                client_version: "0.0.0-test".to_string(),
+                experimental_api: false,
+                mcp_server_openai_form_elicitation: false,
+                opt_out_notification_methods: Vec::new(),
+                channel_capacity: 1,
+            })
+            .await;
+            let err = match result {
+                Ok(_) => panic!("credentials should be rejected before connection"),
+                Err(err) => err,
+            };
+            let rendered = err.to_string();
+
+            assert_eq!(err.kind(), ErrorKind::InvalidInput);
+            assert!(!rendered.contains(username));
+            assert!(!rendered.contains(password));
+            assert!(!rendered.contains(&websocket_url));
+        }
     }
 
     #[tokio::test]

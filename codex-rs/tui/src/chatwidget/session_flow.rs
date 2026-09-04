@@ -3,6 +3,18 @@
 use super::*;
 
 impl ChatWidget {
+    pub(crate) fn server_cwd(&self) -> codex_utils_path_uri::LegacyAppPathString {
+        self.current_remote_cwd.clone().unwrap_or_else(|| {
+            codex_utils_path_uri::LegacyAppPathString::from_abs_path(&self.config.cwd)
+        })
+    }
+
+    pub(crate) fn remote_active_permission_profile_id(&self) -> Option<String> {
+        self.remote_runtime_status
+            .as_ref()
+            .and_then(crate::status::RemoteRuntimeStatus::active_permission_profile_id)
+    }
+
     fn on_session_configured_with_display_and_fork_parent_title(
         &mut self,
         session: ThreadSessionState,
@@ -20,7 +32,10 @@ impl ChatWidget {
         self.session_network_proxy = session.network_proxy.clone();
         let previous_thread_id = self.thread_id;
         let connector_scope_changed = previous_thread_id != Some(session.thread_id)
-            || self.config.cwd.as_path() != session.cwd.as_path();
+            || session
+                .native_cwd()
+                .is_some_and(|cwd| self.config.cwd.as_path() != cwd.as_path())
+            || session.remote_cwd() != self.current_remote_cwd.as_ref();
         self.thread_id = Some(session.thread_id);
         self.bottom_pane
             .set_queue_submissions(/*queue_submissions*/ false);
@@ -38,51 +53,64 @@ impl ChatWidget {
         self.current_goal_revision = 0;
         self.update_collaboration_mode_indicator();
         self.forked_from = session.forked_from_id;
-        self.current_rollout_path = session.rollout_path.clone();
-        self.current_cwd = Some(session.cwd.to_path_buf());
-        self.config.cwd = session.cwd.clone();
+        self.current_rollout_path = session.native_rollout_path().map(Path::to_path_buf);
+        self.current_cwd = session.native_cwd().map(AbsolutePathBuf::to_path_buf);
+        self.current_remote_cwd = session.remote_cwd().cloned();
+        self.remote_runtime_status = crate::status::RemoteRuntimeStatus::from_session(
+            &session,
+            self.runtime_requires_openai_auth,
+        );
+        if let Some(runner) = &self.workspace_command_runner {
+            runner.set_remote_cwd(self.current_remote_cwd.clone());
+        }
         if connector_scope_changed {
             self.invalidate_connector_scope();
         }
-        let runtime_workspace_roots = session.runtime_workspace_roots.clone();
-        self.config.workspace_roots = runtime_workspace_roots.clone();
-        self.config
-            .permissions
-            .set_workspace_roots(runtime_workspace_roots);
-        self.effective_service_tier = session.service_tier.clone();
-        if let Err(err) = self
-            .config
-            .permissions
-            .approval_policy
-            .set(session.approval_policy.to_core())
-        {
-            tracing::warn!(%err, "failed to sync approval_policy from SessionConfigured");
-            self.config.permissions.approval_policy =
-                Constrained::allow_only(session.approval_policy.to_core());
+        if let Some(cwd) = session.native_cwd() {
+            self.config.cwd = cwd.clone();
         }
-        let permission_snapshot = PermissionProfileSnapshot::from_session_snapshot(
-            session.permission_profile.clone(),
-            session.active_permission_profile.clone(),
-        );
-        let permission_sync = self
-            .config
-            .permissions
-            .set_permission_profile_from_session_snapshot(permission_snapshot.clone());
-        if let Err(err) = permission_sync {
-            tracing::warn!(%err, "failed to sync permissions from SessionConfigured");
-            if let Err(replace_err) = self
+        if let Some(runtime_workspace_roots) = session.native_runtime_workspace_roots() {
+            self.config.workspace_roots = runtime_workspace_roots.to_vec();
+            self.config
+                .permissions
+                .set_workspace_roots(runtime_workspace_roots.to_vec());
+        }
+        self.effective_service_tier = session.service_tier.clone();
+        if let Some(permission_profile) = session.native_permission_profile() {
+            if let Err(err) = self
                 .config
                 .permissions
-                .replace_permission_profile_from_session_snapshot(permission_snapshot)
+                .approval_policy
+                .set(session.approval_policy.to_core())
             {
-                tracing::error!(
-                    %replace_err,
-                    "failed to replace permissions from SessionConfigured after constraint fallback"
-                );
+                tracing::warn!(%err, "failed to sync approval_policy from SessionConfigured");
+                self.config.permissions.approval_policy =
+                    Constrained::allow_only(session.approval_policy.to_core());
             }
+            let permission_snapshot = PermissionProfileSnapshot::from_session_snapshot(
+                permission_profile.clone(),
+                session.active_permission_profile.clone(),
+            );
+            let permission_sync = self
+                .config
+                .permissions
+                .set_permission_profile_from_session_snapshot(permission_snapshot.clone());
+            if let Err(err) = permission_sync {
+                tracing::warn!(%err, "failed to sync permissions from SessionConfigured");
+                if let Err(replace_err) = self
+                    .config
+                    .permissions
+                    .replace_permission_profile_from_session_snapshot(permission_snapshot)
+                {
+                    tracing::error!(
+                        %replace_err,
+                        "failed to replace permissions from SessionConfigured after constraint fallback"
+                    );
+                }
+            }
+            self.config.approvals_reviewer = session.approvals_reviewer;
+            self.config.personality = session.personality;
         }
-        self.config.approvals_reviewer = session.approvals_reviewer;
-        self.config.personality = session.personality;
         self.status_line_project_root_name_cache = None;
         let forked_from_id = session.forked_from_id;
         let default_model = session.model.clone();

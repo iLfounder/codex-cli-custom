@@ -58,6 +58,8 @@ fn disabled_checklist_preserves_goal_text_that_mentions_the_tool() {
 fn test_goal(objective: &str) -> ThreadGoal {
     ThreadGoal {
         thread_id: ThreadId::new(),
+        goal_id: "goal-1".to_string(),
+        revision: 1,
         objective: objective.to_string(),
         status: ThreadGoalStatus::Active,
         token_budget: Some(10_000),

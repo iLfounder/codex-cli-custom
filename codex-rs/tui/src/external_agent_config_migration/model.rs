@@ -47,7 +47,12 @@ pub(crate) fn external_agent_config_migration_groups(
     if !projects.is_empty() {
         let project_count = projects
             .iter()
-            .filter_map(|idx| items[*idx].cwd.as_deref())
+            .filter_map(|idx| {
+                items[*idx]
+                    .cwd
+                    .as_ref()
+                    .map(codex_utils_path_uri::LegacyAppPathString::as_str)
+            })
             .collect::<BTreeSet<_>>()
             .len();
         groups.push(ExternalAgentConfigMigrationGroupModel {

@@ -261,7 +261,7 @@ fn sample_thread_with_metadata(
         recency_at: Some(2),
         status: AppServerThreadStatus::Idle,
         path: None,
-        cwd: test_path_buf("/tmp").abs(),
+        cwd: test_path_buf("/tmp").abs().into(),
         cli_version: "0.0.0".to_string(),
         source,
         can_accept_direct_input: None,
@@ -290,7 +290,7 @@ fn sample_thread_start_response(
         model: model.to_string(),
         model_provider: "openai".to_string(),
         service_tier: None,
-        cwd: test_path_buf("/tmp").abs(),
+        cwd: test_path_buf("/tmp").abs().into(),
         runtime_workspace_roots: Vec::new(),
         instruction_sources: Vec::new(),
         approval_policy: AppServerAskForApproval::OnRequest,
@@ -356,7 +356,7 @@ fn sample_thread_resume_response_with_source(
         model: model.to_string(),
         model_provider: "openai".to_string(),
         service_tier: None,
-        cwd: test_path_buf("/tmp").abs(),
+        cwd: test_path_buf("/tmp").abs().into(),
         runtime_workspace_roots: Vec::new(),
         instruction_sources: Vec::new(),
         approval_policy: AppServerAskForApproval::OnRequest,
@@ -523,7 +523,7 @@ fn sample_turn_steer_request(
                     text_elements: vec![],
                 },
                 UserInput::LocalImage {
-                    path: "/tmp/a.png".into(),
+                    path: test_path_buf("/tmp/a.png").abs().into(),
                     detail: None,
                 },
             ],
@@ -1020,7 +1020,7 @@ fn sample_permissions_approval_request(request_id: i64) -> ServerRequest {
             item_id: "permissions-1".to_string(),
             environment_id: None,
             started_at_ms: 1_000,
-            cwd: test_path_buf("/tmp").abs(),
+            cwd: test_path_buf("/tmp").abs().into(),
             reason: Some("need network".to_string()),
             permissions: RequestPermissionProfile {
                 network: Some(codex_app_server_protocol::AdditionalNetworkPermissions {
@@ -3184,7 +3184,7 @@ async fn guardian_completed_notification_publishes_review_event_with_thread_meta
                 GuardianApprovalReviewAction::Command {
                     source: AppServerGuardianCommandSource::Shell,
                     command: "echo hi".to_string(),
-                    cwd: test_path_buf("/tmp").abs(),
+                    cwd: test_path_buf("/tmp").abs().into(),
                 },
             ))),
             &mut events,

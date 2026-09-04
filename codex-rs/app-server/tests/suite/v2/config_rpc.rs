@@ -511,7 +511,8 @@ sandbox_mode = "workspace-write"
 "#,
     )?;
     let codex_home_path = codex_home.path().canonicalize()?;
-    let user_file = AbsolutePathBuf::try_from(codex_home_path.join("config.toml"))?;
+    let user_file: codex_utils_path_uri::LegacyAppPathString =
+        AbsolutePathBuf::try_from(codex_home_path.join("config.toml"))?.into();
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -564,7 +565,8 @@ allowed_domains = ["example.com"]
 "#,
     )?;
     let codex_home_path = codex_home.path().canonicalize()?;
-    let user_file = AbsolutePathBuf::try_from(codex_home_path.join("config.toml"))?;
+    let user_file: codex_utils_path_uri::LegacyAppPathString =
+        AbsolutePathBuf::try_from(codex_home_path.join("config.toml"))?.into();
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -700,8 +702,10 @@ access = "deny"
     )?;
     set_project_trust_level(codex_home.path(), workspace.path(), TrustLevel::Trusted)?;
     let codex_home_path = codex_home.path().canonicalize()?;
-    let user_file = AbsolutePathBuf::try_from(codex_home_path.join("config.toml"))?;
-    let project_config = AbsolutePathBuf::try_from(project_config_dir)?;
+    let user_file: codex_utils_path_uri::LegacyAppPathString =
+        AbsolutePathBuf::try_from(codex_home_path.join("config.toml"))?.into();
+    let project_config: codex_utils_path_uri::LegacyAppPathString =
+        AbsolutePathBuf::try_from(project_config_dir)?.into();
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -712,7 +716,9 @@ access = "deny"
     let request_id = mcp
         .send_config_read_request(ConfigReadParams {
             include_layers: false,
-            cwd: Some(workspace.path().to_string_lossy().into_owned()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                workspace.path(),
+            )),
         })
         .await?;
     let ConfigReadResponse {
@@ -1037,7 +1043,8 @@ enabled = true
 "#,
     )?;
     let codex_home_path = codex_home.path().canonicalize()?;
-    let user_file = AbsolutePathBuf::try_from(codex_home_path.join("config.toml"))?;
+    let user_file: codex_utils_path_uri::LegacyAppPathString =
+        AbsolutePathBuf::try_from(codex_home_path.join("config.toml"))?.into();
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -1263,7 +1270,8 @@ model_reasoning_effort = "high"
 "#,
     )?;
     set_project_trust_level(codex_home.path(), workspace.path(), TrustLevel::Trusted)?;
-    let project_config = AbsolutePathBuf::try_from(project_config_dir)?;
+    let project_config: codex_utils_path_uri::LegacyAppPathString =
+        AbsolutePathBuf::try_from(project_config_dir)?.into();
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -1274,7 +1282,9 @@ model_reasoning_effort = "high"
     let request_id = mcp
         .send_config_read_request(ConfigReadParams {
             include_layers: true,
-            cwd: Some(workspace.path().to_string_lossy().into_owned()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                workspace.path(),
+            )),
         })
         .await?;
     let ConfigReadResponse {
@@ -1330,7 +1340,7 @@ async fn config_read_respects_managed_project_root_markers() -> Result<()> {
     let request_id = app_server
         .send_config_read_request(ConfigReadParams {
             include_layers: true,
-            cwd: Some(child.to_string_lossy().into_owned()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(&child)),
         })
         .await?;
     let ConfigReadResponse { config, layers, .. } =
@@ -1358,7 +1368,7 @@ async fn config_read_respects_managed_project_root_markers() -> Result<()> {
     assert_eq!(
         project_layers,
         vec![(
-            AbsolutePathBuf::try_from(child_config)?,
+            AbsolutePathBuf::try_from(child_config)?.into(),
             json!({"model_reasoning_effort": "high"}),
             None,
         )]
@@ -1387,10 +1397,12 @@ network_access = true
         ),
     )?;
     let codex_home_path = codex_home.path().canonicalize()?;
-    let user_file = AbsolutePathBuf::try_from(codex_home_path.join("config.toml"))?;
+    let user_file: codex_utils_path_uri::LegacyAppPathString =
+        AbsolutePathBuf::try_from(codex_home_path.join("config.toml"))?.into();
 
     let managed_path = codex_home.path().join("managed_config.toml");
-    let managed_file = AbsolutePathBuf::try_from(managed_path.clone())?;
+    let managed_file: codex_utils_path_uri::LegacyAppPathString =
+        AbsolutePathBuf::try_from(managed_path.clone())?.into();
     std::fs::write(
         &managed_path,
         format!(
@@ -1458,7 +1470,12 @@ writable_roots = [{}]
         .sandbox_workspace_write
         .as_ref()
         .expect("sandbox workspace write");
-    assert_eq!(sandbox.writable_roots, vec![system_dir]);
+    assert_eq!(
+        sandbox.writable_roots,
+        vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+            &system_dir
+        )]
+    );
     assert_eq!(
         origins
             .get("sandbox_workspace_write.writable_roots.0")
@@ -1525,7 +1542,8 @@ model = "gpt-old"
         .await?;
     let write: ConfigWriteResponse =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(write_id)).await??;
-    let expected_file_path = AbsolutePathBuf::resolve_path_against_base("config.toml", codex_home);
+    let expected_file_path: codex_utils_path_uri::LegacyAppPathString =
+        AbsolutePathBuf::resolve_path_against_base("config.toml", codex_home).into();
 
     assert_eq!(write.status, WriteStatus::Ok);
     assert_eq!(write.file_path, expected_file_path);
@@ -1645,7 +1663,9 @@ model = "gpt-old"
 
     let write_id = mcp
         .send_config_value_write_request(ConfigValueWriteParams {
-            file_path: Some(codex_home.path().join("config.toml").display().to_string()),
+            file_path: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                &codex_home.path().join("config.toml"),
+            )),
             key_path: "model".to_string(),
             value: json!("gpt-new"),
             merge_strategy: MergeStrategy::Replace,
@@ -1684,7 +1704,9 @@ async fn config_batch_write_applies_multiple_edits() -> Result<()> {
     let writable_root = test_tmp_path_buf();
     let batch_id = mcp
         .send_config_batch_write_request(ConfigBatchWriteParams {
-            file_path: Some(codex_home.join("config.toml").display().to_string()),
+            file_path: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                &codex_home.join("config.toml"),
+            )),
             edits: vec![
                 ConfigEdit {
                     key_path: "sandbox_mode".to_string(),
@@ -1707,7 +1729,8 @@ async fn config_batch_write_applies_multiple_edits() -> Result<()> {
     let batch_write: ConfigWriteResponse =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(batch_id)).await??;
     assert_eq!(batch_write.status, WriteStatus::Ok);
-    let expected_file_path = AbsolutePathBuf::resolve_path_against_base("config.toml", codex_home);
+    let expected_file_path: codex_utils_path_uri::LegacyAppPathString =
+        AbsolutePathBuf::resolve_path_against_base("config.toml", codex_home).into();
     assert_eq!(batch_write.file_path, expected_file_path);
 
     let read_id = mcp
@@ -1724,7 +1747,12 @@ async fn config_batch_write_applies_multiple_edits() -> Result<()> {
         .sandbox_workspace_write
         .as_ref()
         .expect("sandbox workspace write");
-    assert_eq!(sandbox.writable_roots, vec![writable_root]);
+    assert_eq!(
+        sandbox.writable_roots,
+        vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+            &writable_root
+        )]
+    );
     assert!(!sandbox.network_access);
 
     Ok(())
@@ -1849,7 +1877,9 @@ access = "deny"
     assert_eq!(batch_write.status, WriteStatus::Ok);
     assert_eq!(
         batch_write.file_path,
-        AbsolutePathBuf::resolve_path_against_base("config.toml", &codex_home)
+        codex_utils_path_uri::LegacyAppPathString::from_abs_path(
+            &AbsolutePathBuf::resolve_path_against_base("config.toml", &codex_home),
+        )
     );
     assert_eq!(batch_write.overridden_metadata, None);
 
@@ -1982,7 +2012,9 @@ model = "gpt-5.3-spark"
 
     let batch_id = mcp
         .send_config_batch_write_request(ConfigBatchWriteParams {
-            file_path: Some(codex_home.join("config.toml").display().to_string()),
+            file_path: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                &codex_home.join("config.toml"),
+            )),
             edits: vec![
                 ConfigEdit {
                     key_path: "profiles.\"team.prod\".model".to_string(),
@@ -2041,7 +2073,9 @@ async fn config_batch_write_updates_multiple_desktop_settings() -> Result<()> {
 
     let batch_id = mcp
         .send_config_batch_write_request(ConfigBatchWriteParams {
-            file_path: Some(codex_home.join("config.toml").display().to_string()),
+            file_path: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                &codex_home.join("config.toml"),
+            )),
             edits: vec![
                 ConfigEdit {
                     key_path: "desktop.selected-avatar-id".to_string(),
@@ -2088,7 +2122,7 @@ async fn config_batch_write_updates_multiple_desktop_settings() -> Result<()> {
 
 fn assert_layers_user_then_optional_system(
     layers: &[codex_app_server_protocol::ConfigLayer],
-    user_file: AbsolutePathBuf,
+    user_file: codex_utils_path_uri::LegacyAppPathString,
 ) -> Result<()> {
     let mut first_index = 0;
     if matches!(
@@ -2114,8 +2148,8 @@ fn assert_layers_user_then_optional_system(
 
 fn assert_layers_managed_user_then_optional_system(
     layers: &[codex_app_server_protocol::ConfigLayer],
-    managed_file: AbsolutePathBuf,
-    user_file: AbsolutePathBuf,
+    managed_file: codex_utils_path_uri::LegacyAppPathString,
+    user_file: codex_utils_path_uri::LegacyAppPathString,
 ) -> Result<()> {
     let mut first_index = 0;
     if matches!(

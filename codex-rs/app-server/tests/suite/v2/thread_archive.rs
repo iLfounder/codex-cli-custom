@@ -321,7 +321,10 @@ async fn thread_archive_requires_materialized_rollout() -> Result<()> {
         .await?;
     assert!(!thread.id.is_empty());
 
-    let rollout_path = thread.path.clone().expect("thread path");
+    let rollout_path = codex_utils_absolute_path::AbsolutePathBuf::try_from(
+        thread.path.clone().expect("thread path"),
+    )?
+    .into_path_buf();
     assert!(
         !rollout_path.exists(),
         "fresh thread rollout should not exist yet at {}",

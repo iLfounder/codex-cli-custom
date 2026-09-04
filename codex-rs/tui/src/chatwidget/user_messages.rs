@@ -627,17 +627,17 @@ pub(crate) fn mention_bindings_from_user_inputs(
             UserInput::Skill { name, path } => Some(MentionBinding {
                 sigil: TOOL_MENTION_SIGIL,
                 mention: name.clone(),
-                path: path.to_string_lossy().into_owned(),
+                path: path.as_str().to_string(),
             }),
             UserInput::Mention { name, path } => {
-                let plugin_id = path.strip_prefix("plugin://");
+                let plugin_id = path.as_str().strip_prefix("plugin://");
                 let mention = if let Some(plugin_id) = plugin_id {
                     plugin_id
                         .split_once('@')
                         .map(|(plugin_name, _)| plugin_name)
                         .unwrap_or(plugin_id)
                         .to_string()
-                } else if path.starts_with("app://") {
+                } else if path.as_str().starts_with("app://") {
                     codex_connectors::metadata::connector_mention_slug_from_name(name)
                 } else {
                     name.clone()
@@ -652,7 +652,7 @@ pub(crate) fn mention_bindings_from_user_inputs(
                 Some(MentionBinding {
                     sigil,
                     mention,
-                    path: path.clone(),
+                    path: path.as_str().to_string(),
                 })
             }
             UserInput::Text { .. }
@@ -822,7 +822,16 @@ impl ChatWidget {
                     }),
                 ),
                 UserInput::Image { url, .. } => remote_image_urls.push(url.clone()),
-                UserInput::LocalImage { path, .. } => local_images.push(path.clone()),
+                UserInput::LocalImage { path, .. } => {
+                    if let Some(path) = path.to_inferred_abs_path() {
+                        local_images.push(path.into_path_buf());
+                    } else {
+                        tracing::warn!(
+                            path = %path.render_for_ui(),
+                            "omitting non-native local image from TUI history"
+                        );
+                    }
+                }
                 UserInput::Audio { .. } // TODO: Include audio inputs in the user message display.
                 | UserInput::LocalAudio { .. } // TODO: Include audio inputs in the user message display.
                 | UserInput::Skill { .. }

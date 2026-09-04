@@ -123,6 +123,8 @@ impl ProcessExecRequestProcessor {
         };
         let output_bytes_cap = output_bytes_cap.unwrap_or(Some(DEFAULT_OUTPUT_BYTES_CAP));
         let size = size.map(terminal_size_from_protocol).transpose()?;
+        let cwd = AbsolutePathBuf::try_from(cwd)
+            .map_err(|error| invalid_params(format!("invalid process cwd: {error}")))?;
 
         self.process_exec_manager
             .start(StartProcessParams {

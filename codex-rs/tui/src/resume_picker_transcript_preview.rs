@@ -49,13 +49,16 @@ pub(crate) async fn load_transcript_preview(
         ThreadHistoryMode::Legacy => {
             if matches!(app_server.thread_params_mode(), ThreadParamsMode::Embedded)
                 && let Some(path) = thread.path.as_ref()
+                && let Some(path) =
+                    crate::app_server_session::app_server_path_string(path).to_inferred_abs_path()
                 && path
                     .file_name()
                     .and_then(|name| name.to_str())
                     .is_some_and(|name| name.ends_with(".jsonl"))
             {
-                let path = path.clone();
-                let cwd = thread.cwd.clone();
+                let cwd = crate::app_server_session::app_server_path_string(&thread.cwd)
+                    .to_inferred_abs_path()
+                    .ok_or_else(|| std::io::Error::other("invalid local thread cwd"))?;
                 let inline_visualization_context = inline_visualization_context.clone();
                 let scanned = tokio::task::spawn_blocking(move || {
                     scan_legacy_transcript_preview(
@@ -81,6 +84,7 @@ pub(crate) async fn load_transcript_preview(
                 )
                 .await
                 .map_err(std::io::Error::other)?;
+            let cwd = crate::app_server_session::app_server_path_string(&thread.cwd);
             append_transcript_preview_lines(
                 &mut lines,
                 thread
@@ -88,12 +92,12 @@ pub(crate) async fn load_transcript_preview(
                     .iter()
                     .rev()
                     .flat_map(|turn| turn.items.iter().rev()),
-                thread.cwd.as_path(),
+                Path::new(cwd.as_str()),
                 inline_visualization_context.as_ref(),
             );
         }
         ThreadHistoryMode::Paginated => {
-            let cwd = thread.cwd.as_path();
+            let cwd = crate::app_server_session::app_server_path_string(&thread.cwd);
             let mut cursor = None;
             let mut seen_cursors = HashSet::new();
             let mut scanned_items = 0_usize;
@@ -119,7 +123,7 @@ pub(crate) async fn load_transcript_preview(
                         .iter()
                         .take(remaining_items)
                         .map(|entry| &entry.item),
-                    cwd,
+                    Path::new(cwd.as_str()),
                     inline_visualization_context.as_ref(),
                 );
                 if lines.len() == MAX_TRANSCRIPT_PREVIEW_LINES

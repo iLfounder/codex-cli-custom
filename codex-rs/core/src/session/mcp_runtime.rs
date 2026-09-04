@@ -403,10 +403,6 @@ impl Session {
                 })
                 .collect(),
         );
-        let codex_apps_auth_manager =
-            codex_mcp::host_owned_codex_apps_enabled(&mcp_config, auth.as_ref())
-                .then(|| Arc::clone(auth_manager));
-
         McpRuntimeInput {
             startup_policy: if matches!(desired.session_source, SessionSource::SubAgent(_)) {
                 McpStartupPolicy::LazyWhenCached
@@ -426,7 +422,7 @@ impl Session {
             codex_apps_tools_cache_key: connector_runtime_context_key(auth.as_ref()),
             client_mcp_extensions: self.services.client_mcp_extensions.for_mcp_servers(),
             auth,
-            auth_manager: codex_apps_auth_manager,
+            auth_manager: Some(Arc::clone(auth_manager)),
             elicitation_reviewer,
             elicitation_lifecycle: Some(self.mcp_elicitation_lifecycle()),
         }

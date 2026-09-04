@@ -15,6 +15,7 @@ use codex_app_server_protocol::FsWriteFileResponse;
 use codex_app_server_protocol::JSONRPCRequest;
 use codex_app_server_protocol::RequestId;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
 use color_eyre::eyre::Result;
 use color_eyre::eyre::WrapErr;
 use serde::de::DeserializeOwned;
@@ -102,7 +103,7 @@ impl AppServerSession {
         &mut self,
         method: &str,
         path: &AppServerPath,
-        local_request: impl FnOnce(RequestId, AbsolutePathBuf) -> ClientRequest,
+        local_request: impl FnOnce(RequestId, LegacyAppPathString) -> ClientRequest,
         remote_params: impl FnOnce() -> serde_json::Value,
     ) -> Result<T> {
         let request_id = self.next_request_id();
@@ -126,7 +127,10 @@ impl AppServerSession {
                 let path = AbsolutePathBuf::from_absolute_path_checked(path.as_str())
                     .wrap_err_with(|| format!("invalid local app-server fs path {path}"))?;
                 self.client
-                    .request_typed(local_request(request_id, path))
+                    .request_typed(local_request(
+                        request_id,
+                        LegacyAppPathString::from_abs_path(&path),
+                    ))
                     .await
                     .wrap_err_with(|| format!("{method} failed in TUI"))
             }

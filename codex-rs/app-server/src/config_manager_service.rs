@@ -116,10 +116,13 @@ impl ConfigManager {
         &self,
         params: ConfigReadParams,
     ) -> Result<ConfigReadResponse, ConfigManagerError> {
-        let layers = match params.cwd.as_deref() {
+        let layers = match params.cwd {
             Some(cwd) => {
-                let cwd = AbsolutePathBuf::try_from(PathBuf::from(cwd)).map_err(|err| {
-                    ConfigManagerError::io("failed to resolve config cwd to an absolute path", err)
+                let cwd = AbsolutePathBuf::try_from(cwd).map_err(|err| {
+                    ConfigManagerError::anyhow(
+                        "failed to resolve config cwd to an absolute path",
+                        err.into(),
+                    )
                 })?;
                 self.load_config_layers(Some(cwd)).await.map_err(|err| {
                     ConfigManagerError::io("failed to read configuration layers", err)
@@ -215,7 +218,7 @@ impl ConfigManager {
 
     async fn apply_edits(
         &self,
-        file_path: Option<String>,
+        file_path: Option<codex_utils_path_uri::LegacyAppPathString>,
         expected_version: Option<String>,
         edits: Vec<(String, JsonValue, MergeStrategy)>,
     ) -> Result<ConfigWriteResponse, ConfigManagerError> {
@@ -223,8 +226,9 @@ impl ConfigManager {
             .user_config_path()
             .map_err(|err| ConfigManagerError::io("failed to resolve user config path", err))?;
         let provided_path = match file_path {
-            Some(path) => AbsolutePathBuf::from_absolute_path(PathBuf::from(path))
-                .map_err(|err| ConfigManagerError::io("failed to resolve user config path", err))?,
+            Some(path) => AbsolutePathBuf::try_from(path).map_err(|err| {
+                ConfigManagerError::anyhow("failed to resolve user config path", err.into())
+            })?,
             None => allowed_path.clone(),
         };
 
@@ -460,7 +464,7 @@ impl ConfigManager {
                 })?
                 .version
                 .clone(),
-            file_path: provided_path,
+            file_path: provided_path.into(),
             overridden_metadata: overridden,
         })
     }

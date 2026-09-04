@@ -1,10 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
-    "AbsolutePathBuf": {
-      "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
-      "type": "string"
-    },
     "AccountRotationUpdateParams": {
       "properties": {
         "automaticAccountSlotIds": {
@@ -546,11 +542,15 @@
           "type": "array"
         },
         "cwd": {
-          "description": "Optional working directory. Defaults to the server cwd.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LegacyAppPathString"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional working directory. Defaults to the server cwd."
         },
         "disableOutputCap": {
           "description": "Disable stdout/stderr capture truncation for this request.\n\nCannot be combined with `outputBytesCap`.",
@@ -744,11 +744,15 @@
           ]
         },
         "filePath": {
-          "description": "Path to the config file to write; defaults to the user's `config.toml` when omitted.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LegacyAppPathString"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Path to the config file to write; defaults to the user's `config.toml` when omitted."
         },
         "reloadUserConfig": {
           "description": "When true, hot-reload updated runtime settings into loaded threads after writing. Session-static model, reasoning-effort, Plan-mode reasoning-effort, service-tier, and personality defaults are not reloaded.",
@@ -780,11 +784,15 @@
     "ConfigReadParams": {
       "properties": {
         "cwd": {
-          "description": "Optional working directory to resolve project config layers. If specified, return the effective config as seen from that directory (i.e., including any project layers between `cwd` and the project/repo root).",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LegacyAppPathString"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional working directory to resolve project config layers. If specified, return the effective config as seen from that directory (i.e., including any project layers between `cwd` and the project/repo root)."
         },
         "includeLayers": {
           "type": "boolean"
@@ -801,11 +809,15 @@
           ]
         },
         "filePath": {
-          "description": "Path to the config file to write; defaults to the user's `config.toml` when omitted.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LegacyAppPathString"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Path to the config file to write; defaults to the user's `config.toml` when omitted."
         },
         "keyPath": {
           "type": "string"
@@ -1097,7 +1109,7 @@
         "cwds": {
           "description": "Zero or more working directories to include for repo-scoped detection.",
           "items": {
-            "type": "string"
+            "$ref": "#/definitions/LegacyAppPathString"
           },
           "type": [
             "array",
@@ -1166,9 +1178,13 @@
     "ExternalAgentConfigImportHistoryRecordSuccessParams": {
       "properties": {
         "cwd": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LegacyAppPathString"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "itemType": {
@@ -1228,9 +1244,13 @@
     "ExternalAgentConfigImportItemTypeFailure": {
       "properties": {
         "cwd": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LegacyAppPathString"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "errorType": {
@@ -1306,11 +1326,15 @@
     "ExternalAgentConfigMigrationItem": {
       "properties": {
         "cwd": {
-          "description": "Null or empty means home-scoped migration; non-empty means repo-scoped migration.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LegacyAppPathString"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Null or empty means home-scoped migration; non-empty means repo-scoped migration."
         },
         "description": {
           "type": "string"
@@ -1357,7 +1381,7 @@
         },
         "extraLogFiles": {
           "items": {
-            "type": "string"
+            "$ref": "#/definitions/LegacyAppPathString"
           },
           "type": [
             "array",
@@ -1400,7 +1424,7 @@
         "destinationPath": {
           "allOf": [
             {
-              "$ref": "#/definitions/AbsolutePathBuf"
+              "$ref": "#/definitions/LegacyAppPathString"
             }
           ],
           "description": "Absolute destination path."
@@ -1412,7 +1436,7 @@
         "sourcePath": {
           "allOf": [
             {
-              "$ref": "#/definitions/AbsolutePathBuf"
+              "$ref": "#/definitions/LegacyAppPathString"
             }
           ],
           "description": "Absolute source path."
@@ -1430,7 +1454,7 @@
         "path": {
           "allOf": [
             {
-              "$ref": "#/definitions/AbsolutePathBuf"
+              "$ref": "#/definitions/LegacyAppPathString"
             }
           ],
           "description": "Absolute directory path to create."
@@ -1454,7 +1478,7 @@
         "path": {
           "allOf": [
             {
-              "$ref": "#/definitions/AbsolutePathBuf"
+              "$ref": "#/definitions/LegacyAppPathString"
             }
           ],
           "description": "Absolute path to inspect."
@@ -1471,7 +1495,7 @@
         "path": {
           "allOf": [
             {
-              "$ref": "#/definitions/AbsolutePathBuf"
+              "$ref": "#/definitions/LegacyAppPathString"
             }
           ],
           "description": "Absolute directory path to read."
@@ -1488,7 +1512,7 @@
         "path": {
           "allOf": [
             {
-              "$ref": "#/definitions/AbsolutePathBuf"
+              "$ref": "#/definitions/LegacyAppPathString"
             }
           ],
           "description": "Absolute path to read."
@@ -1512,7 +1536,7 @@
         "path": {
           "allOf": [
             {
-              "$ref": "#/definitions/AbsolutePathBuf"
+              "$ref": "#/definitions/LegacyAppPathString"
             }
           ],
           "description": "Absolute path to remove."
@@ -1549,7 +1573,7 @@
         "path": {
           "allOf": [
             {
-              "$ref": "#/definitions/AbsolutePathBuf"
+              "$ref": "#/definitions/LegacyAppPathString"
             }
           ],
           "description": "Absolute file or directory path to watch."
@@ -1575,7 +1599,7 @@
         "path": {
           "allOf": [
             {
-              "$ref": "#/definitions/AbsolutePathBuf"
+              "$ref": "#/definitions/LegacyAppPathString"
             }
           ],
           "description": "Absolute path to write."
@@ -1767,7 +1791,7 @@
         "cwds": {
           "description": "When empty, defaults to the current session working directory.",
           "items": {
-            "type": "string"
+            "$ref": "#/definitions/LegacyAppPathString"
           },
           "type": "array"
         }
@@ -2146,7 +2170,7 @@
         },
         "sparsePaths": {
           "items": {
-            "type": "string"
+            "$ref": "#/definitions/LegacyAppPathString"
           },
           "type": [
             "array",
@@ -2473,11 +2497,15 @@
           ]
         },
         "cwd": {
-          "description": "Optional working directory to resolve project config layers.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LegacyAppPathString"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional working directory to resolve project config layers."
         },
         "limit": {
           "description": "Optional page size; defaults to the full result set.",
@@ -2551,7 +2579,7 @@
         "marketplacePath": {
           "anyOf": [
             {
-              "$ref": "#/definitions/AbsolutePathBuf"
+              "$ref": "#/definitions/LegacyAppPathString"
             },
             {
               "type": "null"
@@ -2578,7 +2606,7 @@
         "cwds": {
           "description": "Optional working directories used to discover repo marketplaces.",
           "items": {
-            "$ref": "#/definitions/AbsolutePathBuf"
+            "$ref": "#/definitions/LegacyAppPathString"
           },
           "type": [
             "array",
@@ -2613,7 +2641,7 @@
         "cwds": {
           "description": "Optional working directories used to discover repo marketplaces. When omitted, only home-scoped marketplaces and the official curated marketplace are considered.",
           "items": {
-            "$ref": "#/definitions/AbsolutePathBuf"
+            "$ref": "#/definitions/LegacyAppPathString"
           },
           "type": [
             "array",
@@ -2642,7 +2670,7 @@
         "marketplacePath": {
           "anyOf": [
             {
-              "$ref": "#/definitions/AbsolutePathBuf"
+              "$ref": "#/definitions/LegacyAppPathString"
             },
             {
               "type": "null"
@@ -2738,7 +2766,7 @@
           ]
         },
         "pluginPath": {
-          "$ref": "#/definitions/AbsolutePathBuf"
+          "$ref": "#/definitions/LegacyAppPathString"
         },
         "remotePluginId": {
           "type": [
@@ -2890,7 +2918,7 @@
     "ProjectRoot": {
       "properties": {
         "path": {
-          "$ref": "#/definitions/AbsolutePathBuf"
+          "$ref": "#/definitions/LegacyAppPathString"
         }
       },
       "required": [
@@ -4107,7 +4135,7 @@
             "writableRoots": {
               "default": [],
               "items": {
-                "$ref": "#/definitions/AbsolutePathBuf"
+                "$ref": "#/definitions/LegacyAppPathString"
               },
               "type": "array"
             }
@@ -4156,10 +4184,10 @@
     "SessionMigration": {
       "properties": {
         "cwd": {
-          "type": "string"
+          "$ref": "#/definitions/LegacyAppPathString"
         },
         "path": {
-          "type": "string"
+          "$ref": "#/definitions/LegacyAppPathString"
         },
         "title": {
           "type": [
@@ -4274,7 +4302,7 @@
         "path": {
           "anyOf": [
             {
-              "$ref": "#/definitions/AbsolutePathBuf"
+              "$ref": "#/definitions/LegacyAppPathString"
             },
             {
               "type": "null"
@@ -4292,7 +4320,7 @@
       "properties": {
         "extraRoots": {
           "items": {
-            "$ref": "#/definitions/AbsolutePathBuf"
+            "$ref": "#/definitions/LegacyAppPathString"
           },
           "type": "array"
         }
@@ -4307,7 +4335,7 @@
         "cwds": {
           "description": "When empty, defaults to the current session working directory.",
           "items": {
-            "type": "string"
+            "$ref": "#/definitions/LegacyAppPathString"
           },
           "type": "array"
         },
@@ -4560,9 +4588,13 @@
           ]
         },
         "cwd": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LegacyAppPathString"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "developerInstructions": {
@@ -4799,11 +4831,11 @@
     "ThreadListCwdFilter": {
       "anyOf": [
         {
-          "type": "string"
+          "$ref": "#/definitions/LegacyAppPathString"
         },
         {
           "items": {
-            "type": "string"
+            "$ref": "#/definitions/LegacyAppPathString"
           },
           "type": "array"
         }
@@ -5344,9 +5376,13 @@
           ]
         },
         "cwd": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LegacyAppPathString"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "developerInstructions": {
@@ -5688,9 +5724,13 @@
           ]
         },
         "cwd": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LegacyAppPathString"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "developerInstructions": {
@@ -6011,11 +6051,15 @@
           ]
         },
         "cwd": {
-          "description": "Override the working directory for this turn and subsequent turns.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LegacyAppPathString"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Override the working directory for this turn and subsequent turns."
         },
         "effort": {
           "anyOf": [
@@ -6265,7 +6309,7 @@
               "default": null
             },
             "path": {
-              "type": "string"
+              "$ref": "#/definitions/LegacyAppPathString"
             },
             "type": {
               "enum": [
@@ -6305,7 +6349,7 @@
         {
           "properties": {
             "path": {
-              "type": "string"
+              "$ref": "#/definitions/LegacyAppPathString"
             },
             "type": {
               "enum": [
@@ -6328,7 +6372,7 @@
               "type": "string"
             },
             "path": {
-              "type": "string"
+              "$ref": "#/definitions/LegacyAppPathString"
             },
             "type": {
               "enum": [
@@ -6352,7 +6396,7 @@
               "type": "string"
             },
             "path": {
-              "type": "string"
+              "$ref": "#/definitions/LegacyAppPathString"
             },
             "type": {
               "enum": [
@@ -6384,7 +6428,7 @@
         "cwd": {
           "anyOf": [
             {
-              "$ref": "#/definitions/AbsolutePathBuf"
+              "$ref": "#/definitions/LegacyAppPathString"
             },
             {
               "type": "null"

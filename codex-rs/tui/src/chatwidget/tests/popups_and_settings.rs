@@ -48,6 +48,7 @@ async fn experimental_mode_plan_is_ignored_on_startup() {
         is_first_run: true,
         status_account_display: None,
         runtime_model_provider_base_url: None,
+        runtime_requires_openai_auth: false,
         initial_plan_type: None,
         model: Some(resolved_model.clone()),
         startup_tooltip_override: None,
@@ -140,11 +141,13 @@ async fn hooks_popup_shows_list_diagnostics() {
         cwd.to_path_buf(),
         Ok(HooksListResponse {
             data: vec![HooksListEntry {
-                cwd: cwd.to_path_buf(),
+                cwd: codex_utils_path_uri::LegacyAppPathString::from_abs_path(&cwd),
                 hooks: Vec::new(),
                 warnings: vec!["skipped invalid matcher for PreToolUse".to_string()],
                 errors: vec![HookErrorInfo {
-                    path: test_path_buf("/tmp/hooks.json"),
+                    path: codex_utils_path_uri::LegacyAppPathString::from_path(&test_path_buf(
+                        "/tmp/hooks.json",
+                    )),
                     message: "failed to parse hooks config".to_string(),
                 }],
             }],
@@ -227,7 +230,7 @@ async fn plugins_popup_keeps_loaded_marketplace_state_with_load_errors() {
     response
         .marketplace_load_errors
         .push(MarketplaceLoadErrorInfo {
-            marketplace_path: plugins_test_absolute_path("marketplaces/broken"),
+            marketplace_path: plugins_test_server_path("marketplaces/broken"),
             message: "failed to load marketplace manifest".to_string(),
         });
 
@@ -332,9 +335,11 @@ async fn plugins_popup_add_marketplace_tab_opens_prompt_and_submits_source() {
     match rx.try_recv() {
         Ok(AppEvent::FetchMarketplaceAdd {
             cwd: event_cwd,
+            remote_cwd,
             source,
         }) => {
             assert_eq!(event_cwd, cwd);
+            assert_eq!(remote_cwd, None);
             assert_eq!(source, "owner/repo");
         }
         other => panic!("expected FetchMarketplaceAdd event, got {other:?}"),
@@ -418,7 +423,7 @@ async fn marketplace_add_success_refreshes_to_new_marketplace_tab() {
     let cwd = chat.config.cwd.to_path_buf();
     let marketplace_root = plugins_test_absolute_path("marketplaces/debug");
     let marketplace_path =
-        plugins_test_absolute_path("marketplaces/debug/.agents/plugins/marketplace.json");
+        plugins_test_server_path("marketplaces/debug/.agents/plugins/marketplace.json");
     let temp = tempdir().expect("tempdir");
     let config_toml_path = temp.path().join("config.toml").abs();
     chat.config.config_layer_stack = ConfigLayerStack::default().with_user_config(
@@ -441,10 +446,13 @@ async fn marketplace_add_success_refreshes_to_new_marketplace_tab() {
     );
     chat.on_marketplace_add_loaded(
         cwd.clone(),
+        /*remote_cwd*/ None,
         "owner/repo".to_string(),
         Ok(MarketplaceAddResponse {
             marketplace_name: "debug".to_string(),
-            installed_root: marketplace_root,
+            installed_root: codex_utils_path_uri::LegacyAppPathString::from_abs_path(
+                &marketplace_root,
+            ),
             already_added: false,
         }),
     );
@@ -595,7 +603,9 @@ async fn plugins_popup_removes_user_configured_marketplace_flow() {
         marketplace_display_name,
         Ok(MarketplaceRemoveResponse {
             marketplace_name: "repo".to_string(),
-            installed_root: Some(plugins_test_absolute_path("marketplaces/repo")),
+            installed_root: Some(codex_utils_path_uri::LegacyAppPathString::from_abs_path(
+                &plugins_test_absolute_path("marketplaces/repo"),
+            )),
         }),
     );
     chat.on_plugins_loaded(
@@ -621,12 +631,11 @@ async fn plugin_detail_popup_snapshot_labels_personal_marketplace_as_local() {
     chat.set_feature_enabled(Feature::Plugins, /*enabled*/ true);
 
     let marketplace_name = "personal-marketplace";
-    let personal_marketplace_path = AbsolutePathBuf::try_from(
-        dirs::home_dir()
+    let personal_marketplace_path = codex_utils_path_uri::LegacyAppPathString::from_path(
+        &dirs::home_dir()
             .expect("home directory")
             .join(".agents/plugins/marketplace.json"),
-    )
-    .expect("absolute personal marketplace path");
+    );
     let summary = plugins_test_summary(
         "plugin-figma",
         "figma",
@@ -1966,7 +1975,7 @@ async fn plugins_popup_refresh_preserves_duplicate_marketplace_tab_by_path() {
     let response = plugins_test_response(vec![
         PluginMarketplaceEntry {
             name: "duplicate".to_string(),
-            path: Some(plugins_test_absolute_path(
+            path: Some(plugins_test_server_path(
                 "marketplaces/home/marketplace.json",
             )),
             interface: Some(MarketplaceInterface {
@@ -1984,7 +1993,7 @@ async fn plugins_popup_refresh_preserves_duplicate_marketplace_tab_by_path() {
         },
         PluginMarketplaceEntry {
             name: "duplicate".to_string(),
-            path: Some(plugins_test_absolute_path(
+            path: Some(plugins_test_server_path(
                 "marketplaces/repo/marketplace.json",
             )),
             interface: Some(MarketplaceInterface {
@@ -2284,7 +2293,7 @@ async fn apps_notification_update_excludes_inaccessible_apps_from_mentions() {
             if matches!(items.as_slice(), [
                 UserInput::Text { .. },
                 UserInput::Mention { name, path },
-            ] if name == "Google Drive" && path == "app://google_drive")
+            ] if name == "Google Drive" && path.as_str() == "app://google_drive")
     );
 
     chat.connectors.partial_snapshot = None;

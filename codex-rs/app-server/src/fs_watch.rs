@@ -13,6 +13,8 @@ use codex_file_watcher::FileWatcher;
 use codex_file_watcher::FileWatcherSubscriber;
 use codex_file_watcher::WatchPath;
 use codex_file_watcher::WatchRegistration;
+use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::hash::Hash;
@@ -85,9 +87,11 @@ impl FsWatchManager {
         };
         let outgoing = self.outgoing.clone();
         let (subscriber, rx) = self.file_watcher.add_subscriber();
-        let watch_root = params.path.clone();
+        let watch_root = AbsolutePathBuf::try_from(params.path)
+            .map_err(|err| invalid_request(format!("invalid path: {err}")))?;
+        let response_path = LegacyAppPathString::from_abs_path(&watch_root);
         let registration = subscriber.register_paths(vec![WatchPath {
-            path: params.path.to_path_buf(),
+            path: watch_root.to_path_buf(),
             recursive: false,
         }]);
         let (terminate_tx, terminate_rx) = oneshot::channel();
@@ -132,7 +136,10 @@ impl FsWatchManager {
                             connection_id,
                             ServerNotification::FsChanged(FsChangedNotification {
                                 watch_id: task_watch_id.clone(),
-                                changed_paths,
+                                changed_paths: changed_paths
+                                    .into_iter()
+                                    .map(LegacyAppPathString::from)
+                                    .collect(),
                             }),
                         )
                         .await;
@@ -140,7 +147,9 @@ impl FsWatchManager {
             }
         });
 
-        Ok(FsWatchResponse { path: params.path })
+        Ok(FsWatchResponse {
+            path: response_path,
+        })
     }
 
     pub(crate) async fn unwatch(
@@ -181,13 +190,15 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
 
-    fn absolute_path(path: PathBuf) -> AbsolutePathBuf {
+    fn absolute_path(path: PathBuf) -> LegacyAppPathString {
         assert!(
             path.is_absolute(),
             "path must be absolute: {}",
             path.display()
         );
-        AbsolutePathBuf::try_from(path).expect("path should be absolute")
+        AbsolutePathBuf::try_from(path)
+            .expect("path should be absolute")
+            .into()
     }
 
     fn manager_with_noop_watcher() -> FsWatchManager {

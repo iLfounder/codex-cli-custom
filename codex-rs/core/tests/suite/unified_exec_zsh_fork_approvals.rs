@@ -406,6 +406,7 @@ async fn unified_exec_zsh_fork_guardian_reviews_intercepted_execve() -> Result<(
         unreachable!("intercepted assessments contain only execve actions");
     };
     let expected_cwd = test.config.cwd.canonicalize()?;
+    let expected_cwd = codex_utils_path_uri::LegacyAppPathString::from_abs_path(&expected_cwd);
     assert_eq!(
         (
             *source,

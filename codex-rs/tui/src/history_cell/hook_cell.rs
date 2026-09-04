@@ -730,7 +730,9 @@ mod tests {
             handler_type: codex_app_server_protocol::HookHandlerType::Command,
             execution_mode: codex_app_server_protocol::HookExecutionMode::Sync,
             scope: codex_app_server_protocol::HookScope::Turn,
-            source_path: test_path_buf("/tmp/hooks.json").abs(),
+            source_path: codex_utils_path_uri::LegacyAppPathString::from_abs_path(
+                &test_path_buf("/tmp/hooks.json").abs(),
+            ),
             source: codex_app_server_protocol::HookSource::User,
             display_order: 0,
             status: HookRunStatus::Running,

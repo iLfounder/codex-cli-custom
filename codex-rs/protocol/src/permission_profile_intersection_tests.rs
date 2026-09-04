@@ -95,8 +95,23 @@ fn intersection(
 
 #[test]
 fn effective_workspace_intersection_preserves_network_metadata_and_temp() {
-    let temp = TempDir::new().expect("workspace");
+    // The workspace must not inherit the independent :tmpdir write grant that this test preserves.
+    #[cfg(windows)]
+    let temp = {
+        let runtime_temp = std::env::temp_dir();
+        let volume_root = runtime_temp.ancestors().last().expect("temp volume root");
+        TempDir::new_in(volume_root).expect("workspace")
+    };
+    #[cfg(not(windows))]
+    let temp = TempDir::new_in(std::env::current_dir().expect("current dir")).expect("workspace");
     let root = canonical(&temp);
+    let runtime_temp = absolute(&std::env::temp_dir())
+        .canonicalize()
+        .expect("canonical runtime temp dir");
+    assert!(
+        !root.as_path().starts_with(runtime_temp.as_path()),
+        "workspace fixture must not inherit :tmpdir write access",
+    );
     let project = root.join("project");
     std::fs::create_dir(project.as_path()).expect("project directory");
     let gitdir = root.join("external-gitdir");

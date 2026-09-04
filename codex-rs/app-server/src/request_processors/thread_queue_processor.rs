@@ -85,7 +85,7 @@ impl ThreadQueueRequestProcessor {
             .service()?
             .enqueue(
                 thread_id,
-                submission_into_turn_input(params.input, Some(params.client_user_message_id)),
+                submission_into_turn_input(params.input, Some(params.client_user_message_id))?,
             )
             .await
             .map_err(queue_error)?;
@@ -143,7 +143,7 @@ impl ThreadQueueRequestProcessor {
             .update(
                 thread_id,
                 params.queued_submission_id.clone(),
-                submission_into_turn_input(params.input, /*client_user_message_id*/ None),
+                submission_into_turn_input(params.input, /*client_user_message_id*/ None)?,
             )
             .await
             .map_err(queue_error)?
@@ -311,11 +311,15 @@ fn ensure_direct_input_allowed(
 fn submission_into_turn_input(
     input: Vec<UserInput>,
     client_user_message_id: Option<String>,
-) -> TurnInput {
-    TurnInput::UserInput {
-        content: input.into_iter().map(UserInput::into_core).collect(),
+) -> Result<TurnInput, JSONRPCErrorError> {
+    Ok(TurnInput::UserInput {
+        content: input
+            .into_iter()
+            .map(UserInput::try_into_core)
+            .collect::<Result<_, _>>()
+            .map_err(|error| invalid_request(error.to_string()))?,
         client_id: client_user_message_id,
-    }
+    })
 }
 
 pub(super) fn queue_error(error: QueueServiceError) -> JSONRPCErrorError {

@@ -6,6 +6,7 @@ use codex_app_server_protocol::ExternalAgentConfigDetectParams;
 use codex_app_server_protocol::ExternalAgentConfigImportCompletedNotification;
 use codex_app_server_protocol::ExternalAgentConfigMigrationItem;
 use codex_app_server_protocol::ExternalAgentConfigMigrationItemType;
+use codex_utils_path_uri::LegacyAppPathString;
 use ratatui::prelude::Stylize as _;
 use ratatui::text::Line;
 
@@ -275,7 +276,7 @@ pub(crate) async fn handle_external_agent_config_migration_prompt(
         let response = match app_server
             .external_agent_config_detect(ExternalAgentConfigDetectParams {
                 include_home: true,
-                cwds: Some(vec![cwd.clone()]),
+                cwds: Some(vec![LegacyAppPathString::from_path(&cwd)]),
                 max_session_age_days: None,
                 max_sessions: None,
                 source: None,

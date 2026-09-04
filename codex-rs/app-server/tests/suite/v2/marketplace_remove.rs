@@ -73,6 +73,8 @@ async fn marketplace_remove_deletes_config_and_installed_root(user_entry: bool) 
     let removed_installed_root = response
         .installed_root
         .context("marketplace/remove should return removed installed root")?;
+    let removed_installed_root =
+        codex_utils_absolute_path::AbsolutePathBuf::try_from(removed_installed_root)?;
     assert_eq!(
         canonicalize_path_with_existing_parent(removed_installed_root.as_path())?,
         canonicalize_path_with_existing_parent(&installed_root)?,

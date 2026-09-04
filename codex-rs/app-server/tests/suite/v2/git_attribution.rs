@@ -283,12 +283,13 @@ async fn cold_resume_replaces_legacy_attribution_without_duplication(
     let rollout_path = thread
         .path
         .context("initial thread should have a rollout path")?;
+    let rollout_path = codex_utils_absolute_path::AbsolutePathBuf::try_from(rollout_path)?;
     let status = timeout(DEFAULT_READ_TIMEOUT, app_server.shutdown_gracefully()).await??;
     anyhow::ensure!(
         status.success(),
         "initial app-server did not exit successfully"
     );
-    replace_attribution_fragment_with_legacy(&rollout_path, legacy_attribution)?;
+    replace_attribution_fragment_with_legacy(rollout_path.as_path(), legacy_attribution)?;
 
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())

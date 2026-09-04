@@ -219,7 +219,7 @@ fn read_auth_file_snapshot_at(
     auth_file: &Path,
     owner_home: &Path,
 ) -> std::io::Result<Option<AuthFileSnapshot>> {
-    let before = match std::fs::symlink_metadata(&auth_file) {
+    let before = match std::fs::symlink_metadata(auth_file) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
@@ -265,7 +265,7 @@ fn read_auth_file_snapshot_at(
     options.custom_flags(0x0000_0100);
     #[cfg(any(target_os = "linux", target_os = "android"))]
     options.custom_flags(0x0002_0000);
-    let mut file = options.open(&auth_file)?;
+    let mut file = options.open(auth_file)?;
     let opened = file.metadata()?;
     #[cfg(windows)]
     let opened_identity = codex_utils_home_dir::file_identity_from_file(&file)?;

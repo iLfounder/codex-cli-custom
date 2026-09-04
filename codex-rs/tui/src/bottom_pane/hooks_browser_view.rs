@@ -35,7 +35,6 @@ use crate::keymap::ListAction;
 use crate::keymap::ListKeymap;
 use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
 use crate::render::renderable::Renderable;
-use crate::status::format_directory_display;
 use crate::style::accent_style;
 
 const EVENT_COLUMN_WIDTH: usize = 22;
@@ -67,7 +66,7 @@ impl HooksBrowserView {
     ) -> Self {
         Self::from_entry(
             HooksListEntry {
-                cwd: std::path::PathBuf::new(),
+                cwd: codex_utils_path_uri::LegacyAppPathString::from_string(String::new()),
                 hooks,
                 warnings,
                 errors,
@@ -403,7 +402,7 @@ impl HooksBrowserView {
                 .map(|warning| format!("⚠ {warning}").into()),
         );
         lines.extend(self.entry.errors.iter().map(|error| {
-            format!("■ {}: {}", error.path.display(), error.message)
+            format!("■ {}: {}", error.path.render_for_ui(), error.message)
                 .red()
                 .into()
         }));
@@ -827,7 +826,7 @@ fn detail_source_value(hook: &HookMetadata) -> String {
         _ => format!(
             "{} - {}",
             config_source_label(hook.source),
-            format_directory_display(&hook.source_path, /*max_width*/ None)
+            hook.source_path.render_for_ui()
         ),
     }
 }
@@ -985,7 +984,9 @@ mod tests {
             timeout_sec: 30,
             status_message: None,
             additional_context_limit: None,
-            source_path: test_path_buf("/tmp/hooks.json").abs(),
+            source_path: codex_utils_path_uri::LegacyAppPathString::from_abs_path(
+                &test_path_buf("/tmp/hooks.json").abs(),
+            ),
             source,
             plugin_id: plugin_id.map(str::to_string),
             display_order,
@@ -1112,7 +1113,9 @@ mod tests {
             Vec::new(),
             vec!["skipped invalid matcher for PreToolUse".to_string()],
             vec![HookErrorInfo {
-                path: test_path_buf("/tmp/hooks.json"),
+                path: codex_utils_path_uri::LegacyAppPathString::from_path(&test_path_buf(
+                    "/tmp/hooks.json",
+                )),
                 message: "failed to parse hooks config".to_string(),
             }],
             AppEventSender::new(tx_raw),
@@ -1371,7 +1374,9 @@ mod tests {
             /*is_managed*/ false,
             /*display_order*/ 0,
         );
-        capped_command_hook.source_path = test_path_buf("/tmp/h.json").abs();
+        capped_command_hook.source_path = codex_utils_path_uri::LegacyAppPathString::from_abs_path(
+            &test_path_buf("/tmp/h.json").abs(),
+        );
         let mut view = HooksBrowserView::new(
             vec![capped_command_hook],
             Vec::new(),

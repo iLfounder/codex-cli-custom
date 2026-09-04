@@ -158,7 +158,7 @@ async fn run_local_image_turn(detail: Option<ImageDetail>) -> Result<Vec<Value>>
                 thread_id: thread.id.clone(),
                 client_user_message_id: None,
                 input: vec![V2UserInput::LocalImage {
-                    path: image_path,
+                    path: codex_utils_path_uri::LegacyAppPathString::from_path(&image_path),
                     detail,
                 }],
                 ..Default::default()
@@ -1778,7 +1778,9 @@ async fn turn_start_accepts_text_at_limit_with_mention_item() -> Result<()> {
                     },
                     V2UserInput::Mention {
                         name: "Demo App".to_string(),
-                        path: "app://demo-app".to_string(),
+                        path: codex_utils_path_uri::LegacyAppPathString::from_string(
+                            "app://demo-app",
+                        ),
                     },
                 ],
                 ..Default::default()
@@ -3379,12 +3381,14 @@ async fn turn_start_explicit_local_environment_updates_legacy_cwd_between_turns(
                 tool_output: None,
                 responsesapi_client_metadata: None,
                 additional_context: None,
-                cwd: Some(first_cwd.clone()),
+                cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                    &first_cwd,
+                )),
                 runtime_workspace_roots: None,
                 approval_policy: Some(codex_app_server_protocol::AskForApproval::Never),
                 approvals_reviewer: None,
                 sandbox_policy: Some(codex_app_server_protocol::SandboxPolicy::WorkspaceWrite {
-                    writable_roots: vec![first_writable_root],
+                    writable_roots: vec![first_writable_root.into()],
                     network_access: false,
                     exclude_tmpdir_env_var: true,
                     exclude_slash_tmp: true,
@@ -3456,7 +3460,10 @@ async fn turn_start_explicit_local_environment_updates_legacy_cwd_between_turns(
         mcp.read_notification("thread/settings/updated"),
     )
     .await??;
-    assert_eq!(settings_updated.thread_settings.cwd, second_cwd.abs());
+    assert_eq!(
+        settings_updated.thread_settings.cwd,
+        second_cwd.abs().into()
+    );
 
     let command_exec_item = timeout(DEFAULT_READ_TIMEOUT, async {
         loop {
@@ -3477,7 +3484,10 @@ async fn turn_start_explicit_local_environment_updates_legacy_cwd_between_turns(
     else {
         unreachable!("loop ensures we break on command execution items");
     };
-    assert_eq!(cwd.as_str(), second_cwd.to_string_lossy().as_ref());
+    assert_eq!(
+        cwd,
+        codex_utils_path_uri::LegacyAppPathString::from_path(&second_cwd)
+    );
     let expected_command = format_with_current_shell_display("echo second turn");
     assert_eq!(command, expected_command);
     assert_eq!(status, CommandExecutionStatus::InProgress);
@@ -3576,7 +3586,7 @@ stream_max_retries = 0
                     text: "select dev profile".to_string(),
                     text_elements: Vec::new(),
                 }],
-                runtime_workspace_roots: Some(vec![old_root]),
+                runtime_workspace_roots: Some(vec![old_root.into()]),
                 permissions: Some("dev".to_string()),
                 ..Default::default()
             },
@@ -3598,7 +3608,7 @@ stream_max_retries = 0
                     text: "write in new root".to_string(),
                     text_elements: Vec::new(),
                 }],
-                runtime_workspace_roots: Some(vec![new_root]),
+                runtime_workspace_roots: Some(vec![new_root.into()]),
                 ..Default::default()
             },
         })
@@ -3712,7 +3722,9 @@ async fn run_environment_selection_case(
     let thread_req = mcp
         .send_thread_start_request(ThreadStartParams {
             model: Some("mock-model".to_string()),
-            cwd: Some(workspace.to_string_lossy().into_owned()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                workspace,
+            )),
             environments: environment_params(case.sticky, workspace),
             ..Default::default()
         })
@@ -3731,7 +3743,9 @@ async fn run_environment_selection_case(
                     text_elements: Vec::new(),
                 }],
                 environments: environment_params(case.turn, workspace),
-                cwd: Some(workspace.to_path_buf()),
+                cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                    workspace,
+                )),
                 model: Some("mock-model".to_string()),
                 ..Default::default()
             },
@@ -3812,7 +3826,9 @@ async fn turn_start_file_change_approval_v2() -> Result<()> {
     let ThreadStartResponse { thread, .. } = mcp
         .start_thread(ThreadStartParams {
             model: Some("mock-model".to_string()),
-            cwd: Some(workspace.to_string_lossy().into_owned()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                &workspace,
+            )),
             ..Default::default()
         })
         .await?;
@@ -3827,7 +3843,9 @@ async fn turn_start_file_change_approval_v2() -> Result<()> {
                     text: "apply patch".into(),
                     text_elements: Vec::new(),
                 }],
-                cwd: Some(workspace.clone()),
+                cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                    &workspace,
+                )),
                 ..Default::default()
             },
         })
@@ -3871,7 +3889,9 @@ async fn turn_start_file_change_approval_v2() -> Result<()> {
     pretty_assertions::assert_eq!(
         started_changes,
         vec![codex_app_server_protocol::FileUpdateChange {
-            path: expected_readme_path.clone(),
+            path: codex_utils_path_uri::LegacyAppPathString::from_string(
+                expected_readme_path.clone(),
+            ),
             kind: PatchChangeKind::Add,
             diff: "new line\n".to_string(),
         }]
@@ -4011,7 +4031,9 @@ async fn turn_start_does_not_stream_apply_patch_change_updates_without_feature_v
     let ThreadStartResponse { thread, .. } = mcp
         .start_thread(ThreadStartParams {
             model: Some("mock-model".to_string()),
-            cwd: Some(workspace.to_string_lossy().into_owned()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                &workspace,
+            )),
             ..Default::default()
         })
         .await?;
@@ -4026,7 +4048,9 @@ async fn turn_start_does_not_stream_apply_patch_change_updates_without_feature_v
                     text: "apply patch".into(),
                     text_elements: Vec::new(),
                 }],
-                cwd: Some(workspace),
+                cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                    &workspace,
+                )),
                 ..Default::default()
             },
         })
@@ -4143,7 +4167,9 @@ async fn turn_start_streams_apply_patch_change_updates_v2() -> Result<()> {
     let ThreadStartResponse { thread, .. } = mcp
         .start_thread(ThreadStartParams {
             model: Some("mock-model".to_string()),
-            cwd: Some(workspace.to_string_lossy().into_owned()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                &workspace,
+            )),
             ..Default::default()
         })
         .await?;
@@ -4158,7 +4184,9 @@ async fn turn_start_streams_apply_patch_change_updates_v2() -> Result<()> {
                     text: "apply patch".into(),
                     text_elements: Vec::new(),
                 }],
-                cwd: Some(workspace.clone()),
+                cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                    &workspace,
+                )),
                 ..Default::default()
             },
         })
@@ -4177,7 +4205,7 @@ async fn turn_start_streams_apply_patch_change_updates_v2() -> Result<()> {
         let change = delta
             .changes
             .iter()
-            .find(|change| change.path == "live.txt")
+            .find(|change| change.path.as_str() == "live.txt")
             .expect("live.txt change");
         assert!(matches!(change.kind, PatchChangeKind::Add));
         streamed_content = change.diff.clone();
@@ -5070,7 +5098,9 @@ async fn turn_start_file_change_approval_accept_for_session_persists_v2() -> Res
     let ThreadStartResponse { thread, .. } = mcp
         .start_thread(ThreadStartParams {
             model: Some("mock-model".to_string()),
-            cwd: Some(workspace.to_string_lossy().into_owned()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                &workspace,
+            )),
             ..Default::default()
         })
         .await?;
@@ -5086,7 +5116,9 @@ async fn turn_start_file_change_approval_accept_for_session_persists_v2() -> Res
                     text: "apply patch 1".into(),
                     text_elements: Vec::new(),
                 }],
-                cwd: Some(workspace.clone()),
+                cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                    &workspace,
+                )),
                 ..Default::default()
             },
         })
@@ -5178,7 +5210,9 @@ async fn turn_start_file_change_approval_accept_for_session_persists_v2() -> Res
                     text: "apply patch 2".into(),
                     text_elements: Vec::new(),
                 }],
-                cwd: Some(workspace.clone()),
+                cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                    &workspace,
+                )),
                 ..Default::default()
             },
         })
@@ -5299,7 +5333,9 @@ async fn run_turn_start_file_change_approval_rejection_v2(
     let ThreadStartResponse { thread, .. } = mcp
         .start_thread(ThreadStartParams {
             model: Some("mock-model".to_string()),
-            cwd: Some(workspace.to_string_lossy().into_owned()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                &workspace,
+            )),
             ..Default::default()
         })
         .await?;
@@ -5314,7 +5350,9 @@ async fn run_turn_start_file_change_approval_rejection_v2(
                     text: "apply patch".into(),
                     text_elements: Vec::new(),
                 }],
-                cwd: Some(workspace.clone()),
+                cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                    &workspace,
+                )),
                 ..Default::default()
             },
         })
@@ -5357,7 +5395,9 @@ async fn run_turn_start_file_change_approval_rejection_v2(
     pretty_assertions::assert_eq!(
         started_changes,
         vec![codex_app_server_protocol::FileUpdateChange {
-            path: expected_readme_path_str.clone(),
+            path: codex_utils_path_uri::LegacyAppPathString::from_string(
+                expected_readme_path_str.clone(),
+            ),
             kind: PatchChangeKind::Add,
             diff: "new line\n".to_string(),
         }]
@@ -5676,7 +5716,9 @@ async fn turn_start_with_elevated_override_does_not_persist_project_trust() -> R
 
     let ThreadStartResponse { thread, .. } = mcp
         .start_thread(ThreadStartParams {
-            cwd: Some(workspace.path().display().to_string()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                workspace.path(),
+            )),
             ..Default::default()
         })
         .await?;
@@ -5686,7 +5728,9 @@ async fn turn_start_with_elevated_override_does_not_persist_project_trust() -> R
             request_id,
             params: TurnStartParams {
                 thread_id: thread.id,
-                cwd: Some(workspace.path().to_path_buf()),
+                cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                    workspace.path(),
+                )),
                 sandbox_policy: Some(codex_app_server_protocol::SandboxPolicy::DangerFullAccess),
                 input: vec![V2UserInput::Text {
                     text: "Hello".to_string(),

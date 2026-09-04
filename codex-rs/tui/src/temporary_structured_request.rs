@@ -21,6 +21,7 @@ use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_utils_path_uri::LegacyAppPathString;
 use color_eyre::eyre::eyre;
 use serde_json::Value;
 use std::time::Duration;
@@ -34,7 +35,7 @@ const STRUCTURED_RESPONSE_MAX_BYTES: usize = 8 * 1024;
 pub(crate) struct TemporaryStructuredThreadOptions {
     pub(crate) model: String,
     pub(crate) model_provider: String,
-    pub(crate) cwd: String,
+    pub(crate) cwd: LegacyAppPathString,
     pub(crate) active_permission_profile: Option<String>,
     pub(crate) mcp_server_names: Vec<String>,
 }

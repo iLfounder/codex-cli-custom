@@ -275,6 +275,7 @@ mod tests {
     use super::*;
     use crate::environment_selection::TurnEnvironmentState;
     use crate::session::tests::make_session_and_context;
+    use crate::session::tests::make_session_and_context_with_auth_and_config_and_rx;
     use crate::session::turn_context::TurnContext;
     use codex_utils_absolute_path::AbsolutePathBuf;
     use codex_utils_path_uri::PathUri;
@@ -660,11 +661,14 @@ mod tests {
 
     #[tokio::test]
     async fn rewrite_mcp_tool_arguments_for_openai_files_surfaces_upload_failures() {
-        let (mut session, turn_context) = make_session_and_context().await;
-        session.services.auth_manager = crate::test_support::auth_manager_from_auth(
-            CodexAuth::create_dummy_chatgpt_auth_for_testing(),
-        );
-        let step_context = StepContext::for_test(Arc::new(turn_context));
+        let (session, turn_context, _rx_event) =
+            make_session_and_context_with_auth_and_config_and_rx(
+                CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+                Vec::new(),
+                |_| {},
+            )
+            .await;
+        let step_context = StepContext::for_test(turn_context);
         let error = rewrite_mcp_tool_arguments_for_openai_files(
             &session,
             &step_context,

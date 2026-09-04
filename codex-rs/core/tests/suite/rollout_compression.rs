@@ -180,6 +180,7 @@ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history()
             codex_core::test_support::auth_manager_from_auth(codex_login::CodexAuth::from_api_key(
                 "dummy",
             )),
+            Vec::new(),
             /*parent_trace*/ None,
             ClientMcpExtensions::default(),
         )

@@ -338,7 +338,13 @@ impl App {
             );
             let mut resume_config = if unloaded {
                 let target_session = SessionTarget {
-                    path: target_thread.path.clone(),
+                    path: if self.app_server_target.uses_remote_workspace() {
+                        None
+                    } else {
+                        target_thread.path.as_ref().and_then(|path| {
+                            path.to_inferred_abs_path().map(AbsolutePathBuf::into_path_buf)
+                        })
+                    },
                     thread_id: root_thread_id,
                     history_mode: Some(target_thread.history_mode),
                 };
@@ -353,7 +359,7 @@ impl App {
                 let config_cwd = if self.app_server_target.uses_remote_workspace() {
                     self.config.cwd.to_path_buf()
                 } else {
-                    target_thread.cwd.to_path_buf()
+                    PathBuf::from(target_thread.cwd.as_str())
                 };
                 let current_cwd = self.config.cwd.to_path_buf();
                 match self
@@ -576,31 +582,38 @@ impl App {
         &mut self,
         app_server: &mut AppServerSession,
         prompt: String,
-        cwd: Option<AbsolutePathBuf>,
+        cwd: Option<LegacyAppPathString>,
     ) {
         self.refresh_in_memory_config_from_disk_best_effort("starting a background task")
             .await;
         let remote_cwd = cwd
             .as_ref()
             .filter(|_| app_server.uses_remote_workspace())
-            .map(AbsolutePathBuf::to_path_buf);
+            .cloned();
         let mut config = match cwd {
-            Some(cwd) if app_server.uses_remote_workspace() => {
-                let mut config = self.fresh_session_config();
-                config.cwd = cwd;
-                config
-            }
-            Some(cwd) => match self.rebuild_config_for_cwd(cwd.to_path_buf()).await {
-                Ok(config) => config,
-                Err(error) => {
+            Some(_) if app_server.uses_remote_workspace() => self.fresh_session_config(),
+            Some(cwd) => {
+                let Some(cwd) = cwd.to_inferred_abs_path() else {
                     if let Ok(mut state) = self.agents_overview.view_state.lock() {
                         state.input = prompt;
                     }
-                    return self
-                        .chat_widget
-                        .add_error_message(format!("Failed to load project settings: {error}"));
+                    return self.chat_widget.add_error_message(format!(
+                        "Cannot start a local task for non-native project path: {}",
+                        cwd.render_for_ui()
+                    ));
+                };
+                match self.rebuild_config_for_cwd(cwd.into_path_buf()).await {
+                    Ok(config) => config,
+                    Err(error) => {
+                        if let Ok(mut state) = self.agents_overview.view_state.lock() {
+                            state.input = prompt;
+                        }
+                        return self.chat_widget.add_error_message(format!(
+                            "Failed to load project settings: {error}"
+                        ));
+                    }
                 }
-            },
+            }
             None => self.fresh_session_config(),
         };
         if let Some(profile) = self.runtime_permission_profile_override.as_ref()
@@ -627,7 +640,7 @@ impl App {
             .start_thread_with_session_start_source(
                 &config,
                 /*session_start_source*/ None,
-                remote_cwd.as_deref(),
+                remote_cwd.as_ref(),
             )
             .await
         {

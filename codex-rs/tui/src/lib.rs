@@ -74,6 +74,7 @@ use codex_utils_absolute_path::canonicalize_existing_preserving_symlinks;
 use codex_utils_home_dir::find_codex_home;
 use codex_utils_oss::ensure_oss_provider_ready;
 use codex_utils_oss::get_default_model_for_oss_provider;
+use codex_utils_path_uri::LegacyAppPathString;
 use color_eyre::eyre::WrapErr;
 use cwd_prompt::CwdPromptAction;
 pub use launch_overrides::InvocationOverrides as LaunchInvocationOverrides;
@@ -250,6 +251,8 @@ use crate::startup_hooks_review::load_startup_hooks_review_entry;
 use crate::startup_hooks_review::maybe_run_startup_hooks_review;
 use crate::tui::Tui;
 pub use cli::Cli;
+pub use cli::RemoteInvocationOverrides;
+pub use cli::capture_remote_invocation_overrides;
 use codex_arg0::Arg0DispatchPaths;
 pub use markdown_render::render_markdown_text;
 pub use public_widgets::composer_input::ComposerAction;
@@ -426,10 +429,15 @@ pub fn resolve_remote_addr(addr: &str) -> color_eyre::Result<RemoteAppServerEndp
         Ok(parsed) => parsed,
         Err(_) => {
             color_eyre::eyre::bail!(
-                "invalid remote address `{addr}`; expected `ws://host:port`, `wss://host:port`, `unix://`, or `unix://PATH`"
+                "invalid remote address; expected `ws://host:port`, `wss://host:port`, `unix://`, or `unix://PATH`"
             );
         }
     };
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        color_eyre::eyre::bail!(
+            "remote URLs must not include credentials; use an environment-variable bearer token instead"
+        );
+    }
     if matches!(parsed.scheme(), "ws" | "wss")
         && parsed.host_str().is_some()
         && remote_addr_has_explicit_port(addr, &parsed)
@@ -696,7 +704,11 @@ fn session_target_from_app_server_thread(
 ) -> Option<resume_picker::SessionTarget> {
     match ThreadId::from_string(&thread.id) {
         Ok(thread_id) => Some(resume_picker::SessionTarget {
-            path: thread.path,
+            path: thread
+                .path
+                .as_ref()
+                .map(app_server_session::app_server_path_string)
+                .map(|path| PathBuf::from(path.into_string())),
             thread_id,
             history_mode: Some(thread.history_mode),
         }),
@@ -761,7 +773,7 @@ async fn lookup_session_target_with_app_server(
 async fn lookup_latest_session_target_with_app_server(
     app_server: &mut AppServerSession,
     config: &Config,
-    cwd_filter: Option<&Path>,
+    cwd_filter: Option<&LegacyAppPathString>,
     include_non_interactive: bool,
 ) -> color_eyre::Result<Option<resume_picker::SessionTarget>> {
     let uses_remote_workspace = app_server.uses_remote_workspace();
@@ -800,7 +812,7 @@ enum LatestSessionLookupMode {
 fn latest_session_lookup_params(
     uses_remote_workspace: bool,
     config: &Config,
-    cwd_filter: Option<&Path>,
+    cwd_filter: Option<&LegacyAppPathString>,
     include_non_interactive: bool,
     lookup_mode: LatestSessionLookupMode,
 ) -> ThreadListParams {
@@ -820,7 +832,9 @@ fn latest_session_lookup_params(
         project_id: None,
         parent_thread_id: None,
         ancestor_thread_id: None,
-        cwd: cwd_filter.map(|cwd| ThreadListCwdFilter::One(cwd.to_string_lossy().to_string())),
+        cwd: cwd_filter.map(|cwd| {
+            ThreadListCwdFilter::One(app_server_session::app_server_request_path(cwd.clone()))
+        }),
         use_state_db_only: match lookup_mode {
             LatestSessionLookupMode::StateDbOnly => true,
             LatestSessionLookupMode::ScanAndRepair => false,
@@ -913,20 +927,20 @@ fn should_load_configured_environments(
     !loader_overrides.ignore_user_config && !app_server_target.uses_remote_workspace()
 }
 
-fn latest_session_cwd_filter<'a>(
+fn latest_session_cwd_filter(
     uses_remote_workspace: bool,
-    remote_cwd_override: Option<&'a Path>,
-    config: &'a Config,
+    remote_cwd_override: Option<&LegacyAppPathString>,
+    config: &Config,
     show_all: bool,
-) -> Option<&'a Path> {
+) -> Option<LegacyAppPathString> {
     if show_all {
         return None;
     }
 
     if uses_remote_workspace {
-        remote_cwd_override
+        remote_cwd_override.cloned()
     } else {
-        Some(config.cwd.as_path())
+        Some(LegacyAppPathString::from_abs_path(&config.cwd))
     }
 }
 
@@ -1047,7 +1061,7 @@ async fn run_ratatui_app(
     loader_overrides: LoaderOverrides,
     strict_config: bool,
     app_server_target: AppServerTarget,
-    remote_cwd_override: Option<PathBuf>,
+    remote_cwd_override: Option<LegacyAppPathString>,
     initial_config: Config,
     manually_selected_oss_provider: Option<String>,
     overrides: ConfigOverrides,
@@ -1060,6 +1074,7 @@ async fn run_ratatui_app(
     startup_draft: startup_draft::StartupDraft,
 ) -> color_eyre::Result<AppExitInfo> {
     let uses_remote_workspace = app_server_target.uses_remote_workspace();
+    let remote_invocation_overrides = cli.remote_invocation_overrides.clone().unwrap_or_default();
     let workload_identity_selected = is_workload_identity_selected();
     color_eyre::install()?;
 
@@ -1126,6 +1141,7 @@ async fn run_ratatui_app(
         Ok(Ok(app_server)) => {
             AppServerSession::new(app_server, app_server_target.thread_params_mode())
                 .with_startup_config(&initial_config)
+                .with_remote_invocation_overrides(remote_invocation_overrides.clone())
         }
         Ok(Err(err)) => {
             terminal_restore_guard.restore_silently();
@@ -1166,7 +1182,7 @@ async fn run_ratatui_app(
         }
     }
     let remote_project_trust =
-        if uses_remote_workspace && let Some(remote_cwd) = remote_cwd_override.as_deref() {
+        if uses_remote_workspace && let Some(remote_cwd) = remote_cwd_override.as_ref() {
             match startup_draft
                 .run_until(
                     &mut tui,
@@ -1198,9 +1214,9 @@ async fn run_ratatui_app(
     #[cfg(target_os = "windows")]
     let mut trust_decision_was_made = false;
     let startup_model_provider = initial_config.model_provider_id.clone();
-    let (login_status, mut startup_account) = if workload_identity_selected {
-        (LoginStatus::AuthMode(AuthMode::Chatgpt), None)
-    } else if initial_config.model_provider.requires_openai_auth {
+    let (login_status, mut startup_account) = if uses_remote_workspace
+        || (!workload_identity_selected && initial_config.model_provider.requires_openai_auth)
+    {
         let Some(active_app_server) = app_server.as_mut() else {
             unreachable!("app server should exist when auth is required");
         };
@@ -1218,11 +1234,20 @@ async fn run_ratatui_app(
                 return Err(err.into());
             }
         }
+    } else if workload_identity_selected {
+        (LoginStatus::AuthMode(AuthMode::Chatgpt), None)
     } else {
         (LoginStatus::NotAuthenticated, None)
     };
-    let should_show_onboarding =
-        should_show_onboarding(login_status, &initial_config, should_show_trust_screen_flag);
+    let startup_requires_openai_auth = startup_account.as_ref().map_or(
+        initial_config.model_provider.requires_openai_auth,
+        |account| account.requires_openai_auth,
+    );
+    let should_show_onboarding = should_show_onboarding(
+        login_status,
+        startup_requires_openai_auth,
+        should_show_trust_screen_flag,
+    );
 
     let config = if should_show_onboarding {
         if let Err(err) = startup_draft.flush_pending_events(&mut tui).await {
@@ -1231,12 +1256,14 @@ async fn run_ratatui_app(
         }
         // Authentication can change while any interactive onboarding screen is open.
         startup_account = None;
-        let show_login_screen = should_show_login_screen(login_status, &initial_config);
+        let show_login_screen =
+            should_show_login_screen(login_status, startup_requires_openai_auth);
         let bedrock_setup_enabled =
             should_show_bedrock_setup_wizard(login_status, &initial_config, &app_server_target);
         let onboarding_result = run_onboarding_app(
             OnboardingScreenArgs {
                 show_login_screen,
+                allow_api_key_env_prefill: !uses_remote_workspace,
                 bedrock_setup_enabled,
                 show_trust_screen: should_show_trust_screen_flag,
                 remote_project_trust,
@@ -1385,7 +1412,7 @@ async fn run_ratatui_app(
         } else if cli.fork_last {
             let filter_cwd = latest_session_cwd_filter(
                 uses_remote_workspace,
-                remote_cwd_override.as_deref(),
+                remote_cwd_override.as_ref(),
                 &config,
                 cli.fork_show_all,
             );
@@ -1398,7 +1425,7 @@ async fn run_ratatui_app(
                     lookup_latest_session_target_with_app_server(
                         startup_app_server,
                         &config,
-                        filter_cwd,
+                        filter_cwd.as_ref(),
                         /*include_non_interactive*/ false,
                     ),
                 )
@@ -1479,7 +1506,7 @@ async fn run_ratatui_app(
     } else if cli.resume_last {
         let filter_cwd = latest_session_cwd_filter(
             uses_remote_workspace,
-            remote_cwd_override.as_deref(),
+            remote_cwd_override.as_ref(),
             &config,
             cli.resume_show_all,
         );
@@ -1492,7 +1519,7 @@ async fn run_ratatui_app(
                 lookup_latest_session_target_with_app_server(
                     startup_app_server,
                     &config,
-                    filter_cwd,
+                    filter_cwd.as_ref(),
                     cli.resume_include_non_interactive,
                 ),
             )
@@ -1722,6 +1749,7 @@ async fn run_ratatui_app(
                 startup_account = None;
                 AppServerSession::new(app_server, app_server_target.thread_params_mode())
                     .with_startup_config(&config)
+                    .with_remote_invocation_overrides(remote_invocation_overrides.clone())
                     .with_remote_cwd_override(remote_cwd_override.clone())
             }
             Ok(Err(err)) => {
@@ -1757,7 +1785,11 @@ async fn run_ratatui_app(
                         None => app_server.bootstrap(&config).await,
                     }
                 },
-                load_startup_hooks_review_entry(hooks_request_handle, hooks_cwd),
+                load_startup_hooks_review_entry(
+                    hooks_request_handle,
+                    hooks_cwd,
+                    uses_remote_workspace,
+                ),
             )
         })
         .await;
@@ -2001,20 +2033,20 @@ fn should_show_trust_screen(config: &Config) -> bool {
 
 fn should_show_onboarding(
     login_status: LoginStatus,
-    config: &Config,
+    requires_openai_auth: bool,
     show_trust_screen: bool,
 ) -> bool {
     if show_trust_screen {
         return true;
     }
 
-    should_show_login_screen(login_status, config)
+    should_show_login_screen(login_status, requires_openai_auth)
 }
 
-fn should_show_login_screen(login_status: LoginStatus, config: &Config) -> bool {
+fn should_show_login_screen(login_status: LoginStatus, requires_openai_auth: bool) -> bool {
     // Only show the login screen for providers that actually require OpenAI auth
     // (OpenAI or equivalents). For OSS/other providers, skip login entirely.
-    if !config.model_provider.requires_openai_auth {
+    if !requires_openai_auth {
         return false;
     }
 
@@ -2027,7 +2059,7 @@ fn should_show_bedrock_setup_wizard(
     app_server_target: &AppServerTarget,
 ) -> bool {
     matches!(app_server_target, AppServerTarget::Embedded)
-        && should_show_login_screen(login_status, config)
+        && should_show_login_screen(login_status, config.model_provider.requires_openai_auth)
         && config.features.enabled(Feature::BedrockSetupWizard)
         && config.model_provider_id == "openai"
         && config
@@ -2139,6 +2171,27 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn login_screen_uses_runtime_provider_auth_requirement() {
+        assert!(should_show_login_screen(
+            LoginStatus::NotAuthenticated,
+            /*requires_openai_auth*/ true,
+        ));
+        assert!(!should_show_login_screen(
+            LoginStatus::NotAuthenticated,
+            /*requires_openai_auth*/ false,
+        ));
+        assert!(!should_show_login_screen(
+            LoginStatus::AuthMode(AuthMode::Chatgpt),
+            /*requires_openai_auth*/ true,
+        ));
+        assert!(should_show_onboarding(
+            LoginStatus::NotAuthenticated,
+            /*requires_openai_auth*/ false,
+            /*show_trust_screen*/ true,
+        ));
     }
 
     fn write_session_rollout(
@@ -2437,7 +2490,11 @@ mod tests {
             };
 
             assert!(!session_resume::cwds_differ(
-                started.session.cwd.as_path(),
+                started
+                    .session
+                    .native_cwd()
+                    .expect("local startup returns native session state")
+                    .as_path(),
                 &expected_cwd,
             ));
             app_server.shutdown().await?;
@@ -2572,6 +2629,25 @@ mod tests {
                 auth_token: None,
             }
         );
+    }
+
+    #[test]
+    fn resolve_remote_addr_rejects_credential_bearing_urls_without_exposing_credentials() {
+        let username = "dummy-user";
+        let password = "dummy-secret";
+        let addresses = [
+            format!("wss://{username}:{password}@example.com:443"),
+            format!("wss://{username}:{password}@"),
+        ];
+
+        for addr in addresses {
+            let err = resolve_remote_addr(&addr).expect_err("credentials should be rejected");
+            let rendered = err.to_string();
+
+            assert!(!rendered.contains(username));
+            assert!(!rendered.contains(password));
+            assert!(!rendered.contains(&addr));
+        }
     }
 
     #[test]
@@ -2927,11 +3003,12 @@ mod tests {
         let temp_dir = TempDir::new()?;
         let config = build_config(&temp_dir).await?;
         let cwd = temp_dir.path().join("project");
+        let cwd_filter = LegacyAppPathString::from_path(&cwd);
 
         let params = latest_session_lookup_params(
             /*uses_remote_workspace*/ false,
             &config,
-            Some(cwd.as_path()),
+            Some(&cwd_filter),
             /*include_non_interactive*/ false,
             LatestSessionLookupMode::StateDbOnly,
         );
@@ -2941,15 +3018,15 @@ mod tests {
             Some(vec![config.model_provider_id.clone()])
         );
         assert_eq!(
-            params.cwd,
-            Some(ThreadListCwdFilter::One(cwd.to_string_lossy().to_string()))
+            serde_json::to_value(&params.cwd).expect("serialize cwd filter"),
+            serde_json::json!(cwd.to_string_lossy())
         );
         assert!(params.use_state_db_only);
 
         let scan_params = latest_session_lookup_params(
             /*uses_remote_workspace*/ false,
             &config,
-            Some(cwd.as_path()),
+            Some(&cwd_filter),
             /*include_non_interactive*/ false,
             LatestSessionLookupMode::ScanAndRepair,
         );
@@ -2963,6 +3040,7 @@ mod tests {
         let temp_dir = TempDir::new()?;
         let config = build_config(&temp_dir).await?;
         let cwd = temp_dir.path().join("project");
+        let cwd_filter = LegacyAppPathString::from_path(&cwd);
         let target = AppServerTarget::LocalDaemon {
             endpoint: RemoteAppServerEndpoint::UnixSocket {
                 socket_path: AbsolutePathBuf::relative_to_current_dir("codex.sock")?,
@@ -2973,15 +3051,15 @@ mod tests {
         let params = latest_session_lookup_params(
             target.uses_remote_workspace(),
             &config,
-            Some(cwd.as_path()),
+            Some(&cwd_filter),
             /*include_non_interactive*/ false,
             LatestSessionLookupMode::StateDbOnly,
         );
 
         assert_eq!(params.model_providers, Some(vec![config.model_provider_id]));
         assert_eq!(
-            params.cwd,
-            Some(ThreadListCwdFilter::One(cwd.to_string_lossy().to_string()))
+            serde_json::to_value(&params.cwd).expect("serialize cwd filter"),
+            serde_json::json!(cwd.to_string_lossy())
         );
         Ok(())
     }
@@ -3036,20 +3114,20 @@ mod tests {
     -> std::io::Result<()> {
         let temp_dir = TempDir::new()?;
         let config = build_config(&temp_dir).await?;
-        let cwd = Path::new("repo/on/server");
+        let cwd = LegacyAppPathString::from_string("/Volumes/work/repo");
 
         let params = latest_session_lookup_params(
             /*uses_remote_workspace*/ true,
             &config,
-            Some(cwd),
+            Some(&cwd),
             /*include_non_interactive*/ false,
             LatestSessionLookupMode::StateDbOnly,
         );
 
         assert_eq!(params.model_providers, None);
         assert_eq!(
-            params.cwd,
-            Some(ThreadListCwdFilter::One(String::from("repo/on/server")))
+            serde_json::to_value(&params.cwd).expect("serialize cwd filter"),
+            serde_json::json!("/Volumes/work/repo")
         );
         Ok(())
     }
@@ -3058,7 +3136,7 @@ mod tests {
     async fn latest_session_cwd_filter_respects_scope_options() -> std::io::Result<()> {
         let temp_dir = TempDir::new()?;
         let config = build_config(&temp_dir).await?;
-        let remote_cwd = Path::new("repo/on/server");
+        let remote_cwd = LegacyAppPathString::from_string("~/repo/on/server");
 
         let local_filter = latest_session_cwd_filter(
             /*uses_remote_workspace*/ false, /*remote_cwd_override*/ None, &config,
@@ -3070,12 +3148,15 @@ mod tests {
         );
         let remote_filter = latest_session_cwd_filter(
             /*uses_remote_workspace*/ true,
-            Some(remote_cwd),
+            Some(&remote_cwd),
             &config,
             /*show_all*/ false,
         );
 
-        assert_eq!(local_filter, Some(config.cwd.as_path()));
+        assert_eq!(
+            local_filter,
+            Some(LegacyAppPathString::from_abs_path(&config.cwd))
+        );
         assert_eq!(show_all_filter, None);
         assert_eq!(remote_filter, Some(remote_cwd));
         Ok(())
@@ -3128,7 +3209,7 @@ mod tests {
         let scoped_target = lookup_latest_session_target_with_app_server(
             &mut app_server,
             &config,
-            filter_cwd,
+            filter_cwd.as_ref(),
             /*include_non_interactive*/ false,
         )
         .await?
@@ -3140,7 +3221,7 @@ mod tests {
         let show_all_target = lookup_latest_session_target_with_app_server(
             &mut app_server,
             &config,
-            show_all_filter_cwd,
+            show_all_filter_cwd.as_ref(),
             /*include_non_interactive*/ false,
         )
         .await?
@@ -3183,10 +3264,11 @@ mod tests {
             &project_cwd,
         )?;
 
+        let project_cwd_filter = LegacyAppPathString::from_path(&project_cwd);
         let target = lookup_latest_session_target_with_app_server(
             &mut app_server,
             &config,
-            Some(project_cwd.as_path()),
+            Some(&project_cwd_filter),
             /*include_non_interactive*/ false,
         )
         .await?

@@ -118,7 +118,7 @@ async fn thread_start_routes_project_exec_policy_warning_to_requester() -> Resul
 
     let project = TempDir::new()?;
     std::fs::create_dir(project.path().join(".git"))?;
-    let rules_dir = project.path().join(".codex/rules");
+    let rules_dir = project.path().join(".codex").join("rules");
     std::fs::create_dir_all(&rules_dir)?;
     let rules_path = rules_dir.join("broken.rules");
     std::fs::write(&rules_path, "prefix_rule(")?;
@@ -138,7 +138,9 @@ async fn thread_start_routes_project_exec_policy_warning_to_requester() -> Resul
         "thread/start",
         /*id*/ 3,
         Some(serde_json::to_value(ThreadStartParams {
-            cwd: Some(project.path().display().to_string()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                project.path(),
+            )),
             model: Some("mock-model".to_string()),
             ..Default::default()
         })?),
@@ -178,12 +180,10 @@ async fn thread_start_routes_project_exec_policy_warning_to_requester() -> Resul
             .context("configWarning should include params")?,
     )?;
     assert_eq!(
-        warning
-            .path
-            .as_deref()
-            .map(Path::new)
-            .and_then(Path::file_name),
-        Some(std::ffi::OsStr::new("broken.rules"))
+        warning.path,
+        Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+            &rules_path
+        ))
     );
 
     match timeout(Duration::from_millis(250), async {

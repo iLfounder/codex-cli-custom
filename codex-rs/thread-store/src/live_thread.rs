@@ -226,7 +226,7 @@ impl LiveThread {
         };
         let metadata_sync = ThreadMetadataSync::for_resume(&params, metadata.as_ref());
         thread_store
-            .activate_prepared_thread_resume(authority, params.metadata)
+            .activate_prepared_thread_resume(authority, params)
             .await?;
         Ok(Self {
             thread_id,

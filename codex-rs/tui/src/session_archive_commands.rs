@@ -385,10 +385,15 @@ pub(super) async fn start_app_server_for_session_command(
         launch_disposition,
         crate::canonical_launch_projection::CanonicalLaunchProjection::default(),
     )?;
-    let remote_cwd_override = cli
-        .cwd
-        .clone()
-        .filter(|_| app_server_target.uses_remote_workspace());
+    let remote_invocation_overrides = if app_server_target.uses_remote_workspace() {
+        Some(crate::capture_remote_invocation_overrides(&cli).map_err(|error| eyre!(error))?)
+    } else {
+        None
+    };
+    let remote_cwd_override = remote_invocation_overrides
+        .as_ref()
+        .and_then(crate::RemoteInvocationOverrides::cwd)
+        .cloned();
 
     let local_runtime_paths = ExecServerRuntimePaths::from_optional_paths(
         arg0_paths.codex_self_exe.clone(),
@@ -494,6 +499,7 @@ pub(super) async fn start_app_server_for_session_command(
     .await?;
     Ok(
         AppServerSession::new(app_server, app_server_target.thread_params_mode())
+            .with_remote_invocation_overrides(remote_invocation_overrides.unwrap_or_default())
             .with_remote_cwd_override(remote_cwd_override),
     )
 }

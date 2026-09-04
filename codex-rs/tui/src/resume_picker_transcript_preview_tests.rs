@@ -342,7 +342,9 @@ async fn transcript_preview_for_history_mode(
             params: ThreadStartParams {
                 model: Some(String::from("mock-model")),
                 model_provider: Some(String::from("mock_provider")),
-                cwd: Some(codex_home.path().display().to_string()),
+                cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                    codex_home.path(),
+                )),
                 history_mode: Some(history_mode),
                 ..Default::default()
             },

@@ -390,17 +390,19 @@ async fn submission_preserves_text_elements_and_local_images() {
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        permission_profile: PermissionProfile::read_only(),
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            test_path_buf("/home/user/project").abs(),
+            Vec::new(),
+            PermissionProfile::read_only(),
+            Some(rollout_file.path().to_path_buf()),
+        ),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
-        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: Some(rollout_file.path().to_path_buf()),
     };
     chat.handle_thread_session(configured);
     drain_insert_history(&mut rx);
@@ -425,7 +427,7 @@ async fn submission_preserves_text_elements_and_local_images() {
     assert_eq!(
         items[0],
         UserInput::LocalImage {
-            path: local_images[0].clone(),
+            path: codex_utils_path_uri::LegacyAppPathString::from_path(&local_images[0]),
             detail: None,
         }
     );
@@ -499,17 +501,19 @@ async fn submission_includes_configured_active_permission_profile() {
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        permission_profile: expected_permission_profile,
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            test_path_buf("/home/user/project").abs(),
+            Vec::new(),
+            expected_permission_profile,
+            Some(rollout_file.path().to_path_buf()),
+        ),
         active_permission_profile: Some(expected_active_permission_profile.clone()),
-        cwd: test_path_buf("/home/user/project").abs(),
-        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: Some(rollout_file.path().to_path_buf()),
     };
     chat.handle_thread_session(configured);
     drain_insert_history(&mut rx);
@@ -554,17 +558,19 @@ async fn submission_omits_active_permission_profile_for_legacy_snapshot() {
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        permission_profile: expected_permission_profile,
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            test_path_buf("/home/user/project").abs(),
+            Vec::new(),
+            expected_permission_profile,
+            Some(rollout_file.path().to_path_buf()),
+        ),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
-        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: Some(rollout_file.path().to_path_buf()),
     };
     chat.handle_thread_session(configured);
     drain_insert_history(&mut rx);
@@ -599,17 +605,19 @@ async fn submission_with_remote_and_local_images_keeps_local_placeholder_numberi
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        permission_profile: PermissionProfile::read_only(),
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            test_path_buf("/home/user/project").abs(),
+            Vec::new(),
+            PermissionProfile::read_only(),
+            Some(rollout_file.path().to_path_buf()),
+        ),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
-        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: Some(rollout_file.path().to_path_buf()),
     };
     chat.handle_thread_session(configured);
     drain_insert_history(&mut rx);
@@ -645,7 +653,7 @@ async fn submission_with_remote_and_local_images_keeps_local_placeholder_numberi
     assert_eq!(
         items[1],
         UserInput::LocalImage {
-            path: local_images[0].clone(),
+            path: codex_utils_path_uri::LegacyAppPathString::from_path(&local_images[0]),
             detail: None,
         }
     );
@@ -697,17 +705,19 @@ async fn enter_with_only_remote_images_submits_user_turn() {
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        permission_profile: PermissionProfile::read_only(),
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            test_path_buf("/home/user/project").abs(),
+            Vec::new(),
+            PermissionProfile::read_only(),
+            Some(rollout_file.path().to_path_buf()),
+        ),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
-        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: Some(rollout_file.path().to_path_buf()),
     };
     chat.handle_thread_session(configured);
     drain_insert_history(&mut rx);
@@ -764,17 +774,19 @@ async fn shift_enter_with_only_remote_images_does_not_submit_user_turn() {
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        permission_profile: PermissionProfile::read_only(),
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            test_path_buf("/home/user/project").abs(),
+            Vec::new(),
+            PermissionProfile::read_only(),
+            Some(rollout_file.path().to_path_buf()),
+        ),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
-        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: Some(rollout_file.path().to_path_buf()),
     };
     chat.handle_thread_session(configured);
     drain_insert_history(&mut rx);
@@ -805,17 +817,19 @@ async fn enter_with_only_remote_images_does_not_submit_when_modal_is_active() {
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        permission_profile: PermissionProfile::read_only(),
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            test_path_buf("/home/user/project").abs(),
+            Vec::new(),
+            PermissionProfile::read_only(),
+            Some(rollout_file.path().to_path_buf()),
+        ),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
-        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: Some(rollout_file.path().to_path_buf()),
     };
     chat.handle_thread_session(configured);
     drain_insert_history(&mut rx);
@@ -846,17 +860,19 @@ async fn enter_with_only_remote_images_does_not_submit_when_input_disabled() {
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        permission_profile: PermissionProfile::read_only(),
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            test_path_buf("/home/user/project").abs(),
+            Vec::new(),
+            PermissionProfile::read_only(),
+            Some(rollout_file.path().to_path_buf()),
+        ),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
-        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: Some(rollout_file.path().to_path_buf()),
     };
     chat.handle_thread_session(configured);
     drain_insert_history(&mut rx);
@@ -890,23 +906,29 @@ async fn submission_prefers_selected_duplicate_skill_path() {
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        permission_profile: PermissionProfile::read_only(),
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            test_path_buf("/home/user/project").abs(),
+            Vec::new(),
+            PermissionProfile::read_only(),
+            Some(rollout_file.path().to_path_buf()),
+        ),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
-        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: Some(rollout_file.path().to_path_buf()),
     };
     chat.handle_thread_session(configured);
     drain_insert_history(&mut rx);
 
-    let repo_skill_path = test_path_buf("/tmp/repo/figma/SKILL.md").abs();
-    let user_skill_path = test_path_buf("/tmp/user/figma/SKILL.md").abs();
+    let repo_skill_path = codex_utils_path_uri::LegacyAppPathString::from_abs_path(
+        &test_path_buf("/tmp/repo/figma/SKILL.md").abs(),
+    );
+    let user_skill_path = codex_utils_path_uri::LegacyAppPathString::from_abs_path(
+        &test_path_buf("/tmp/user/figma/SKILL.md").abs(),
+    );
     chat.set_skills(Some(vec![
         SkillMetadata {
             name: "figma".to_string(),
@@ -939,7 +961,7 @@ async fn submission_prefers_selected_duplicate_skill_path() {
         vec![MentionBinding {
             sigil: '$',
             mention: "figma".to_string(),
-            path: user_skill_path.to_string_lossy().into_owned(),
+            path: user_skill_path.render_for_ui(),
         }],
     );
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -955,7 +977,7 @@ async fn submission_prefers_selected_duplicate_skill_path() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(selected_skill_paths, vec![user_skill_path.to_path_buf()]);
+    assert_eq!(selected_skill_paths, vec![user_skill_path]);
 }
 
 #[tokio::test]
@@ -2144,7 +2166,7 @@ async fn submit_user_message_ignores_inaccessible_app_mentions_from_bindings() {
 
 #[test]
 fn user_message_display_from_inputs_matches_flattened_user_message_shape() {
-    let local_image = PathBuf::from("/tmp/local.png");
+    let local_image = test_path_buf("/tmp/local.png").abs();
     let rendered = ChatWidget::user_message_display_from_inputs(&[
         UserInput::Text {
             text: "hello ".to_string(),
@@ -2155,16 +2177,16 @@ fn user_message_display_from_inputs_matches_flattened_user_message_shape() {
             detail: None,
         },
         UserInput::LocalImage {
-            path: local_image.clone(),
+            path: codex_utils_path_uri::LegacyAppPathString::from_abs_path(&local_image),
             detail: None,
         },
         UserInput::Skill {
             name: "demo".to_string(),
-            path: PathBuf::from("/tmp/skill/SKILL.md"),
+            path: codex_utils_path_uri::LegacyAppPathString::from_string("/tmp/skill/SKILL.md"),
         },
         UserInput::Mention {
             name: "repo".to_string(),
-            path: "app://repo".to_string(),
+            path: codex_utils_path_uri::LegacyAppPathString::from_string("app://repo"),
         },
         UserInput::Text {
             text: "world".to_string(),
@@ -2180,7 +2202,7 @@ fn user_message_display_from_inputs_matches_flattened_user_message_shape() {
                 TextElement::new((0..5).into(), Some("hello".to_string())),
                 TextElement::new((6..11).into(), Some("planet".to_string())),
             ],
-            vec![local_image],
+            vec![local_image.to_path_buf()],
             vec!["https://example.com/remote.png".to_string()],
         )
     );
@@ -2225,7 +2247,7 @@ fn task_and_plugin_mentions_with_same_name_keep_prompt_order() {
         },
         UserInput::Mention {
             name: "same".to_string(),
-            path: "plugin://same@test".to_string(),
+            path: codex_utils_path_uri::LegacyAppPathString::from_string("plugin://same@test"),
         },
     ];
 
@@ -2313,7 +2335,7 @@ async fn task_mention_submission_and_transcript_preserve_the_visible_title() {
 #[tokio::test]
 async fn committed_user_message_with_hidden_prompt_context_renders_local_images() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    let local_image = PathBuf::from("/tmp/context-image.png");
+    let local_image = test_path_buf("/tmp/context-image.png").abs();
     let raw_message =
         "# Context from my IDE setup:\n\n## Active file: src/lib.rs\n\n## My request for Codex:\n";
 
@@ -2326,7 +2348,7 @@ async fn committed_user_message_with_hidden_prompt_context_renders_local_images(
                 text_elements: Vec::new(),
             },
             UserInput::LocalImage {
-                path: local_image.clone(),
+                path: codex_utils_path_uri::LegacyAppPathString::from_abs_path(&local_image),
                 detail: None,
             },
         ],
@@ -2344,7 +2366,7 @@ async fn committed_user_message_with_hidden_prompt_context_renders_local_images(
 
     let (message, local_images) = user_cell.expect("expected user history cell");
     assert_eq!(message, "");
-    assert_eq!(local_images, vec![local_image]);
+    assert_eq!(local_images, vec![local_image.to_path_buf()]);
 }
 
 #[tokio::test]

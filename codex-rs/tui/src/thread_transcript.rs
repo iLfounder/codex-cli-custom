@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::app_server_session::AppServerSession;
 use crate::app_server_session::HistoryHydrationScope;
 use crate::git_action_directives::parse_assistant_markdown;
+use crate::git_action_directives::parse_assistant_markdown_without_cwd;
 use crate::history_cell::AgentMarkdownCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::PlainHistoryCell;
@@ -20,7 +21,7 @@ use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::UserInput;
 use codex_protocol::ThreadId;
 use codex_protocol::items::UserMessageItem;
-use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
 use ratatui::style::Stylize as _;
 use ratatui::text::Line;
 
@@ -83,11 +84,12 @@ pub(crate) fn thread_to_transcript_cells(
 
 pub(crate) fn thread_items_to_transcript_cells(
     thread_id: Option<ThreadId>,
-    cwd: &AbsolutePathBuf,
+    cwd: &LegacyAppPathString,
     items: impl IntoIterator<Item = ThreadItem>,
     raw_reasoning_visibility: RawReasoningVisibility,
     config: Option<&Config>,
 ) -> TranscriptCells {
+    let native_cwd = cwd.to_inferred_abs_path();
     let inline_visualization_context = config.and_then(|config| {
         thread_id.and_then(|thread_id| InlineVisualizationContext::from_config(config, thread_id))
     });
@@ -115,7 +117,16 @@ pub(crate) fn thread_items_to_transcript_cells(
                     client_id,
                     content: content
                         .into_iter()
-                        .map(codex_app_server_protocol::UserInput::into_core)
+                        .filter_map(|input| match input.try_into_core() {
+                            Ok(input) => Some(input),
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    "omitting user input with a non-native path from transcript"
+                                );
+                                None
+                            }
+                        })
                         .collect(),
                 };
                 cells.push(Arc::new(UserHistoryCell {
@@ -126,13 +137,22 @@ pub(crate) fn thread_items_to_transcript_cells(
                 }));
             }
             ThreadItem::AgentMessage { text, .. } => {
-                let parsed = parse_assistant_markdown(&text, cwd.as_path());
+                let parsed = native_cwd.as_ref().map_or_else(
+                    || parse_assistant_markdown_without_cwd(&text),
+                    |cwd| parse_assistant_markdown(&text, cwd.as_path()),
+                );
                 if !parsed.visible_markdown.trim().is_empty() {
-                    cells.push(Arc::new(AgentMarkdownCell::new_with_inline_visualizations(
-                        parsed.visible_markdown,
-                        cwd.as_path(),
-                        inline_visualization_context.clone(),
-                    )));
+                    let cell: Arc<dyn HistoryCell> = match native_cwd.as_ref() {
+                        Some(cwd) => Arc::new(AgentMarkdownCell::new_with_inline_visualizations(
+                            parsed.visible_markdown,
+                            cwd.as_path(),
+                            inline_visualization_context.clone(),
+                        )),
+                        None => {
+                            Arc::new(AgentMarkdownCell::new_without_cwd(parsed.visible_markdown))
+                        }
+                    };
+                    cells.push(cell);
                 }
             }
             ThreadItem::FunctionCallOutput {
@@ -157,10 +177,13 @@ pub(crate) fn thread_items_to_transcript_cells(
             }
             ThreadItem::Plan { text, .. } => {
                 if !text.trim().is_empty() {
-                    cells.push(Arc::new(crate::history_cell::new_proposed_plan(
-                        text,
-                        cwd.as_path(),
-                    )));
+                    let cell: Arc<dyn HistoryCell> = match native_cwd.as_ref() {
+                        Some(cwd) => {
+                            Arc::new(crate::history_cell::new_proposed_plan(text, cwd.as_path()))
+                        }
+                        None => Arc::new(crate::history_cell::new_proposed_plan_without_cwd(text)),
+                    };
+                    cells.push(cell);
                 }
             }
             ThreadItem::Reasoning {
@@ -175,12 +198,18 @@ pub(crate) fn thread_items_to_transcript_cells(
                         split_reasoning_summary_parts(&summary)
                     };
                 if !text.trim().is_empty() {
-                    cells.push(Arc::new(ReasoningSummaryCell::new(
-                        header,
-                        text,
-                        cwd.as_path(),
-                        /*transcript_only*/ false,
-                    )));
+                    let cell: Arc<dyn HistoryCell> = match native_cwd.as_ref() {
+                        Some(cwd) => Arc::new(ReasoningSummaryCell::new(
+                            header,
+                            text,
+                            cwd.as_path(),
+                            /*transcript_only*/ false,
+                        )),
+                        None => Arc::new(ReasoningSummaryCell::new_without_cwd(
+                            header, text, /*transcript_only*/ false,
+                        )),
+                    };
+                    cells.push(cell);
                 }
             }
             other => {
@@ -283,7 +312,7 @@ fn fallback_transcript_cell(item: &ThreadItem) -> Option<PlainHistoryCell> {
             let saved = item
                 .saved_path
                 .as_ref()
-                .map(|path| format!(" · {}", path.as_path().display()))
+                .map(|path| format!(" · {}", path.render_for_ui()))
                 .unwrap_or_default();
             vec![
                 format!("image generation: {}{saved}", item.status)

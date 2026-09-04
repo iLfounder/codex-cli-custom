@@ -50,20 +50,30 @@ enum StartupHooksReviewSelection {
 pub(crate) async fn load_startup_hooks_review_entry(
     request_handle: AppServerRequestHandle,
     cwd: PathBuf,
+    skip_server_hook_scan: bool,
 ) -> HooksListEntry {
-    let response = match fetch_hooks_list(request_handle, cwd.clone()).await {
+    let request_cwd = codex_utils_path_uri::LegacyAppPathString::from_path(&cwd);
+    if skip_server_hook_scan {
+        return HooksListEntry {
+            cwd: request_cwd,
+            hooks: Vec::new(),
+            warnings: Vec::new(),
+            errors: Vec::new(),
+        };
+    }
+    let response = match fetch_hooks_list(request_handle, request_cwd.clone()).await {
         Ok(response) => response,
         Err(err) => {
             tracing::warn!("failed to load startup hook review state: {err:#}");
             return HooksListEntry {
-                cwd,
+                cwd: request_cwd,
                 hooks: Vec::new(),
                 warnings: Vec::new(),
                 errors: Vec::new(),
             };
         }
     };
-    hooks_list_entry_for_cwd(response, &cwd)
+    hooks_list_entry_for_cwd(response, &request_cwd)
 }
 
 pub(crate) async fn maybe_run_startup_hooks_review(
@@ -340,7 +350,9 @@ mod tests {
             timeout_sec: 30,
             status_message: None,
             additional_context_limit: None,
-            source_path: test_path_buf("/tmp/hooks.json").abs(),
+            source_path: codex_utils_path_uri::LegacyAppPathString::from_abs_path(
+                &test_path_buf("/tmp/hooks.json").abs(),
+            ),
             source: HookSource::User,
             plugin_id: None,
             display_order: 0,
@@ -352,7 +364,7 @@ mod tests {
 
     fn entry() -> HooksListEntry {
         HooksListEntry {
-            cwd: test_path_buf("/tmp"),
+            cwd: codex_utils_path_uri::LegacyAppPathString::from_path(&test_path_buf("/tmp")),
             hooks: vec![
                 hook("path:new", HookTrustStatus::Untrusted),
                 hook("path:changed", HookTrustStatus::Modified),

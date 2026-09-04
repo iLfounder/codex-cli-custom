@@ -66,17 +66,19 @@ impl App {
             );
             return;
         };
-        let permissions_override = Self::turn_permissions_override_from_config(
-            &retry_config,
-            active_permission_profile.as_ref(),
-            self.runtime_permission_profile_override
-                .as_ref()
-                .and_then(RuntimePermissionProfileOverride::turn_permission_profile),
-        );
-        if let Err(err) = turn_permissions_overrides(permissions_override, cwd.as_path()) {
-            self.chat_widget
-                .add_error_message(format!("Failed to retry with a faster model: {err}"));
-            return;
+        if !self.app_server_target.uses_remote_workspace() {
+            let permissions_override = Self::turn_permissions_override_from_config(
+                &retry_config,
+                active_permission_profile.as_ref(),
+                self.runtime_permission_profile_override
+                    .as_ref()
+                    .and_then(RuntimePermissionProfileOverride::turn_permission_profile),
+            );
+            if let Err(err) = turn_permissions_overrides(permissions_override, cwd.as_path()) {
+                self.chat_widget
+                    .add_error_message(format!("Failed to retry with a faster model: {err}"));
+                return;
+            }
         }
         *turn_model = model.clone();
         *effort = Some(ReasoningEffortConfig::Low);

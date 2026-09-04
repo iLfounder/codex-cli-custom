@@ -132,7 +132,6 @@ async fn installed_extension_warms_connections_without_blocking_thread_start() -
     ];
     connections[0].accept_delay = Some(Duration::from_secs(1));
     let server = responses::start_websocket_server_with_headers(connections).await;
-    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("test-api-key"));
     let mut config = test.config.clone();
     config.model_provider = ModelProviderInfo::create_openai_provider(Some(format!(
         "http://{}/v1",
@@ -140,13 +139,10 @@ async fn installed_extension_warms_connections_without_blocking_thread_start() -
     )));
     config.features.enable(Feature::GuardianV2)?;
     let mut builder = ExtensionRegistryBuilder::new();
-    super::install(
-        &mut builder,
-        auth_manager,
-        Arc::downgrade(&test.thread_manager),
-    );
+    super::install(&mut builder, Arc::downgrade(&test.thread_manager));
     let registry = builder.build();
     let session_store = ExtensionData::new("session-1");
+    session_store.insert(test.codex.execution_account().as_ref().clone());
     let thread_store = test.codex.thread_extension_data();
 
     registry.thread_lifecycle_contributors()[0]
@@ -2246,17 +2242,13 @@ async fn contributor_skips_required_models_in_standard_scope() -> Result<()> {
         "http://{}/v1",
         server.uri().trim_start_matches("ws://")
     )));
-    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("test-api-key"));
     let mut config = test.config.clone();
     config.model_provider = provider_info;
     let mut builder = ExtensionRegistryBuilder::new();
-    super::install(
-        &mut builder,
-        auth_manager,
-        Arc::downgrade(&test.thread_manager),
-    );
+    super::install(&mut builder, Arc::downgrade(&test.thread_manager));
     let registry = builder.build();
     let session_store = ExtensionData::new("session-1");
+    session_store.insert(test.codex.execution_account().as_ref().clone());
     let thread_store = test.codex.thread_extension_data();
     registry.thread_lifecycle_contributors()[0]
         .on_thread_start(ThreadStartInput {

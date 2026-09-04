@@ -18,6 +18,9 @@
       ],
       "type": "object"
     },
+    "LegacyAppPathString": {
+      "type": "string"
+    },
     "MergeStrategy": {
       "enum": [
         "replace",
@@ -40,11 +43,15 @@
       ]
     },
     "filePath": {
-      "description": "Path to the config file to write; defaults to the user's `config.toml` when omitted.",
-      "type": [
-        "string",
-        "null"
-      ]
+      "anyOf": [
+        {
+          "$ref": "#/definitions/LegacyAppPathString"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Path to the config file to write; defaults to the user's `config.toml` when omitted."
     },
     "reloadUserConfig": {
       "description": "When true, hot-reload updated runtime settings into loaded threads after writing. Session-static model, reasoning-effort, Plan-mode reasoning-effort, service-tier, and personality defaults are not reloaded.",

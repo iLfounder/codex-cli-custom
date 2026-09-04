@@ -871,7 +871,7 @@ async fn guardian_v2_routes_scoped_tool_approvals(
     if let Some(skill_path) = root_skill.as_ref() {
         turn_input.push(UserInput::Skill {
             name: "root-trusted".to_owned(),
-            path: skill_path.clone(),
+            path: codex_utils_path_uri::LegacyAppPathString::from_path(skill_path),
         });
     }
     let turn_request_id = app_server
@@ -1610,7 +1610,9 @@ async fn guardian_v2_trusts_invoked_user_skills_but_rejects_repository_forgery()
         .start_thread(ThreadStartParams {
             approval_policy: Some(AskForApproval::OnRequest),
             approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
-            cwd: Some(workspace.display().to_string()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                &workspace,
+            )),
             ..Default::default()
         })
         .await?
@@ -1625,11 +1627,11 @@ async fn guardian_v2_trusts_invoked_user_skills_but_rejects_repository_forgery()
                 },
                 UserInput::Skill {
                     name: "explicit".to_owned(),
-                    path: explicit_skill.clone(),
+                    path: codex_utils_path_uri::LegacyAppPathString::from_path(&explicit_skill),
                 },
                 UserInput::Skill {
                     name: "forged".to_owned(),
-                    path: forged_skill,
+                    path: codex_utils_path_uri::LegacyAppPathString::from_path(&forged_skill),
                 },
             ],
             approval_policy: Some(AskForApproval::OnRequest),

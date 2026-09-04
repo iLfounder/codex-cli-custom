@@ -36,7 +36,8 @@ foo = "bar"
 fn agents_accept_interactive_configuration_overrides() -> Result<()> {
     let codex_home = TempDir::new()?;
 
-    for args in [
+    #[cfg(unix)]
+    let accepted_args = [
         ["-c", "features.multi_agent_mode=true", "agents"].as_slice(),
         ["--enable", "multi_agent_mode", "agents"].as_slice(),
         ["--yolo", "agents"].as_slice(),
@@ -44,7 +45,17 @@ fn agents_accept_interactive_configuration_overrides() -> Result<()> {
         ["--model", "gpt-5", "agents"].as_slice(),
         ["--approve-for-me", "agents"].as_slice(),
         ["--cd", ".", "agents"].as_slice(),
-    ] {
+    ];
+    #[cfg(not(unix))]
+    let accepted_args = [
+        ["-c", "model_reasoning_effort=\"high\"", "agents"].as_slice(),
+        ["-c", "service_tier=\"fast\"", "agents"].as_slice(),
+        ["--search", "agents"].as_slice(),
+        ["--model", "gpt-5", "agents"].as_slice(),
+        ["--cd", "~", "agents"].as_slice(),
+    ];
+
+    for args in accepted_args {
         let mut cmd = codex_command(codex_home.path())?;
         cmd.env("TERM", "xterm-256color").args(args);
         #[cfg(not(unix))]
@@ -92,6 +103,57 @@ fn agents_reject_inputs_that_cannot_be_applied() -> Result<()> {
             ]
             .as_slice(),
             "cannot apply local provider or additional-directory overrides",
+        ),
+        (
+            [
+                "-c",
+                "features.multi_agent_mode=true",
+                "agents",
+                "--remote",
+                "ws://127.0.0.1:4512",
+            ]
+            .as_slice(),
+            "cannot be applied by a remote TUI",
+        ),
+        (
+            [
+                "--enable",
+                "multi_agent_mode",
+                "agents",
+                "--remote",
+                "ws://127.0.0.1:4512",
+            ]
+            .as_slice(),
+            "cannot be applied by a remote TUI",
+        ),
+        (
+            [
+                "--disable",
+                "multi_agent_mode",
+                "agents",
+                "--remote",
+                "ws://127.0.0.1:4512",
+            ]
+            .as_slice(),
+            "cannot be applied by a remote TUI",
+        ),
+        (
+            ["--yolo", "agents", "--remote", "ws://127.0.0.1:4512"].as_slice(),
+            "cannot be applied by a remote TUI",
+        ),
+        (
+            [
+                "--approve-for-me",
+                "agents",
+                "--remote",
+                "ws://127.0.0.1:4512",
+            ]
+            .as_slice(),
+            "cannot be applied by a remote TUI",
+        ),
+        (
+            ["--cd", ".", "agents", "--remote", "ws://127.0.0.1:4512"].as_slice(),
+            "must be an absolute server path",
         ),
     ] {
         let mut cmd = codex_command(codex_home.path())?;

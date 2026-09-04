@@ -160,6 +160,7 @@ use codex_terminal_detection::TerminalName;
 use codex_terminal_detection::terminal_info;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_cli::resume_hint;
+use codex_utils_path_uri::LegacyAppPathString;
 use codex_utils_path_uri::PathUri;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -300,7 +301,6 @@ use crate::bottom_pane::custom_prompt_view::CustomPromptView;
 use crate::bottom_pane::popup_consts::standard_popup_hint_line;
 use crate::clipboard_paste::paste_image_to_temp_png;
 use crate::collaboration_modes;
-use crate::diff_render::display_path_for;
 use crate::exec_cell::CommandOutput;
 use crate::exec_cell::ExecCell;
 use crate::exec_cell::new_active_exec_command;
@@ -522,6 +522,7 @@ pub(crate) struct ChatWidgetInit {
     pub(crate) is_first_run: bool,
     pub(crate) status_account_display: Option<StatusAccountDisplay>,
     pub(crate) runtime_model_provider_base_url: Option<String>,
+    pub(crate) runtime_requires_openai_auth: bool,
     pub(crate) initial_plan_type: Option<PlanType>,
     pub(crate) model: Option<String>,
     pub(crate) startup_tooltip_override: Option<String>,
@@ -577,6 +578,7 @@ pub(crate) struct ChatWidget {
     initial_user_message: Option<UserMessage>,
     status_account_display: Option<StatusAccountDisplay>,
     runtime_model_provider_base_url: Option<String>,
+    runtime_requires_openai_auth: bool,
     pub(crate) remote_connection: Option<RemoteConnectionStatus>,
     token_info: Option<TokenUsageInfo>,
     token_usage_pending: bool,
@@ -617,7 +619,7 @@ pub(crate) struct ChatWidget {
     pending_collab_spawn_requests: HashMap<String, multi_agents::SpawnRequestSummary>,
     suppressed_exec_calls: HashSet<String>,
     skills_all: Vec<SkillMetadata>,
-    skills_initial_state: Option<HashMap<AbsolutePathBuf, bool>>,
+    skills_initial_state: Option<HashMap<LegacyAppPathString, bool>>,
     last_unified_wait: Option<UnifiedExecWaitState>,
     unified_exec_wait_streak: Option<UnifiedExecWaitStreak>,
     turn_lifecycle: TurnLifecycleState,
@@ -726,6 +728,10 @@ pub(crate) struct ChatWidget {
     current_rollout_path: Option<PathBuf>,
     // Current working directory (if known)
     current_cwd: Option<PathBuf>,
+    // Execution-host path text for a remote session; never used with local filesystem APIs.
+    current_remote_cwd: Option<codex_utils_path_uri::LegacyAppPathString>,
+    // Server-authoritative remote values used only by status surfaces.
+    remote_runtime_status: Option<crate::status::RemoteRuntimeStatus>,
     // App-server-backed command runner for status-line workspace metadata lookups.
     workspace_command_runner: Option<WorkspaceCommandRunner>,
     // Instruction source files loaded for the current session, supplied by app-server.
@@ -757,7 +763,7 @@ pub(crate) struct ChatWidget {
     // Cached git branch name for the status line (None if unknown).
     status_line_branch: Option<String>,
     // CWD used to resolve the cached branch; change resets branch state.
-    status_line_branch_cwd: Option<PathBuf>,
+    status_line_branch_cwd: Option<codex_utils_path_uri::LegacyAppPathString>,
     // True while an async branch lookup is in flight.
     status_line_branch_pending: bool,
     // True once we've attempted a branch lookup for the current CWD.
@@ -765,7 +771,7 @@ pub(crate) struct ChatWidget {
     // Cached PR and branch-change summary for the active status-line cwd.
     status_line_git_summary: Option<StatusLineGitSummary>,
     // CWD used to resolve the cached Git summary; change resets summary state.
-    status_line_git_summary_cwd: Option<PathBuf>,
+    status_line_git_summary_cwd: Option<codex_utils_path_uri::LegacyAppPathString>,
     // True while an async Git summary lookup is in flight.
     status_line_git_summary_pending: bool,
     // True once we've attempted a Git summary lookup for the current CWD.
@@ -914,6 +920,15 @@ fn patch_approval_request_from_params(
 fn request_permissions_from_params(
     params: codex_app_server_protocol::PermissionsRequestApprovalParams,
 ) -> std::io::Result<RequestPermissionsEvent> {
+    let cwd = params.cwd.to_inferred_path_uri().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "permission request cwd is not an absolute path: {}",
+                params.cwd.render_for_ui()
+            ),
+        )
+    })?;
     Ok(RequestPermissionsEvent {
         turn_id: params.turn_id,
         call_id: params.item_id,
@@ -921,7 +936,10 @@ fn request_permissions_from_params(
         started_at_ms: params.started_at_ms,
         reason: params.reason,
         permissions: params.permissions.try_into()?,
-        cwd: Some(params.cwd),
+        // The permissions UI does not consume cwd. Retain a native value for
+        // embedded/local callers, but do not reinterpret a remote executor's
+        // absolute path using the display host's path rules.
+        cwd: cwd.to_abs_path().ok(),
     })
 }
 

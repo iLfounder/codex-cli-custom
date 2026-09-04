@@ -20,6 +20,7 @@ use codex_app_server_protocol::PermissionProfileListParams;
 use codex_app_server_protocol::PermissionProfileListResponse;
 use codex_app_server_protocol::PluginListParams;
 use codex_app_server_protocol::PluginListResponse;
+use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SkillScope;
 use codex_app_server_protocol::SkillsChangedNotification;
 use codex_app_server_protocol::SkillsExtraRootsSetParams;
@@ -142,7 +143,9 @@ async fn skills_list_disabled_bundled_skills_preserves_shared_system_skill_cache
     let enabled_skills_request_id = enabled_mcp
         .send_skills_list_request(SkillsListParams {
             thread_id: None,
-            cwds: vec![cwd.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                cwd.path(),
+            )],
             force_reload: true,
         })
         .await?;
@@ -173,7 +176,9 @@ async fn skills_list_disabled_bundled_skills_preserves_shared_system_skill_cache
     let disabled_skills_request_id = disabled_mcp
         .send_skills_list_request(SkillsListParams {
             thread_id: None,
-            cwds: vec![cwd.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                cwd.path(),
+            )],
             force_reload: true,
         })
         .await?;
@@ -191,16 +196,19 @@ async fn skills_list_disabled_bundled_skills_preserves_shared_system_skill_cache
             .all(|skill| skill.scope != SkillScope::System)
     );
     assert!(
-        system_skill_paths
-            .iter()
-            .all(|path| path.as_path().is_file()),
+        system_skill_paths.iter().all(|path| {
+            path.to_inferred_abs_path()
+                .is_some_and(|path| path.as_path().is_file())
+        }),
         "disabled app-server must not remove the cache shared by other processes"
     );
 
     let reloaded_skills_request_id = enabled_mcp
         .send_skills_list_request(SkillsListParams {
             thread_id: None,
-            cwds: vec![cwd.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                cwd.path(),
+            )],
             force_reload: true,
         })
         .await?;
@@ -246,8 +254,8 @@ async fn skills_list_uses_each_cwds_bundled_skills_configuration() -> Result<()>
         .send_skills_list_request(SkillsListParams {
             thread_id: None,
             cwds: vec![
-                disabled_cwd.path().to_path_buf(),
-                enabled_cwd.path().to_path_buf(),
+                codex_utils_path_uri::LegacyAppPathString::from_path(disabled_cwd.path()),
+                codex_utils_path_uri::LegacyAppPathString::from_path(enabled_cwd.path()),
             ],
             force_reload: true,
         })
@@ -260,7 +268,10 @@ async fn skills_list_uses_each_cwds_bundled_skills_configuration() -> Result<()>
         .iter()
         .zip([(disabled_cwd.path(), false), (enabled_cwd.path(), true)])
     {
-        assert_eq!(entry.cwd, cwd);
+        assert_eq!(
+            entry.cwd,
+            codex_utils_path_uri::LegacyAppPathString::from_path(cwd)
+        );
         assert_eq!(entry.errors, Vec::new());
         assert_eq!(
             entry
@@ -304,7 +315,9 @@ async fn skills_list_runtime_enable_refreshes_shared_system_skill_cache() -> Res
     let disabled_skills_request_id = mcp
         .send_skills_list_request(SkillsListParams {
             thread_id: None,
-            cwds: vec![cwd.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                cwd.path(),
+            )],
             force_reload: true,
         })
         .await?;
@@ -341,7 +354,9 @@ async fn skills_list_runtime_enable_refreshes_shared_system_skill_cache() -> Res
     let enabled_skills_request_id = mcp
         .send_skills_list_request(SkillsListParams {
             thread_id: None,
-            cwds: vec![cwd.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                cwd.path(),
+            )],
             force_reload: true,
         })
         .await?;
@@ -413,14 +428,18 @@ enabled = true
     let initial_skills_list_request_id = mcp
         .send_skills_list_request(SkillsListParams {
             thread_id: None,
-            cwds: vec![cwd.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                cwd.path(),
+            )],
             force_reload: false,
         })
         .await?;
     let thread_start_request_id = mcp
         .send_thread_start_request_with_auto_env(ThreadStartParams {
             transition: None,
-            cwd: Some(cwd.path().to_string_lossy().into_owned()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                cwd.path(),
+            )),
             ..Default::default()
         })
         .await?;
@@ -448,7 +467,9 @@ enabled = true
         let request_id = mcp
             .send_skills_list_request(SkillsListParams {
                 thread_id: None,
-                cwds: vec![cwd.path().to_path_buf()],
+                cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                    cwd.path(),
+                )],
                 force_reload,
             })
             .await?;
@@ -473,7 +494,9 @@ enabled = true
     let skills_list_request_id = mcp
         .send_skills_list_request(SkillsListParams {
             thread_id: None,
-            cwds: vec![cwd.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                cwd.path(),
+            )],
             force_reload: true,
         })
         .await?;
@@ -586,7 +609,9 @@ async fn skills_list_loads_remote_installed_plugin_skills_from_cache() -> Result
     let stale_skills_list_request_id = mcp
         .send_skills_list_request(SkillsListParams {
             thread_id: None,
-            cwds: vec![cwd.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                cwd.path(),
+            )],
             force_reload: true,
         })
         .await?;
@@ -642,7 +667,9 @@ async fn skills_list_loads_remote_installed_plugin_skills_from_cache() -> Result
             let skills_list_request_id = mcp
                 .send_skills_list_request(SkillsListParams {
                     thread_id: None,
-                    cwds: vec![cwd.path().to_path_buf()],
+                    cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                        cwd.path(),
+                    )],
                     force_reload: false,
                 })
                 .await?;
@@ -668,8 +695,12 @@ async fn skills_list_loads_remote_installed_plugin_skills_from_cache() -> Result
         .iter()
         .find(|skill| skill.name == "linear:triage-issues")
         .expect("expected skill from cached remote plugin");
+    let skill_path = skill
+        .path
+        .to_inferred_abs_path()
+        .expect("app-server should return a native absolute skill path");
     assert_eq!(
-        std::fs::canonicalize(skill.path.as_path())?,
+        std::fs::canonicalize(skill_path.as_path())?,
         expected_skill_path
     );
     assert_eq!(
@@ -692,7 +723,9 @@ async fn config_reads_complete_alongside_skills_list_request() -> Result<()> {
     let skills_request_id = mcp
         .send_skills_list_request(SkillsListParams {
             thread_id: None,
-            cwds: vec![cwd.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                cwd.path(),
+            )],
             force_reload: true,
         })
         .await?;
@@ -757,7 +790,9 @@ async fn skills_list_skips_cwd_roots_when_environment_disabled() -> Result<()> {
     let request_id = mcp
         .send_skills_list_request(SkillsListParams {
             thread_id: None,
-            cwds: vec![cwd.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                cwd.path(),
+            )],
             force_reload: true,
         })
         .await?;
@@ -765,7 +800,10 @@ async fn skills_list_skips_cwd_roots_when_environment_disabled() -> Result<()> {
     let SkillsListResponse { data } =
         timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
     assert_eq!(data.len(), 1);
-    assert_eq!(data[0].cwd, cwd.path().to_path_buf());
+    assert_eq!(
+        data[0].cwd,
+        codex_utils_path_uri::LegacyAppPathString::from_path(cwd.path())
+    );
     assert_eq!(data[0].errors, Vec::new());
     assert!(
         data[0]
@@ -783,7 +821,7 @@ async fn skills_list_skips_cwd_roots_when_environment_disabled() -> Result<()> {
 }
 
 #[tokio::test]
-async fn skills_list_accepts_relative_cwds() -> Result<()> {
+async fn skills_list_rejects_relative_cwds() -> Result<()> {
     let codex_home = TempDir::new()?;
     let relative_cwd = std::path::PathBuf::from("relative-cwd");
     std::fs::create_dir_all(codex_home.path().join(&relative_cwd))?;
@@ -797,16 +835,20 @@ async fn skills_list_accepts_relative_cwds() -> Result<()> {
     let request_id = mcp
         .send_skills_list_request(SkillsListParams {
             thread_id: None,
-            cwds: vec![relative_cwd.clone()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                &relative_cwd,
+            )],
             force_reload: true,
         })
         .await?;
 
-    let SkillsListResponse { data } =
-        timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
-    assert_eq!(data.len(), 1);
-    assert_eq!(data[0].cwd, relative_cwd);
-    assert_eq!(data[0].errors, Vec::new());
+    let err = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    assert_eq!(err.error.code, -32600);
+    assert!(err.error.message.contains("skills/list cwd"));
     Ok(())
 }
 
@@ -893,9 +935,9 @@ enabled = false
             .send_skills_list_request(SkillsListParams {
                 thread_id: None,
                 cwds: vec![
-                    first_cwd.path().to_path_buf(),
-                    second_cwd.path().to_path_buf(),
-                    third_cwd.path().to_path_buf(),
+                    codex_utils_path_uri::LegacyAppPathString::from_path(first_cwd.path()),
+                    codex_utils_path_uri::LegacyAppPathString::from_path(second_cwd.path()),
+                    codex_utils_path_uri::LegacyAppPathString::from_path(third_cwd.path()),
                 ],
                 force_reload,
             })
@@ -903,10 +945,12 @@ enabled = false
         let SkillsListResponse { data } =
             timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
         assert_eq!(
-            data.iter()
-                .map(|entry| entry.cwd.as_path())
-                .collect::<Vec<_>>(),
-            vec![first_cwd.path(), second_cwd.path(), third_cwd.path()],
+            data.iter().map(|entry| &entry.cwd).collect::<Vec<_>>(),
+            vec![
+                &codex_utils_path_uri::LegacyAppPathString::from_path(first_cwd.path()),
+                &codex_utils_path_uri::LegacyAppPathString::from_path(second_cwd.path()),
+                &codex_utils_path_uri::LegacyAppPathString::from_path(third_cwd.path()),
+            ],
         );
         for (entry, (project_skill, plugin_enabled)) in data.iter().zip([
             ("first-project-skill", true),
@@ -1006,7 +1050,7 @@ enabled = true
         let request_id = mcp
             .send_skills_list_request(SkillsListParams {
                 thread_id: None,
-                cwds: vec![cwd.to_path_buf()],
+                cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(cwd)],
                 force_reload,
             })
             .await?;
@@ -1041,7 +1085,9 @@ async fn skills_list_uses_cached_result_after_session_default_writes_until_force
     let first_request_id = mcp
         .send_skills_list_request(SkillsListParams {
             thread_id: None,
-            cwds: vec![cwd.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                cwd.path(),
+            )],
             force_reload: false,
         })
         .await?;
@@ -1106,7 +1152,9 @@ async fn skills_list_uses_cached_result_after_session_default_writes_until_force
     let second_request_id = mcp
         .send_skills_list_request(SkillsListParams {
             thread_id: None,
-            cwds: vec![cwd.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                cwd.path(),
+            )],
             force_reload: false,
         })
         .await?;
@@ -1123,7 +1171,9 @@ async fn skills_list_uses_cached_result_after_session_default_writes_until_force
     let third_request_id = mcp
         .send_skills_list_request(SkillsListParams {
             thread_id: None,
-            cwds: vec![cwd.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                cwd.path(),
+            )],
             force_reload: true,
         })
         .await?;
@@ -1160,7 +1210,7 @@ async fn skills_extra_roots_set_updates_process_runtime_roots() -> Result<()> {
 
     let set_request_id = mcp
         .send_skills_extra_roots_set_request(SkillsExtraRootsSetParams {
-            extra_roots: vec![AbsolutePathBuf::from_absolute_path(&extra_skills_root)?],
+            extra_roots: vec![AbsolutePathBuf::from_absolute_path(&extra_skills_root)?.into()],
         })
         .await?;
     let _: SkillsExtraRootsSetResponse =
@@ -1170,7 +1220,9 @@ async fn skills_extra_roots_set_updates_process_runtime_roots() -> Result<()> {
     let skills_request_id = mcp
         .send_skills_list_request(SkillsListParams {
             thread_id: None,
-            cwds: vec![cwd.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                cwd.path(),
+            )],
             force_reload: false,
         })
         .await?;
@@ -1188,7 +1240,7 @@ async fn skills_extra_roots_set_updates_process_runtime_roots() -> Result<()> {
     let missing_root = extra_root.path().join("missing-skills");
     let reset_request_id = mcp
         .send_skills_extra_roots_set_request(SkillsExtraRootsSetParams {
-            extra_roots: vec![AbsolutePathBuf::from_absolute_path(&missing_root)?],
+            extra_roots: vec![AbsolutePathBuf::from_absolute_path(&missing_root)?.into()],
         })
         .await?;
     let _: SkillsExtraRootsSetResponse =
@@ -1198,7 +1250,9 @@ async fn skills_extra_roots_set_updates_process_runtime_roots() -> Result<()> {
     let skills_request_id = mcp
         .send_skills_list_request(SkillsListParams {
             thread_id: None,
-            cwds: vec![cwd.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                cwd.path(),
+            )],
             force_reload: false,
         })
         .await?;
@@ -1224,7 +1278,9 @@ async fn skills_extra_roots_set_updates_process_runtime_roots() -> Result<()> {
     let skills_request_id = mcp
         .send_skills_list_request(SkillsListParams {
             thread_id: None,
-            cwds: vec![cwd.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                cwd.path(),
+            )],
             force_reload: false,
         })
         .await?;
@@ -1248,7 +1304,9 @@ async fn skills_extra_roots_set_updates_process_runtime_roots() -> Result<()> {
     let skills_request_id = mcp
         .send_skills_list_request(SkillsListParams {
             thread_id: None,
-            cwds: vec![cwd.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                cwd.path(),
+            )],
             force_reload: false,
         })
         .await?;
@@ -1287,7 +1345,9 @@ async fn skills_changed_notification_is_emitted_after_skill_change() -> Result<(
     let initial_skills_request_id = mcp
         .send_skills_list_request(SkillsListParams {
             thread_id: None,
-            cwds: vec![codex_home.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                codex_home.path(),
+            )],
             force_reload: true,
         })
         .await?;
@@ -1353,7 +1413,9 @@ async fn skills_changed_notification_is_emitted_after_skill_change() -> Result<(
     let updated_skills_request_id = mcp
         .send_skills_list_request(SkillsListParams {
             thread_id: None,
-            cwds: vec![codex_home.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                codex_home.path(),
+            )],
             force_reload: false,
         })
         .await?;

@@ -206,10 +206,17 @@ async fn thread_fork_creates_new_thread_and_emits_started() -> Result<()> {
     assert_eq!(thread.preview, preview);
     assert_eq!(thread.model_provider, "mock_provider");
     assert_eq!(thread.status, ThreadStatus::Idle);
-    let thread_path = thread.path.clone().expect("thread path");
+    let thread_path = codex_utils_absolute_path::AbsolutePathBuf::try_from(
+        thread.path.clone().expect("thread path"),
+    )?;
     assert!(thread_path.as_path().is_absolute());
     assert_ne!(thread_path.as_path(), original_path);
-    assert!(thread.cwd.as_path().is_absolute());
+    assert!(
+        thread
+            .cwd
+            .to_inferred_abs_path()
+            .is_some_and(|cwd| cwd.as_path().is_absolute())
+    );
     assert_eq!(thread.source, SessionSource::VsCode);
     assert_eq!(thread.thread_source, Some(ThreadSource::User));
     assert_eq!(thread.name, None);
@@ -596,7 +603,9 @@ async fn assert_thread_fork_at_named_boundary_keeps_only_terminal_prefix(
         ..
     } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(start_id)).await??;
     let source_thread_id = source_thread.id.clone();
-    let source_path = source_thread.path.expect("source thread path");
+    let source_path = codex_utils_absolute_path::AbsolutePathBuf::try_from(
+        source_thread.path.expect("source thread path"),
+    )?;
 
     let mut turn_ids = Vec::new();
     for text in ["first", "second", "third"] {
@@ -658,7 +667,9 @@ async fn assert_thread_fork_at_named_boundary_keeps_only_terminal_prefix(
         "forking at a turn must not mutate the source rollout"
     );
 
-    let forked_path = forked_thread.path.clone().expect("forked thread path");
+    let forked_path = codex_utils_absolute_path::AbsolutePathBuf::try_from(
+        forked_thread.path.clone().expect("forked thread path"),
+    )?;
     let forked_contents = std::fs::read_to_string(forked_path.as_path())?;
     if history_mode == ThreadHistoryMode::Paginated {
         assert!(
@@ -1065,7 +1076,9 @@ async fn thread_fork_can_load_source_by_path() -> Result<()> {
     let fork_id = mcp
         .send_thread_fork_request(ThreadForkParams {
             thread_id: "not-a-valid-thread-id".to_string(),
-            path: Some(original_path),
+            path: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                &original_path,
+            )),
             ..Default::default()
         })
         .await?;
@@ -1412,7 +1425,9 @@ async fn thread_fork_creates_reference_backed_paginated_thread() -> Result<()> {
     assert_eq!(forked_thread.forked_from_id, Some(conversation_id.clone()));
     assert_eq!(forked_thread.turns.len(), 1);
     let forked_thread_id = forked_thread.id.clone();
-    let forked_path = forked_thread.path.expect("forked rollout path");
+    let forked_path = codex_utils_absolute_path::AbsolutePathBuf::try_from(
+        forked_thread.path.expect("forked rollout path"),
+    )?;
     assert!(!std::fs::read_to_string(forked_path.as_path())?.contains("Saved user message"));
     let meta = read_session_meta_line(forked_path.as_path()).await?;
     let history_base = meta.meta.history_base.expect("history base");
@@ -1476,7 +1491,9 @@ async fn thread_fork_creates_reference_backed_paginated_thread() -> Result<()> {
         ..
     } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(exclude_id)).await??;
     assert!(excluded_turns_thread.turns.is_empty());
-    let excluded_turns_path = excluded_turns_thread.path.expect("forked rollout path");
+    let excluded_turns_path = codex_utils_absolute_path::AbsolutePathBuf::try_from(
+        excluded_turns_thread.path.expect("forked rollout path"),
+    )?;
     let excluded_turns_meta = read_session_meta_line(excluded_turns_path.as_path()).await?;
     assert_eq!(excluded_turns_meta.meta.history_base, Some(history_base));
 
@@ -1496,7 +1513,9 @@ async fn thread_fork_creates_reference_backed_paginated_thread() -> Result<()> {
     assert_eq!(nested_thread.forked_from_id, Some(forked_thread_id.clone()));
     assert_eq!(nested_thread.history_mode, ThreadHistoryMode::Paginated);
     assert!(nested_thread.turns.is_empty());
-    let nested_path = nested_thread.path.expect("nested fork rollout path");
+    let nested_path = codex_utils_absolute_path::AbsolutePathBuf::try_from(
+        nested_thread.path.expect("nested fork rollout path"),
+    )?;
     let nested_meta = read_session_meta_line(nested_path.as_path()).await?;
     assert_eq!(
         nested_meta
@@ -1771,7 +1790,9 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
         })
         .await?;
     let forked_thread_id = forked_thread.id.clone();
-    let forked_path = forked_thread.path.expect("forked rollout path");
+    let forked_path = codex_utils_absolute_path::AbsolutePathBuf::try_from(
+        forked_thread.path.expect("forked rollout path"),
+    )?;
     let history_base = read_session_meta_line(forked_path.as_path())
         .await?
         .meta
@@ -2065,7 +2086,7 @@ async fn thread_fork_with_empty_path_uses_thread_id() -> Result<()> {
     let fork_id = mcp
         .send_thread_fork_request(ThreadForkParams {
             thread_id: conversation_id.clone(),
-            path: Some(std::path::PathBuf::new()),
+            path: Some(codex_utils_path_uri::LegacyAppPathString::from_string("")),
             thread_source: Some(ThreadSource::User),
             ..Default::default()
         })
@@ -2496,7 +2517,9 @@ async fn pathless_ephemeral_thread_rejects_codex_home_path_after_reload() -> Res
     let resume_id = app_server
         .send_thread_resume_request(ThreadResumeParams {
             thread_id: side_thread_id.clone(),
-            path: Some(codex_home_path.clone()),
+            path: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                &codex_home_path,
+            )),
             ..Default::default()
         })
         .await?;
@@ -2519,7 +2542,9 @@ async fn pathless_ephemeral_thread_rejects_codex_home_path_after_reload() -> Res
     let fork_id = app_server
         .send_thread_fork_request(ThreadForkParams {
             thread_id: side_thread_id,
-            path: Some(codex_home_path),
+            path: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                &codex_home_path,
+            )),
             ..Default::default()
         })
         .await?;

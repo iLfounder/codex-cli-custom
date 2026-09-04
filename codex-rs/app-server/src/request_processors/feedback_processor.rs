@@ -287,6 +287,9 @@ impl FeedbackRequestProcessor {
         }
         if let Some(extra_log_files) = extra_log_files {
             for extra_log_file in extra_log_files {
+                let extra_log_file =
+                    resolve_absolute_api_path(extra_log_file, "feedback extra log file")?
+                        .into_path_buf();
                 if seen_attachment_paths.insert(extra_log_file.clone()) {
                     attachment_paths.push(FeedbackAttachmentPath {
                         path: extra_log_file,

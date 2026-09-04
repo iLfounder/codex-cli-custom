@@ -35,14 +35,12 @@ use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::ThreadGoalStatus as CoreThreadGoalStatus;
 use codex_protocol::protocol::TokenUsage as CoreTokenUsage;
 use codex_protocol::protocol::TokenUsageInfo as CoreTokenUsageInfo;
-use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::LegacyAppPathString;
 use codex_utils_path_uri::PathUri;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
@@ -87,11 +85,11 @@ pub struct ThreadStartParams {
     #[ts(optional = nullable)]
     pub service_tier: Option<Option<String>>,
     #[ts(optional = nullable)]
-    pub cwd: Option<String>,
+    pub cwd: Option<LegacyAppPathString>,
     /// Replace the thread's runtime workspace roots. Paths must be absolute.
     #[experimental("thread/start.runtimeWorkspaceRoots")]
     #[ts(optional = nullable)]
-    pub runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
+    pub runtime_workspace_roots: Option<Vec<LegacyAppPathString>>,
     #[experimental(nested)]
     #[ts(optional = nullable)]
     pub approval_policy: Option<AskForApproval>,
@@ -192,12 +190,12 @@ pub struct ThreadStartResponse {
     pub model: String,
     pub model_provider: String,
     pub service_tier: Option<String>,
-    pub cwd: AbsolutePathBuf,
+    pub cwd: LegacyAppPathString,
     /// Thread-scoped runtime workspace roots used to materialize
     /// `:workspace_roots`.
     #[experimental("thread/start.runtimeWorkspaceRoots")]
     #[serde(default)]
-    pub runtime_workspace_roots: Vec<AbsolutePathBuf>,
+    pub runtime_workspace_roots: Vec<LegacyAppPathString>,
     /// Environment-native paths to instruction source files currently loaded for this thread.
     #[serde(default)]
     pub instruction_sources: Vec<LegacyAppPathString>,
@@ -241,7 +239,7 @@ pub struct ThreadSettingsUpdateParams {
     pub thread_id: String,
     /// Override the working directory for subsequent turns.
     #[ts(optional = nullable)]
-    pub cwd: Option<PathBuf>,
+    pub cwd: Option<LegacyAppPathString>,
     /// Override the approval policy for subsequent turns.
     #[experimental(nested)]
     #[ts(optional = nullable)]
@@ -301,7 +299,7 @@ pub struct ThreadSettingsUpdateResponse {}
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ThreadSettings {
-    pub cwd: AbsolutePathBuf,
+    pub cwd: LegacyAppPathString,
     pub approval_policy: AskForApproval,
     pub approvals_reviewer: ApprovalsReviewer,
     pub sandbox_policy: SandboxPolicy,
@@ -366,7 +364,7 @@ pub struct ThreadResumeParams {
         deserialize_with = "crate::protocol::serde_helpers::deserialize_empty_path_as_none"
     )]
     #[ts(optional = nullable)]
-    pub path: Option<PathBuf>,
+    pub path: Option<LegacyAppPathString>,
 
     /// Configuration overrides for the resumed thread, if any.
     #[ts(optional = nullable)]
@@ -382,11 +380,11 @@ pub struct ThreadResumeParams {
     #[ts(optional = nullable)]
     pub service_tier: Option<Option<String>>,
     #[ts(optional = nullable)]
-    pub cwd: Option<String>,
+    pub cwd: Option<LegacyAppPathString>,
     /// Replace the thread's runtime workspace roots. Paths must be absolute.
     #[experimental("thread/resume.runtimeWorkspaceRoots")]
     #[ts(optional = nullable)]
-    pub runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
+    pub runtime_workspace_roots: Option<Vec<LegacyAppPathString>>,
     #[experimental(nested)]
     #[ts(optional = nullable)]
     pub approval_policy: Option<AskForApproval>,
@@ -440,12 +438,12 @@ pub struct ThreadResumeResponse {
     pub model: String,
     pub model_provider: String,
     pub service_tier: Option<String>,
-    pub cwd: AbsolutePathBuf,
+    pub cwd: LegacyAppPathString,
     /// Thread-scoped runtime workspace roots used to materialize
     /// `:workspace_roots`.
     #[experimental("thread/resume.runtimeWorkspaceRoots")]
     #[serde(default)]
-    pub runtime_workspace_roots: Vec<AbsolutePathBuf>,
+    pub runtime_workspace_roots: Vec<LegacyAppPathString>,
     /// Environment-native paths to instruction source files currently loaded for this thread.
     #[serde(default)]
     pub instruction_sources: Vec<LegacyAppPathString>,
@@ -562,7 +560,7 @@ pub struct ThreadForkParams {
         deserialize_with = "crate::protocol::serde_helpers::deserialize_empty_path_as_none"
     )]
     #[ts(optional = nullable)]
-    pub path: Option<PathBuf>,
+    pub path: Option<LegacyAppPathString>,
 
     /// Configuration overrides for the forked thread, if any.
     #[ts(optional = nullable)]
@@ -578,11 +576,11 @@ pub struct ThreadForkParams {
     #[ts(optional = nullable)]
     pub service_tier: Option<Option<String>>,
     #[ts(optional = nullable)]
-    pub cwd: Option<String>,
+    pub cwd: Option<LegacyAppPathString>,
     /// Replace the thread's runtime workspace roots. Paths must be absolute.
     #[experimental("thread/fork.runtimeWorkspaceRoots")]
     #[ts(optional = nullable)]
-    pub runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
+    pub runtime_workspace_roots: Option<Vec<LegacyAppPathString>>,
     #[experimental(nested)]
     #[ts(optional = nullable)]
     pub approval_policy: Option<AskForApproval>,
@@ -631,12 +629,12 @@ pub struct ThreadForkResponse {
     pub model: String,
     pub model_provider: String,
     pub service_tier: Option<String>,
-    pub cwd: AbsolutePathBuf,
+    pub cwd: LegacyAppPathString,
     /// Thread-scoped runtime workspace roots used to materialize
     /// `:workspace_roots`.
     #[experimental("thread/fork.runtimeWorkspaceRoots")]
     #[serde(default)]
-    pub runtime_workspace_roots: Vec<AbsolutePathBuf>,
+    pub runtime_workspace_roots: Vec<LegacyAppPathString>,
     /// Environment-native paths to instruction source files currently loaded for this thread.
     #[serde(default)]
     pub instruction_sources: Vec<LegacyAppPathString>,
@@ -1653,8 +1651,8 @@ pub struct ThreadSearchParams {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
 #[serde(untagged)]
 pub enum ThreadListCwdFilter {
-    One(String),
-    Many(Vec<String>),
+    One(LegacyAppPathString),
+    Many(Vec<LegacyAppPathString>),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]

@@ -15,14 +15,13 @@ use codex_protocol::config_types::Verbosity;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::config_types::WebSearchToolConfig;
 use codex_protocol::openai_models::ReasoningEffort;
-use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
 use codex_utils_path_uri::PathUri;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -34,7 +33,7 @@ pub enum ConfigLayerSource {
     #[ts(rename_all = "camelCase")]
     PackagedDefaults {
         /// Path to the packaged default configuration file.
-        file: AbsolutePathBuf,
+        file: LegacyAppPathString,
     },
 
     /// Managed preferences layer delivered by MDM (macOS only).
@@ -51,7 +50,7 @@ pub enum ConfigLayerSource {
     System {
         /// This is the path to the system config.toml file, though it is not
         /// guaranteed to exist.
-        file: AbsolutePathBuf,
+        file: LegacyAppPathString,
     },
 
     /// Enterprise-managed config layer delivered by the cloud config bundle.
@@ -76,7 +75,7 @@ pub enum ConfigLayerSource {
     User {
         /// This is the path to the user's config.toml file, though it is not
         /// guaranteed to exist.
-        file: AbsolutePathBuf,
+        file: LegacyAppPathString,
 
         /// Name of the selected profile-v2 config layered on top of the base
         /// user config, when this layer represents one.
@@ -88,7 +87,7 @@ pub enum ConfigLayerSource {
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
     Project {
-        dot_codex_folder: AbsolutePathBuf,
+        dot_codex_folder: LegacyAppPathString,
     },
 
     /// Session-layer overrides supplied via `-c`/`--config`.
@@ -101,7 +100,7 @@ pub enum ConfigLayerSource {
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
     LegacyManagedConfigTomlFromFile {
-        file: AbsolutePathBuf,
+        file: LegacyAppPathString,
     },
 
     LegacyManagedConfigTomlFromMdm,
@@ -144,7 +143,7 @@ impl PartialOrd for ConfigLayerSource {
 #[ts(export_to = "v2/")]
 pub struct SandboxWorkspaceWrite {
     #[serde(default)]
-    pub writable_roots: Vec<PathBuf>,
+    pub writable_roots: Vec<LegacyAppPathString>,
     #[serde(default)]
     pub network_access: bool,
     #[serde(default)]
@@ -362,7 +361,7 @@ pub struct ConfigWriteResponse {
     pub status: WriteStatus,
     pub version: String,
     /// Canonical path to the config file that was written.
-    pub file_path: AbsolutePathBuf,
+    pub file_path: LegacyAppPathString,
     pub overridden_metadata: Option<OverriddenMetadata>,
 }
 
@@ -389,7 +388,7 @@ pub struct ConfigReadParams {
     /// return the effective config as seen from that directory (i.e., including any
     /// project layers between `cwd` and the project/repo root).
     #[ts(optional = nullable)]
-    pub cwd: Option<String>,
+    pub cwd: Option<LegacyAppPathString>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
@@ -574,8 +573,8 @@ pub struct InAppBrowserRequirements {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ManagedHooksRequirements {
-    pub managed_dir: Option<PathBuf>,
-    pub windows_managed_dir: Option<PathBuf>,
+    pub managed_dir: Option<LegacyAppPathString>,
+    pub windows_managed_dir: Option<LegacyAppPathString>,
     #[serde(rename = "PreToolUse")]
     #[ts(rename = "PreToolUse")]
     pub pre_tool_use: Vec<ConfiguredHookMatcherGroup>,
@@ -785,8 +784,8 @@ pub struct SkillMigration {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct SessionMigration {
-    pub path: PathBuf,
-    pub cwd: PathBuf,
+    pub path: LegacyAppPathString,
+    pub cwd: LegacyAppPathString,
     pub title: Option<String>,
 }
 
@@ -847,7 +846,7 @@ pub struct ExternalAgentConfigMigrationItem {
     pub item_type: ExternalAgentConfigMigrationItemType,
     pub description: String,
     /// Null or empty means home-scoped migration; non-empty means repo-scoped migration.
-    pub cwd: Option<PathBuf>,
+    pub cwd: Option<LegacyAppPathString>,
     pub details: Option<MigrationDetails>,
 }
 
@@ -869,7 +868,7 @@ pub struct ExternalAgentConfigDetectParams {
     pub include_home: bool,
     /// Zero or more working directories to include for repo-scoped detection.
     #[ts(optional = nullable)]
-    pub cwds: Option<Vec<PathBuf>>,
+    pub cwds: Option<Vec<LegacyAppPathString>>,
     /// Maximum age in days for detected sessions. Missing values use the default limit.
     #[ts(optional = nullable)]
     pub max_session_age_days: Option<u32>,
@@ -919,7 +918,7 @@ pub struct ExternalAgentConfigImportItemTypeFailure {
     pub sub_error_type: Option<String>,
     pub failure_stage: String,
     pub message: String,
-    pub cwd: Option<PathBuf>,
+    pub cwd: Option<LegacyAppPathString>,
     pub source: Option<String>,
 }
 
@@ -928,7 +927,7 @@ pub struct ExternalAgentConfigImportItemTypeFailure {
 #[ts(export_to = "v2/")]
 pub struct ExternalAgentConfigImportItemTypeSuccess {
     pub item_type: ExternalAgentConfigMigrationItemType,
-    pub cwd: Option<PathBuf>,
+    pub cwd: Option<LegacyAppPathString>,
     pub source: Option<String>,
     pub target: Option<String>,
     /// Original title for an imported session; null for other item types.
@@ -950,7 +949,7 @@ pub struct ExternalAgentConfigImportTypeResult {
 #[ts(export_to = "v2/")]
 pub struct ExternalAgentConfigImportHistoryRecordSuccessParams {
     pub item_type: ExternalAgentConfigMigrationItemType,
-    pub cwd: Option<PathBuf>,
+    pub cwd: Option<LegacyAppPathString>,
     pub source: Option<String>,
     pub target: Option<String>,
     /// Original title for an imported session, when available.
@@ -1062,7 +1061,7 @@ pub struct ConfigValueWriteParams {
     pub merge_strategy: MergeStrategy,
     /// Path to the config file to write; defaults to the user's `config.toml` when omitted.
     #[ts(optional = nullable)]
-    pub file_path: Option<String>,
+    pub file_path: Option<LegacyAppPathString>,
     #[ts(optional = nullable)]
     pub expected_version: Option<String>,
 }
@@ -1074,7 +1073,7 @@ pub struct ConfigBatchWriteParams {
     pub edits: Vec<ConfigEdit>,
     /// Path to the config file to write; defaults to the user's `config.toml` when omitted.
     #[ts(optional = nullable)]
-    pub file_path: Option<String>,
+    pub file_path: Option<LegacyAppPathString>,
     #[ts(optional = nullable)]
     pub expected_version: Option<String>,
     /// When true, hot-reload updated runtime settings into loaded threads after writing.
@@ -1122,7 +1121,7 @@ pub struct ConfigWarningNotification {
     /// Optional path to the config file that triggered the warning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub path: Option<String>,
+    pub path: Option<LegacyAppPathString>,
     /// Optional range for the error location inside the config file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]

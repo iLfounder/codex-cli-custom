@@ -5,7 +5,6 @@ use crate::parse_command::ParsedCommand;
 use crate::protocol::FileChange;
 use crate::protocol::ReviewDecision;
 use crate::request_permissions::RequestPermissionProfile;
-use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::LegacyAppPathString;
 use codex_utils_path_uri::PathUri;
 use schemars::JsonSchema;
@@ -140,13 +139,13 @@ pub enum GuardianAssessmentAction {
     Command {
         source: GuardianCommandSource,
         command: String,
-        cwd: AbsolutePathBuf,
+        cwd: LegacyAppPathString,
     },
     Execve {
         source: GuardianCommandSource,
         program: String,
         argv: Vec<String>,
-        cwd: AbsolutePathBuf,
+        cwd: LegacyAppPathString,
     },
     /// A child approval for input to an existing command execution item.
     WriteStdin {
@@ -157,8 +156,8 @@ pub enum GuardianAssessmentAction {
         cwd: PathUri,
     },
     ApplyPatch {
-        cwd: AbsolutePathBuf,
-        files: Vec<AbsolutePathBuf>,
+        cwd: LegacyAppPathString,
+        files: Vec<LegacyAppPathString>,
     },
     NetworkAccess {
         target: String,
@@ -469,7 +468,7 @@ mod tests {
             GuardianAssessmentAction::Command {
                 source: GuardianCommandSource::Shell,
                 command: "rm -rf /tmp/guardian".to_string(),
-                cwd: test_path_buf("/tmp").abs(),
+                cwd: test_path_buf("/tmp").abs().into(),
             }
         );
     }
@@ -502,8 +501,80 @@ mod tests {
                     "-f".to_string(),
                     "/tmp/file.sqlite".to_string(),
                 ],
-                cwd: test_path_buf("/tmp").abs(),
+                cwd: test_path_buf("/tmp").abs().into(),
             }
         );
+    }
+
+    #[test]
+    fn guardian_path_actions_round_trip_foreign_path_text() {
+        #[cfg(windows)]
+        let (cwd, first_file, second_file) = (
+            "/Users/alice/work/repo",
+            "src/main.rs",
+            "/Users/alice/work/repo/src/lib.rs",
+        );
+        #[cfg(not(windows))]
+        let (cwd, first_file, second_file) = (
+            r"C:\Users\Alice\work\repo",
+            r"src\main.rs",
+            r"C:\Users\Alice\work\repo\src\lib.rs",
+        );
+
+        let cases = [
+            (
+                serde_json::json!({
+                    "type": "command",
+                    "source": "shell",
+                    "command": "pwd",
+                    "cwd": cwd,
+                }),
+                GuardianAssessmentAction::Command {
+                    source: GuardianCommandSource::Shell,
+                    command: "pwd".to_string(),
+                    cwd: LegacyAppPathString::from_string(cwd),
+                },
+            ),
+            (
+                serde_json::json!({
+                    "type": "execve",
+                    "source": "unified_exec",
+                    "program": "tool",
+                    "argv": ["tool", "--check"],
+                    "cwd": cwd,
+                }),
+                GuardianAssessmentAction::Execve {
+                    source: GuardianCommandSource::UnifiedExec,
+                    program: "tool".to_string(),
+                    argv: vec!["tool".to_string(), "--check".to_string()],
+                    cwd: LegacyAppPathString::from_string(cwd),
+                },
+            ),
+            (
+                serde_json::json!({
+                    "type": "apply_patch",
+                    "cwd": cwd,
+                    "files": [first_file, second_file],
+                }),
+                GuardianAssessmentAction::ApplyPatch {
+                    cwd: LegacyAppPathString::from_string(cwd),
+                    files: vec![
+                        LegacyAppPathString::from_string(first_file),
+                        LegacyAppPathString::from_string(second_file),
+                    ],
+                },
+            ),
+        ];
+
+        for (value, expected) in cases {
+            let action: GuardianAssessmentAction =
+                serde_json::from_value(value.clone()).expect("foreign path action");
+
+            assert_eq!(action, expected);
+            assert_eq!(
+                serde_json::to_value(&action).expect("serialize foreign path action"),
+                value,
+            );
+        }
     }
 }

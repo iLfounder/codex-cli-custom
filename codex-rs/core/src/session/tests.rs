@@ -106,7 +106,7 @@ fn default_execution_account(
     })
 }
 
-fn default_execution_account_runtime(
+pub(super) fn default_execution_account_runtime(
     auth_manager: &Arc<AuthManager>,
     models_manager: &SharedModelsManager,
     services: &SessionServices,

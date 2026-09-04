@@ -81,7 +81,10 @@ async fn thread_unarchive_moves_rollout_back_into_sessions_directory() -> Result
     let ThreadStartResponse { thread, .. } =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(start_id)).await??;
 
-    let rollout_path = thread.path.clone().expect("thread path");
+    let rollout_path = codex_utils_absolute_path::AbsolutePathBuf::try_from(
+        thread.path.clone().expect("thread path"),
+    )?
+    .into_path_buf();
 
     let turn_start_id = mcp
         .send_turn_start_request(TurnStartParams {

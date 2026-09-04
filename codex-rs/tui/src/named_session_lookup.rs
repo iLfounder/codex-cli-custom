@@ -231,11 +231,15 @@ impl<'a> NamedSessionCandidates<'a> {
                     None
                 } else {
                     let (Ok(thread_id), Some(path)) =
-                        (ThreadId::from_string(&thread.id), thread.path.as_deref())
+                        (ThreadId::from_string(&thread.id), thread.path.as_ref())
                     else {
                         continue;
                     };
-                    let Some(path) = codex_rollout::existing_rollout_path(path).await else {
+                    let Some(path) = path.to_inferred_abs_path() else {
+                        continue;
+                    };
+                    let Some(path) = codex_rollout::existing_rollout_path(path.as_path()).await
+                    else {
                         continue;
                     };
                     let expected_root = self.codex_home.join(match self.collection {

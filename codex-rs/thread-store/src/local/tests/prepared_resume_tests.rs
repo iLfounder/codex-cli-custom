@@ -88,7 +88,16 @@ async fn prepared_snapshot_hands_writer_authority_to_live_recorder() {
     }));
 
     store
-        .activate_prepared_thread_resume(authority, thread_metadata())
+        .activate_prepared_thread_resume(
+            authority,
+            ResumeThreadParams {
+                thread_id,
+                rollout_path: stored_thread.rollout_path,
+                history: Some(snapshot),
+                include_archived: true,
+                metadata: thread_metadata(),
+            },
+        )
         .await
         .expect("activate prepared writer");
     store

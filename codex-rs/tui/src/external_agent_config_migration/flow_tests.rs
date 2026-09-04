@@ -10,7 +10,6 @@ use codex_app_server_protocol::SessionMigration;
 use codex_app_server_protocol::SkillMigration;
 use pretty_assertions::assert_eq;
 use ratatui::text::Line;
-use std::path::PathBuf;
 
 fn detected_item(description: &str) -> ExternalAgentConfigMigrationItem {
     ExternalAgentConfigMigrationItem {
@@ -83,18 +82,30 @@ fn selected_items() -> Vec<ExternalAgentConfigMigrationItem> {
             details: Some(MigrationDetails {
                 sessions: vec![
                     SessionMigration {
-                        path: PathBuf::from("/sessions/alpha.jsonl"),
-                        cwd: PathBuf::from("/workspace/project"),
+                        path: codex_utils_path_uri::LegacyAppPathString::from_string(
+                            "/sessions/alpha.jsonl",
+                        ),
+                        cwd: codex_utils_path_uri::LegacyAppPathString::from_string(
+                            "/workspace/project",
+                        ),
                         title: Some("Alpha rollout".to_string()),
                     },
                     SessionMigration {
-                        path: PathBuf::from("/sessions/beta.jsonl"),
-                        cwd: PathBuf::from("/workspace/project"),
+                        path: codex_utils_path_uri::LegacyAppPathString::from_string(
+                            "/sessions/beta.jsonl",
+                        ),
+                        cwd: codex_utils_path_uri::LegacyAppPathString::from_string(
+                            "/workspace/project",
+                        ),
                         title: Some("Beta review".to_string()),
                     },
                     SessionMigration {
-                        path: PathBuf::from("/sessions/gamma.jsonl"),
-                        cwd: PathBuf::from("/workspace/project"),
+                        path: codex_utils_path_uri::LegacyAppPathString::from_string(
+                            "/sessions/gamma.jsonl",
+                        ),
+                        cwd: codex_utils_path_uri::LegacyAppPathString::from_string(
+                            "/workspace/project",
+                        ),
                         title: Some("Gamma notes".to_string()),
                     },
                 ],
@@ -166,7 +177,9 @@ fn completed_notification() -> ExternalAgentConfigImportCompletedNotification {
                     sub_error_type: Some("failed_to_copy_plugin_file".to_string()),
                     failure_stage: "plugin_import".to_string(),
                     message: "install failed".to_string(),
-                    cwd: Some(PathBuf::from("/workspace/project")),
+                    cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_string(
+                        "/workspace/project",
+                    )),
                     source: Some("deployer@example".to_string()),
                 }],
             },

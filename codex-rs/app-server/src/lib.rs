@@ -68,6 +68,7 @@ use codex_feedback::CodexFeedback;
 use codex_protocol::protocol::SessionSource;
 use codex_rollout::state_db as rollout_state_db;
 use codex_state::log_db;
+use codex_utils_path_uri::LegacyAppPathString;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -303,19 +304,21 @@ fn config_warning_from_error(
     }
 }
 
-fn config_error_location(err: &std::io::Error) -> Option<(String, AppTextRange)> {
+fn config_error_location(err: &std::io::Error) -> Option<(LegacyAppPathString, AppTextRange)> {
     err.get_ref()
         .and_then(|err| err.downcast_ref::<ConfigLoadError>())
         .map(|err| {
             let config_error = err.config_error();
             (
-                config_error.path.to_string_lossy().to_string(),
+                LegacyAppPathString::from_path(&config_error.path),
                 app_text_range(&config_error.range),
             )
         })
 }
 
-fn exec_policy_warning_location(err: &ExecPolicyError) -> (Option<String>, Option<AppTextRange>) {
+fn exec_policy_warning_location(
+    err: &ExecPolicyError,
+) -> (Option<LegacyAppPathString>, Option<AppTextRange>) {
     match err {
         ExecPolicyError::ParsePolicy { path, source } => {
             if let Some(location) = source.location() {
@@ -329,9 +332,12 @@ fn exec_policy_warning_location(err: &ExecPolicyError) -> (Option<String>, Optio
                         column: location.range.end.column,
                     },
                 };
-                return (Some(location.path), Some(range));
+                return (
+                    Some(LegacyAppPathString::from_string(location.path)),
+                    Some(range),
+                );
             }
-            (Some(path.clone()), None)
+            (Some(LegacyAppPathString::from_string(path.clone())), None)
         }
         _ => (None, None),
     }

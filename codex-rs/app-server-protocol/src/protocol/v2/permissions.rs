@@ -20,6 +20,7 @@ use codex_protocol::request_permissions::PermissionGrantScope as CorePermissionG
 use codex_protocol::request_permissions::RequestPermissionProfile as CoreRequestPermissionProfile;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::LegacyAppPathString;
+use codex_utils_path_uri::LegacyAppPathStringError;
 use codex_utils_path_uri::PathUri;
 use serde::Deserialize;
 use serde::Serialize;
@@ -397,7 +398,7 @@ pub struct PermissionProfileListParams {
     pub limit: Option<u32>,
     /// Optional working directory to resolve project config layers.
     #[ts(optional = nullable)]
-    pub cwd: Option<String>,
+    pub cwd: Option<LegacyAppPathString>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -556,7 +557,7 @@ pub enum SandboxPolicy {
     #[ts(rename_all = "camelCase")]
     WorkspaceWrite {
         #[serde(default)]
-        writable_roots: Vec<AbsolutePathBuf>,
+        writable_roots: Vec<LegacyAppPathString>,
         #[serde(default)]
         network_access: bool,
         #[serde(default)]
@@ -585,7 +586,7 @@ enum SandboxPolicyDeserialize {
     #[serde(rename_all = "camelCase")]
     WorkspaceWrite {
         #[serde(default)]
-        writable_roots: Vec<AbsolutePathBuf>,
+        writable_roots: Vec<LegacyAppPathString>,
         #[serde(default)]
         read_only_access: Option<LegacyReadOnlyAccess>,
         #[serde(default)]
@@ -649,8 +650,10 @@ impl<'de> Deserialize<'de> for SandboxPolicy {
 }
 
 impl SandboxPolicy {
-    pub fn to_core(&self) -> codex_protocol::protocol::SandboxPolicy {
-        match self {
+    pub fn try_to_core(
+        &self,
+    ) -> Result<codex_protocol::protocol::SandboxPolicy, LegacyAppPathStringError> {
+        Ok(match self {
             SandboxPolicy::DangerFullAccess => {
                 codex_protocol::protocol::SandboxPolicy::DangerFullAccess
             }
@@ -673,12 +676,16 @@ impl SandboxPolicy {
                 exclude_tmpdir_env_var,
                 exclude_slash_tmp,
             } => codex_protocol::protocol::SandboxPolicy::WorkspaceWrite {
-                writable_roots: writable_roots.clone(),
+                writable_roots: writable_roots
+                    .iter()
+                    .cloned()
+                    .map(AbsolutePathBuf::try_from)
+                    .collect::<Result<_, _>>()?,
                 network_access: *network_access,
                 exclude_tmpdir_env_var: *exclude_tmpdir_env_var,
                 exclude_slash_tmp: *exclude_slash_tmp,
             },
-        }
+        })
     }
 }
 
@@ -705,7 +712,7 @@ impl From<codex_protocol::protocol::SandboxPolicy> for SandboxPolicy {
                 exclude_tmpdir_env_var,
                 exclude_slash_tmp,
             } => SandboxPolicy::WorkspaceWrite {
-                writable_roots,
+                writable_roots: writable_roots.into_iter().map(Into::into).collect(),
                 network_access,
                 exclude_tmpdir_env_var,
                 exclude_slash_tmp,
@@ -779,7 +786,7 @@ pub struct PermissionsRequestApprovalParams {
     /// Unix timestamp (in milliseconds) when this approval request started.
     #[ts(type = "number")]
     pub started_at_ms: i64,
-    pub cwd: AbsolutePathBuf,
+    pub cwd: LegacyAppPathString,
     pub reason: Option<String>,
     pub permissions: RequestPermissionProfile,
 }

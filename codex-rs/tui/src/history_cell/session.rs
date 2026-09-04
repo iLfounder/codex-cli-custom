@@ -139,10 +139,18 @@ pub(crate) fn new_session_info(
         config.cwd.to_path_buf(),
         CODEX_CLI_VERSION,
     )
-    .with_yolo_mode(has_yolo_permissions(
-        session.approval_policy,
-        &session.permission_profile,
-    ));
+    .with_yolo_mode(match session.native_permission_profile() {
+        Some(permission_profile) => {
+            has_yolo_permissions(session.approval_policy, permission_profile)
+        }
+        None => {
+            session.approval_policy == codex_app_server_protocol::AskForApproval::Never
+                && matches!(
+                    session.remote_sandbox(),
+                    Some(codex_app_server_protocol::SandboxPolicy::DangerFullAccess)
+                )
+        }
+    });
     let mut parts: Vec<Box<dyn HistoryCell>> = vec![Box::new(header)];
 
     if is_first_event {

@@ -357,7 +357,9 @@ async fn plugin_search_stitches_local_results_into_the_first_remote_page() -> Re
         .without_auto_env()
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
-    let roots = vec![AbsolutePathBuf::try_from(repo_root.path())?];
+    let roots = vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+        repo_root.path(),
+    )];
     let request_id = app_server
         .send_plugin_search_request(PluginSearchParams {
             search_term: "calendar".to_string(),
@@ -371,6 +373,8 @@ async fn plugin_search_stitches_local_results_into_the_first_remote_page() -> Re
         timeout(DEFAULT_TIMEOUT, app_server.read_response(request_id)).await??;
 
     assert_eq!(response.next_cursor.as_deref(), Some("next-page"));
+    let marketplace_path =
+        codex_utils_path_uri::LegacyAppPathString::from_abs_path(&marketplace_path);
     let mut expected_results = vec![
         ("calendar", None, false),
         ("calendar-notes", Some(&marketplace_path), false),
@@ -612,8 +616,8 @@ async fn plugin_search_returns_local_matches_for_api_key_auth() -> Result<()> {
                     search_term: search_term.to_string(),
                     scope,
                     cwds: Some(vec![
-                        AbsolutePathBuf::try_from(repo_root.path())?,
-                        AbsolutePathBuf::try_from(bundled_alpha_root.as_path())?,
+                        AbsolutePathBuf::try_from(repo_root.path())?.into(),
+                        AbsolutePathBuf::try_from(bundled_alpha_root.as_path())?.into(),
                     ]),
                     cursor: None,
                     limit: None,
@@ -760,7 +764,7 @@ enabled = true
         .send_plugin_search_request(PluginSearchParams {
             search_term: "calendar".to_string(),
             scope: None,
-            cwds: Some(vec![AbsolutePathBuf::try_from(repo_root.path())?]),
+            cwds: Some(vec![AbsolutePathBuf::try_from(repo_root.path())?.into()]),
             cursor: None,
             limit: None,
         })
@@ -779,6 +783,8 @@ enabled = true
         vec![Some(false), Some(false), Some(false)]
     );
     let response: PluginSearchResponse = serde_json::from_value(raw_response)?;
+    let personal_marketplace_path =
+        codex_utils_path_uri::LegacyAppPathString::from_abs_path(&personal_marketplace_path);
 
     assert_eq!(
         response

@@ -78,9 +78,23 @@ fn file_storage_atomic_save_exposes_only_complete_snapshots() -> anyhow::Result<
     let expected_new = new.clone();
     let reader = std::thread::spawn(move || -> std::io::Result<()> {
         for _ in 0..500 {
-            let loaded = reader_storage
-                .load()?
-                .ok_or_else(|| std::io::Error::other("auth file disappeared during atomic save"))?;
+            let loaded = loop {
+                match reader_storage.load() {
+                    Ok(Some(loaded)) => break loaded,
+                    Ok(None) => {
+                        return Err(std::io::Error::other(
+                            "auth file disappeared during atomic save",
+                        ));
+                    }
+                    Err(error)
+                        if matches!(
+                            error.to_string().as_str(),
+                            "auth.json identity changed while opening"
+                                | "auth.json identity changed while reading"
+                        ) => {}
+                    Err(error) => return Err(error),
+                }
+            };
             if loaded != expected_old && loaded != expected_new {
                 return Err(std::io::Error::other(
                     "reader observed a partial auth snapshot",

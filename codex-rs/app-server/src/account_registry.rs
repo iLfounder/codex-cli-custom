@@ -30,7 +30,7 @@ use codex_core::path_utils::write_atomically;
 use codex_login::AuthConfig;
 use codex_login::AuthManager;
 use codex_login::AuthSourceKind;
-use codex_login::CodexAuth;
+use codex_model_provider::ProviderAccount;
 use codex_model_provider::create_model_provider;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_protocol::config_types::ForcedLoginMethod;
@@ -60,10 +60,8 @@ const DEFAULT_LIST_LIMIT: usize = 50;
 const MAX_LIST_LIMIT: usize = 100;
 const MAX_MANIFEST_SLOTS: usize = 1_000;
 const TOKEN_MANAGER_URL: &str = "http://127.0.0.1:3101/";
-#[cfg(debug_assertions)]
 const TEST_TOKEN_MANAGER_URL_ENV_VAR: &str = "CODEX_APP_SERVER_TEST_TOKEN_MANAGER_URL";
 
-#[cfg(debug_assertions)]
 fn resolve_token_manager_base_url(test_override: Option<&str>) -> Option<url::Url> {
     let url = url::Url::parse(test_override.unwrap_or(TOKEN_MANAGER_URL)).ok()?;
     let is_loopback_ip = matches!(url.host(), Some(url::Host::Ipv4(address)) if address.is_loopback())
@@ -82,18 +80,12 @@ fn resolve_token_manager_base_url(test_override: Option<&str>) -> Option<url::Ur
 }
 
 fn token_manager_base_url() -> Option<url::Url> {
-    #[cfg(debug_assertions)]
-    {
-        match std::env::var_os(TEST_TOKEN_MANAGER_URL_ENV_VAR) {
-            Some(test_override) => test_override
-                .to_str()
-                .and_then(|test_override| resolve_token_manager_base_url(Some(test_override))),
-            None => resolve_token_manager_base_url(/*test_override*/ None),
-        }
+    match std::env::var_os(TEST_TOKEN_MANAGER_URL_ENV_VAR) {
+        Some(test_override) => test_override
+            .to_str()
+            .and_then(|test_override| resolve_token_manager_base_url(Some(test_override))),
+        None => resolve_token_manager_base_url(/*test_override*/ None),
     }
-
-    #[cfg(not(debug_assertions))]
-    url::Url::parse(TOKEN_MANAGER_URL).ok()
 }
 
 const DENY_MANIFEST_INVALID: &str = "account_slot_manifest_invalid";
@@ -110,13 +102,26 @@ const DENY_DEFAULT_WORKLOAD_IDENTITY: &str = "workload_identity_managed_auth";
 
 pub(crate) fn default_logout_uses_host_managed_provider(
     config: &Config,
-    auth_manager: &AuthManager,
+    auth_manager: &Arc<AuthManager>,
 ) -> bool {
-    config.model_provider.is_amazon_bedrock()
-        && !matches!(
-            auth_manager.auth_cached(),
-            Some(CodexAuth::BedrockApiKey(_))
-        )
+    if !config.model_provider.is_amazon_bedrock() {
+        return false;
+    }
+
+    let provider = create_model_provider(
+        config.model_provider.clone(),
+        Some(Arc::clone(auth_manager)),
+    );
+    !matches!(
+        provider.account_state(),
+        Ok(state)
+            if matches!(
+                state.account,
+                Some(ProviderAccount::AmazonBedrock {
+                    uses_codex_managed_credentials: true,
+                })
+            )
+    )
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

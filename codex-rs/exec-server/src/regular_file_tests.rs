@@ -41,7 +41,13 @@ async fn read_sensitive_file_rejects_symlink() {
     #[cfg(unix)]
     std::os::unix::fs::symlink(&target, &link).expect("create symlink");
     #[cfg(windows)]
-    std::os::windows::fs::symlink_file(&target, &link).expect("create symlink");
+    if let Err(error) = std::os::windows::fs::symlink_file(&target, &link) {
+        if error.raw_os_error() == Some(1314) {
+            eprintln!("skipping file-symlink assertion: Windows symlink privilege unavailable");
+            return;
+        }
+        panic!("create symlink: {error}");
+    }
 
     assert!(read_sensitive_file_to_string(&link).await.is_err());
 }

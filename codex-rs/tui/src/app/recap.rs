@@ -282,15 +282,11 @@ impl App {
         };
         let request_handle = app_server.request_handle();
         let model = self.chat_widget.current_model().to_string();
+        let cwd = app_server
+            .remote_cwd_override()
+            .cloned()
+            .unwrap_or_else(|| self.chat_widget.server_cwd());
         let config = self.chat_widget.config_ref();
-        let cwd = if app_server.uses_remote_workspace() {
-            app_server
-                .remote_cwd_override()
-                .map(|cwd| cwd.to_string_lossy().into_owned())
-                .unwrap_or_else(|| config.cwd.display().to_string())
-        } else {
-            config.cwd.display().to_string()
-        };
         let options = TemporaryStructuredThreadOptions {
             model,
             model_provider: config.model_provider_id.clone(),

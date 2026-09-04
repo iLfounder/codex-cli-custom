@@ -1,10 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
-    "AbsolutePathBuf": {
-      "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
-      "type": "string"
-    },
     "ActivePermissionProfile": {
       "properties": {
         "extends": {
@@ -360,9 +356,13 @@
               "type": "string"
             },
             "path": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/LegacyAppPathString"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "type": {
@@ -386,9 +386,13 @@
               "type": "string"
             },
             "path": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/LegacyAppPathString"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "query": {
@@ -533,7 +537,7 @@
           "$ref": "#/definitions/PatchChangeKind"
         },
         "path": {
-          "type": "string"
+          "$ref": "#/definitions/LegacyAppPathString"
         }
       },
       "required": [
@@ -837,7 +841,7 @@
           "type": "string"
         },
         "path": {
-          "type": "string"
+          "$ref": "#/definitions/LegacyAppPathString"
         }
       },
       "required": [
@@ -993,9 +997,13 @@
         {
           "properties": {
             "move_path": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/LegacyAppPathString"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "type": {
@@ -1105,7 +1113,7 @@
             "writableRoots": {
               "default": [],
               "items": {
-                "$ref": "#/definitions/AbsolutePathBuf"
+                "$ref": "#/definitions/LegacyAppPathString"
               },
               "type": "array"
             }
@@ -1294,7 +1302,7 @@
         "cwd": {
           "allOf": [
             {
-              "$ref": "#/definitions/AbsolutePathBuf"
+              "$ref": "#/definitions/LegacyAppPathString"
             }
           ],
           "description": "Working directory captured for the thread."
@@ -1360,11 +1368,15 @@
           ]
         },
         "path": {
-          "description": "[UNSTABLE] Path to the thread on disk.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LegacyAppPathString"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "[UNSTABLE] Path to the thread on disk."
         },
         "preview": {
           "description": "Usually the first user message in the thread, if available.",
@@ -2241,7 +2253,7 @@
             "savedPath": {
               "anyOf": [
                 {
-                  "$ref": "#/definitions/AbsolutePathBuf"
+                  "$ref": "#/definitions/LegacyAppPathString"
                 },
                 {
                   "type": "null"
@@ -2762,7 +2774,7 @@
               "default": null
             },
             "path": {
-              "type": "string"
+              "$ref": "#/definitions/LegacyAppPathString"
             },
             "type": {
               "enum": [
@@ -2802,7 +2814,7 @@
         {
           "properties": {
             "path": {
-              "type": "string"
+              "$ref": "#/definitions/LegacyAppPathString"
             },
             "type": {
               "enum": [
@@ -2825,7 +2837,7 @@
               "type": "string"
             },
             "path": {
-              "type": "string"
+              "$ref": "#/definitions/LegacyAppPathString"
             },
             "type": {
               "enum": [
@@ -2849,7 +2861,7 @@
               "type": "string"
             },
             "path": {
-              "type": "string"
+              "$ref": "#/definitions/LegacyAppPathString"
             },
             "type": {
               "enum": [
@@ -2984,7 +2996,7 @@
       "description": "Reviewer currently used for approval requests on this thread."
     },
     "cwd": {
-      "$ref": "#/definitions/AbsolutePathBuf"
+      "$ref": "#/definitions/LegacyAppPathString"
     },
     "instructionSources": {
       "default": [],

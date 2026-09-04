@@ -203,9 +203,14 @@ impl ExternalAgentConfigMigrationScreen {
             .description
             .strip_prefix("Migrate ")
             .map_or_else(|| item.description.clone(), |rest| format!("Import {rest}"));
-        let Some(cwd) = item.cwd.as_deref() else {
+        let Some(cwd) = item
+            .cwd
+            .as_ref()
+            .and_then(codex_utils_path_uri::LegacyAppPathString::to_inferred_abs_path)
+        else {
             return description;
         };
+        let cwd = cwd.as_path();
 
         fn reformat_description(
             description: &str,
@@ -587,12 +592,9 @@ impl ExternalAgentConfigMigrationScreen {
             .unwrap_or(selected_item_idx)
     }
 
-    fn section_title(cwd: Option<&std::path::Path>) -> Line<'static> {
+    fn section_title(cwd: Option<&codex_utils_path_uri::LegacyAppPathString>) -> Line<'static> {
         match cwd {
-            Some(cwd) => Line::from(vec![
-                "Current project: ".bold(),
-                cwd.display().to_string().dim(),
-            ]),
+            Some(cwd) => Line::from(vec!["Current project: ".bold(), cwd.render_for_ui().dim()]),
             None => Line::from("Home".bold()),
         }
     }
@@ -647,9 +649,9 @@ impl ExternalAgentConfigMigrationScreen {
 
     fn build_customize_render_lines(&self) -> Vec<RenderLineEntry> {
         let mut lines = Vec::new();
-        let mut current_scope: Option<Option<&std::path::Path>> = None;
+        let mut current_scope: Option<Option<&codex_utils_path_uri::LegacyAppPathString>> = None;
         for (idx, item) in self.items.iter().enumerate() {
-            let scope = item.item.cwd.as_deref();
+            let scope = item.item.cwd.as_ref();
             if current_scope != Some(scope) {
                 if current_scope.is_some() {
                     lines.push(RenderLineEntry {
@@ -788,8 +790,10 @@ mod tests {
                 cwd: None,
                 details: Some(codex_app_server_protocol::MigrationDetails {
                     sessions: vec![SessionMigration {
-                        path: PathBuf::from("/Users/alex/.claude/projects/project/session.jsonl"),
-                        cwd: project_root.clone(),
+                        path: codex_utils_path_uri::LegacyAppPathString::from_string(
+                            "/Users/alex/.claude/projects/project/session.jsonl",
+                        ),
+                        cwd: codex_utils_path_uri::LegacyAppPathString::from_path(&project_root),
                         title: Some("Investigate migration UX".to_string()),
                     }],
                     ..Default::default()
@@ -801,7 +805,9 @@ mod tests {
                     "Migrate enabled plugins from {}",
                     sample_project_path(".claude/settings.json")
                 ),
-                cwd: Some(project_root.clone()),
+                cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                    &project_root,
+                )),
                 details: Some(sample_plugin_details()),
             },
             ExternalAgentConfigMigrationItem {
@@ -811,7 +817,9 @@ mod tests {
                     sample_project_path("CLAUDE.md"),
                     sample_project_path("AGENTS.md")
                 ),
-                cwd: Some(project_root),
+                cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                    &project_root,
+                )),
                 details: None,
             },
         ]

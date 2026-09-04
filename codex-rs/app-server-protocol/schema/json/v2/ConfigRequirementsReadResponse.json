@@ -718,6 +718,9 @@
       },
       "type": "object"
     },
+    "LegacyAppPathString": {
+      "type": "string"
+    },
     "ManagedHooksRequirements": {
       "properties": {
         "Interrupt": {
@@ -795,15 +798,23 @@
           "type": "array"
         },
         "managedDir": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LegacyAppPathString"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "windowsManagedDir": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LegacyAppPathString"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       },

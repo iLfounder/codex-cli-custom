@@ -524,6 +524,7 @@ use codex_thread_store::ThreadSortKey as StoreThreadSortKey;
 use codex_thread_store::ThreadStore;
 use codex_thread_store::ThreadStoreError;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
 use codex_utils_pty::DEFAULT_OUTPUT_BYTES_CAP;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -634,9 +635,28 @@ pub(crate) fn apply_live_model_settings(
     thread.reasoning_effort = config_snapshot.reasoning_effort.clone();
 }
 
-fn resolve_request_cwd(cwd: Option<PathBuf>) -> Result<Option<AbsolutePathBuf>, JSONRPCErrorError> {
+fn resolve_request_cwd(
+    cwd: Option<LegacyAppPathString>,
+) -> Result<Option<AbsolutePathBuf>, JSONRPCErrorError> {
     cwd.map(|cwd| {
-        AbsolutePathBuf::relative_to_current_dir(path_utils::normalize_for_native_workdir(cwd))
+        let cwd = cwd.into_string();
+        let tilde_child = cwd
+            .strip_prefix("~/")
+            .is_some_and(|rest| !rest.starts_with('/') && !rest.starts_with('\\'));
+        if cwd == "~" || tilde_child {
+            return AbsolutePathBuf::from_absolute_path_checked(cwd)
+                .map_err(|err| invalid_request(format!("invalid cwd: {err}")));
+        }
+
+        let cwd = path_utils::normalize_for_native_workdir(PathBuf::from(cwd));
+        let cwd = if cwd.is_absolute() {
+            cwd
+        } else {
+            std::env::current_dir()
+                .map_err(|err| invalid_request(format!("invalid cwd: {err}")))?
+                .join(cwd)
+        };
+        AbsolutePathBuf::from_absolute_path_checked(cwd)
             .map_err(|err| invalid_request(format!("invalid cwd: {err}")))
     })
     .transpose()
@@ -692,14 +712,83 @@ fn resolve_turn_environment_selections(
     Ok(Some(selections))
 }
 
-fn resolve_runtime_workspace_roots(workspace_roots: Vec<AbsolutePathBuf>) -> Vec<AbsolutePathBuf> {
+fn resolve_runtime_workspace_roots(
+    workspace_roots: Vec<LegacyAppPathString>,
+) -> Result<Vec<AbsolutePathBuf>, JSONRPCErrorError> {
     let mut resolved_roots = Vec::new();
     for root in workspace_roots {
+        let root = AbsolutePathBuf::try_from(root)
+            .map_err(|err| invalid_request(format!("invalid runtime workspace root: {err}")))?;
         if !resolved_roots.iter().any(|existing| existing == &root) {
             resolved_roots.push(root);
         }
     }
-    resolved_roots
+    Ok(resolved_roots)
+}
+
+fn resolve_absolute_api_path(
+    path: LegacyAppPathString,
+    field: &str,
+) -> Result<AbsolutePathBuf, JSONRPCErrorError> {
+    AbsolutePathBuf::try_from(path)
+        .map_err(|err| invalid_request(format!("invalid {field}: {err}")))
+}
+
+#[cfg(test)]
+mod cwd_resolution_tests {
+    use super::*;
+    use codex_utils_absolute_path::AbsolutePathBufGuard;
+
+    #[test]
+    fn expands_only_exact_tilde_forms() {
+        let home = std::env::current_dir()
+            .expect("current directory")
+            .join("fixture-home");
+        AbsolutePathBufGuard::with_home_directory(&home, || {
+            let bare = resolve_request_cwd(Some(LegacyAppPathString::from_string("~")))
+                .expect("resolve bare tilde")
+                .expect("cwd");
+            let child = resolve_request_cwd(Some(LegacyAppPathString::from_string("~/repo")))
+                .expect("resolve tilde child")
+                .expect("cwd");
+            let current = std::env::current_dir().expect("current directory");
+            let ordinary_double_slash =
+                resolve_request_cwd(Some(LegacyAppPathString::from_string("~//repo")))
+                    .expect("resolve double-slash relative path")
+                    .expect("cwd");
+            let ordinary_mixed_slash =
+                resolve_request_cwd(Some(LegacyAppPathString::from_string(r"~/\repo")))
+                    .expect("resolve mixed-slash relative path")
+                    .expect("cwd");
+
+            assert_eq!(bare.as_path(), home);
+            assert_eq!(child.as_path(), home.join("repo"));
+            assert_eq!(
+                ordinary_double_slash.as_path(),
+                current.join(PathBuf::from("~//repo"))
+            );
+            assert_eq!(
+                ordinary_mixed_slash.as_path(),
+                current.join(PathBuf::from(r"~/\repo"))
+            );
+            assert!(ordinary_double_slash.as_path().starts_with(&current));
+            assert!(ordinary_mixed_slash.as_path().starts_with(&current));
+        });
+    }
+
+    #[test]
+    fn preserves_absolute_and_ordinary_relative_resolution() {
+        let current = std::env::current_dir().expect("current directory");
+        let absolute = resolve_request_cwd(Some(LegacyAppPathString::from_path(&current)))
+            .expect("resolve absolute cwd")
+            .expect("cwd");
+        let relative = resolve_request_cwd(Some(LegacyAppPathString::from_string("nested/repo")))
+            .expect("resolve relative cwd")
+            .expect("cwd");
+
+        assert_eq!(absolute.as_path(), current);
+        assert_eq!(relative.as_path(), current.join("nested").join("repo"));
+    }
 }
 
 mod config_errors;

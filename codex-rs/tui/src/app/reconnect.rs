@@ -30,7 +30,7 @@ pub(super) async fn reconnect(
     target: AppServerTarget,
     config: Config,
     thread_id: Option<ThreadId>,
-    remote_cwd: Option<PathBuf>,
+    remote_cwd: Option<LegacyAppPathString>,
     task_tools: ThreadToolTransport,
     presentation: ReconnectPresentation,
 ) -> Result<Reconnected> {
@@ -119,6 +119,10 @@ impl App {
         session: &mut ThreadSessionState,
         cached: &ThreadSessionState,
     ) {
+        // Remote permissions are projected from the server, never from local config.
+        if session.native_permission_profile().is_none() {
+            return;
+        }
         if self.current_displayed_thread_id() != Some(session.thread_id)
             && self.primary_thread_id != Some(session.thread_id)
         {
@@ -134,11 +138,11 @@ impl App {
             session.approval_policy = policy;
         }
         if let Some(profile) = &self.runtime_permission_profile_override
-            && profile.permission_profile == cached.permission_profile
+            && Some(&profile.permission_profile) == cached.native_permission_profile()
             && profile.active_permission_profile == cached.active_permission_profile
             && self.config.approvals_reviewer == cached.approvals_reviewer
         {
-            session.permission_profile = profile.permission_profile.clone();
+            session.set_native_permission_profile(profile.permission_profile.clone());
             session.active_permission_profile = profile.active_permission_profile.clone();
             session.approvals_reviewer = self.config.approvals_reviewer;
         }
@@ -262,6 +266,7 @@ impl App {
             );
         self.workspace_command_runner = Some(Arc::new(AppServerWorkspaceCommandRunner::new(
             app_server.request_handle(),
+            app_server.uses_remote_workspace(),
         )));
         self.file_search =
             FileSearchManager::new(self.config.cwd.to_path_buf(), self.app_event_tx.clone());

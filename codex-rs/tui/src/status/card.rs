@@ -27,7 +27,6 @@ use codex_utils_sandbox_summary::summarize_permission_profile;
 use ratatui::prelude::*;
 use ratatui::style::Stylize;
 use std::collections::BTreeSet;
-use std::path::PathBuf;
 use url::Url;
 
 use super::account::StatusAccountDisplay;
@@ -47,6 +46,7 @@ use super::rate_limits::compose_rate_limit_data_many;
 use super::rate_limits::format_status_limit_summary;
 use super::rate_limits::render_status_limit_progress_bar;
 use super::remote_connection::RemoteConnectionStatus;
+use super::remote_runtime::StatusRuntimeDisplay;
 use super::thread_usage::StatusThreadUsage;
 use crate::wrapping::RtOptions;
 use crate::wrapping::adaptive_wrap_lines;
@@ -119,7 +119,7 @@ impl StatusHistoryHandle {
 struct StatusHistoryCell {
     model_name: String,
     model_details: Vec<String>,
-    directory: PathBuf,
+    directory: String,
     permissions: String,
     agents_summary: Arc<RwLock<String>>,
     collaboration_mode: Option<String>,
@@ -192,6 +192,7 @@ pub(crate) fn new_status_output_with_rate_limits(
     new_status_output_with_rate_limits_handle(
         config,
         /*runtime_model_provider_base_url*/ None,
+        /*runtime_display*/ None,
         /*remote_connection*/ None,
         account_display,
         token_info,
@@ -215,6 +216,7 @@ pub(crate) fn new_status_output_with_rate_limits(
 pub(crate) fn new_status_output_with_rate_limits_handle(
     config: &Config,
     runtime_model_provider_base_url: Option<&str>,
+    runtime_display: Option<&StatusRuntimeDisplay>,
     remote_connection: Option<&RemoteConnectionStatus>,
     account_display: Option<&StatusAccountDisplay>,
     token_info: Option<&TokenUsageInfo>,
@@ -235,6 +237,7 @@ pub(crate) fn new_status_output_with_rate_limits_handle(
     let (card, handle) = StatusHistoryCell::new(
         config,
         runtime_model_provider_base_url,
+        runtime_display,
         remote_connection,
         account_display,
         token_info,
@@ -263,6 +266,7 @@ impl StatusHistoryCell {
     fn new(
         config: &Config,
         runtime_model_provider_base_url: Option<&str>,
+        runtime_display: Option<&StatusRuntimeDisplay>,
         remote_connection: Option<&RemoteConnectionStatus>,
         account_display: Option<&StatusAccountDisplay>,
         token_info: Option<&TokenUsageInfo>,
@@ -279,23 +283,33 @@ impl StatusHistoryCell {
         agents_summary: String,
         refreshing_rate_limits: bool,
     ) -> (Self, StatusHistoryHandle) {
-        let approval_policy = AskForApproval::from(config.permissions.approval_policy.value());
-        let permission_profile = config.permissions.effective_permission_profile();
-        let workspace_roots = config.effective_workspace_roots();
+        let directory = runtime_display.map_or_else(
+            || format_directory_display(&config.cwd, /*max_width*/ None),
+            |runtime| runtime.directory.clone(),
+        );
+        let model_provider_id = runtime_display.map_or_else(
+            || config.model_provider_id.clone(),
+            |runtime| runtime.model_provider_id.clone(),
+        );
         let mut config_entries = vec![
-            ("workdir", config.cwd.display().to_string()),
+            ("workdir", directory.clone()),
             ("model", model_name.to_string()),
-            ("provider", config.model_provider_id.clone()),
+            ("provider", model_provider_id),
             (
                 "approval",
                 config.permissions.approval_policy.value().to_string(),
             ),
             (
                 "sandbox",
-                summarize_permission_profile(
-                    &permission_profile,
-                    &config.cwd,
-                    workspace_roots.as_slice(),
+                runtime_display.map_or_else(
+                    || {
+                        summarize_permission_profile(
+                            &config.permissions.effective_permission_profile(),
+                            &config.cwd,
+                            config.effective_workspace_roots().as_slice(),
+                        )
+                    },
+                    |runtime| runtime.permissions.clone(),
                 ),
             ),
         ];
@@ -319,21 +333,42 @@ impl StatusHistoryCell {
             .find(|(k, _)| *k == "approval")
             .map(|(_, v)| v.clone())
             .unwrap_or_else(|| "<unknown>".to_string());
-        let active_permission_profile = config.permissions.active_permission_profile();
-        let sandbox =
-            status_permission_summary(&permission_profile, &config.cwd, workspace_roots.as_slice());
-        let workspace_root_suffix = workspace_root_suffix(workspace_roots.as_slice(), &config.cwd);
-        let approval = status_approval_label(approval_policy, config.approvals_reviewer, &approval);
-        let permissions = status_permissions_label(
-            active_permission_profile.as_ref(),
-            &permission_profile,
-            approval_policy,
-            &sandbox,
-            &approval,
-            workspace_root_suffix.as_deref(),
+        let permissions = runtime_display.map_or_else(
+            || {
+                let approval_policy =
+                    AskForApproval::from(config.permissions.approval_policy.value());
+                let permission_profile = config.permissions.effective_permission_profile();
+                let workspace_roots = config.effective_workspace_roots();
+                let active_permission_profile = config.permissions.active_permission_profile();
+                let sandbox = status_permission_summary(
+                    &permission_profile,
+                    &config.cwd,
+                    workspace_roots.as_slice(),
+                );
+                let workspace_root_suffix =
+                    workspace_root_suffix(workspace_roots.as_slice(), &config.cwd);
+                let approval =
+                    status_approval_label(approval_policy, config.approvals_reviewer, &approval);
+                status_permissions_label(
+                    active_permission_profile.as_ref(),
+                    &permission_profile,
+                    approval_policy,
+                    &sandbox,
+                    &approval,
+                    workspace_root_suffix.as_deref(),
+                )
+            },
+            |runtime| runtime.permissions.clone(),
         );
-        let model_provider = format_model_provider(config, runtime_model_provider_base_url);
-        let show_chatgpt_usage_link = config.model_provider.requires_openai_auth;
+        let model_provider = format_model_provider(
+            config,
+            runtime_model_provider_base_url,
+            runtime_display.map(|runtime| runtime.model_provider_id.as_str()),
+        );
+        let show_chatgpt_usage_link = runtime_display
+            .map_or(config.model_provider.requires_openai_auth, |runtime| {
+                runtime.requires_openai_auth
+            });
         let account = compose_account_display(account_display);
         let session_id = session_id.as_ref().map(std::string::ToString::to_string);
         let forked_from = forked_from.map(|id| id.to_string());
@@ -370,7 +405,7 @@ impl StatusHistoryCell {
             Self {
                 model_name,
                 model_details,
-                directory: config.cwd.to_path_buf(),
+                directory,
                 permissions,
                 collaboration_mode: collaboration_mode.map(ToString::to_string),
                 model_provider,
@@ -839,13 +874,11 @@ impl HistoryCell for StatusHistoryCell {
             model_spans.push(Span::from(")").dim());
         }
 
-        let directory_value = format_directory_display(&self.directory, Some(value_width));
-
         lines.push(formatter.line("Model", model_spans));
         if let Some(model_provider) = self.model_provider.as_ref() {
             lines.push(formatter.line("Model provider", vec![Span::from(model_provider.clone())]));
         }
-        lines.push(formatter.line("Directory", vec![Span::from(directory_value)]));
+        lines.push(formatter.line("Directory", vec![Span::from(self.directory.clone())]));
         lines.push(formatter.line("Permissions", vec![Span::from(self.permissions.clone())]));
         lines.push(formatter.line("Agents.md", vec![Span::from(agents_summary)]));
 
@@ -932,7 +965,23 @@ impl HistoryCell for StatusHistoryCell {
     }
 }
 
-fn format_model_provider(config: &Config, runtime_base_url: Option<&str>) -> Option<String> {
+fn format_model_provider(
+    config: &Config,
+    runtime_base_url: Option<&str>,
+    runtime_provider_id: Option<&str>,
+) -> Option<String> {
+    if let Some(runtime_provider_id) = runtime_provider_id {
+        let provider_name = runtime_provider_id.trim();
+        let base_url = runtime_base_url.and_then(sanitize_base_url);
+        if provider_name == "openai" && base_url.is_none() {
+            return None;
+        }
+        return Some(match base_url {
+            Some(base_url) => format!("{provider_name} - {base_url}"),
+            None => provider_name.to_string(),
+        });
+    }
+
     let provider = &config.model_provider;
     let name = provider.name.trim();
     let provider_name = if name.is_empty() {

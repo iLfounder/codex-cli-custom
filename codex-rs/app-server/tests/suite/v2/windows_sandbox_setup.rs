@@ -94,6 +94,9 @@ async fn windows_sandbox_setup_start_rejects_relative_cwd() -> Result<()> {
     .await??;
 
     assert_eq!(err.error.code, -32600);
-    assert!(err.error.message.contains("Invalid request"));
+    assert_eq!(
+        err.error.message,
+        "invalid cwd: path `relative-root` is not absolute"
+    );
     Ok(())
 }

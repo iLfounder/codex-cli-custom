@@ -280,11 +280,13 @@ async fn status_line_branch_changes_render_no_changes() {
 #[tokio::test]
 async fn stale_status_line_git_summary_update_is_ignored() {
     let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.status_line_git_summary_cwd = Some(PathBuf::from("/expected"));
+    chat.status_line_git_summary_cwd = Some(
+        codex_utils_path_uri::LegacyAppPathString::from_string("/expected"),
+    );
     chat.status_line_git_summary_pending = true;
 
     chat.set_status_line_git_summary(
-        PathBuf::from("/other"),
+        codex_utils_path_uri::LegacyAppPathString::from_string("/other"),
         StatusLineGitSummary {
             pull_request: Some(crate::branch_summary::StatusLinePullRequest {
                 number: 20_252,
@@ -502,6 +504,7 @@ async fn configured_pet_load_is_deferred_until_after_construction() {
         is_first_run: true,
         status_account_display: None,
         runtime_model_provider_base_url: None,
+        runtime_requires_openai_auth: false,
         initial_plan_type: None,
         model: Some(resolved_model),
         startup_tooltip_override: None,
@@ -4296,17 +4299,19 @@ async fn session_configured_clears_goal_status_footer() {
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        permission_profile: PermissionProfile::read_only(),
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            test_path_buf("/home/user/project").abs(),
+            Vec::new(),
+            PermissionProfile::read_only(),
+            Some(rollout_file.path().to_path_buf()),
+        ),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
-        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: Some(rollout_file.path().to_path_buf()),
     });
 
     assert_eq!(chat.current_goal_status_indicator, None);
@@ -4819,7 +4824,9 @@ async fn user_prompt_submit_app_server_hook_notifications_render_snapshot() {
                 handler_type: AppServerHookHandlerType::Command,
                 execution_mode: AppServerHookExecutionMode::Sync,
                 scope: AppServerHookScope::Turn,
-                source_path: PathBuf::from(test_path_display("/tmp/hooks.json")).abs(),
+                source_path: codex_utils_path_uri::LegacyAppPathString::from_path(&PathBuf::from(
+                    test_path_display("/tmp/hooks.json"),
+                )),
                 source: codex_app_server_protocol::HookSource::User,
                 display_order: 0,
                 status: AppServerHookRunStatus::Running,
@@ -4842,7 +4849,9 @@ async fn user_prompt_submit_app_server_hook_notifications_render_snapshot() {
                 handler_type: AppServerHookHandlerType::Command,
                 execution_mode: AppServerHookExecutionMode::Sync,
                 scope: AppServerHookScope::Turn,
-                source_path: PathBuf::from(test_path_display("/tmp/hooks.json")).abs(),
+                source_path: codex_utils_path_uri::LegacyAppPathString::from_path(&PathBuf::from(
+                    test_path_display("/tmp/hooks.json"),
+                )),
                 source: codex_app_server_protocol::HookSource::User,
                 display_order: 0,
                 status: AppServerHookRunStatus::Stopped,
@@ -5507,7 +5516,9 @@ fn hook_run_summary(
         handler_type: codex_app_server_protocol::HookHandlerType::Command,
         execution_mode: codex_app_server_protocol::HookExecutionMode::Sync,
         scope: codex_app_server_protocol::HookScope::Turn,
-        source_path: PathBuf::from(test_path_display("/tmp/hooks.json")).abs(),
+        source_path: codex_utils_path_uri::LegacyAppPathString::from_path(&PathBuf::from(
+            test_path_display("/tmp/hooks.json"),
+        )),
         source: codex_app_server_protocol::HookSource::User,
         display_order: 0,
         status,

@@ -298,7 +298,7 @@ pub(crate) struct ReasoningSummaryCell {
     _header: String,
     content: String,
     /// Session cwd used to render local file links inside the reasoning body.
-    cwd: PathBuf,
+    cwd: Option<PathBuf>,
     transcript_only: bool,
 }
 
@@ -309,7 +309,16 @@ impl ReasoningSummaryCell {
         Self {
             _header: header,
             content,
-            cwd: cwd.to_path_buf(),
+            cwd: Some(cwd.to_path_buf()),
+            transcript_only,
+        }
+    }
+
+    pub(crate) fn new_without_cwd(header: String, content: String, transcript_only: bool) -> Self {
+        Self {
+            _header: header,
+            content,
+            cwd: None,
             transcript_only,
         }
     }
@@ -319,7 +328,7 @@ impl ReasoningSummaryCell {
         append_markdown(
             &self.content,
             crate::width::usable_content_width_u16(width, /*reserved_cols*/ 2),
-            Some(self.cwd.as_path()),
+            self.cwd.as_deref(),
             &mut lines,
         );
         let summary_style = Style::default().dim().italic();
@@ -446,7 +455,7 @@ impl HistoryCell for AgentMessageCell {
 #[derive(Debug)]
 pub(crate) struct AgentMarkdownCell {
     markdown_source: String,
-    cwd: PathBuf,
+    cwd: Option<PathBuf>,
     inline_visualization_context: Option<crate::inline_visualization::InlineVisualizationContext>,
     rendered_lines: Option<MarkdownRenderCache>,
 }
@@ -478,8 +487,20 @@ impl AgentMarkdownCell {
                 .then(MarkdownRenderCache::default);
         Self {
             markdown_source,
-            cwd: cwd.to_path_buf(),
+            cwd: Some(cwd.to_path_buf()),
             inline_visualization_context,
+            rendered_lines,
+        }
+    }
+
+    pub(crate) fn new_without_cwd(markdown_source: String) -> Self {
+        let rendered_lines =
+            (!crate::inline_visualization::contains_inline_visualization(&markdown_source))
+                .then(MarkdownRenderCache::default);
+        Self {
+            markdown_source,
+            cwd: None,
+            inline_visualization_context: None,
             rendered_lines,
         }
     }
@@ -522,7 +543,7 @@ impl HistoryCell for AgentMarkdownCell {
             let lines = crate::markdown::render_markdown_agent_with_links_cwd_and_visualizations(
                 &self.markdown_source,
                 Some(wrap_width),
-                Some(self.cwd.as_path()),
+                self.cwd.as_deref(),
                 self.inline_visualization_context.as_ref(),
             );
             normalize_whitespace_only_hyperlink_lines(prefix_hyperlink_lines(

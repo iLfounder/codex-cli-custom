@@ -1,4 +1,4 @@
-use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
@@ -41,7 +41,7 @@ pub(crate) struct SkillsToggleItem {
     pub skill_name: String,
     pub description: String,
     pub enabled: bool,
-    pub path: AbsolutePathBuf,
+    pub path: LegacyAppPathString,
 }
 
 pub(crate) struct SkillsToggleView {
@@ -467,14 +467,18 @@ mod tests {
                 skill_name: "polish:superpowers-systematic-debugging".to_string(),
                 description: "Find root causes before fixing bugs".to_string(),
                 enabled: true,
-                path: test_path_buf("/tmp/skills/systematic-debugging/SKILL.md").abs(),
+                path: LegacyAppPathString::from_abs_path(
+                    &test_path_buf("/tmp/skills/systematic-debugging/SKILL.md").abs(),
+                ),
             },
             SkillsToggleItem {
                 name: "superpowers-verification-before-completion (polish)".to_string(),
                 skill_name: "polish:superpowers-verification-before-completion".to_string(),
                 description: "Verify completion before claiming success".to_string(),
                 enabled: false,
-                path: test_path_buf("/tmp/skills/verification-before-completion/SKILL.md").abs(),
+                path: LegacyAppPathString::from_abs_path(
+                    &test_path_buf("/tmp/skills/verification-before-completion/SKILL.md").abs(),
+                ),
             },
         ]
     }
@@ -489,14 +493,18 @@ mod tests {
                 skill_name: "repo_scout".to_string(),
                 description: "Summarize the repo layout".to_string(),
                 enabled: true,
-                path: test_path_buf("/tmp/skills/repo_scout.toml").abs(),
+                path: LegacyAppPathString::from_abs_path(
+                    &test_path_buf("/tmp/skills/repo_scout.toml").abs(),
+                ),
             },
             SkillsToggleItem {
                 name: "Changelog Writer".to_string(),
                 skill_name: "changelog_writer".to_string(),
                 description: "Draft release notes".to_string(),
                 enabled: false,
-                path: test_path_buf("/tmp/skills/changelog_writer.toml").abs(),
+                path: LegacyAppPathString::from_abs_path(
+                    &test_path_buf("/tmp/skills/changelog_writer.toml").abs(),
+                ),
             },
         ];
         let view = SkillsToggleView::new(items, tx, crate::keymap::RuntimeKeymap::defaults().list);

@@ -30,7 +30,7 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
         app.primary_thread_id = Some(id);
         let mut thread_session = test_thread_session(id, cwd.to_path_buf());
         thread_session.approval_policy = AskForApproval::OnRequest;
-        thread_session.permission_profile = PermissionProfile::read_only();
+        thread_session.set_native_permission_profile(PermissionProfile::read_only());
         app.ensure_thread_channel(id)
             .store
             .lock()

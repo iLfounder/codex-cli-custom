@@ -38,6 +38,7 @@ use codex_protocol::review_format::render_review_output_text;
 use codex_secrets::redact_secrets;
 use codex_shell_command::parse_command::parse_command;
 use codex_shell_command::parse_command::shlex_join;
+use codex_utils_path_uri::LegacyAppPathString;
 use codex_utils_path_uri::PathUri;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -167,12 +168,12 @@ fn command_actions_for_path_uri(parsed_cmd: &[ParsedCommand], cwd: &PathUri) -> 
             }
             ParsedCommand::ListFiles { cmd, path } => Some(CommandAction::ListFiles {
                 command: redact_secrets(cmd),
-                path,
+                path: path.map(LegacyAppPathString::from_string),
             }),
             ParsedCommand::Search { cmd, query, path } => Some(CommandAction::Search {
                 command: redact_secrets(cmd),
                 query: query.map(redact_secrets),
-                path,
+                path: path.map(LegacyAppPathString::from_string),
             }),
             ParsedCommand::Unknown { cmd } => Some(CommandAction::Unknown {
                 command: redact_secrets(cmd),
@@ -202,7 +203,7 @@ pub fn build_item_from_guardian_event(
                 plugin_id: assessment.plugin_id.clone(),
                 script_path: assessment.script_path.clone(),
                 command,
-                cwd: cwd.clone().into(),
+                cwd: cwd.clone(),
                 process_id: None,
                 source: CommandExecutionSource::Agent,
                 status,
@@ -225,22 +226,21 @@ pub fn build_item_from_guardian_event(
             };
             let command = shlex_join(&argv);
             let parsed_cmd = parse_command(&argv);
-            let command_actions = if parsed_cmd.is_empty() {
-                vec![CommandAction::Unknown {
-                    command: command.clone(),
-                }]
-            } else {
-                parsed_cmd
+            let command_actions = match cwd.to_inferred_abs_path() {
+                Some(native_cwd) if !parsed_cmd.is_empty() => parsed_cmd
                     .into_iter()
-                    .map(|parsed| CommandAction::from_core_with_cwd(parsed, cwd))
-                    .collect()
+                    .map(|parsed| CommandAction::from_core_with_cwd(parsed, &native_cwd))
+                    .collect(),
+                _ => vec![CommandAction::Unknown {
+                    command: command.clone(),
+                }],
             };
             Some(ThreadItem::CommandExecution {
                 id: id.clone(),
                 plugin_id: assessment.plugin_id.clone(),
                 script_path: assessment.script_path.clone(),
                 command,
-                cwd: cwd.clone().into(),
+                cwd: cwd.clone(),
                 process_id: None,
                 source: CommandExecutionSource::Agent,
                 status,
@@ -335,12 +335,12 @@ pub fn convert_patch_changes(changes: &HashMap<PathBuf, FileChange>) -> Vec<File
     let mut converted: Vec<FileUpdateChange> = changes
         .iter()
         .map(|(path, change)| FileUpdateChange {
-            path: path.to_string_lossy().into_owned(),
+            path: LegacyAppPathString::from_path(path),
             kind: map_patch_change_kind(change),
             diff: format_file_change_diff(change),
         })
         .collect();
-    converted.sort_by(|a, b| a.path.cmp(&b.path));
+    converted.sort_by(|a, b| a.path.as_str().cmp(b.path.as_str()));
     converted
 }
 
@@ -349,7 +349,7 @@ fn map_patch_change_kind(change: &FileChange) -> PatchChangeKind {
         FileChange::Add { .. } => PatchChangeKind::Add,
         FileChange::Delete { .. } => PatchChangeKind::Delete,
         FileChange::Update { move_path, .. } => PatchChangeKind::Update {
-            move_path: move_path.clone(),
+            move_path: move_path.as_deref().map(LegacyAppPathString::from_path),
         },
     }
 }

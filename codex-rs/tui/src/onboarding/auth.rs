@@ -258,6 +258,7 @@ pub(crate) struct AuthModeWidget {
     pub login_status: LoginStatus,
     pub app_server_request_handle: AppServerRequestHandle,
     pub auth_config: AuthConfig,
+    pub allow_api_key_env_prefill: bool,
     pub bedrock_setup_enabled: bool,
     pub animations_enabled: bool,
     pub animations_suppressed: Cell<bool>,
@@ -839,7 +840,7 @@ impl AuthModeWidget {
             return;
         }
         self.set_error(/*message*/ None);
-        let prefill_from_env = read_openai_api_key_from_env();
+        let prefill_from_env = api_key_env_prefill(self.allow_api_key_env_prefill);
         let mut guard = self.sign_in_state.write().unwrap();
         match &mut *guard {
             SignInState::ApiKeyEntry(state) => {
@@ -1029,6 +1030,10 @@ impl AuthModeWidget {
     }
 }
 
+fn api_key_env_prefill(allow: bool) -> Option<String> {
+    allow.then(read_openai_api_key_from_env).flatten()
+}
+
 impl StepStateProvider for AuthModeWidget {
     fn get_step_state(&self) -> StepState {
         let sign_in_state = self.sign_in_state.read().unwrap();
@@ -1171,6 +1176,7 @@ mod tests {
             login_status: LoginStatus::NotAuthenticated,
             app_server_request_handle: AppServerRequestHandle::InProcess(client.request_handle()),
             auth_config,
+            allow_api_key_env_prefill: true,
             bedrock_setup_enabled: false,
             animations_enabled: true,
             animations_suppressed: std::cell::Cell::new(false),
@@ -1192,6 +1198,11 @@ mod tests {
             &*widget.sign_in_state.read().unwrap(),
             SignInState::PickMode
         ));
+    }
+
+    #[test]
+    fn api_key_env_prefill_can_be_disabled_without_reading_process_environment() {
+        assert!(api_key_env_prefill(/*allow*/ false).is_none());
     }
 
     #[tokio::test]

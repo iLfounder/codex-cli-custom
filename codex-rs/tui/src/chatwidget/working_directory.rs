@@ -41,7 +41,7 @@ impl ChatWidget {
 
         self.app_event_tx.send(AppEvent::ChangeWorkingDirectory {
             thread_id,
-            requested_cwd: PathBuf::from(path),
+            requested_cwd: path.to_string(),
         });
     }
 }

@@ -6,6 +6,7 @@ use super::account_validation::AccountSlotUpdateDisposition;
 use super::app_server_event_targets::ServerNotificationThreadTarget;
 use super::app_server_event_targets::server_notification_thread_target;
 use super::app_server_event_targets::server_request_thread_id;
+use super::remote_file_search_matches;
 use crate::app_command::AppCommand;
 use crate::app_event::AppEvent;
 use crate::app_event::RateLimitRefreshOrigin;
@@ -98,6 +99,27 @@ impl App {
         app_server_client: &AppServerSession,
         notification: ServerNotification,
     ) {
+        match &notification {
+            ServerNotification::FuzzyFileSearchSessionUpdated(update) => {
+                if self
+                    .remote_file_search_session
+                    .as_ref()
+                    .is_some_and(|session| {
+                        session.session_id == update.session_id
+                            && session.latest_query == update.query
+                            && !update.query.is_empty()
+                    })
+                {
+                    self.app_event_tx.send(AppEvent::FileSearchResult {
+                        query: update.query.clone(),
+                        matches: remote_file_search_matches(update.files.clone()),
+                    });
+                }
+                return;
+            }
+            ServerNotification::FuzzyFileSearchSessionCompleted(_) => return,
+            _ => {}
+        }
         // Keep native dynamic-tool status and hidden-helper routing ahead of account controls.
         // These notifications are consumed by their owning temporary thread and must not leak
         // into visible thread history or agent overview state.
@@ -540,6 +562,7 @@ impl App {
                 crate::app_server_session::thread_start_params_from_config(
                     &self.config,
                     app_server_client.thread_params_mode(),
+                    app_server_client.remote_invocation_overrides(),
                     app_server_client.remote_cwd_override(),
                     /*session_start_source*/ None,
                 );

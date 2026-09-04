@@ -12,6 +12,7 @@ use crate::app_event::RecapTrigger;
 use crate::app_event::ThreadTitleDestination;
 use crate::app_server_session::ForkGoalContinuation;
 use crate::app_server_session::UnsupportedLegacyPermissionProfile;
+use crate::app_server_session::app_server_request_path;
 use crate::app_server_session::turn_permissions_overrides;
 use crate::config_update::format_config_error;
 use crate::external_agent_config_migration::flow::ExternalAgentConfigMigrationFlowOutcome;
@@ -193,17 +194,24 @@ impl App {
                         "Changing directories requires an idle primary session without queued input."
                             .to_string(),
                     );
+                } else if self.app_server_target.uses_remote_workspace() {
+                    self.change_remote_working_directory(
+                        tui,
+                        app_server,
+                        requested_cwd.as_str(),
+                    )
+                    .await;
                 } else if crate::uses_remote_workspace_or_environment(
                     &self.app_server_target,
                     self.environment_manager.as_ref(),
                 ) {
                     self.chat_widget.add_error_message(
-                        "Changing directories is not supported for remote workspaces or remote execution environments."
+                        "Changing directories is not supported for remote execution environments."
                             .to_string(),
                     );
                 } else {
                     let cwd = AbsolutePathBuf::resolve_path_against_base(
-                        requested_cwd.as_path(),
+                        std::path::Path::new(&requested_cwd),
                         self.chat_widget.config_ref().cwd.as_path(),
                     );
                     match std::fs::metadata(cwd.as_path()) {
@@ -1095,8 +1103,12 @@ impl App {
             AppEvent::HooksLoaded { cwd, result } => {
                 self.chat_widget.on_hooks_loaded(cwd, result);
             }
-            AppEvent::FetchMarketplaceAdd { cwd, source } => {
-                self.fetch_marketplace_add(app_server, cwd, source);
+            AppEvent::FetchMarketplaceAdd {
+                cwd,
+                remote_cwd,
+                source,
+            } => {
+                self.fetch_marketplace_add(app_server, cwd, remote_cwd, source);
             }
             AppEvent::FetchMarketplaceUpgrade {
                 cwd,
@@ -1106,13 +1118,24 @@ impl App {
             }
             AppEvent::MarketplaceAddLoaded {
                 cwd,
+                remote_cwd,
                 source,
                 result,
             } => {
                 let add_succeeded = result.is_ok();
-                self.chat_widget
-                    .on_marketplace_add_loaded(cwd.clone(), source, result);
-                if add_succeeded && self.chat_widget.config_ref().cwd.as_path() == cwd.as_path() {
+                self.chat_widget.on_marketplace_add_loaded(
+                    cwd.clone(),
+                    remote_cwd.clone(),
+                    source,
+                    result,
+                );
+                if add_succeeded
+                    && self.chat_widget.config_ref().cwd.as_path() == cwd.as_path()
+                    && self.chat_widget.server_cwd()
+                        == remote_cwd.unwrap_or_else(|| {
+                            LegacyAppPathString::from_path(self.chat_widget.config_ref().cwd.as_path())
+                        })
+                {
                     self.fetch_plugins_list(app_server, cwd);
                 }
             }
@@ -1279,8 +1302,96 @@ impl App {
                 );
             }
             AppEvent::StartFileSearch(query) => {
-                self.file_search.on_user_query(query.clone());
-                if let Some(thread_id) = self.active_thread_id
+                if self.app_server_target.uses_remote_workspace() {
+                    let cwd = Some(self.chat_widget.server_cwd());
+                    if query.is_empty() || cwd.is_none() {
+                        if let Some(session) = self.remote_file_search_session.take() {
+                            let request = ClientRequest::FuzzyFileSearchSessionStop {
+                                request_id: app_server.next_request_id(),
+                                params: codex_app_server_protocol::FuzzyFileSearchSessionStopParams {
+                                    session_id: session.session_id,
+                                },
+                            };
+                            if let Err(error) = app_server
+                                .request_handle()
+                                .request_typed::<codex_app_server_protocol::FuzzyFileSearchSessionStopResponse>(request)
+                                .await
+                            {
+                                tracing::warn!(%error, "failed to stop remote file search session");
+                            }
+                        }
+                        self.app_event_tx.send(AppEvent::FileSearchResult {
+                            query: query.clone(),
+                            matches: Vec::new(),
+                        });
+                    } else if let Some(cwd) = cwd {
+                        let cwd_changed = self
+                            .remote_file_search_session
+                            .as_ref()
+                            .is_some_and(|session| session.cwd != cwd);
+                        if cwd_changed
+                            && let Some(session) = self.remote_file_search_session.take()
+                        {
+                            let request = ClientRequest::FuzzyFileSearchSessionStop {
+                                request_id: app_server.next_request_id(),
+                                params: codex_app_server_protocol::FuzzyFileSearchSessionStopParams {
+                                    session_id: session.session_id,
+                                },
+                            };
+                            let _ = app_server
+                                .request_handle()
+                                .request_typed::<codex_app_server_protocol::FuzzyFileSearchSessionStopResponse>(request)
+                                .await;
+                        }
+                        if self.remote_file_search_session.is_none() {
+                            let session_id = format!("tui-file-search-{}", Uuid::new_v4());
+                            let request = ClientRequest::FuzzyFileSearchSessionStart {
+                                request_id: app_server.next_request_id(),
+                                params: codex_app_server_protocol::FuzzyFileSearchSessionStartParams {
+                                    session_id: session_id.clone(),
+                                    roots: vec![app_server_request_path(cwd.clone())],
+                                },
+                            };
+                            match app_server
+                                .request_handle()
+                                .request_typed::<codex_app_server_protocol::FuzzyFileSearchSessionStartResponse>(request)
+                                .await
+                            {
+                                Ok(_) => {
+                                    self.remote_file_search_session = Some(RemoteFileSearchSession {
+                                        session_id,
+                                        cwd,
+                                        latest_query: String::new(),
+                                    });
+                                }
+                                Err(error) => {
+                                    tracing::warn!(%error, "failed to start remote file search session");
+                                }
+                            }
+                        }
+                        if let Some(session) = self.remote_file_search_session.as_mut() {
+                            session.latest_query.clone_from(&query);
+                            let request = ClientRequest::FuzzyFileSearchSessionUpdate {
+                                request_id: app_server.next_request_id(),
+                                params: codex_app_server_protocol::FuzzyFileSearchSessionUpdateParams {
+                                    session_id: session.session_id.clone(),
+                                    query: query.clone(),
+                                },
+                            };
+                            if let Err(error) = app_server
+                                .request_handle()
+                                .request_typed::<codex_app_server_protocol::FuzzyFileSearchSessionUpdateResponse>(request)
+                                .await
+                            {
+                                tracing::warn!(%error, "failed to update remote file search session");
+                            }
+                        }
+                    }
+                } else {
+                    self.file_search.on_user_query(query.clone());
+                }
+                if !self.app_server_target.uses_remote_workspace()
+                    && let Some(thread_id) = self.active_thread_id
                     && app_server.task_tools_available(thread_id)
                     && self.config.features.enabled(Feature::MentionsV2)
                 {
@@ -1288,11 +1399,6 @@ impl App {
                         .thread_cwd(thread_id)
                         .await
                         .map(|cwd| cwd.to_path_buf())
-                        .or_else(|| {
-                            app_server
-                                .remote_cwd_override()
-                                .map(std::path::Path::to_path_buf)
-                        })
                         .unwrap_or_else(|| self.config.cwd.to_path_buf());
                     crate::task_mentions::spawn_search(
                         app_server.request_handle(),
@@ -1670,7 +1776,9 @@ impl App {
                 }
             }
             AppEvent::UpdateReasoningEffort(effort) => {
-                self.on_update_reasoning_effort(effort.clone());
+                if !self.app_server_target.uses_remote_workspace() {
+                    self.on_update_reasoning_effort(effort.clone());
+                }
                 self.sync_active_thread_reasoning_setting(app_server, effort)
                     .await;
             }
@@ -1678,15 +1786,21 @@ impl App {
                 let model_changed = self.chat_widget.current_model() != model
                     || self.chat_widget.current_collaboration_mode().model() != model;
                 if model_changed {
-                    self.chat_widget.set_model(&model);
+                    if !self.app_server_target.uses_remote_workspace() {
+                        self.chat_widget.set_model(&model);
+                    }
                     self.sync_active_thread_model_setting(app_server, model, /*effort*/ None)
                         .await;
-                    self.sync_active_thread_service_tier_to_cached_session()
-                        .await;
+                    if !self.app_server_target.uses_remote_workspace() {
+                        self.sync_active_thread_service_tier_to_cached_session()
+                            .await;
+                    }
                 }
             }
             AppEvent::UpdatePersonality(personality) => {
-                self.on_update_personality(personality);
+                if !self.app_server_target.uses_remote_workspace() {
+                    self.on_update_personality(personality);
+                }
                 self.sync_active_thread_personality_setting(app_server, personality)
                     .await;
             }
@@ -1733,26 +1847,36 @@ impl App {
             AppEvent::ApplyAdvancedReasoning { model, effort } => {
                 let model_changed = self.chat_widget.current_model() != model
                     || self.chat_widget.current_collaboration_mode().model() != model;
-                let default_effort =
-                    self.on_apply_advanced_reasoning(model.as_str(), effort.clone());
+                let remote = self.app_server_target.uses_remote_workspace();
+                let default_effort = (!remote)
+                    .then(|| self.on_apply_advanced_reasoning(model.as_str(), effort.clone()))
+                    .flatten();
                 if model_changed {
                     self.sync_active_thread_model_setting(
                         app_server,
                         model.clone(),
-                        Some(effort.clone()),
+                        (!remote).then_some(effort.clone()),
                     )
                     .await;
-                } else if let Some(mut params) =
+                }
+                if remote {
+                    self.sync_active_thread_reasoning_setting(app_server, Some(effort.clone()))
+                        .await;
+                } else if !model_changed
+                    && let Some(mut params) =
                     self.active_thread_reasoning_setting_update_params(Some(effort.clone()))
                 {
                     params.collaboration_mode =
                         Some(self.chat_widget.effective_collaboration_mode());
                     self.send_thread_settings_update(app_server, params).await;
                 }
-                self.sync_active_thread_service_tier_to_cached_session()
-                    .await;
+                if !remote {
+                    self.sync_active_thread_service_tier_to_cached_session()
+                        .await;
+                }
 
-                if let Some(default_effort) = default_effort.as_ref()
+                if !remote
+                    && let Some(default_effort) = default_effort.as_ref()
                     && let Err(err) = crate::config_update::write_config_batch(
                         app_server.request_handle(),
                         crate::config_update::build_model_selection_edits(
@@ -1766,7 +1890,7 @@ impl App {
                     tracing::error!(error = %error, "failed to persist conversation model");
                     self.chat_widget
                         .add_error_message(format!("Failed to save default model: {error}"));
-                } else {
+                } else if !remote {
                     self.chat_widget.add_info_message(
                         format!("Model changed to {model} {effort} for this conversation"),
                         /*hint*/ None,
@@ -2542,11 +2666,37 @@ impl App {
                 }
             }
             AppEvent::SelectPermissionProfile(selection) => {
-                if self.apply_permission_profile_selection(selection).await {
+                if self.app_server_target.uses_remote_workspace()
+                    && let Some(thread_id) = self.current_displayed_thread_id()
+                {
+                    self.apply_permission_shortcut(app_server, tui, thread_id, selection)
+                        .await;
+                    self.chat_widget.submit_initial_user_message_if_pending();
+                } else if self.apply_permission_profile_selection(selection).await {
                     self.chat_widget.submit_initial_user_message_if_pending();
                 }
             }
             AppEvent::UpdateApprovalsReviewer(policy) => {
+                if self.app_server_target.uses_remote_workspace()
+                    && let Some(thread_id) = self.current_displayed_thread_id()
+                {
+                    let result = app_server
+                        .thread_settings_update(
+                            codex_app_server_protocol::ThreadSettingsUpdateParams {
+                                thread_id: thread_id.to_string(),
+                                approvals_reviewer: Some(policy.into()),
+                                ..Default::default()
+                            },
+                        )
+                        .await;
+                    if !matches!(result, Ok(true)) {
+                        self.chat_widget.add_error_message(
+                            "The remote app server did not apply the approvals reviewer."
+                                .to_string(),
+                        );
+                    }
+                    return Ok(AppRunControl::Continue);
+                }
                 self.config.approvals_reviewer = policy;
                 self.chat_widget.set_approvals_reviewer(policy);
                 self.sync_active_thread_permission_settings_to_cached_session()
@@ -2831,7 +2981,7 @@ impl App {
                         self.chat_widget.update_skill_enabled(path, enabled);
                     }
                     Err(err) => {
-                        let path_display = path.display();
+                        let path_display = path.render_for_ui();
                         self.chat_widget.add_error_message(format!(
                             "Failed to update skill config for {path_display}: {err}"
                         ));
@@ -2913,6 +3063,24 @@ impl App {
             }
             AppEvent::OpenPermissionsPopup => {
                 self.chat_widget.open_permissions_popup();
+            }
+            AppEvent::OpenRemotePermissionProfiles => {
+                let cwd = self.chat_widget.server_cwd();
+                let active_profile_id =
+                    self.chat_widget.remote_active_permission_profile_id();
+                match app_server.permission_profiles_list(cwd).await {
+                    Ok(profiles) => self
+                        .chat_widget
+                        .open_remote_permission_profiles_popup(profiles, active_profile_id),
+                    Err(err) => {
+                        tracing::warn!(%err, "failed to load remote permission profiles");
+                        self.chat_widget.add_error_message(format!(
+                            "Failed to load remote permission profiles: {err}"
+                        ));
+                        self.chat_widget
+                            .open_remote_permission_profiles_popup(None, active_profile_id);
+                    }
+                }
             }
             AppEvent::OpenReviewBranchPicker(cwd) => {
                 self.chat_widget.show_review_branch_picker(&cwd).await;

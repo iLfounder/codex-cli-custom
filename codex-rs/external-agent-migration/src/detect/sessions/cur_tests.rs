@@ -7,9 +7,27 @@ use std::time::Duration;
 use std::time::SystemTime;
 use tempfile::TempDir;
 
+fn decodable_project_tempdir() -> TempDir {
+    // Keep positive decode fixtures within the decoder's bounded ambiguity probe budget.
+    #[cfg(windows)]
+    let root = {
+        let runtime_temp = std::env::temp_dir();
+        let volume_root = runtime_temp.ancestors().last().expect("temp volume root");
+        TempDir::new_in(volume_root).expect("tempdir")
+    };
+    #[cfg(not(windows))]
+    let root = TempDir::new().expect("tempdir");
+    assert_eq!(
+        decode_cur_project_path(&encode_project_path(root.path())),
+        Some(root.path().to_path_buf()),
+        "fixture root must fit within the Cursor decoder probe budget",
+    );
+    root
+}
+
 #[test]
 fn detects_cur_transcript_with_project_cwd() {
-    let root = TempDir::new().expect("tempdir");
+    let root = decodable_project_tempdir();
     let project_root = root.path().join("workspace with.dots_and-dashes");
     fs::create_dir_all(&project_root).expect("project root");
     let external_agent_home = root.path().join(".external");
@@ -123,7 +141,7 @@ fn detects_cur_transcript_with_embedded_unc_cwd() {
 
 #[test]
 fn skips_cur_subagent_transcripts() {
-    let root = TempDir::new().expect("tempdir");
+    let root = decodable_project_tempdir();
     let project_root = root.path().join("workspace");
     fs::create_dir_all(&project_root).expect("project root");
     let external_agent_home = root.path().join(".external");
@@ -163,7 +181,7 @@ fn skips_cur_subagent_transcripts() {
 
 #[test]
 fn rejects_ambiguous_encoded_project_cwd() {
-    let root = TempDir::new().expect("tempdir");
+    let root = decodable_project_tempdir();
     let nested_project = root.path().join("workspace").join("nested");
     let hyphenated_project = root.path().join("workspace-nested");
     fs::create_dir_all(&nested_project).expect("nested project");
@@ -191,7 +209,7 @@ fn resolves_cur_project_names_with_common_separators() {
         ("my-awesome-project", "my-awesome-project"),
         ("my-awesome-cool-project", "my-awesome-cool-project"),
     ] {
-        let root = TempDir::new().expect("tempdir");
+        let root = decodable_project_tempdir();
         let project = root.path().join(project_name);
         fs::create_dir_all(&project).expect("project root");
         let encoded = format!("{}-{encoded_name}", encode_project_path(root.path()));
@@ -202,7 +220,7 @@ fn resolves_cur_project_names_with_common_separators() {
 
 #[test]
 fn rejects_ambiguous_cur_project_without_a_direct_match() {
-    let root = TempDir::new().expect("tempdir");
+    let root = decodable_project_tempdir();
     for project_name in ["my-project", "my project", "my+project"] {
         fs::create_dir_all(root.path().join(project_name)).expect("project root");
     }
@@ -213,7 +231,7 @@ fn rejects_ambiguous_cur_project_without_a_direct_match() {
 
 #[test]
 fn rejects_ambiguous_cur_project_with_punctuated_ancestor() {
-    let root = TempDir::new().expect("tempdir");
+    let root = decodable_project_tempdir();
     let punctuated_ancestor = root.path().join("a-b").join("c");
     let punctuated_leaf = root.path().join("a").join("b-c");
     fs::create_dir_all(&punctuated_ancestor).expect("punctuated ancestor project");
@@ -230,7 +248,7 @@ fn rejects_ambiguous_cur_project_with_multiple_punctuated_ancestors() {
         (&["a-b", "c-d", "e"][..], &["a", "b", "c", "d-e"][..]),
         (&["a-b", "c-d"][..], &["a", "b", "c", "d"][..]),
     ] {
-        let root = TempDir::new().expect("tempdir");
+        let root = decodable_project_tempdir();
         let first = first
             .iter()
             .fold(root.path().to_path_buf(), |path, component| {
@@ -265,7 +283,7 @@ fn parses_windows_cursor_fixture_project_directory() {
 
 #[test]
 fn ignores_cur_sessions_older_than_import_window() {
-    let root = TempDir::new().expect("tempdir");
+    let root = decodable_project_tempdir();
     let project_root = root.path().join("workspace");
     fs::create_dir_all(&project_root).expect("project root");
     let external_agent_home = root.path().join(".external");
@@ -289,7 +307,7 @@ fn ignores_cur_sessions_older_than_import_window() {
 
 #[test]
 fn detects_cur_sessions_in_batches_and_redetects_modified_imports() {
-    let root = TempDir::new().expect("tempdir");
+    let root = decodable_project_tempdir();
     let project_root = root.path().join("workspace");
     fs::create_dir_all(&project_root).expect("project root");
     let external_agent_home = root.path().join(".external");

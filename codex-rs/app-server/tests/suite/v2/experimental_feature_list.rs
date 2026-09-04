@@ -121,7 +121,9 @@ memories = true
 
     let thread_start_id = mcp
         .send_thread_start_request_with_auto_env(ThreadStartParams {
-            cwd: Some(workspace.path().display().to_string()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                workspace.path(),
+            )),
             ..Default::default()
         })
         .await?;
@@ -443,7 +445,7 @@ async fn read_config(mcp: &mut TestAppServer, cwd: Option<String>) -> Result<Con
     let request_id = mcp
         .send_config_read_request(ConfigReadParams {
             include_layers: false,
-            cwd,
+            cwd: cwd.map(codex_utils_path_uri::LegacyAppPathString::from_string),
         })
         .await?;
     read_response(mcp, request_id).await

@@ -570,7 +570,9 @@ impl ChatWidget {
                             ),
                         ]),
                         reason: None,
-                        grant_root: Some(PathBuf::from("/tmp")),
+                        grant_root: Some(codex_utils_path_uri::LegacyAppPathString::from_string(
+                            "/tmp",
+                        )),
                     },
                 );
             }

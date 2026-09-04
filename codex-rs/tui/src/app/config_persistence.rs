@@ -1602,17 +1602,19 @@ enabled = false
                 service_tier: None,
                 approval_policy: AskForApproval::Never,
                 approvals_reviewer: ApprovalsReviewer::User,
-                permission_profile: PermissionProfile::read_only(),
+                execution_context: crate::session_state::SessionExecutionContext::native(
+                    next_cwd.clone().abs(),
+                    Vec::new(),
+                    PermissionProfile::read_only(),
+                    Some(PathBuf::new()),
+                ),
                 active_permission_profile: None,
-                cwd: next_cwd.clone().abs(),
-                runtime_workspace_roots: Vec::new(),
                 instruction_source_paths: Vec::new(),
                 reasoning_effort: None,
                 collaboration_mode: None,
                 personality: None,
                 message_history: None,
                 network_proxy: None,
-                rollout_path: Some(PathBuf::new()),
             });
 
         assert_eq!(app.chat_widget.config_ref().cwd.to_path_buf(), next_cwd);

@@ -386,7 +386,7 @@ async fn ready_proof_matches_at(
         if !is_owner_private(path)? {
             return Ok(false);
         }
-        return Ok(serde_json::from_slice(&contents).ok() == Some(expected));
+        Ok(serde_json::from_slice(&contents).ok() == Some(expected))
     }
     #[cfg(not(windows))]
     match tokio::fs::read(path).await {

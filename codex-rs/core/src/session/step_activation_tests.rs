@@ -4,6 +4,7 @@ use crate::session::handlers::submission_loop;
 use crate::session::step_context::StepContext;
 use crate::session::step_settings::StepSettings;
 use crate::session::tests::HeldStepTask;
+use crate::session::tests::default_execution_account_runtime;
 use crate::session::tests::make_session_and_context;
 use crate::session::tests::update_selected_settings_for_test;
 use crate::session::tests::update_turn_settings_for_test;
@@ -174,6 +175,11 @@ async fn activation_fixture(models: Vec<ModelInfo>) -> ActivationFixture {
     let mutable = Arc::get_mut(&mut session).expect("unshared test session");
     let (models, lookup) = GatedModelsManager::new(models);
     mutable.services.models_manager = models;
+    mutable.execution_account_runtime = default_execution_account_runtime(
+        &mutable.services.auth_manager,
+        &mutable.services.models_manager,
+        &mutable.services,
+    );
     for feature in [
         Feature::StepModelSwitching,
         Feature::FastMode,

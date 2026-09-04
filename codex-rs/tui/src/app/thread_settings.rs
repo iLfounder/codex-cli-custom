@@ -16,6 +16,7 @@ use codex_protocol::config_types::ModeKind;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::MODEL_SPECIALTY_CYBER;
+use codex_utils_path_uri::LegacyAppPathString;
 
 impl App {
     pub(super) async fn sync_active_thread_model_setting(
@@ -27,7 +28,9 @@ impl App {
         let Some(mut params) = self.active_thread_model_setting_update_params(model) else {
             return;
         };
-        params.effort = effort;
+        if !self.app_server_target.uses_remote_workspace() {
+            params.effort = effort;
+        }
         let defaulted_to_auto_review = params.approvals_reviewer
             == Some(AppServerApprovalsReviewer::AutoReview)
             && (self.chat_widget.config_ref().approvals_reviewer != ApprovalsReviewer::AutoReview
@@ -49,6 +52,13 @@ impl App {
         model: String,
     ) -> Option<ThreadSettingsUpdateParams> {
         let thread_id = self.active_thread_id?;
+        if self.app_server_target.uses_remote_workspace() {
+            return Some(ThreadSettingsUpdateParams {
+                thread_id: thread_id.to_string(),
+                model: Some(model),
+                ..ThreadSettingsUpdateParams::default()
+            });
+        }
         let is_cyber_model = self.model_catalog.try_list_models().is_ok_and(|models| {
             models.iter().any(|preset| {
                 preset.model == model
@@ -102,6 +112,13 @@ impl App {
         effort: Option<codex_protocol::openai_models::ReasoningEffort>,
     ) -> Option<ThreadSettingsUpdateParams> {
         let thread_id = self.active_thread_id?;
+        if self.app_server_target.uses_remote_workspace() {
+            return Some(ThreadSettingsUpdateParams {
+                thread_id: thread_id.to_string(),
+                effort,
+                ..ThreadSettingsUpdateParams::default()
+            });
+        }
         Some(ThreadSettingsUpdateParams {
             thread_id: thread_id.to_string(),
             effort,
@@ -169,7 +186,9 @@ impl App {
 
         let params = ThreadSettingsUpdateParams {
             thread_id: thread_id.to_string(),
-            cwd: cwd.clone(),
+            cwd: cwd
+                .as_ref()
+                .map(|cwd| LegacyAppPathString::from_path(cwd.as_path())),
             approval_policy: *approval_policy,
             approvals_reviewer: approvals_reviewer.map(AppServerApprovalsReviewer::from),
             permissions: active_permission_profile
@@ -190,19 +209,20 @@ impl App {
         &mut self,
         thread_id: ThreadId,
         settings: &ThreadSettings,
-    ) {
+    ) -> Result<(), String> {
         if self.primary_thread_id == Some(thread_id)
             && let Some(session) = self.primary_session_configured.as_mut()
         {
-            apply_thread_settings_to_session(session, settings);
+            apply_thread_settings_to_session(session, settings)?;
         }
 
         if let Some(channel) = self.thread_event_channels.get(&thread_id) {
             let mut store = channel.store.lock().await;
             if let Some(session) = store.session.as_mut() {
-                apply_thread_settings_to_session(session, settings);
+                apply_thread_settings_to_session(session, settings)?;
             }
         }
+        Ok(())
     }
 
     pub(super) async fn send_thread_settings_update(
@@ -225,7 +245,16 @@ impl App {
     }
 }
 
-fn apply_thread_settings_to_session(session: &mut ThreadSessionState, settings: &ThreadSettings) {
+fn apply_thread_settings_to_session(
+    session: &mut ThreadSessionState,
+    settings: &ThreadSettings,
+) -> Result<(), String> {
+    let native_sandbox = session
+        .native_cwd()
+        .is_some()
+        .then(|| settings.sandbox_policy.try_to_core())
+        .transpose()
+        .map_err(|error| format!("server returned a non-native sandbox path: {error}"))?;
     if settings.collaboration_mode.mode == ModeKind::Default {
         session.model = settings.model.clone();
         session.reasoning_effort = settings.effort.clone();
@@ -234,12 +263,30 @@ fn apply_thread_settings_to_session(session: &mut ThreadSessionState, settings: 
     session.service_tier = settings.service_tier.clone();
     session.approval_policy = settings.approval_policy;
     session.approvals_reviewer = settings.approvals_reviewer.to_core();
-    session.permission_profile = PermissionProfile::from_legacy_sandbox_policy_for_cwd(
-        &settings.sandbox_policy.to_core(),
-        settings.cwd.as_path(),
-    );
+    if let Some(cwd) = session.native_cwd().cloned() {
+        session.set_native_permission_profile(
+            PermissionProfile::from_legacy_sandbox_policy_for_cwd(
+                native_sandbox
+                    .as_ref()
+                    .expect("native sessions validate sandbox paths"),
+                cwd.as_path(),
+            ),
+        );
+        if let Some(updated_cwd) = settings.cwd.to_inferred_abs_path() {
+            session.set_cwd_retargeting_implicit_runtime_workspace_root(updated_cwd);
+        }
+    } else {
+        let roots = session
+            .remote_runtime_workspace_roots()
+            .unwrap_or_default()
+            .to_vec();
+        session.replace_remote_execution_context(
+            settings.cwd.clone(),
+            roots,
+            settings.sandbox_policy.clone(),
+        );
+    }
     session.active_permission_profile = settings.active_permission_profile.clone().map(Into::into);
-    session.set_cwd_retargeting_implicit_runtime_workspace_root(settings.cwd.clone());
     session.personality = settings.personality;
     let mut collaboration_mode = settings.collaboration_mode.clone();
     collaboration_mode
@@ -248,6 +295,7 @@ fn apply_thread_settings_to_session(session: &mut ThreadSessionState, settings: 
         .clone_from(&settings.model);
     collaboration_mode.settings.reasoning_effort = settings.effort.clone();
     session.collaboration_mode = Some(Box::new(collaboration_mode));
+    Ok(())
 }
 
 fn thread_settings_update_has_changes(params: &ThreadSettingsUpdateParams) -> bool {

@@ -672,7 +672,9 @@ async fn mcp_server_status_list_uses_thread_project_local_config() -> Result<()>
         .await?;
     let ThreadStartResponse { thread, .. } = mcp
         .start_thread(ThreadStartParams {
-            cwd: Some(workspace.path().to_string_lossy().into_owned()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                workspace.path(),
+            )),
             ..Default::default()
         })
         .await?;

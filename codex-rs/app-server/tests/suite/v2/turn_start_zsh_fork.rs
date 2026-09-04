@@ -105,7 +105,9 @@ async fn turn_start_shell_zsh_fork_executes_command_v2() -> Result<()> {
     let start_id = mcp
         .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("mock-model".to_string()),
-            cwd: Some(workspace.to_string_lossy().into_owned()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                &workspace,
+            )),
             ..Default::default()
         })
         .await?;
@@ -120,7 +122,9 @@ async fn turn_start_shell_zsh_fork_executes_command_v2() -> Result<()> {
                 text: "run echo hi".to_string(),
                 text_elements: Vec::new(),
             }],
-            cwd: Some(workspace.clone()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                &workspace,
+            )),
             approval_policy: Some(codex_app_server_protocol::AskForApproval::Never),
             sandbox_policy: Some(codex_app_server_protocol::SandboxPolicy::DangerFullAccess),
             model: Some("mock-model".to_string()),
@@ -161,7 +165,10 @@ async fn turn_start_shell_zsh_fork_executes_command_v2() -> Result<()> {
     assert!(command.contains("/bin/sh -c"));
     assert!(command.contains("sleep 0.01"));
     assert!(command.contains(&release_marker.display().to_string()));
-    assert_eq!(cwd.as_str(), workspace.to_string_lossy().as_ref());
+    assert_eq!(
+        cwd,
+        codex_utils_path_uri::LegacyAppPathString::from_path(&workspace)
+    );
 
     mcp.interrupt_turn_and_wait_for_aborted(thread.id, turn.id, DEFAULT_READ_TIMEOUT)
         .await?;
@@ -219,7 +226,9 @@ async fn turn_start_shell_zsh_fork_exec_approval_decline_v2() -> Result<()> {
     let start_id = mcp
         .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("mock-model".to_string()),
-            cwd: Some(workspace.to_string_lossy().into_owned()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                &workspace,
+            )),
             ..Default::default()
         })
         .await?;
@@ -234,7 +243,9 @@ async fn turn_start_shell_zsh_fork_exec_approval_decline_v2() -> Result<()> {
                 text: "run python".to_string(),
                 text_elements: Vec::new(),
             }],
-            cwd: Some(workspace.clone()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                &workspace,
+            )),
             ..Default::default()
         })
         .await?;
@@ -347,7 +358,9 @@ async fn turn_start_shell_zsh_fork_exec_approval_cancel_v2() -> Result<()> {
     let start_id = mcp
         .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("mock-model".to_string()),
-            cwd: Some(workspace.to_string_lossy().into_owned()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                &workspace,
+            )),
             ..Default::default()
         })
         .await?;
@@ -362,7 +375,9 @@ async fn turn_start_shell_zsh_fork_exec_approval_cancel_v2() -> Result<()> {
                 text: "run python".to_string(),
                 text_elements: Vec::new(),
             }],
-            cwd: Some(workspace.clone()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                &workspace,
+            )),
             ..Default::default()
         })
         .await?;
@@ -501,7 +516,9 @@ async fn turn_start_shell_zsh_fork_subcommand_decline_marks_parent_declined_v2()
     let start_id = mcp
         .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("mock-model".to_string()),
-            cwd: Some(workspace.to_string_lossy().into_owned()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                &workspace,
+            )),
             ..Default::default()
         })
         .await?;
@@ -516,7 +533,9 @@ async fn turn_start_shell_zsh_fork_subcommand_decline_marks_parent_declined_v2()
                 text: "remove both files".to_string(),
                 text_elements: Vec::new(),
             }],
-            cwd: Some(workspace.clone()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                &workspace,
+            )),
             approval_policy: Some(codex_app_server_protocol::AskForApproval::UnlessTrusted),
             // This test is about execve-intercept approval propagation, not
             // workspace sandboxing. Using full access avoids macOS sandbox

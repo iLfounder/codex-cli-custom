@@ -58,6 +58,7 @@ use codex_models_manager::manager::SharedModelsManager;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::error::CodexErr;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::mcp::OPENAI_STANDARD_FORM_INPUT_EXTENSION_ID;
@@ -104,6 +105,7 @@ use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -1508,6 +1510,13 @@ impl ThreadManager {
         parent_trace: Option<W3cTraceContext>,
         client_mcp_extensions: ClientMcpExtensions,
     ) -> CodexResult<NewThread> {
+        if let Some(thread) = self
+            .state
+            .running_thread_for_rollout_path(&rollout_path)
+            .await
+        {
+            return Ok(thread);
+        }
         let prepared = self
             .state
             .prepare_thread_resume(PrepareThreadResumeTarget::RolloutPath(rollout_path))
@@ -1744,10 +1753,23 @@ impl ThreadManager {
         let InitialHistory::Resumed(resumed) = initial_history else {
             return Ok(None);
         };
-        let prepared = self
+        let prepared = match self
             .state
             .prepare_thread_resume(PrepareThreadResumeTarget::ThreadId(resumed.conversation_id))
-            .await?;
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(err)
+                if matches!(
+                    err.details(),
+                    CodexErrorDetails::ThreadNotFound(thread_id)
+                        if *thread_id == resumed.conversation_id
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(err) => return Err(err),
+        };
         let (stored_thread, _, authority) = prepared.into_parts();
         if stored_thread.thread_id != resumed.conversation_id {
             return Err(CodexErr::Fatal(format!(
@@ -1783,6 +1805,13 @@ impl ThreadManager {
         user_shell_override: crate::shell::Shell,
         client_mcp_extensions: ClientMcpExtensions,
     ) -> CodexResult<NewThread> {
+        if let Some(thread) = self
+            .state
+            .running_thread_for_rollout_path(&rollout_path)
+            .await
+        {
+            return Ok(thread);
+        }
         let agent_control = self.agent_control_for_config(&config);
         let prepared = self
             .state
@@ -2551,6 +2580,23 @@ impl ThreadManagerState {
         }))
     }
 
+    async fn running_thread_for_rollout_path(&self, rollout_path: &Path) -> Option<NewThread> {
+        let mut threads = self.threads.write().await;
+        let (thread_id, thread) = threads.iter().find_map(|(thread_id, thread)| {
+            (thread.rollout_path().as_deref() == Some(rollout_path))
+                .then(|| (*thread_id, Arc::clone(thread)))
+        })?;
+        if !thread.is_running() {
+            threads.remove(&thread_id);
+            return None;
+        }
+        Some(NewThread {
+            thread_id,
+            session_configured: thread.session_configured(),
+            thread,
+        })
+    }
+
     /// Spawn a new thread with optional history and register it with the manager.
     async fn spawn_thread(&self, request: ThreadSpawnRequest) -> CodexResult<NewThread> {
         let ThreadSpawnRequest {
@@ -2682,7 +2728,9 @@ impl ThreadManagerState {
                 LoadedUserInstructions::default(),
                 None,
                 empty_extension_registry(),
-                Arc::new(McpManager::new(Arc::clone(&self.plugins_manager))),
+                Arc::new(McpManager::new(Arc::clone(
+                    &execution_services.plugins_manager,
+                ))),
                 Some(MultiAgentVersion::Disabled),
             )
         } else {
@@ -2695,7 +2743,7 @@ impl ThreadManagerState {
                 .await,
                 inherited_exec_policy,
                 Arc::clone(&self.extensions),
-                Arc::clone(&self.mcp_manager),
+                Arc::clone(&execution_services.mcp_manager),
                 self.initial_multi_agent_version_for_spawn(
                     &initial_history,
                     Some(&session_source),
@@ -2747,7 +2795,7 @@ impl ThreadManagerState {
             environment_manager: Arc::clone(&self.environment_manager),
             skills_service: Arc::clone(&self.skills_service),
             plugins_manager: execution_services.plugins_manager,
-            mcp_manager: execution_services.mcp_manager,
+            mcp_manager,
             code_mode_session_provider: Arc::clone(&self.code_mode_session_provider),
             extensions,
             conversation_history: initial_history,

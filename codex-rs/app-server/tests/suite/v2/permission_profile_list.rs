@@ -123,7 +123,9 @@ description = "Project-scoped profile."
         .send_permission_profile_list_request(PermissionProfileListParams {
             cursor: None,
             limit: Some(3),
-            cwd: Some(workspace.path().to_string_lossy().into_owned()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                workspace.path(),
+            )),
         })
         .await?;
     let first = read_response::<PermissionProfileListResponse>(&mut mcp, first_request_id).await?;
@@ -155,7 +157,9 @@ description = "Project-scoped profile."
         .send_permission_profile_list_request(PermissionProfileListParams {
             cursor: first.next_cursor,
             limit: Some(3),
-            cwd: Some(workspace.path().to_string_lossy().into_owned()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                workspace.path(),
+            )),
         })
         .await?;
     let second =
@@ -203,7 +207,9 @@ description = "Project-scoped profile."
         .send_permission_profile_list_request(PermissionProfileListParams {
             cursor: None,
             limit: None,
-            cwd: Some(workspace.path().to_string_lossy().into_owned()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                workspace.path(),
+            )),
         })
         .await?;
     let actual = read_response::<PermissionProfileListResponse>(&mut mcp, request_id).await?;

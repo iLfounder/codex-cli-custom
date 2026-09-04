@@ -11,7 +11,7 @@ use codex_protocol::protocol::HookRunSummary as CoreHookRunSummary;
 use codex_protocol::protocol::HookScope as CoreHookScope;
 use codex_protocol::protocol::HookSource as CoreHookSource;
 use codex_protocol::protocol::HookTrustStatus as CoreHookTrustStatus;
-use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -106,7 +106,7 @@ pub struct HookRunSummary {
     pub handler_type: HookHandlerType,
     pub execution_mode: HookExecutionMode,
     pub scope: HookScope,
-    pub source_path: AbsolutePathBuf,
+    pub source_path: LegacyAppPathString,
     #[serde(default = "default_hook_source")]
     pub source: HookSource,
     pub display_order: i64,
@@ -126,7 +126,7 @@ impl From<CoreHookRunSummary> for HookRunSummary {
             handler_type: value.handler_type.into(),
             execution_mode: value.execution_mode.into(),
             scope: value.scope.into(),
-            source_path: value.source_path,
+            source_path: value.source_path.into(),
             source: value.source.into(),
             display_order: value.display_order,
             status: value.status.into(),

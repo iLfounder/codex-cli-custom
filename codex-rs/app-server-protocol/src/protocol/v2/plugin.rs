@@ -9,10 +9,9 @@ use codex_protocol::protocol::SkillInterface as CoreSkillInterface;
 use codex_protocol::protocol::SkillMetadata as CoreSkillMetadata;
 use codex_protocol::protocol::SkillScope as CoreSkillScope;
 use codex_protocol::protocol::SkillToolDependency as CoreSkillToolDependency;
-use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
 use serde::Deserialize;
 use serde::Serialize;
-use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
@@ -24,7 +23,7 @@ pub struct SkillsListParams {
 
     /// When empty, defaults to the current session working directory.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cwds: Vec<PathBuf>,
+    pub cwds: Vec<LegacyAppPathString>,
 
     /// When true, bypass the skills cache and re-scan skills from disk.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -42,7 +41,7 @@ pub struct SkillsListResponse {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct SkillsExtraRootsSetParams {
-    pub extra_roots: Vec<AbsolutePathBuf>,
+    pub extra_roots: Vec<LegacyAppPathString>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -56,7 +55,7 @@ pub struct SkillsExtraRootsSetResponse {}
 pub struct HooksListParams {
     /// When empty, defaults to the current session working directory.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cwds: Vec<PathBuf>,
+    pub cwds: Vec<LegacyAppPathString>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -74,7 +73,7 @@ pub struct MarketplaceAddParams {
     #[ts(optional = nullable)]
     pub ref_name: Option<String>,
     #[ts(optional = nullable)]
-    pub sparse_paths: Option<Vec<String>>,
+    pub sparse_paths: Option<Vec<LegacyAppPathString>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -82,7 +81,7 @@ pub struct MarketplaceAddParams {
 #[ts(export_to = "v2/")]
 pub struct MarketplaceAddResponse {
     pub marketplace_name: String,
-    pub installed_root: AbsolutePathBuf,
+    pub installed_root: LegacyAppPathString,
     pub already_added: bool,
 }
 
@@ -98,7 +97,7 @@ pub struct MarketplaceRemoveParams {
 #[ts(export_to = "v2/")]
 pub struct MarketplaceRemoveResponse {
     pub marketplace_name: String,
-    pub installed_root: Option<AbsolutePathBuf>,
+    pub installed_root: Option<LegacyAppPathString>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -114,7 +113,7 @@ pub struct MarketplaceUpgradeParams {
 #[ts(export_to = "v2/")]
 pub struct MarketplaceUpgradeResponse {
     pub selected_marketplaces: Vec<String>,
-    pub upgraded_roots: Vec<AbsolutePathBuf>,
+    pub upgraded_roots: Vec<LegacyAppPathString>,
     pub errors: Vec<MarketplaceUpgradeErrorInfo>,
 }
 
@@ -133,7 +132,7 @@ pub struct PluginListParams {
     /// Optional working directories used to discover repo marketplaces. When omitted,
     /// only home-scoped marketplaces and the official curated marketplace are considered.
     #[ts(optional = nullable)]
-    pub cwds: Option<Vec<AbsolutePathBuf>>,
+    pub cwds: Option<Vec<LegacyAppPathString>>,
     /// Optional marketplace kind filter. When omitted, only local marketplaces are queried, plus
     /// the default remote catalog when enabled by feature flag.
     #[ts(optional = nullable)]
@@ -149,7 +148,7 @@ pub struct PluginListParams {
 pub struct PluginInstalledParams {
     /// Optional working directories used to discover repo marketplaces.
     #[ts(optional = nullable)]
-    pub cwds: Option<Vec<AbsolutePathBuf>>,
+    pub cwds: Option<Vec<LegacyAppPathString>>,
     /// Additional uninstalled plugin names that should be returned when present locally.
     /// This is used by mention surfaces that intentionally expose install entrypoints.
     #[ts(optional = nullable)]
@@ -244,7 +243,7 @@ pub struct PluginReconcileChangedPlugin {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct MarketplaceLoadErrorInfo {
-    pub marketplace_path: AbsolutePathBuf,
+    pub marketplace_path: LegacyAppPathString,
     pub message: String,
 }
 
@@ -253,7 +252,7 @@ pub struct MarketplaceLoadErrorInfo {
 #[ts(export_to = "v2/")]
 pub struct PluginReadParams {
     #[ts(optional = nullable)]
-    pub marketplace_path: Option<AbsolutePathBuf>,
+    pub marketplace_path: Option<LegacyAppPathString>,
     #[ts(optional = nullable)]
     pub remote_marketplace_name: Option<String>,
     pub plugin_name: String,
@@ -286,7 +285,7 @@ pub struct PluginSkillReadResponse {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct PluginShareSaveParams {
-    pub plugin_path: AbsolutePathBuf,
+    pub plugin_path: LegacyAppPathString,
     #[ts(optional = nullable)]
     pub remote_plugin_id: Option<String>,
     #[ts(optional = nullable)]
@@ -348,9 +347,9 @@ pub struct PluginShareCheckoutResponse {
     pub remote_plugin_id: String,
     pub plugin_id: String,
     pub plugin_name: String,
-    pub plugin_path: AbsolutePathBuf,
+    pub plugin_path: LegacyAppPathString,
     pub marketplace_name: String,
-    pub marketplace_path: AbsolutePathBuf,
+    pub marketplace_path: LegacyAppPathString,
     pub remote_version: Option<String>,
 }
 
@@ -371,7 +370,7 @@ pub struct PluginShareDeleteResponse {}
 #[ts(export_to = "v2/")]
 pub struct PluginShareListItem {
     pub plugin: PluginSummary,
-    pub local_plugin_path: Option<AbsolutePathBuf>,
+    pub local_plugin_path: Option<LegacyAppPathString>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
@@ -481,7 +480,7 @@ pub struct SkillMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub dependencies: Option<SkillDependencies>,
-    pub path: AbsolutePathBuf,
+    pub path: LegacyAppPathString,
     pub scope: SkillScope,
     pub enabled: bool,
     /// Owning plugin ID, matching `PluginSummary.id`, when known.
@@ -497,9 +496,9 @@ pub struct SkillInterface {
     #[ts(optional)]
     pub short_description: Option<String>,
     #[ts(optional)]
-    pub icon_small: Option<AbsolutePathBuf>,
+    pub icon_small: Option<LegacyAppPathString>,
     #[ts(optional)]
-    pub icon_large: Option<AbsolutePathBuf>,
+    pub icon_large: Option<LegacyAppPathString>,
     /// Remote small icon URL from the plugin catalog.
     pub icon_small_url: Option<String>,
     /// Remote large icon URL from the plugin catalog.
@@ -543,7 +542,7 @@ pub struct SkillToolDependency {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct SkillErrorInfo {
-    pub path: PathBuf,
+    pub path: LegacyAppPathString,
     pub message: String,
 }
 
@@ -551,7 +550,7 @@ pub struct SkillErrorInfo {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct SkillsListEntry {
-    pub cwd: PathBuf,
+    pub cwd: LegacyAppPathString,
     pub skills: Vec<SkillMetadata>,
     pub errors: Vec<SkillErrorInfo>,
 }
@@ -560,7 +559,7 @@ pub struct SkillsListEntry {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct HooksListEntry {
-    pub cwd: PathBuf,
+    pub cwd: LegacyAppPathString,
     pub hooks: Vec<HookMetadata>,
     pub warnings: Vec<String>,
     pub errors: Vec<HookErrorInfo>,
@@ -597,7 +596,7 @@ pub struct HookMetadata {
     /// Configured `additionalContext` spill threshold.
     /// `null` uses 2,500 tokens; `0` disables spilling.
     pub additional_context_limit: Option<usize>,
-    pub source_path: AbsolutePathBuf,
+    pub source_path: LegacyAppPathString,
     pub source: HookSource,
     pub plugin_id: Option<String>,
     pub display_order: i64,
@@ -611,7 +610,7 @@ pub struct HookMetadata {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct HookErrorInfo {
-    pub path: PathBuf,
+    pub path: LegacyAppPathString,
     pub message: String,
 }
 
@@ -622,7 +621,7 @@ pub struct PluginMarketplaceEntry {
     pub name: String,
     /// Local marketplace file path when the marketplace is backed by a local file.
     /// Remote-only catalog marketplaces do not have a local path.
-    pub path: Option<AbsolutePathBuf>,
+    pub path: Option<LegacyAppPathString>,
     pub interface: Option<MarketplaceInterface>,
     pub plugins: Vec<PluginSummary>,
 }
@@ -760,7 +759,7 @@ pub struct PluginShareContext {
 #[ts(export_to = "v2/")]
 pub struct PluginDetail {
     pub marketplace_name: String,
-    pub marketplace_path: Option<AbsolutePathBuf>,
+    pub marketplace_path: Option<LegacyAppPathString>,
     pub summary: PluginSummary,
     pub share_url: Option<String>,
     pub description: Option<String>,
@@ -859,7 +858,7 @@ pub struct SkillSummary {
     pub description: String,
     pub short_description: Option<String>,
     pub interface: Option<SkillInterface>,
-    pub path: Option<AbsolutePathBuf>,
+    pub path: Option<LegacyAppPathString>,
     pub enabled: bool,
 }
 
@@ -881,19 +880,19 @@ pub struct PluginInterface {
     pub default_prompt: Option<Vec<String>>,
     pub brand_color: Option<String>,
     /// Local composer icon path, resolved from the installed plugin package.
-    pub composer_icon: Option<AbsolutePathBuf>,
+    pub composer_icon: Option<LegacyAppPathString>,
     /// Remote composer icon URL from the plugin catalog.
     pub composer_icon_url: Option<String>,
     /// Local logo path, resolved from the installed plugin package.
-    pub logo: Option<AbsolutePathBuf>,
+    pub logo: Option<LegacyAppPathString>,
     /// Local dark-mode logo path, resolved from the installed plugin package.
-    pub logo_dark: Option<AbsolutePathBuf>,
+    pub logo_dark: Option<LegacyAppPathString>,
     /// Remote logo URL from the plugin catalog.
     pub logo_url: Option<String>,
     /// Remote dark-mode logo URL from the plugin catalog.
     pub logo_url_dark: Option<String>,
     /// Local screenshot paths, resolved from the installed plugin package.
-    pub screenshots: Vec<AbsolutePathBuf>,
+    pub screenshots: Vec<LegacyAppPathString>,
     /// Remote screenshot URLs from the plugin catalog.
     pub screenshot_urls: Vec<String>,
 }
@@ -905,12 +904,12 @@ pub struct PluginInterface {
 pub enum PluginSource {
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
-    Local { path: AbsolutePathBuf },
+    Local { path: LegacyAppPathString },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
     Git {
         url: String,
-        path: Option<String>,
+        path: Option<LegacyAppPathString>,
         ref_name: Option<String>,
         sha: Option<String>,
     },
@@ -934,7 +933,7 @@ pub enum PluginSource {
 pub struct SkillsConfigWriteParams {
     /// Path-based selector.
     #[ts(optional = nullable)]
-    pub path: Option<AbsolutePathBuf>,
+    pub path: Option<LegacyAppPathString>,
     /// Name-based selector.
     #[ts(optional = nullable)]
     pub name: Option<String>,
@@ -953,7 +952,7 @@ pub struct SkillsConfigWriteResponse {
 #[ts(export_to = "v2/")]
 pub struct PluginInstallParams {
     #[ts(optional = nullable)]
-    pub marketplace_path: Option<AbsolutePathBuf>,
+    pub marketplace_path: Option<LegacyAppPathString>,
     #[ts(optional = nullable)]
     pub remote_marketplace_name: Option<String>,
     /// Client-generated identifier used to correlate one installation attempt.
@@ -990,7 +989,7 @@ impl From<CoreSkillMetadata> for SkillMetadata {
             short_description: value.short_description,
             interface: value.interface.map(SkillInterface::from),
             dependencies: value.dependencies.map(SkillDependencies::from),
-            path: value.path,
+            path: LegacyAppPathString::from_path(&value.path),
             scope: value.scope.into(),
             enabled: true,
             plugin_id: None,
@@ -1005,8 +1004,14 @@ impl From<CoreSkillInterface> for SkillInterface {
             short_description: value.short_description,
             brand_color: value.brand_color,
             default_prompt: value.default_prompt,
-            icon_small: value.icon_small,
-            icon_large: value.icon_large,
+            icon_small: value
+                .icon_small
+                .as_deref()
+                .map(LegacyAppPathString::from_path),
+            icon_large: value
+                .icon_large
+                .as_deref()
+                .map(LegacyAppPathString::from_path),
             icon_small_url: None,
             icon_large_url: None,
         }

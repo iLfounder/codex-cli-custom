@@ -367,11 +367,9 @@ async fn auto_recap_opt_out_blocks_requests_and_cleans_up_pending_start() -> Res
 #[tokio::test]
 async fn recap_generation_uses_remote_workspace_cwd() -> Result<()> {
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
-    let remote_cwd = if cfg!(windows) {
-        PathBuf::from(r"C:\remote\project")
-    } else {
-        PathBuf::from("/srv/remote/project")
-    };
+    let remote_cwd = codex_utils_path_uri::LegacyAppPathString::from_abs_path(
+        &test_path_buf("/srv/remote/project").abs(),
+    );
     let (app_server, requests, proxy) = start_recording_remote_app_server(&app.config).await?;
     let mut app_server = app_server.with_remote_cwd_override(Some(remote_cwd.clone()));
     let mut tui = crate::tui::test_support::make_test_tui()?;
@@ -392,7 +390,7 @@ async fn recap_generation_uses_remote_workspace_cwd() -> Result<()> {
 
     let starts = recorded_params(&requests, "thread/start");
     assert_eq!(starts.len(), 1);
-    assert_eq!(starts[0]["cwd"], remote_cwd.to_string_lossy().into_owned());
+    assert_eq!(starts[0]["cwd"], remote_cwd.as_str());
     assert_eq!(starts[0]["ephemeral"], true);
     assert_eq!(starts[0]["environments"], serde_json::json!([]));
 
@@ -417,7 +415,7 @@ async fn temporary_recap_threads_disable_memories_and_remote_mcp_servers() -> Re
     let options = crate::temporary_structured_request::TemporaryStructuredThreadOptions {
         model: app.chat_widget.current_model().to_string(),
         model_provider: config.model_provider_id.clone(),
-        cwd: config.cwd.display().to_string(),
+        cwd: config.cwd.clone().into(),
         active_permission_profile: config
             .permissions
             .active_permission_profile()

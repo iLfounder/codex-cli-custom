@@ -15,11 +15,11 @@ use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::ThreadSortKey;
 use codex_protocol::ThreadId;
+use codex_utils_path_uri::LegacyAppPathString;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
 use pretty_assertions::assert_eq;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -175,12 +175,13 @@ fn archived_status_preserves_directory_filter_and_hides_archive_shortcut() {
                 .push((request.status, request.cwd_filter));
         }
     });
+    let cwd_filter = LegacyAppPathString::from_string("/tmp/project");
     let mut state = PickerState::new(
         FrameRequester::test_dummy(),
         picker_loader,
         ProviderFilter::Any,
         /*show_all*/ false,
-        Some(PathBuf::from("/tmp/project")),
+        Some(cwd_filter.clone()),
         SessionPickerAction::Resume,
     );
 
@@ -189,7 +190,7 @@ fn archived_status_preserves_directory_filter_and_hides_archive_shortcut() {
     assert_eq!(state.status, SessionStatus::Archived);
     let params = super::super::thread_list_params(
         /*cursor*/ None,
-        Some(std::path::Path::new("/tmp/project")),
+        Some(&cwd_filter),
         SessionStatus::Archived,
         ProviderFilter::Any,
         ThreadSortKey::UpdatedAt,
@@ -219,7 +220,7 @@ fn archived_status_preserves_directory_filter_and_hides_archive_shortcut() {
     assert_eq!(
         *requested_filters.lock().unwrap(),
         vec![
-            (SessionStatus::Archived, Some(PathBuf::from("/tmp/project")),),
+            (SessionStatus::Archived, Some(cwd_filter),),
             (SessionStatus::Archived, None),
         ]
     );

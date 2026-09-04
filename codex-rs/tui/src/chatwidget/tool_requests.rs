@@ -58,7 +58,7 @@ impl ChatWidget {
                 Some(auto_review_denials::action_summary(action))
             }
             GuardianAssessmentAction::ApplyPatch { files, .. } => Some(if files.len() == 1 {
-                format!("apply_patch touching {}", files[0].display())
+                format!("apply_patch touching {}", files[0].render_for_ui())
             } else {
                 format!("apply_patch touching {} files", files.len())
             }),
@@ -173,7 +173,7 @@ impl ChatWidget {
                     GuardianAssessmentAction::ApplyPatch { files, .. } => {
                         let files = files
                             .iter()
-                            .map(|path| path.display().to_string())
+                            .map(codex_utils_path_uri::LegacyAppPathString::render_for_ui)
                             .collect::<Vec<_>>();
                         history_cell::new_guardian_timed_out_patch_request(files)
                     }
@@ -223,7 +223,7 @@ impl ChatWidget {
                 GuardianAssessmentAction::ApplyPatch { files, .. } => {
                     let files = files
                         .iter()
-                        .map(|path| path.display().to_string())
+                        .map(codex_utils_path_uri::LegacyAppPathString::render_for_ui)
                         .collect::<Vec<_>>();
                     history_cell::new_guardian_denied_patch_request(files)
                 }
@@ -311,6 +311,7 @@ impl ChatWidget {
     pub(crate) fn handle_apply_patch_approval_now(&mut self, ev: ApplyPatchApprovalRequestEvent) {
         self.flush_answer_stream_with_separator();
 
+        let cwd = self.server_cwd();
         let changed_paths = ev.changes.keys().cloned().collect();
         let request = ApprovalRequest::ApplyPatch(ApplyPatchApprovalRequest {
             thread_id: self.thread_id.unwrap_or_default(),
@@ -318,7 +319,7 @@ impl ChatWidget {
             id: ev.call_id,
             reason: ev.reason,
             changes: ev.changes,
-            cwd: self.config.cwd.clone(),
+            cwd: cwd.clone(),
         });
         self.bottom_pane
             .push_approval_request(request, &self.config.features);
@@ -328,7 +329,7 @@ impl ChatWidget {
         );
         self.request_redraw();
         self.notify(Notification::EditApprovalRequested {
-            cwd: self.config.cwd.to_path_buf(),
+            cwd,
             changes: changed_paths,
         });
     }

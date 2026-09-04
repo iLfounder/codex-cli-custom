@@ -1,9 +1,9 @@
 use crate::JsonSchema;
 use crate::TS;
+use codex_utils_path_uri::LegacyAppPathString;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
@@ -17,7 +17,7 @@ pub struct FeedbackUploadParams {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_logs: bool,
     #[ts(optional = nullable)]
-    pub extra_log_files: Option<Vec<PathBuf>>,
+    pub extra_log_files: Option<Vec<LegacyAppPathString>>,
     #[ts(optional = nullable)]
     pub tags: Option<BTreeMap<String, String>>,
 }

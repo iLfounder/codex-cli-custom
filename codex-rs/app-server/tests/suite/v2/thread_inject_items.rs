@@ -136,8 +136,10 @@ async fn thread_inject_items_adds_raw_response_items_to_thread_history(
         Some("polluted")
     );
 
-    let rollout_path = thread.path.as_ref().context("thread path missing")?;
-    let history = RolloutRecorder::get_rollout_history(rollout_path).await?;
+    let rollout_path = codex_utils_absolute_path::AbsolutePathBuf::try_from(
+        thread.path.as_ref().context("thread path missing")?.clone(),
+    )?;
+    let history = RolloutRecorder::get_rollout_history(rollout_path.as_path()).await?;
     let InitialHistory::Resumed(resumed_history) = history else {
         panic!("expected resumed rollout history");
     };
@@ -208,7 +210,7 @@ async fn thread_inject_items_adds_raw_response_items_to_thread_history(
     .await??;
 
     let InitialHistory::Resumed(resumed_history) =
-        RolloutRecorder::get_rollout_history(rollout_path).await?
+        RolloutRecorder::get_rollout_history(rollout_path.as_path()).await?
     else {
         panic!("expected resumed rollout history");
     };
@@ -431,9 +433,11 @@ async fn thread_inject_items_adds_raw_response_items_after_a_turn() -> Result<()
     let _response: ThreadInjectItemsResponse =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(inject_req)).await??;
 
-    let rollout_path = thread.path.as_ref().context("thread path missing")?;
+    let rollout_path = codex_utils_absolute_path::AbsolutePathBuf::try_from(
+        thread.path.as_ref().context("thread path missing")?.clone(),
+    )?;
     let InitialHistory::Resumed(resumed_history) =
-        RolloutRecorder::get_rollout_history(rollout_path).await?
+        RolloutRecorder::get_rollout_history(rollout_path.as_path()).await?
     else {
         panic!("expected resumed rollout history");
     };

@@ -18,6 +18,7 @@ use codex_http_client::HttpClientFactory;
 use codex_login::ExternalAuthFuture;
 use codex_login::auth::ReadOnlyAuthRefresh;
 use serde::Deserialize;
+#[cfg(unix)]
 use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
@@ -429,11 +430,12 @@ impl TokenManagerLifecycle {
 
     // Consumed by the serial global lifecycle authority after this primitive lands.
     #[allow(dead_code)]
-    pub(crate) async fn commit(mut self) -> Result<(), CatalogError> {
+    pub(crate) async fn commit(self) -> Result<(), CatalogError> {
         tokio::task::spawn_blocking(move || {
             #[cfg(unix)]
             {
-                self.commit_sync()
+                let mut lifecycle = self;
+                lifecycle.commit_sync()
             }
             #[cfg(not(unix))]
             {

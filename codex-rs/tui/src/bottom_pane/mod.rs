@@ -3060,7 +3060,9 @@ mod tests {
                 short_description: None,
                 interface: None,
                 dependencies: None,
-                path: test_path_buf("/tmp/test-skill/SKILL.md").abs(),
+                path: codex_utils_path_uri::LegacyAppPathString::from_abs_path(
+                    &test_path_buf("/tmp/test-skill/SKILL.md").abs(),
+                ),
                 scope: crate::test_support::skill_scope_user(),
                 enabled: true,
                 plugin_id: None,

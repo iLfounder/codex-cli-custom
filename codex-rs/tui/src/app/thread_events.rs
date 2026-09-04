@@ -412,17 +412,19 @@ mod tests {
             service_tier: None,
             approval_policy: AskForApproval::Never,
             approvals_reviewer: ApprovalsReviewer::User,
-            permission_profile: PermissionProfile::read_only(),
+            execution_context: crate::session_state::SessionExecutionContext::native(
+                cwd.abs(),
+                Vec::new(),
+                PermissionProfile::read_only(),
+                Some(PathBuf::new()),
+            ),
             active_permission_profile: None,
-            cwd: cwd.abs(),
-            runtime_workspace_roots: Vec::new(),
             instruction_source_paths: Vec::new(),
             reasoning_effort: None,
             collaboration_mode: None,
             personality: None,
             message_history: None,
             network_proxy: None,
-            rollout_path: Some(PathBuf::new()),
         }
     }
 
@@ -474,7 +476,9 @@ mod tests {
                 handler_type: AppServerHookHandlerType::Command,
                 execution_mode: AppServerHookExecutionMode::Sync,
                 scope: AppServerHookScope::Turn,
-                source_path: test_path_buf("/tmp/hooks.json").abs(),
+                source_path: codex_utils_path_uri::LegacyAppPathString::from_abs_path(
+                    &test_path_buf("/tmp/hooks.json").abs(),
+                ),
                 source: codex_app_server_protocol::HookSource::User,
                 display_order: 0,
                 status: AppServerHookRunStatus::Running,
@@ -497,7 +501,9 @@ mod tests {
                 handler_type: AppServerHookHandlerType::Command,
                 execution_mode: AppServerHookExecutionMode::Sync,
                 scope: AppServerHookScope::Turn,
-                source_path: test_path_buf("/tmp/hooks.json").abs(),
+                source_path: codex_utils_path_uri::LegacyAppPathString::from_abs_path(
+                    &test_path_buf("/tmp/hooks.json").abs(),
+                ),
                 source: codex_app_server_protocol::HookSource::User,
                 display_order: 0,
                 status: AppServerHookRunStatus::Stopped,

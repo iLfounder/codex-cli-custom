@@ -2,6 +2,7 @@ mod thread_list_cwd_filter_tests {
     use super::super::normalize_thread_list_cwd_filters;
     use codex_app_server_protocol::ThreadListCwdFilter;
     use codex_utils_absolute_path::AbsolutePathBuf;
+    use codex_utils_path_uri::LegacyAppPathString;
     use pretty_assertions::assert_eq;
     use std::path::PathBuf;
 
@@ -14,8 +15,10 @@ mod thread_list_cwd_filter_tests {
         };
 
         assert_eq!(
-            normalize_thread_list_cwd_filters(Some(ThreadListCwdFilter::One(cwd.clone())))
-                .expect("cwd filter should parse"),
+            normalize_thread_list_cwd_filters(Some(ThreadListCwdFilter::One(
+                LegacyAppPathString::from_string(cwd.clone()),
+            )))
+            .expect("cwd filter should parse"),
             Some(vec![PathBuf::from(cwd)])
         );
     }
@@ -26,9 +29,9 @@ mod thread_list_cwd_filter_tests {
         let expected = AbsolutePathBuf::relative_to_current_dir("repo-b")?.to_path_buf();
 
         assert_eq!(
-            normalize_thread_list_cwd_filters(Some(ThreadListCwdFilter::Many(vec![String::from(
-                "repo-b"
-            ),])))
+            normalize_thread_list_cwd_filters(Some(ThreadListCwdFilter::Many(vec![
+                LegacyAppPathString::from_string("repo-b"),
+            ])))
             .expect("cwd filter should parse"),
             Some(vec![expected])
         );

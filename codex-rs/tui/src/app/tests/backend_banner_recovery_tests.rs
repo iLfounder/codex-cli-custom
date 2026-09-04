@@ -68,6 +68,18 @@ async fn backend_banner_limit_error_refreshes_again_after_intervening_rolling_ha
     app.config.codex_home = home.path().to_path_buf().abs();
     app.config.chatgpt_base_url = server.uri();
     app.config.sqlite = codex_state::SqliteConfig::new_for_testing(home.path().abs());
+    let mut session = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+    let started = session.start_thread(&app.config).await?;
+    let thread_id = started.session.thread_id;
+    app.enqueue_primary_thread_session(started.session, started.turns)
+        .await?;
+    let runtime =
+        crate::app_server_session::session_runtime_for_thread(session.request_handle(), thread_id)
+            .await?;
+    app.account_runtime = Some((runtime.instance_epoch, runtime.snapshot));
+    let subject = app
+        .current_rate_limit_request_subject()
+        .expect("loaded test subject");
     set_chatgpt_auth(&mut app.chat_widget);
     app.chat_widget.set_model("test-model-a");
     let mut healthy = response_with_banner();
@@ -100,7 +112,6 @@ async fn backend_banner_limit_error_refreshes_again_after_intervening_rolling_ha
         .expect(3)
         .mount(&server)
         .await;
-    let mut session = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
     let mut tui = crate::tui::test_support::make_test_tui()?;
     while events.try_recv().is_ok() {}
     app.chat_widget.handle_server_notification(
@@ -147,8 +158,8 @@ async fn backend_banner_limit_error_refreshes_again_after_intervening_rolling_ha
         codex_app_server_client::AppServerEvent::ServerNotification(Box::new(
             ServerNotification::AccountRateLimitsUpdated(
                 codex_app_server_protocol::AccountRateLimitsUpdatedNotification {
-                    thread_id: None,
-                    execution_account: None,
+                    thread_id: Some(subject.thread_id.to_string()),
+                    execution_account: subject.execution_account.clone(),
                     rate_limits: rolling.clone(),
                 },
             ),
@@ -178,8 +189,8 @@ async fn backend_banner_limit_error_refreshes_again_after_intervening_rolling_ha
         codex_app_server_client::AppServerEvent::ServerNotification(Box::new(
             ServerNotification::AccountRateLimitsUpdated(
                 codex_app_server_protocol::AccountRateLimitsUpdatedNotification {
-                    thread_id: None,
-                    execution_account: None,
+                    thread_id: Some(subject.thread_id.to_string()),
+                    execution_account: subject.execution_account.clone(),
                     rate_limits: rolling,
                 },
             ),

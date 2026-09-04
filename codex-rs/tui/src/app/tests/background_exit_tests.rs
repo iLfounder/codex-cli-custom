@@ -223,11 +223,19 @@ async fn exit_interrupts_before_requesting_shutdown() -> Result<()> {
     prepare_running_local_daemon(&mut app)?;
     app.chat_widget
         .set_feature_enabled(Feature::Goals, /*enabled*/ true);
-    let (mut app_server, mut tui) =
-        prepare_background_exit_test(&app, &mut app_event_rx, &mut op_rx).await?;
-    let started = app_server
-        .start_thread(app.chat_widget.config_ref())
-        .await?;
+    let cwd_dir = tempdir()?;
+    let cwd = cwd_dir.path().abs();
+    let mut server_config = app.chat_widget.config_ref().clone();
+    server_config.cwd = cwd.clone();
+    server_config.workspace_roots = vec![cwd.clone()];
+    server_config
+        .permissions
+        .set_workspace_roots(server_config.workspace_roots.clone());
+    while app_event_rx.try_recv().is_ok() {}
+    while op_rx.try_recv().is_ok() {}
+    let mut app_server = crate::start_embedded_app_server_for_picker(&server_config).await?;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let started = app_server.start_thread(&server_config).await?;
     let thread_id = started.session.thread_id;
     app.active_thread_id = Some(thread_id);
     app.chat_widget
@@ -255,10 +263,11 @@ async fn exit_interrupts_before_requesting_shutdown() -> Result<()> {
         ),
         /*replay_kind*/ None,
     );
+    let marker = cwd.join("turn-ready");
     let command = if cfg!(windows) {
-        "Start-Sleep -Seconds 30"
+        "Set-Content -LiteralPath turn-ready -Value ready; Start-Sleep -Seconds 30"
     } else {
-        "sleep 30"
+        ": > turn-ready; sleep 30"
     };
     app_server
         .thread_shell_command(thread_id, command.to_string())
@@ -275,6 +284,13 @@ async fn exit_interrupts_before_requesting_shutdown() -> Result<()> {
             break notification.turn.id.clone();
         }
     };
+    time::timeout(Duration::from_secs(/*secs*/ 5), async {
+        while !marker.exists() {
+            time::sleep(Duration::from_millis(/*millis*/ 10)).await;
+        }
+    })
+    .await
+    .expect("shell command should start in the test working directory");
     app.thread_event_channels.insert(
         thread_id,
         ThreadEventChannel::new_with_session(

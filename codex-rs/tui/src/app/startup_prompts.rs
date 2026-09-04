@@ -5,12 +5,12 @@
 
 use super::*;
 use codex_config::ConfigLayerSource;
+use codex_utils_path_uri::LegacyAppPathString;
 use std::collections::HashSet;
-use std::path::PathBuf;
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct SkillLoadWarningKey {
-    path: PathBuf,
+    path: LegacyAppPathString,
     message: String,
 }
 
@@ -58,7 +58,7 @@ pub(super) fn emit_skill_load_warnings(app_event_tx: &AppEventSender, errors: &[
     )));
 
     for error in errors {
-        let path = error.path.display();
+        let path = error.path.render_for_ui();
         let message = error.message.as_str();
         app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
             crate::history_cell::new_warning_event(format!("{path}: {message}")),
@@ -403,7 +403,7 @@ mod tests {
 
     fn skill_error(path: &str, message: &str) -> SkillErrorInfo {
         SkillErrorInfo {
-            path: PathBuf::from(path),
+            path: LegacyAppPathString::from_string(path),
             message: message.to_string(),
         }
     }

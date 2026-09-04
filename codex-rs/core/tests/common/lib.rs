@@ -132,9 +132,24 @@ pub fn create_directory_symlink(source: &Path, link: &Path) {
 #[cfg(windows)]
 #[allow(clippy::expect_used)]
 pub fn create_directory_symlink(source: &Path, link: &Path) {
-    // Running this test locally may require Windows Developer Mode or an elevated process.
-    std::os::windows::fs::symlink_dir(source, link)
-        .expect("create directory symlink; enable Developer Mode or run the test elevated");
+    if let Err(err) = std::os::windows::fs::symlink_dir(source, link) {
+        assert_eq!(
+            err.raw_os_error(),
+            Some(1314),
+            "create directory symlink: {err}"
+        );
+        let output = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(source)
+            .output()
+            .expect("run mklink /J fallback");
+        assert!(
+            output.status.success(),
+            "create directory junction fallback: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 pub trait TempDirExt {

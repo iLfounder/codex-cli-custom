@@ -1,6 +1,6 @@
 use crate::JsonSchema;
 use crate::TS;
-use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -34,7 +34,7 @@ pub struct ProcessSpawnParams {
     /// handle can be reused after the prior process exits.
     pub process_handle: String,
     /// Absolute working directory for the process.
-    pub cwd: AbsolutePathBuf,
+    pub cwd: LegacyAppPathString,
     /// Enable PTY mode.
     ///
     /// This implies `streamStdin` and `streamStdoutStderr`.

@@ -1,6 +1,6 @@
 use crate::JsonSchema;
 use crate::TS;
-use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -8,7 +8,7 @@ use serde::Serialize;
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct WindowsWorldWritableWarningNotification {
-    pub sample_paths: Vec<String>,
+    pub sample_paths: Vec<LegacyAppPathString>,
     pub extra_count: usize,
     pub failed_scan: bool,
 }
@@ -36,7 +36,7 @@ pub enum WindowsSandboxReadiness {
 pub struct WindowsSandboxSetupStartParams {
     pub mode: WindowsSandboxSetupMode,
     #[ts(optional = nullable)]
-    pub cwd: Option<AbsolutePathBuf>,
+    pub cwd: Option<LegacyAppPathString>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

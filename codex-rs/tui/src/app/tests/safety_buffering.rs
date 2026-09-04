@@ -557,11 +557,12 @@ goals = true
         let source = app_server
             .thread_read(source_thread_id, /*include_turns*/ true)
             .await?;
-        std::fs::remove_file(
-            source
-                .path
-                .expect("source thread should have a rollout path"),
-        )?;
+        let rollout_path = source
+            .path
+            .expect("source thread should have a rollout path")
+            .to_inferred_abs_path()
+            .expect("source rollout path should be host-native");
+        std::fs::remove_file(rollout_path)?;
     }
 
     let primary_thread_id = ThreadId::new();

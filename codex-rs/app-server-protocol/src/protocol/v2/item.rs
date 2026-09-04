@@ -16,7 +16,7 @@ use crate::protocol::item_builders::review_output_text;
 use codex_experimental_api_macros::ExperimentalApi;
 use codex_extension_items::ExtensionItem;
 pub use codex_extension_items::image_generation::ImageGenerationFailure;
-pub use codex_extension_items::image_generation::ImageGenerationItem;
+use codex_extension_items::image_generation::ImageGenerationItem as ExtensionImageGenerationItem;
 pub use codex_extension_items::sleep::SleepItem;
 pub use codex_extension_items::web_search::WebSearchAction;
 pub use codex_extension_items::web_search::WebSearchItem;
@@ -57,6 +57,43 @@ use serde_with::serde_as;
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
+
+#[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub struct ImageGenerationItem {
+    pub id: String,
+    pub status: String,
+    pub revised_prompt: Option<String>,
+    pub result: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub transparent_background: Option<bool>,
+    #[serde(default)]
+    pub failure: Option<ImageGenerationFailure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub saved_path: Option<LegacyAppPathString>,
+    #[serde(skip)]
+    #[schemars(skip)]
+    #[ts(skip)]
+    pub imagegen_request_id: Option<String>,
+}
+
+impl From<ExtensionImageGenerationItem> for ImageGenerationItem {
+    fn from(value: ExtensionImageGenerationItem) -> Self {
+        Self {
+            id: value.id,
+            status: value.status,
+            revised_prompt: value.revised_prompt,
+            result: value.result,
+            transparent_background: value.transparent_background,
+            failure: value.failure,
+            saved_path: value.saved_path.map(Into::into),
+            imagegen_request_id: value.imagegen_request_id,
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
@@ -133,12 +170,12 @@ pub enum CommandAction {
     },
     ListFiles {
         command: String,
-        path: Option<String>,
+        path: Option<LegacyAppPathString>,
     },
     Search {
         command: String,
         query: Option<String>,
-        path: Option<String>,
+        path: Option<LegacyAppPathString>,
     },
     Unknown {
         command: String,
@@ -166,7 +203,7 @@ impl From<CoreMemoryCitation> for MemoryCitation {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct MemoryCitationEntry {
-    pub path: String,
+    pub path: LegacyAppPathString,
     pub line_start: u32,
     pub line_end: u32,
     pub note: String,
@@ -175,7 +212,7 @@ pub struct MemoryCitationEntry {
 impl From<CoreMemoryCitationEntry> for MemoryCitationEntry {
     fn from(value: CoreMemoryCitationEntry) -> Self {
         Self {
-            path: value.path,
+            path: LegacyAppPathString::from_string(value.path),
             line_start: value.line_start,
             line_end: value.line_end,
             note: value.note,
@@ -195,14 +232,19 @@ impl CommandAction {
                 name,
                 path: PathBuf::from(path.into_string()),
             },
-            CommandAction::ListFiles { command: cmd, path } => {
-                CoreParsedCommand::ListFiles { cmd, path }
-            }
+            CommandAction::ListFiles { command: cmd, path } => CoreParsedCommand::ListFiles {
+                cmd,
+                path: path.map(LegacyAppPathString::into_string),
+            },
             CommandAction::Search {
                 command: cmd,
                 query,
                 path,
-            } => CoreParsedCommand::Search { cmd, query, path },
+            } => CoreParsedCommand::Search {
+                cmd,
+                query,
+                path: path.map(LegacyAppPathString::into_string),
+            },
             CommandAction::Unknown { command: cmd } => CoreParsedCommand::Unknown { cmd },
         }
     }
@@ -214,13 +256,14 @@ impl CommandAction {
                 name,
                 path: cwd.join(path).into(),
             },
-            CoreParsedCommand::ListFiles { cmd, path } => {
-                CommandAction::ListFiles { command: cmd, path }
-            }
+            CoreParsedCommand::ListFiles { cmd, path } => CommandAction::ListFiles {
+                command: cmd,
+                path: path.map(LegacyAppPathString::from_string),
+            },
             CoreParsedCommand::Search { cmd, query, path } => CommandAction::Search {
                 command: cmd,
                 query,
-                path,
+                path: path.map(LegacyAppPathString::from_string),
             },
             CoreParsedCommand::Unknown { cmd } => CommandAction::Unknown { command: cmd },
         }
@@ -579,7 +622,7 @@ impl From<GuardianCommandSource> for CoreGuardianCommandSource {
 pub struct GuardianCommandReviewAction {
     pub source: GuardianCommandSource,
     pub command: String,
-    pub cwd: AbsolutePathBuf,
+    pub cwd: LegacyAppPathString,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -589,15 +632,15 @@ pub struct GuardianExecveReviewAction {
     pub source: GuardianCommandSource,
     pub program: String,
     pub argv: Vec<String>,
-    pub cwd: AbsolutePathBuf,
+    pub cwd: LegacyAppPathString,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct GuardianApplyPatchReviewAction {
-    pub cwd: AbsolutePathBuf,
-    pub files: Vec<AbsolutePathBuf>,
+    pub cwd: LegacyAppPathString,
+    pub files: Vec<LegacyAppPathString>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -639,7 +682,7 @@ pub enum GuardianApprovalReviewAction {
     Command {
         source: GuardianCommandSource,
         command: String,
-        cwd: AbsolutePathBuf,
+        cwd: LegacyAppPathString,
     },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
@@ -647,7 +690,7 @@ pub enum GuardianApprovalReviewAction {
         source: GuardianCommandSource,
         program: String,
         argv: Vec<String>,
-        cwd: AbsolutePathBuf,
+        cwd: LegacyAppPathString,
     },
     /// A child approval for input to an existing command execution item.
     #[serde(rename_all = "camelCase")]
@@ -661,8 +704,8 @@ pub enum GuardianApprovalReviewAction {
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
     ApplyPatch {
-        cwd: AbsolutePathBuf,
-        files: Vec<AbsolutePathBuf>,
+        cwd: LegacyAppPathString,
+        files: Vec<LegacyAppPathString>,
     },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
@@ -980,7 +1023,7 @@ impl From<CoreTurnItem> for ThreadItem {
                 path: image.path.into(),
             },
             CoreTurnItem::Extension(extension) => match extension {
-                ExtensionItem::ImageGeneration(item) => ThreadItem::ImageGeneration(item),
+                ExtensionItem::ImageGeneration(item) => ThreadItem::ImageGeneration(item.into()),
                 ExtensionItem::Sleep(item) => ThreadItem::Sleep(item),
                 ExtensionItem::WebSearch(item) => ThreadItem::WebSearch(item),
             },
@@ -992,7 +1035,7 @@ impl From<CoreTurnItem> for ThreadItem {
                     result: image.result,
                     transparent_background: None,
                     failure: None,
-                    saved_path: image.saved_path,
+                    saved_path: image.saved_path.map(Into::into),
                     imagegen_request_id: None,
                 })
             }
@@ -1122,7 +1165,7 @@ pub enum CollabAgentTool {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct FileUpdateChange {
-    pub path: String,
+    pub path: LegacyAppPathString,
     pub kind: PatchChangeKind,
     pub diff: String,
 }
@@ -1134,7 +1177,9 @@ pub struct FileUpdateChange {
 pub enum PatchChangeKind {
     Add,
     Delete,
-    Update { move_path: Option<PathBuf> },
+    Update {
+        move_path: Option<LegacyAppPathString>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -1626,7 +1671,7 @@ pub struct FileChangeRequestApprovalParams {
     /// [UNSTABLE] When set, the agent is asking the user to allow writes under this root
     /// for the remainder of the session (unclear if this is honored today).
     #[ts(optional = nullable)]
-    pub grant_root: Option<PathBuf>,
+    pub grant_root: Option<LegacyAppPathString>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

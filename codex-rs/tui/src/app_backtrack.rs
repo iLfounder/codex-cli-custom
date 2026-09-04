@@ -682,7 +682,6 @@ mod tests {
     use codex_app_server_protocol::UserInput;
     use pretty_assertions::assert_eq;
     use ratatui::prelude::Line;
-    use std::path::PathBuf;
     use std::sync::Arc;
 
     fn render_lines(lines: &[Line<'static>]) -> Vec<String> {
@@ -945,15 +944,21 @@ mod tests {
                 },
                 UserInput::Skill {
                     name: "skill".to_string(),
-                    path: PathBuf::from("/tmp/skills/skill/SKILL.md"),
+                    path: codex_utils_path_uri::LegacyAppPathString::from_string(
+                        "/tmp/skills/skill/SKILL.md",
+                    ),
                 },
                 UserInput::Mention {
                     name: "Sample Plugin".to_string(),
-                    path: "plugin://sample@test".to_string(),
+                    path: codex_utils_path_uri::LegacyAppPathString::from_string(
+                        "plugin://sample@test",
+                    ),
                 },
                 UserInput::Mention {
                     name: "Google Calendar".to_string(),
-                    path: "app://google_calendar".to_string(),
+                    path: codex_utils_path_uri::LegacyAppPathString::from_string(
+                        "app://google_calendar",
+                    ),
                 },
             ],
         }];

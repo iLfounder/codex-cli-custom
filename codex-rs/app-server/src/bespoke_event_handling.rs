@@ -674,7 +674,10 @@ pub(crate) async fn apply_bespoke_event_handling(
                 item_id: item_id.clone(),
                 started_at_ms: event.started_at_ms,
                 reason: event.reason.clone(),
-                grant_root: event.grant_root.clone(),
+                grant_root: event
+                    .grant_root
+                    .as_deref()
+                    .map(LegacyAppPathString::from_path),
             };
             let (pending_request_id, rx) = outgoing
                 .send_request(ServerRequestPayload::FileChangeRequestApproval(params))
@@ -965,7 +968,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 item_id: request.call_id.clone(),
                 environment_id: request.environment_id.clone(),
                 started_at_ms: request.started_at_ms,
-                cwd: request_cwd,
+                cwd: request_cwd.clone().into(),
                 reason: request.reason,
                 permissions: request.permissions.into(),
             };
@@ -2584,7 +2587,7 @@ mod tests {
         let action = codex_protocol::protocol::GuardianAssessmentAction::Command {
             source: codex_protocol::protocol::GuardianCommandSource::Shell,
             command: "rm -rf /tmp/example.sqlite".to_string(),
-            cwd: test_path_buf("/tmp").abs(),
+            cwd: test_path_buf("/tmp").abs().into(),
         };
         let notification = guardian_auto_approval_review_notification(
             &conversation_id,
@@ -2632,7 +2635,7 @@ mod tests {
         let action = codex_protocol::protocol::GuardianAssessmentAction::Command {
             source: codex_protocol::protocol::GuardianCommandSource::Shell,
             command: "rm -rf /tmp/example.sqlite".to_string(),
-            cwd: test_path_buf("/tmp").abs(),
+            cwd: test_path_buf("/tmp").abs().into(),
         };
         let notification = guardian_auto_approval_review_notification(
             &conversation_id,

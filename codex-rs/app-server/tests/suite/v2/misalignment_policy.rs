@@ -246,13 +246,12 @@ async fn assert_policy_violation_completes_turn_with_typed_terminal_error(
     );
     response_mock.single_request();
 
-    let rollout = tokio::fs::read_to_string(
+    let rollout_path = codex_utils_absolute_path::AbsolutePathBuf::try_from(
         thread
             .path
-            .as_ref()
             .expect("non-ephemeral thread should have a rollout path"),
-    )
-    .await?;
+    )?;
+    let rollout = tokio::fs::read_to_string(rollout_path.as_path()).await?;
     assert!(!rollout.contains(EXPLANATION));
     assert!(!rollout.contains(STEER));
 

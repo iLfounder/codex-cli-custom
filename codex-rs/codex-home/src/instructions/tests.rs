@@ -35,21 +35,27 @@ fn expected(
 }
 
 #[cfg(unix)]
-fn create_symlink_loop(path: &Path) {
+fn make_override_unreadable(path: &Path) -> Option<fs::File> {
     std::os::unix::fs::symlink(
         path.file_name().expect("override path should have a name"),
         path,
     )
     .expect("create symlink loop");
+    None
 }
 
 #[cfg(windows)]
-fn create_symlink_loop(path: &Path) {
-    std::os::windows::fs::symlink_file(
-        path.file_name().expect("override path should have a name"),
-        path,
+fn make_override_unreadable(path: &Path) -> Option<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    fs::write(path, "locked override").expect("write override");
+    Some(
+        fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(path)
+            .expect("lock override against concurrent reads"),
     )
-    .expect("create symlink loop");
 }
 
 #[tokio::test]
@@ -111,9 +117,9 @@ async fn directory_override_falls_back_to_default() {
 async fn recoverable_override_read_error_warns_and_falls_back_to_default() {
     let home = TempDir::new().expect("temp dir");
     let override_path = home.path().join(LOCAL_AGENTS_MD_FILENAME);
-    create_symlink_loop(&override_path);
+    let _unreadable_guard = make_override_unreadable(&override_path);
     fs::write(home.path().join(DEFAULT_AGENTS_MD_FILENAME), "default").expect("write default");
-    let read_error = fs::read(&override_path).expect_err("symlink loop should not be readable");
+    let read_error = fs::read(&override_path).expect_err("override should not be readable");
     let warning = format!(
         "Failed to read global AGENTS.md instructions from `{}`: {read_error}",
         override_path.display()

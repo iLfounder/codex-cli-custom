@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::Path;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -45,7 +44,7 @@ use codex_core_plugins::remote::REMOTE_WORKSPACE_MARKETPLACE_NAME;
 use codex_core_plugins::remote::REMOTE_WORKSPACE_SHARED_WITH_ME_MARKETPLACE_NAME;
 use codex_core_plugins::remote::REMOTE_WORKSPACE_SHARED_WITH_ME_PRIVATE_MARKETPLACE_NAME;
 use codex_core_plugins::remote::REMOTE_WORKSPACE_SHARED_WITH_ME_UNLISTED_MARKETPLACE_NAME;
-use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
 use crossterm::event::KeyCode;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -78,7 +77,7 @@ const OTHER_MARKETPLACE_TAB_ORDER: u8 = 4;
 
 #[derive(Debug, Clone)]
 struct PreferredLocalPluginSource {
-    marketplace_path: AbsolutePathBuf,
+    marketplace_path: LegacyAppPathString,
     plugin_name: String,
     installed: bool,
     install_policy: PluginInstallPolicy,
@@ -101,7 +100,7 @@ impl MarketplaceProduct {
 
     fn from_marketplace_parts(
         marketplace_name: &str,
-        marketplace_path: Option<&AbsolutePathBuf>,
+        marketplace_path: Option<&LegacyAppPathString>,
     ) -> Self {
         if marketplace_path.is_some_and(is_personal_marketplace_path) {
             return Self::Local;
@@ -1598,13 +1597,15 @@ fn sort_plugin_entries(entries: &mut [(&PluginMarketplaceEntry, &PluginSummary, 
 
 pub(super) fn marketplace_tab_id(marketplace: &PluginMarketplaceEntry) -> String {
     match marketplace.path.as_ref() {
-        Some(path) => marketplace_tab_id_from_path(path.as_path()),
+        Some(path) => marketplace_tab_id_from_server_path(path),
         None => format!("marketplace:{}", marketplace.name),
     }
 }
 
-pub(super) fn marketplace_tab_id_from_path(path: &Path) -> String {
-    format!("{MARKETPLACE_TAB_ID_PREFIX}{}", path.display())
+pub(super) fn marketplace_tab_id_from_server_path(
+    path: &codex_utils_path_uri::LegacyAppPathString,
+) -> String {
+    format!("{MARKETPLACE_TAB_ID_PREFIX}{}", path.render_for_ui())
 }
 
 pub(super) fn marketplace_tab_id_matching_saved_id(
@@ -1626,12 +1627,11 @@ pub(super) fn marketplace_tab_id_matching_saved_id(
     if root.is_empty() {
         return None;
     }
-    let root = Path::new(root);
     marketplaces.iter().find_map(|marketplace| {
         marketplace
             .path
             .as_ref()
-            .is_some_and(|path| path.as_path().starts_with(root))
+            .is_some_and(|path| path.render_for_ui().starts_with(root))
             .then(|| marketplace_tab_id(marketplace))
     })
 }
@@ -1699,12 +1699,10 @@ pub(super) fn merge_remote_marketplaces(
     response.marketplaces.extend(remote_marketplaces);
 }
 
-fn is_personal_marketplace_path(marketplace_path: &AbsolutePathBuf) -> bool {
+fn is_personal_marketplace_path(marketplace_path: &LegacyAppPathString) -> bool {
     dirs::home_dir()
-        .and_then(|home| {
-            AbsolutePathBuf::try_from(home.join(PERSONAL_MARKETPLACE_RELATIVE_PATH)).ok()
-        })
-        .is_some_and(|personal_path| personal_path.as_path() == marketplace_path.as_path())
+        .map(|home| LegacyAppPathString::from_path(&home.join(PERSONAL_MARKETPLACE_RELATIVE_PATH)))
+        .is_some_and(|personal_path| &personal_path == marketplace_path)
 }
 
 fn remote_section_loading_item(label: &str, description: &str) -> SelectionItem {

@@ -186,7 +186,9 @@ async fn thread_settings_update_cwd_retargets_default_environment() -> Result<()
         .await?;
     let request_id = mcp
         .send_thread_start_request(ThreadStartParams {
-            cwd: Some(initial_workspace.path().to_string_lossy().into_owned()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                initial_workspace.path(),
+            )),
             model: Some("mock-model".to_string()),
             ..Default::default()
         })
@@ -198,13 +200,18 @@ async fn thread_settings_update_cwd_retargets_default_environment() -> Result<()
         &mut mcp,
         ThreadSettingsUpdateParams {
             thread_id: thread.id.clone(),
-            cwd: Some(workspace.path().to_path_buf()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                workspace.path(),
+            )),
             ..Default::default()
         },
     )
     .await?;
     let updated = read_thread_settings_updated(&mut mcp).await?;
-    assert_eq!(updated.thread_settings.cwd.as_path(), workspace.path());
+    assert_eq!(
+        updated.thread_settings.cwd,
+        codex_utils_path_uri::LegacyAppPathString::from_path(workspace.path())
+    );
 
     start_text_turn(&mut mcp, thread.id).await?;
     timeout(

@@ -586,7 +586,7 @@ async fn execute_inner(
                 );
             }
             thread_start_params.model_provider = Some(source_thread.model_provider.clone());
-            thread_start_params.cwd = Some(source_thread.cwd.to_string_lossy().into_owned());
+            thread_start_params.cwd = Some(source_thread.cwd.clone());
             thread_start_params.project_id = source_thread.project_id.clone();
             thread_start_params.ephemeral = Some(source_thread.ephemeral);
             thread_start_params.history_mode = (source_thread.history_mode

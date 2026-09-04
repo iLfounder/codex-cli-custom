@@ -1258,9 +1258,9 @@ impl ThreadStore for LocalThreadStore {
     fn activate_prepared_thread_resume(
         &self,
         authority: PreparedThreadResumeAuthority,
-        metadata: crate::ThreadPersistenceMetadata,
+        params: ResumeThreadParams,
     ) -> ThreadStoreFuture<'_, ()> {
-        Box::pin(async move { prepared_resume::activate(self, authority, metadata).await })
+        Box::pin(async move { prepared_resume::activate(self, authority, params.metadata).await })
     }
 
     fn append_items(&self, params: AppendThreadItemsParams) -> ThreadStoreFuture<'_, ()> {

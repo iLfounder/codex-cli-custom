@@ -1798,7 +1798,16 @@ mod tests {
             .get_exec_backend()
             .start(crate::ExecParams {
                 process_id: ProcessId::from("default-env-proc"),
-                argv: vec!["true".to_string()],
+                argv: if cfg!(windows) {
+                    vec![
+                        std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string()),
+                        "/D".to_string(),
+                        "/C".to_string(),
+                        "exit /B 0".to_string(),
+                    ]
+                } else {
+                    vec!["true".to_string()]
+                },
                 cwd: PathUri::from_host_native_path(
                     std::env::current_dir().expect("read current dir"),
                 )

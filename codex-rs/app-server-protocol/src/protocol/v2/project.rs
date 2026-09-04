@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use crate::JsonSchema;
 use crate::TS;
 use codex_experimental_api_macros::ExperimentalApi;
-use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -13,7 +13,7 @@ use super::SortDirection;
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ProjectRoot {
-    pub path: AbsolutePathBuf,
+    pub path: LegacyAppPathString,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]

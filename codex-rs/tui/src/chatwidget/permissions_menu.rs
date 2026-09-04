@@ -33,6 +33,47 @@ pub(crate) fn cyber_model_approval_reviewer(config: &Config) -> Option<Approvals
 }
 
 impl ChatWidget {
+    pub(crate) fn open_remote_permission_profiles_popup(
+        &mut self,
+        profiles: Option<Vec<codex_app_server_protocol::PermissionProfileSummary>>,
+        active_profile_id: Option<String>,
+    ) {
+        let items = match profiles {
+            Some(profiles) if !profiles.is_empty() => profiles
+                .into_iter()
+                .map(|profile| {
+                    Self::permission_profile_selection_item(
+                        &profile.id,
+                        &profile.id,
+                        profile
+                            .description
+                            .as_deref()
+                            .unwrap_or("Server permission profile."),
+                        active_profile_id.as_deref(),
+                        profile.allowed,
+                    )
+                })
+                .collect(),
+            _ => vec![SelectionItem {
+                name: active_profile_id.unwrap_or_else(|| "Server default".to_string()),
+                description: Some(
+                    "This server does not expose selectable permission profiles.".to_string(),
+                ),
+                is_current: true,
+                is_disabled: true,
+                dismiss_on_select: true,
+                ..Default::default()
+            }],
+        };
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            title: Some("Update Model Permissions".to_string()),
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            header: Box::new(()),
+            ..Default::default()
+        });
+    }
+
     pub(super) fn permission_mode_disabled_reason(
         &self,
         preset: &ApprovalPreset,

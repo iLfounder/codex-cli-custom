@@ -57,6 +57,7 @@ async fn thread_start_reports_selected_environment_metadata() -> Result<()> {
         .workspace_roots
         .iter()
         .filter_map(|root| root.to_abs_path().ok())
+        .map(|root| codex_utils_path_uri::LegacyAppPathString::from_abs_path(&root))
         .collect::<Vec<_>>();
 
     let ThreadStartResponse {
@@ -68,7 +69,7 @@ async fn thread_start_reports_selected_environment_metadata() -> Result<()> {
         .start_thread(ThreadStartParams::default())
         .await?;
     let host_cwd = codex_home.path().to_path_buf().abs().canonicalize()?;
-    let cwd = cwd.canonicalize()?;
+    let host_cwd = codex_utils_path_uri::LegacyAppPathString::from_path(&host_cwd);
     assert_eq!(
         (cwd, runtime_workspace_roots, active_permission_profile),
         (

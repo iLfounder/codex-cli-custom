@@ -51,8 +51,8 @@ use codex_message_history::HistoryBatchCursor;
 use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ReasoningEffort;
-use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_approval_presets::ApprovalPreset;
+use codex_utils_path_uri::LegacyAppPathString;
 use strum_macros::IntoStaticStr;
 use uuid::Uuid;
 
@@ -181,12 +181,16 @@ pub(crate) struct ConnectorsSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PluginLocation {
-    Local { marketplace_path: AbsolutePathBuf },
-    Remote { marketplace_name: String },
+    Local {
+        marketplace_path: LegacyAppPathString,
+    },
+    Remote {
+        marketplace_name: String,
+    },
 }
 
 impl PluginLocation {
-    pub(crate) fn into_request_params(self) -> (Option<AbsolutePathBuf>, Option<String>) {
+    pub(crate) fn into_request_params(self) -> (Option<LegacyAppPathString>, Option<String>) {
         match self {
             PluginLocation::Local { marketplace_path } => (Some(marketplace_path), None),
             PluginLocation::Remote { marketplace_name } => (None, Some(marketplace_name)),
@@ -368,7 +372,7 @@ pub(crate) enum AppEvent {
     /// Start a background task directly from the shared dashboard.
     DispatchAgentsOverviewTask {
         prompt: String,
-        cwd: Option<AbsolutePathBuf>,
+        cwd: Option<LegacyAppPathString>,
     },
     /// Rename a task directly from the shared dashboard.
     RenameAgentsOverviewThread {
@@ -506,7 +510,7 @@ pub(crate) enum AppEvent {
     /// Change the working directory of the originating idle primary thread.
     ChangeWorkingDirectory {
         thread_id: ThreadId,
-        requested_cwd: PathBuf,
+        requested_cwd: String,
     },
 
     /// Result of the fresh startup thread that is attached after the input UI is live.
@@ -883,12 +887,14 @@ pub(crate) enum AppEvent {
     /// Add a marketplace from the provided source.
     FetchMarketplaceAdd {
         cwd: PathBuf,
+        remote_cwd: Option<LegacyAppPathString>,
         source: String,
     },
 
     /// Result of adding a marketplace.
     MarketplaceAddLoaded {
         cwd: PathBuf,
+        remote_cwd: Option<LegacyAppPathString>,
         source: String,
         result: Result<MarketplaceAddResponse, String>,
     },
@@ -1336,7 +1342,7 @@ pub(crate) enum AppEvent {
 
     /// Enable or disable a skill by path.
     SetSkillEnabled {
-        path: AbsolutePathBuf,
+        path: LegacyAppPathString,
         enabled: bool,
     },
 
@@ -1380,6 +1386,9 @@ pub(crate) enum AppEvent {
 
     /// Re-open the permissions presets popup.
     OpenPermissionsPopup,
+
+    /// Load server-authoritative permission profiles for a remote workspace.
+    OpenRemotePermissionProfiles,
 
     /// Open the branch picker option from the review popup.
     OpenReviewBranchPicker(PathBuf),
@@ -1431,12 +1440,12 @@ pub(crate) enum AppEvent {
 
     /// Async update of the current git branch for status line rendering.
     StatusLineBranchUpdated {
-        cwd: PathBuf,
+        cwd: LegacyAppPathString,
         branch: Option<String>,
     },
     /// Async update of Git summary fields for status line rendering.
     StatusLineGitSummaryUpdated {
-        cwd: PathBuf,
+        cwd: LegacyAppPathString,
         summary: crate::chatwidget::StatusLineGitSummary,
     },
     /// Async update of the workspace notification headline for status line rendering.

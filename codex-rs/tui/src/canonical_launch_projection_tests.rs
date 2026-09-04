@@ -4,6 +4,7 @@ use clap::Parser;
 use codex_app_server_protocol::ApprovalsReviewer;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::SandboxMode;
+use codex_utils_path_uri::LegacyAppPathString;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 
@@ -14,7 +15,7 @@ fn fully_populated_start() -> ThreadStartParams {
         model: Some("model".to_string()),
         model_provider: Some("provider".to_string()),
         service_tier: Some(Some("fast".to_string())),
-        cwd: Some("/work".to_string()),
+        cwd: Some(LegacyAppPathString::from_string("/work")),
         runtime_workspace_roots: Some(Vec::new()),
         approval_policy: Some(AskForApproval::Never),
         approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
@@ -43,7 +44,7 @@ fn empty_projection_keeps_only_cwd_and_workspace_roots() {
     assert_eq!(
         actual,
         ThreadStartParams {
-            cwd: Some("/work".to_string()),
+            cwd: Some(LegacyAppPathString::from_string("/work")),
             runtime_workspace_roots: Some(Vec::new()),
             ..ThreadStartParams::default()
         }
@@ -100,7 +101,7 @@ fn empty_projection_restricts_resume_and_fork_to_canonical_safe_paths() {
         thread_id: "thread".to_string(),
         model: Some("model".to_string()),
         model_provider: Some("custom".to_string()),
-        cwd: Some("/work".to_string()),
+        cwd: Some(LegacyAppPathString::from_string("/work")),
         runtime_workspace_roots: Some(Vec::new()),
         approval_policy: Some(AskForApproval::Never),
         sandbox: Some(SandboxMode::WorkspaceWrite),
@@ -113,7 +114,7 @@ fn empty_projection_restricts_resume_and_fork_to_canonical_safe_paths() {
         thread_id: "thread".to_string(),
         model: Some("model".to_string()),
         model_provider: Some("custom".to_string()),
-        cwd: Some("/work".to_string()),
+        cwd: Some(LegacyAppPathString::from_string("/work")),
         runtime_workspace_roots: Some(Vec::new()),
         approval_policy: Some(AskForApproval::Never),
         sandbox: Some(SandboxMode::WorkspaceWrite),
@@ -131,7 +132,7 @@ fn empty_projection_restricts_resume_and_fork_to_canonical_safe_paths() {
         resume,
         ThreadResumeParams {
             thread_id: "thread".to_string(),
-            cwd: Some("/work".to_string()),
+            cwd: Some(LegacyAppPathString::from_string("/work")),
             runtime_workspace_roots: Some(Vec::new()),
             ..ThreadResumeParams::default()
         }
@@ -140,7 +141,7 @@ fn empty_projection_restricts_resume_and_fork_to_canonical_safe_paths() {
         fork,
         ThreadForkParams {
             thread_id: "thread".to_string(),
-            cwd: Some("/work".to_string()),
+            cwd: Some(LegacyAppPathString::from_string("/work")),
             runtime_workspace_roots: Some(Vec::new()),
             ..ThreadForkParams::default()
         }
@@ -157,7 +158,7 @@ fn oss_projection_keeps_only_provider_and_raw_reasoning_proof() {
     let mut expected = ThreadStartParams {
         model: Some("model".to_string()),
         model_provider: Some("provider".to_string()),
-        cwd: Some("/work".to_string()),
+        cwd: Some(LegacyAppPathString::from_string("/work")),
         runtime_workspace_roots: Some(Vec::new()),
         config: Some(HashMap::from([(
             "show_raw_agent_reasoning".to_string(),

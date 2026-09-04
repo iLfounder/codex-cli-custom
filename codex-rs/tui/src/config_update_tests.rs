@@ -68,7 +68,11 @@ async fn remote_project_trust_guards_thread_start_and_preserves_repository_decis
         .ok_or_else(|| color_eyre::eyre::eyre!("failed to calculate relative project path"))?;
 
     assert_eq!(
-        read_remote_project_trust(app_server.request_handle(), &relative_cwd).await?,
+        read_remote_project_trust(
+            app_server.request_handle(),
+            &LegacyAppPathString::from_path(&relative_cwd),
+        )
+        .await?,
         Some(RemoteProjectTrust {
             cwd: project_cwd.clone(),
             trust_target: PathBuf::from(project_trust_key(&project_root)),
@@ -91,14 +95,18 @@ async fn remote_project_trust_guards_thread_start_and_preserves_repository_decis
         .request_typed(ClientRequest::ThreadStart {
             request_id: RequestId::Integer(1),
             params: ThreadStartParams {
-                cwd: Some(project_cwd.to_string_lossy().into_owned()),
+                cwd: Some(LegacyAppPathString::from_path(&project_cwd)),
                 ephemeral: Some(true),
                 ..ThreadStartParams::default()
             },
         })
         .await?;
     assert_eq!(
-        read_remote_project_trust(app_server.request_handle(), &project_cwd).await?,
+        read_remote_project_trust(
+            app_server.request_handle(),
+            &LegacyAppPathString::from_path(&project_cwd),
+        )
+        .await?,
         None
     );
 
@@ -106,7 +114,11 @@ async fn remote_project_trust_guards_thread_start_and_preserves_repository_decis
     untrusted_project.value = serde_json::json!("untrusted");
     write_config_batch(app_server.request_handle(), vec![untrusted_project]).await?;
     assert_eq!(
-        read_remote_project_trust(app_server.request_handle(), &project_cwd).await?,
+        read_remote_project_trust(
+            app_server.request_handle(),
+            &LegacyAppPathString::from_path(&project_cwd),
+        )
+        .await?,
         None
     );
 
@@ -115,7 +127,9 @@ async fn remote_project_trust_guards_thread_start_and_preserves_repository_decis
             request_id: RequestId::String("untrusted-project-warning".to_string()),
             params: ConfigReadParams {
                 include_layers: true,
-                cwd: Some(project_cwd.to_string_lossy().into_owned()),
+                cwd: Some(crate::app_server_session::app_server_request_path(
+                    LegacyAppPathString::from_path(&project_cwd),
+                )),
             },
         })
         .await?;
@@ -146,9 +160,12 @@ async fn remote_project_trust_guards_thread_start_and_preserves_repository_decis
     std::fs::remove_file(project_cwd.join(".codex/config.toml"))?;
     std::fs::remove_dir(project_cwd.join(".codex"))?;
     let canonical_project_cwd = PathBuf::from(project_trust_key(&project_root)).join("nested");
-    let error = read_remote_project_trust(app_server.request_handle(), &canonical_project_cwd)
-        .await
-        .expect_err("an untrusted repository must not be overridden by its subdirectory");
+    let error = read_remote_project_trust(
+        app_server.request_handle(),
+        &LegacyAppPathString::from_path(&canonical_project_cwd),
+    )
+    .await
+    .expect_err("an untrusted repository must not be overridden by its subdirectory");
     assert!(error.to_string().contains("explicitly untrusted project"));
 
     app_server.shutdown().await?;

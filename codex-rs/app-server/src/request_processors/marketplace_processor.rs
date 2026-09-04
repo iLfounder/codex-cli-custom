@@ -63,7 +63,7 @@ impl MarketplaceRequestProcessor {
         .await
         .map(|outcome| MarketplaceRemoveResponse {
             marketplace_name: outcome.marketplace_name,
-            installed_root: outcome.removed_installed_root,
+            installed_root: outcome.removed_installed_root.map(Into::into),
         })
         .map_err(|err| match err {
             MarketplaceRemoveError::InvalidRequest(message) => invalid_request(message),
@@ -102,7 +102,7 @@ impl MarketplaceRequestProcessor {
 
         Ok(MarketplaceUpgradeResponse {
             selected_marketplaces: outcome.selected_marketplaces,
-            upgraded_roots: outcome.upgraded_roots,
+            upgraded_roots: outcome.upgraded_roots.into_iter().map(Into::into).collect(),
             errors: outcome
                 .errors
                 .into_iter()
@@ -125,13 +125,18 @@ impl MarketplaceRequestProcessor {
             MarketplaceAddRequest {
                 source: params.source,
                 ref_name: params.ref_name,
-                sparse_paths: params.sparse_paths.unwrap_or_default(),
+                sparse_paths: params
+                    .sparse_paths
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(LegacyAppPathString::into_string)
+                    .collect(),
             },
         )
         .await
         .map(|outcome| MarketplaceAddResponse {
             marketplace_name: outcome.marketplace_name,
-            installed_root: outcome.installed_root,
+            installed_root: outcome.installed_root.into(),
             already_added: outcome.already_added,
         })
         .map_err(|err| match err {

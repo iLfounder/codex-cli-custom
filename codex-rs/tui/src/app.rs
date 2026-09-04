@@ -172,6 +172,7 @@ use codex_rollout::StateDbHandle;
 use codex_terminal_detection::user_agent;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_approval_presets::builtin_permission_profile_for_active_permission_profile;
+use codex_utils_path_uri::LegacyAppPathString;
 use color_eyre::eyre::Result;
 use color_eyre::eyre::WrapErr;
 use crossterm::event::KeyCode;
@@ -527,11 +528,11 @@ fn rollout_path_is_resumable(rollout_path: &Path) -> bool {
     std::fs::metadata(rollout_path).is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
 }
 
-fn errors_for_cwd(cwd: &Path, response: &SkillsListResponse) -> Vec<SkillErrorInfo> {
+fn errors_for_cwd(cwd: &LegacyAppPathString, response: &SkillsListResponse) -> Vec<SkillErrorInfo> {
     response
         .data
         .iter()
-        .find(|entry| entry.cwd.as_path() == cwd)
+        .find(|entry| &entry.cwd == cwd)
         .map(|entry| entry.errors.clone())
         .unwrap_or_default()
 }
@@ -569,6 +570,7 @@ pub(crate) struct App {
     runtime_permission_profile_override: Option<RuntimePermissionProfileOverride>,
 
     pub(crate) file_search: FileSearchManager,
+    remote_file_search_session: Option<RemoteFileSearchSession>,
 
     pub(crate) transcript_cells: Vec<Arc<dyn HistoryCell>>,
     last_rendered_history_tail: Option<history_ui::RenderedHistoryTail>,
@@ -670,6 +672,39 @@ pub(crate) struct App {
     // persist an older toggle after a newer one.
     pending_hook_enabled_writes: HashMap<String, Option<bool>>,
     recap: recap::RecapState,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RemoteFileSearchSession {
+    session_id: String,
+    cwd: LegacyAppPathString,
+    latest_query: String,
+}
+
+fn remote_file_search_matches(
+    files: Vec<codex_app_server_protocol::FuzzyFileSearchResult>,
+) -> Vec<codex_file_search::FileMatch> {
+    files
+        .into_iter()
+        .map(|entry| codex_file_search::FileMatch {
+            score: entry.score,
+            path: PathBuf::from(
+                crate::app_server_session::app_server_path_string(&entry.path).into_string(),
+            ),
+            match_type: match entry.match_type {
+                codex_app_server_protocol::FuzzyFileSearchMatchType::File => {
+                    codex_file_search::MatchType::File
+                }
+                codex_app_server_protocol::FuzzyFileSearchMatchType::Directory => {
+                    codex_file_search::MatchType::Directory
+                }
+            },
+            root: PathBuf::from(
+                crate::app_server_session::app_server_path_string(&entry.root).into_string(),
+            ),
+            indices: entry.indices,
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -828,6 +863,7 @@ impl App {
                 .chat_widget
                 .runtime_model_provider_base_url()
                 .map(str::to_string),
+            runtime_requires_openai_auth: self.chat_widget.runtime_requires_openai_auth(),
             initial_plan_type: self.chat_widget.current_plan_type(),
             model: Some(self.chat_widget.current_model().to_string()),
             startup_tooltip_override: None,

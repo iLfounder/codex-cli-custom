@@ -281,7 +281,9 @@ async fn thread_compact_start_triggers_compaction_and_returns_empty_response() -
     let thread_req = mcp
         .send_thread_start_request(ThreadStartParams {
             model: Some("mock-model".to_string()),
-            cwd: Some(initial_cwd.path().to_string_lossy().into_owned()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                initial_cwd.path(),
+            )),
             history_mode: Some(ThreadHistoryMode::Paginated),
             experimental_raw_events: true,
             ..Default::default()
@@ -294,7 +296,9 @@ async fn thread_compact_start_triggers_compaction_and_returns_empty_response() -
         DEFAULT_READ_TIMEOUT,
         mcp.start_turn_and_wait_for_completion(TurnStartParams {
             thread_id: thread_id.clone(),
-            cwd: Some(updated_cwd.path().to_path_buf()),
+            cwd: Some(codex_utils_path_uri::LegacyAppPathString::from_path(
+                updated_cwd.path(),
+            )),
             input: vec![V2UserInput::Text {
                 text: "seed history".to_string(),
                 text_elements: Vec::new(),
@@ -372,7 +376,10 @@ async fn thread_compact_start_triggers_compaction_and_returns_empty_response() -
         .await?;
     let ThreadResumeResponse { cwd, .. } =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
-    assert_eq!(cwd.as_path(), updated_cwd.path());
+    assert_eq!(
+        cwd,
+        codex_utils_path_uri::LegacyAppPathString::from_path(updated_cwd.path())
+    );
 
     Ok(())
 }

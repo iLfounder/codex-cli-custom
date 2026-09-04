@@ -32,7 +32,7 @@ impl ChatWidget {
         call_id: String,
         status: String,
         revised_prompt: Option<String>,
-        saved_path: Option<AbsolutePathBuf>,
+        saved_path: Option<LegacyAppPathString>,
     ) {
         self.flush_answer_stream_with_separator();
         self.add_to_history(history_cell::new_image_generation_call(

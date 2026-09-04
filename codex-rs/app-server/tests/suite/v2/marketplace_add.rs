@@ -47,8 +47,12 @@ async fn marketplace_add_local_directory_source() -> Result<()> {
     let expected_root = AbsolutePathBuf::from_absolute_path(source.canonicalize()?)?;
 
     assert_eq!(marketplace_name, "debug");
-    assert_eq!(installed_root, expected_root);
+    assert_eq!(
+        installed_root,
+        codex_utils_path_uri::LegacyAppPathString::from_abs_path(&expected_root)
+    );
     assert!(!already_added);
+    let installed_root = AbsolutePathBuf::try_from(installed_root)?;
     assert_eq!(
         std::fs::read_to_string(installed_root.as_path().join("plugins/sample/marker.txt"))?,
         "local ref"

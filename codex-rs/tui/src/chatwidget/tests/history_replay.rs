@@ -27,17 +27,19 @@ async fn resumed_initial_messages_render_history() {
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        permission_profile: PermissionProfile::read_only(),
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            test_path_buf("/home/user/project").abs(),
+            Vec::new(),
+            PermissionProfile::read_only(),
+            Some(rollout_file.path().to_path_buf()),
+        ),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
-        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: Some(rollout_file.path().to_path_buf()),
     };
 
     chat.handle_thread_session(configured);
@@ -141,17 +143,19 @@ async fn restored_conversation_ultra_remains_selected_after_switching_to_plan() 
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        permission_profile: PermissionProfile::read_only(),
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            test_path_buf("/home/user/project").abs(),
+            Vec::new(),
+            PermissionProfile::read_only(),
+            None,
+        ),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
-        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::Ultra),
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: None,
     });
     chat.handle_key_event(KeyEvent::from(KeyCode::BackTab));
 
@@ -182,7 +186,7 @@ async fn replayed_user_messages_seed_composer_history() {
                 },
                 AppServerUserInput::Mention {
                     name: name.to_string(),
-                    path: path.to_string(),
+                    path: codex_utils_path_uri::LegacyAppPathString::from_string(path),
                 },
             ],
             ReplayKind::ResumeInitialMessages,
@@ -302,7 +306,7 @@ async fn replayed_delegated_tool_output_is_attributed_without_seeding_composer_h
     );
     let projected = crate::thread_transcript::thread_items_to_transcript_cells(
         /*thread_id*/ None,
-        &chat.config.cwd,
+        &codex_utils_path_uri::LegacyAppPathString::from_abs_path(&chat.config.cwd),
         [item],
         crate::thread_transcript::RawReasoningVisibility::Hidden,
         /*config*/ None,
@@ -414,7 +418,8 @@ async fn replayed_user_message_preserves_text_elements_and_local_images() {
         (0..placeholder.len()).into(),
         Some(placeholder.to_string()),
     )];
-    let local_images = vec![PathBuf::from("/tmp/replay.png")];
+    let local_image = test_path_buf("/tmp/replay.png").abs();
+    let local_images = vec![local_image.to_path_buf()];
 
     let thread_id = ThreadId::new();
     let rollout_file = NamedTempFile::new().unwrap();
@@ -428,17 +433,19 @@ async fn replayed_user_message_preserves_text_elements_and_local_images() {
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        permission_profile: PermissionProfile::read_only(),
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            test_path_buf("/home/user/project").abs(),
+            Vec::new(),
+            PermissionProfile::read_only(),
+            Some(rollout_file.path().to_path_buf()),
+        ),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
-        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: Some(rollout_file.path().to_path_buf()),
     };
 
     chat.handle_thread_session(configured);
@@ -451,7 +458,7 @@ async fn replayed_user_message_preserves_text_elements_and_local_images() {
                 text_elements: text_elements.clone().into_iter().map(Into::into).collect(),
             },
             AppServerUserInput::LocalImage {
-                path: local_images[0].clone(),
+                path: codex_utils_path_uri::LegacyAppPathString::from_abs_path(&local_image),
                 detail: None,
             },
         ],
@@ -500,17 +507,19 @@ async fn replayed_user_message_preserves_remote_image_urls() {
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        permission_profile: PermissionProfile::read_only(),
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            test_path_buf("/home/user/project").abs(),
+            Vec::new(),
+            PermissionProfile::read_only(),
+            Some(rollout_file.path().to_path_buf()),
+        ),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
-        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: Some(rollout_file.path().to_path_buf()),
     };
 
     chat.handle_thread_session(configured);
@@ -604,17 +613,19 @@ async fn session_configured_syncs_widget_config_permissions_and_cwd() {
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        permission_profile: expected_permission_profile,
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            expected_cwd.clone(),
+            vec![expected_cwd.clone()],
+            expected_permission_profile,
+            None,
+        ),
         active_permission_profile: None,
-        cwd: expected_cwd.clone(),
-        runtime_workspace_roots: vec![expected_cwd.clone()],
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: None,
     };
 
     chat.handle_thread_session(configured);
@@ -677,17 +688,19 @@ async fn session_configured_preserves_profile_workspace_roots() {
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        permission_profile: session_permission_profile.clone(),
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            session_cwd.clone(),
+            session_runtime_workspace_roots.clone(),
+            session_permission_profile.clone(),
+            None,
+        ),
         active_permission_profile: None,
-        cwd: session_cwd.clone(),
-        runtime_workspace_roots: session_runtime_workspace_roots.clone(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: None,
     };
 
     chat.handle_thread_session(configured);
@@ -724,17 +737,19 @@ async fn session_configured_external_sandbox_keeps_external_runtime_policy() {
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        permission_profile: expected_permission_profile,
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            test_path_buf("/home/user/external").abs(),
+            Vec::new(),
+            expected_permission_profile,
+            None,
+        ),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/external").abs(),
-        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: None,
     };
 
     chat.handle_thread_session(configured);
@@ -765,17 +780,19 @@ async fn replayed_user_message_with_only_remote_images_renders_history_cell() {
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        permission_profile: PermissionProfile::read_only(),
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            test_path_buf("/home/user/project").abs(),
+            Vec::new(),
+            PermissionProfile::read_only(),
+            Some(rollout_file.path().to_path_buf()),
+        ),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
-        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: Some(rollout_file.path().to_path_buf()),
     };
 
     chat.handle_thread_session(configured);
@@ -809,7 +826,8 @@ async fn replayed_user_message_with_only_remote_images_renders_history_cell() {
 async fn replayed_user_message_with_only_local_images_renders_history_cell() {
     let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
 
-    let local_images = [PathBuf::from("/tmp/replay-local-only.png")];
+    let local_image = test_path_buf("/tmp/replay-local-only.png").abs();
+    let local_images = [local_image.to_path_buf()];
 
     let thread_id = ThreadId::new();
     let rollout_file = NamedTempFile::new().unwrap();
@@ -823,17 +841,19 @@ async fn replayed_user_message_with_only_local_images_renders_history_cell() {
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        permission_profile: PermissionProfile::read_only(),
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            test_path_buf("/home/user/project").abs(),
+            Vec::new(),
+            PermissionProfile::read_only(),
+            Some(rollout_file.path().to_path_buf()),
+        ),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
-        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: Some(rollout_file.path().to_path_buf()),
     };
 
     chat.handle_thread_session(configured);
@@ -841,7 +861,7 @@ async fn replayed_user_message_with_only_local_images_renders_history_cell() {
         &mut chat,
         "user-1",
         vec![AppServerUserInput::LocalImage {
-            path: local_images[0].clone(),
+            path: codex_utils_path_uri::LegacyAppPathString::from_abs_path(&local_image),
             detail: None,
         }],
         ReplayKind::ResumeInitialMessages,
@@ -1120,17 +1140,19 @@ async fn replayed_reasoning_item_preserves_summary_parts_and_hides_raw_reasoning
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        permission_profile: PermissionProfile::read_only(),
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            test_project_path().abs(),
+            Vec::new(),
+            PermissionProfile::read_only(),
+            None,
+        ),
         active_permission_profile: None,
-        cwd: test_project_path().abs(),
-        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: None,
     });
     let _ = drain_insert_history(&mut rx);
 
@@ -1171,17 +1193,19 @@ async fn replayed_reasoning_item_shows_raw_reasoning_when_enabled() {
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        permission_profile: PermissionProfile::read_only(),
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            test_project_path().abs(),
+            Vec::new(),
+            PermissionProfile::read_only(),
+            None,
+        ),
         active_permission_profile: None,
-        cwd: test_project_path().abs(),
-        runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: None,
     });
     let _ = drain_insert_history(&mut rx);
 

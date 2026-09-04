@@ -15,6 +15,7 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
 use codex_app_server_protocol::WriteStatus;
+use codex_utils_path_uri::LegacyAppPathString;
 use serde_json::Value;
 use serde_json::json;
 use std::ffi::OsString;
@@ -108,7 +109,7 @@ fn run_plugin_turn(client: &mut CodexClient, expected: &ExpectedPlugin) -> Resul
         client_user_message_id: None,
         input: vec![UserInput::Mention {
             name: expected.plugin_name.clone(),
-            path: format!("plugin://{}", expected.plugin_id),
+            path: LegacyAppPathString::from_string(format!("plugin://{}", expected.plugin_id)),
         }],
         ..Default::default()
     })?;
@@ -237,7 +238,7 @@ fn write_plugin_enabled(
                 key_path: format!("plugins.{plugin_id}.enabled"),
                 value: json!(enabled),
                 merge_strategy: MergeStrategy::Replace,
-                file_path: Some(config_path.display().to_string()),
+                file_path: Some(LegacyAppPathString::from_path(config_path)),
                 expected_version: None,
             },
         },

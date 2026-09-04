@@ -81,7 +81,10 @@ impl App {
                 store
                     .session
                     .as_ref()
-                    .map_or_else(|| self.config.cwd.clone(), |session| session.cwd.clone()),
+                    .map(ThreadSessionState::server_cwd)
+                    .unwrap_or_else(|| {
+                        codex_utils_path_uri::LegacyAppPathString::from_abs_path(&self.config.cwd)
+                    }),
                 store.turns.clone(),
             )
         };

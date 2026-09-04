@@ -106,7 +106,10 @@ async fn plugin_install_rejects_relative_marketplace_paths() -> Result<()> {
     .await??;
 
     assert_eq!(err.error.code, -32600);
-    assert!(err.error.message.contains("Invalid request"));
+    assert_eq!(
+        err.error.message,
+        "invalid plugin marketplace path: path `relative-marketplace.json` is not absolute"
+    );
     Ok(())
 }
 
@@ -152,9 +155,9 @@ async fn plugin_install_rejects_multiple_install_sources() -> Result<()> {
 
     let request_id = mcp
         .send_plugin_install_request(PluginInstallParams {
-            marketplace_path: Some(AbsolutePathBuf::try_from(
-                codex_home.path().join("marketplace.json"),
-            )?),
+            marketplace_path: Some(
+                AbsolutePathBuf::try_from(codex_home.path().join("marketplace.json"))?.into(),
+            ),
             remote_marketplace_name: Some("openai-curated-remote".to_string()),
             install_attempt_id: None,
             plugin_name: "sample-plugin".to_string(),
@@ -805,9 +808,10 @@ async fn plugin_install_returns_invalid_request_for_missing_marketplace_file() -
 
     let request_id = mcp
         .send_plugin_install_request(PluginInstallParams {
-            marketplace_path: Some(AbsolutePathBuf::try_from(
-                codex_home.path().join("missing-marketplace.json"),
-            )?),
+            marketplace_path: Some(
+                AbsolutePathBuf::try_from(codex_home.path().join("missing-marketplace.json"))?
+                    .into(),
+            ),
             remote_marketplace_name: None,
             install_attempt_id: None,
             plugin_name: "missing-plugin".to_string(),
@@ -849,7 +853,7 @@ async fn plugin_install_tracks_analytics_when_marketplace_file_cannot_be_read() 
 
     let request_id = mcp
         .send_plugin_install_request(PluginInstallParams {
-            marketplace_path: Some(AbsolutePathBuf::try_from(marketplace_path)?),
+            marketplace_path: Some(AbsolutePathBuf::try_from(marketplace_path)?.into()),
             remote_marketplace_name: None,
             install_attempt_id: None,
             plugin_name: "sample-plugin".to_string(),
@@ -907,7 +911,7 @@ async fn plugin_install_returns_invalid_request_for_not_available_plugin() -> Re
 
     let request_id = mcp
         .send_plugin_install_request(PluginInstallParams {
-            marketplace_path: Some(marketplace_path),
+            marketplace_path: Some(marketplace_path.into()),
             remote_marketplace_name: None,
             install_attempt_id: None,
             plugin_name: "sample-plugin".to_string(),
@@ -960,7 +964,7 @@ async fn plugin_install_returns_invalid_request_for_disallowed_product_plugin() 
 
     let request_id = mcp
         .send_plugin_install_request(PluginInstallParams {
-            marketplace_path: Some(marketplace_path),
+            marketplace_path: Some(marketplace_path.into()),
             remote_marketplace_name: None,
             install_attempt_id: None,
             plugin_name: "sample-plugin".to_string(),
@@ -1012,7 +1016,7 @@ async fn plugin_install_tracks_analytics_event() -> Result<()> {
 
     let request_id = mcp
         .send_plugin_install_request(PluginInstallParams {
-            marketplace_path: Some(marketplace_path),
+            marketplace_path: Some(marketplace_path.into()),
             remote_marketplace_name: None,
             install_attempt_id: None,
             plugin_name: "sample-plugin".to_string(),
@@ -1077,7 +1081,7 @@ async fn plugin_install_failure_tracks_analytics_event() -> Result<()> {
 
     let request_id = mcp
         .send_plugin_install_request(PluginInstallParams {
-            marketplace_path: Some(marketplace_path),
+            marketplace_path: Some(marketplace_path.into()),
             remote_marketplace_name: None,
             install_attempt_id: None,
             plugin_name: "sample-plugin".to_string(),
@@ -1324,7 +1328,7 @@ async fn plugin_install_returns_apps_needing_auth() -> Result<()> {
 
     let request_id = mcp
         .send_plugin_install_request(PluginInstallParams {
-            marketplace_path: Some(marketplace_path),
+            marketplace_path: Some(marketplace_path.into()),
             remote_marketplace_name: None,
             install_attempt_id: None,
             plugin_name: "sample-plugin".to_string(),
@@ -1416,7 +1420,7 @@ async fn plugin_install_skips_mcp_oauth_for_chatgpt_dual_surface_plugin() -> Res
 
     let request_id = mcp
         .send_plugin_install_request(PluginInstallParams {
-            marketplace_path: Some(marketplace_path),
+            marketplace_path: Some(marketplace_path.into()),
             remote_marketplace_name: None,
             install_attempt_id: None,
             plugin_name: "sample-plugin".to_string(),
@@ -1469,7 +1473,7 @@ url = "https://example.com/allowed-mcp"
 
     let request_id = mcp
         .send_plugin_install_request(PluginInstallParams {
-            marketplace_path: Some(marketplace_path),
+            marketplace_path: Some(marketplace_path.into()),
             remote_marketplace_name: None,
             install_attempt_id: None,
             plugin_name: "sample-plugin".to_string(),
@@ -1523,7 +1527,7 @@ enabled = false
 
     let request_id = mcp
         .send_plugin_install_request(PluginInstallParams {
-            marketplace_path: Some(marketplace_path),
+            marketplace_path: Some(marketplace_path.into()),
             remote_marketplace_name: None,
             install_attempt_id: None,
             plugin_name: "sample-plugin".to_string(),
@@ -1624,7 +1628,7 @@ url = {executor_url}
 
     let request_id = mcp
         .send_plugin_install_request(PluginInstallParams {
-            marketplace_path: Some(marketplace_path),
+            marketplace_path: Some(marketplace_path.into()),
             remote_marketplace_name: None,
             install_attempt_id: None,
             plugin_name: "sample-plugin".to_string(),
@@ -1685,7 +1689,7 @@ async fn plugin_install_starts_mcp_oauth_with_formerly_disallowed_plugin_app() -
 
     let request_id = mcp
         .send_plugin_install_request(PluginInstallParams {
-            marketplace_path: Some(marketplace_path),
+            marketplace_path: Some(marketplace_path.into()),
             remote_marketplace_name: None,
             install_attempt_id: None,
             plugin_name: "sample-plugin".to_string(),
@@ -1813,7 +1817,7 @@ async fn plugin_install_starts_mcp_oauth_through_configured_http_proxy() -> Resu
 
     let request_id = mcp
         .send_plugin_install_request(PluginInstallParams {
-            marketplace_path: Some(marketplace_path),
+            marketplace_path: Some(marketplace_path.into()),
             remote_marketplace_name: None,
             install_attempt_id: None,
             plugin_name: "sample-plugin".to_string(),
@@ -1927,7 +1931,7 @@ async fn plugin_oauth_login_preserves_registered_callbacks_or_uses_legacy_fallba
         .await?;
     let install_id = mcp
         .send_plugin_install_request(PluginInstallParams {
-            marketplace_path: Some(marketplace_path),
+            marketplace_path: Some(marketplace_path.into()),
             remote_marketplace_name: None,
             install_attempt_id: None,
             plugin_name: "sample-plugin".to_string(),
@@ -2079,7 +2083,7 @@ connectors = true
 
     let request_id = mcp
         .send_plugin_install_request(PluginInstallParams {
-            marketplace_path: Some(marketplace_path),
+            marketplace_path: Some(marketplace_path.into()),
             remote_marketplace_name: None,
             install_attempt_id: None,
             plugin_name: "sample-plugin".to_string(),
@@ -2327,7 +2331,7 @@ async fn plugin_install_includes_formerly_disallowed_apps_needing_auth() -> Resu
 
     let request_id = mcp
         .send_plugin_install_request(PluginInstallParams {
-            marketplace_path: Some(marketplace_path),
+            marketplace_path: Some(marketplace_path.into()),
             remote_marketplace_name: None,
             install_attempt_id: None,
             plugin_name: "sample-plugin".to_string(),
@@ -2413,7 +2417,7 @@ async fn plugin_install_makes_bundled_mcp_servers_available_to_followup_requests
 
     let request_id = mcp
         .send_plugin_install_request(PluginInstallParams {
-            marketplace_path: Some(marketplace_path),
+            marketplace_path: Some(marketplace_path.into()),
             remote_marketplace_name: None,
             install_attempt_id: None,
             plugin_name: "sample-plugin".to_string(),

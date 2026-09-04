@@ -1504,7 +1504,7 @@ async fn logout_managed_bedrock_restores_default_account(
     std::fs::write(
         config_path,
         format!(
-            "{config}\n[model_providers.{model_provider_id}]\nbase_url = \"https://bedrock.example.com/v1\"\n[model_providers.{model_provider_id}.aws]\nprofile = \"managed-profile\"\nregion = \"us-west-2\"\nauth_refresh = {{ command = \"aws\" }}\n"
+            "{config}\n[model_providers.{model_provider_id}]\nbase_url = \"https://bedrock.example.com/v1\"\n[model_providers.{model_provider_id}.aws]\nregion = \"us-west-2\"\nauth_refresh = {{ command = \"aws\" }}\n"
         ),
     )?;
     let mut expected_config = read_config_toml(codex_home.path())?;
@@ -1542,7 +1542,7 @@ async fn logout_managed_bedrock_restores_default_account(
 }
 
 #[tokio::test]
-async fn logout_aws_managed_bedrock_clears_provider_and_restores_default_account() -> Result<()> {
+async fn logout_aws_managed_bedrock_is_rejected_without_changes() -> Result<()> {
     for managed_bedrock_auth in [false, true] {
         let codex_home = TempDir::new()?;
         create_config_toml(codex_home.path(), aws_managed_bedrock_config())?;
@@ -1604,40 +1604,34 @@ async fn logout_aws_managed_bedrock_clears_provider_and_restores_default_account
                 requires_openai_auth: false,
             }
         );
-        let mut expected_config = read_config_toml(codex_home.path())?;
-        let expected_config_root = expected_config
-            .as_table_mut()
-            .expect("config should be a table");
-        expected_config_root.remove("model_provider");
-        expected_config_root.remove("model");
-        expected_config["model_providers"]["amazon-bedrock"]
-            .as_table_mut()
-            .expect("Bedrock provider config should be a table")
-            .remove("aws");
+        let expected_auth = load_file_auth(codex_home.path())?;
+        let expected_config = read_config_toml(codex_home.path())?;
 
         let request_id = mcp.send_logout_account_request().await?;
-        let response = timeout(
+        let error = timeout(
             DEFAULT_READ_TIMEOUT,
-            mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+            mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
         )
         .await??;
+        assert_eq!(error.error.code, -32600);
         assert_eq!(
-            to_response::<LogoutAccountResponse>(response)?,
-            LogoutAccountResponse {}
+            error.error.message,
+            "cannot log out while Amazon Bedrock is using AWS-managed credentials; manage those credentials through AWS or switch model providers before logging out Codex authentication"
         );
-        assert_eq!(load_file_auth(codex_home.path())?, None);
+        assert_eq!(load_file_auth(codex_home.path())?, expected_auth);
         assert_eq!(read_config_toml(codex_home.path())?, expected_config);
         assert_eq!(std::fs::read_to_string(dotenv_path)?, dotenv);
         assert_eq!(
             std::fs::read_to_string(aws_credentials_path)?,
             aws_credentials
         );
-        assert_account_updated(&mut mcp, /*auth_mode*/ None).await?;
         assert_eq!(
             read_account(&mut mcp).await?,
             GetAccountResponse {
-                account: None,
-                requires_openai_auth: true,
+                account: Some(Account::AmazonBedrock {
+                    uses_codex_managed_credentials: false,
+                }),
+                requires_openai_auth: false,
             }
         );
     }

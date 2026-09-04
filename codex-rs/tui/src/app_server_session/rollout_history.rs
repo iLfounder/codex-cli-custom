@@ -66,7 +66,8 @@ impl AppServerSession {
             session_config,
             thread_id,
             self.thread_params_mode(),
-            self.remote_cwd_override.as_deref(),
+            self.remote_invocation_overrides(),
+            self.remote_cwd_override.as_ref(),
             model_settings,
         );
         self.thread_tool_transport()

@@ -20,7 +20,9 @@ fn map_api_error_preserves_retry_delay() {
                 message: "retry later".to_string(),
                 delay: Some(retry_delay),
             },
-            CodexErrorInfo::Other,
+            CodexErrorInfo::ResponseStreamDisconnected {
+                http_status_code: None,
+            },
             "stream disconnected before completion: retry later",
         ),
         (

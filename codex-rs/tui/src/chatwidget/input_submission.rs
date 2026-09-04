@@ -210,7 +210,7 @@ impl ChatWidget {
 
         for image in &local_images {
             items.push(UserInput::LocalImage {
-                path: image.path.clone(),
+                path: codex_utils_path_uri::LegacyAppPathString::from_path(&image.path),
                 detail: None,
             });
         }
@@ -228,7 +228,8 @@ impl ChatWidget {
             .map(|binding| binding.mention.clone())
             .collect();
         let mut skill_names_lower: HashSet<String> = HashSet::new();
-        let mut selected_skill_paths: HashSet<AbsolutePathBuf> = HashSet::new();
+        let mut selected_skill_paths: HashSet<codex_utils_path_uri::LegacyAppPathString> =
+            HashSet::new();
         let mut selected_plugin_ids: HashSet<String> = HashSet::new();
 
         if let Some(skills) = self.bottom_pane.skills() {
@@ -242,13 +243,14 @@ impl ChatWidget {
                     .path
                     .strip_prefix("skill://")
                     .unwrap_or(binding.path.as_str());
-                let path = Path::new(path);
-                if let Some(skill) = skills.iter().find(|skill| skill.path.as_path() == path)
+                if let Some(skill) = skills
+                    .iter()
+                    .find(|skill| skill.path.render_for_ui() == path)
                     && selected_skill_paths.insert(skill.path.clone())
                 {
                     items.push(UserInput::Skill {
                         name: skill.name.clone(),
-                        path: skill.path.to_path_buf(),
+                        path: skill.path.clone(),
                     });
                 }
             }
@@ -262,7 +264,7 @@ impl ChatWidget {
                 }
                 items.push(UserInput::Skill {
                     name: skill.name.clone(),
-                    path: skill.path.to_path_buf(),
+                    path: skill.path.clone(),
                 });
             }
         }
@@ -285,7 +287,9 @@ impl ChatWidget {
                 {
                     items.push(UserInput::Mention {
                         name: plugin.display_name.clone(),
-                        path: binding.path.clone(),
+                        path: codex_utils_path_uri::LegacyAppPathString::from_string(
+                            binding.path.clone(),
+                        ),
                     });
                 }
             }
@@ -311,7 +315,9 @@ impl ChatWidget {
                     selected_app_ids.insert(app_id.to_string());
                     items.push(UserInput::Mention {
                         name: app.name.clone(),
-                        path: binding.path.clone(),
+                        path: codex_utils_path_uri::LegacyAppPathString::from_string(
+                            binding.path.clone(),
+                        ),
                     });
                 }
             }
@@ -325,7 +331,9 @@ impl ChatWidget {
                 let app_id = app.id.as_str();
                 items.push(UserInput::Mention {
                     name: app.name.clone(),
-                    path: format!("app://{app_id}"),
+                    path: codex_utils_path_uri::LegacyAppPathString::from_string(format!(
+                        "app://{app_id}"
+                    )),
                 });
             }
         }

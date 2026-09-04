@@ -132,7 +132,8 @@ async fn standalone_image_generation_returns_saved_path_hint_to_model() -> Resul
     assert_eq!(revised_prompt.as_deref(), Some("paint a blue whale"));
     assert_eq!(result, RESULT);
     assert_eq!(transparent_background, Some(false));
-    assert_eq!(std::fs::read(&saved_path)?, TINY_PNG_BYTES);
+    let saved_path = codex_utils_absolute_path::AbsolutePathBuf::try_from(saved_path)?;
+    assert_eq!(std::fs::read(saved_path.as_path())?, TINY_PNG_BYTES);
 
     let image_request = server
         .received_requests()
@@ -167,7 +168,7 @@ async fn standalone_image_generation_returns_saved_path_hint_to_model() -> Resul
         .as_str()
         .context("image output should include model-visible path hint")?;
     assert!(
-        output_hint.contains(&saved_path.display().to_string()),
+        output_hint.contains(&saved_path.as_path().display().to_string()),
         "output hint should identify the path the extension saved"
     );
     assert!(
@@ -608,7 +609,7 @@ async fn standalone_image_edit_uses_attached_model_visible_image() -> Result<()>
                     text_elements: Vec::new(),
                 },
                 V2UserInput::LocalImage {
-                    path: image_path,
+                    path: codex_utils_path_uri::LegacyAppPathString::from_path(&image_path),
                     detail: None,
                 },
             ],

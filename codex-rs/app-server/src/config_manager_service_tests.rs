@@ -12,8 +12,14 @@ use codex_config::test_support::CloudConfigBundleFixture;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
 use pretty_assertions::assert_eq;
+use std::path::Path;
 use tempfile::tempdir;
+
+fn api_path(path: impl AsRef<Path>) -> LegacyAppPathString {
+    LegacyAppPathString::from_path(path.as_ref())
+}
 
 #[test]
 fn toml_value_to_item_handles_nested_config_tables() {
@@ -83,7 +89,7 @@ unified_exec = true
     let service = ConfigManager::without_managed_config_for_tests(tmp.path().to_path_buf());
     service
         .write_value(ConfigValueWriteParams {
-            file_path: Some(tmp.path().join(CONFIG_TOML_FILE).display().to_string()),
+            file_path: Some(api_path(tmp.path().join(CONFIG_TOML_FILE))),
             key_path: "features.personality".to_string(),
             value: serde_json::json!(true),
             merge_strategy: MergeStrategy::Replace,
@@ -159,7 +165,7 @@ async fn clear_missing_nested_config_is_noop() -> Result<()> {
     let service = ConfigManager::without_managed_config_for_tests(tmp.path().to_path_buf());
     let response = service
         .write_value(ConfigValueWriteParams {
-            file_path: Some(path.display().to_string()),
+            file_path: Some(api_path(&path)),
             key_path: "features.personality".to_string(),
             value: serde_json::Value::Null,
             merge_strategy: MergeStrategy::Replace,
@@ -183,7 +189,7 @@ async fn clearing_user_setting_falls_back_to_packaged_default_without_override()
     let service = ConfigManager::without_managed_config_for_tests(tmp.path().to_path_buf());
     let response = service
         .write_value(ConfigValueWriteParams {
-            file_path: Some(path.display().to_string()),
+            file_path: Some(api_path(&path)),
             key_path: "hide_agent_reasoning".to_string(),
             value: serde_json::Value::Null,
             merge_strategy: MergeStrategy::Replace,
@@ -206,7 +212,7 @@ async fn write_value_rejects_legacy_profile_selector() -> Result<()> {
     let service = ConfigManager::without_managed_config_for_tests(tmp.path().to_path_buf());
     let error = service
         .write_value(ConfigValueWriteParams {
-            file_path: Some(path.display().to_string()),
+            file_path: Some(api_path(&path)),
             key_path: "profile".to_string(),
             value: serde_json::json!("work"),
             merge_strategy: MergeStrategy::Replace,
@@ -238,7 +244,7 @@ async fn write_value_rejects_legacy_profile_table() -> Result<()> {
     let service = ConfigManager::without_managed_config_for_tests(tmp.path().to_path_buf());
     let error = service
         .write_value(ConfigValueWriteParams {
-            file_path: Some(path.display().to_string()),
+            file_path: Some(api_path(&path)),
             key_path: "profiles.work.model".to_string(),
             value: serde_json::json!("gpt-work"),
             merge_strategy: MergeStrategy::Replace,
@@ -282,7 +288,7 @@ async fn batch_write_rejects_legacy_profile_selector() -> Result<()> {
                     merge_strategy: MergeStrategy::Replace,
                 },
             ],
-            file_path: Some(path.display().to_string()),
+            file_path: Some(api_path(&path)),
             expected_version: None,
             reload_user_config: false,
         })
@@ -311,7 +317,7 @@ async fn write_value_supports_nested_app_paths() -> Result<()> {
     let service = ConfigManager::without_managed_config_for_tests(tmp.path().to_path_buf());
     service
         .write_value(ConfigValueWriteParams {
-            file_path: Some(tmp.path().join(CONFIG_TOML_FILE).display().to_string()),
+            file_path: Some(api_path(tmp.path().join(CONFIG_TOML_FILE))),
             key_path: "apps".to_string(),
             value: serde_json::json!({
                 "app1": {
@@ -326,7 +332,7 @@ async fn write_value_supports_nested_app_paths() -> Result<()> {
 
     service
         .write_value(ConfigValueWriteParams {
-            file_path: Some(tmp.path().join(CONFIG_TOML_FILE).display().to_string()),
+            file_path: Some(api_path(tmp.path().join(CONFIG_TOML_FILE))),
             key_path: "apps.app1.default_tools_approval_mode".to_string(),
             value: serde_json::json!("prompt"),
             merge_strategy: MergeStrategy::Replace,
@@ -377,7 +383,7 @@ async fn write_value_supports_custom_mcp_server_default_tool_approval_mode() -> 
     let service = ConfigManager::without_managed_config_for_tests(tmp.path().to_path_buf());
     service
         .write_value(ConfigValueWriteParams {
-            file_path: Some(tmp.path().join(CONFIG_TOML_FILE).display().to_string()),
+            file_path: Some(api_path(tmp.path().join(CONFIG_TOML_FILE))),
             key_path: "mcp_servers.docs.default_tools_approval_mode".to_string(),
             value: serde_json::json!("approve"),
             merge_strategy: MergeStrategy::Replace,
@@ -444,7 +450,7 @@ async fn read_includes_origins_and_layers() {
             .expect("origin")
             .name,
         ApiConfigLayerSource::LegacyManagedConfigTomlFromFile {
-            file: managed_file.clone()
+            file: managed_file.clone().into()
         },
     );
     let layers = response.layers.expect("layers present");
@@ -462,13 +468,13 @@ async fn read_includes_origins_and_layers() {
     assert_eq!(
         layers.first().unwrap().name,
         ApiConfigLayerSource::LegacyManagedConfigTomlFromFile {
-            file: managed_file.clone()
+            file: managed_file.clone().into()
         }
     );
     assert_eq!(
         layers.get(1).unwrap().name,
         ApiConfigLayerSource::User {
-            file: user_file.clone(),
+            file: user_file.clone().into(),
             profile: None,
         }
     );
@@ -508,7 +514,7 @@ writable_roots = ["~/code"]
 
     let response = service
         .write_value(ConfigValueWriteParams {
-            file_path: Some(tmp.path().join(CONFIG_TOML_FILE).display().to_string()),
+            file_path: Some(api_path(tmp.path().join(CONFIG_TOML_FILE))),
             key_path: "model".to_string(),
             value: serde_json::json!("updated"),
             merge_strategy: MergeStrategy::Replace,
@@ -548,7 +554,7 @@ async fn write_value_reports_override() {
 
     let result = service
         .write_value(ConfigValueWriteParams {
-            file_path: Some(tmp.path().join(CONFIG_TOML_FILE).display().to_string()),
+            file_path: Some(api_path(tmp.path().join(CONFIG_TOML_FILE))),
             key_path: "approval_policy".to_string(),
             value: serde_json::json!("never"),
             merge_strategy: MergeStrategy::Replace,
@@ -575,7 +581,7 @@ async fn write_value_reports_override() {
             .expect("origin")
             .name,
         ApiConfigLayerSource::LegacyManagedConfigTomlFromFile {
-            file: managed_file.clone()
+            file: managed_file.clone().into()
         }
     );
     assert_eq!(result.status, WriteStatus::Ok);
@@ -591,7 +597,7 @@ async fn version_conflict_rejected() {
     let service = ConfigManager::without_managed_config_for_tests(tmp.path().to_path_buf());
     let error = service
         .write_value(ConfigValueWriteParams {
-            file_path: Some(tmp.path().join(CONFIG_TOML_FILE).display().to_string()),
+            file_path: Some(api_path(tmp.path().join(CONFIG_TOML_FILE))),
             key_path: "model".to_string(),
             value: serde_json::json!("gpt-5.2"),
             merge_strategy: MergeStrategy::Replace,
@@ -781,7 +787,7 @@ async fn invalid_user_value_rejected_even_if_overridden_by_managed() {
 
     let error = service
         .write_value(ConfigValueWriteParams {
-            file_path: Some(tmp.path().join(CONFIG_TOML_FILE).display().to_string()),
+            file_path: Some(api_path(tmp.path().join(CONFIG_TOML_FILE))),
             key_path: "approval_policy".to_string(),
             value: serde_json::json!("bogus"),
             merge_strategy: MergeStrategy::Replace,
@@ -807,7 +813,7 @@ async fn reserved_builtin_provider_override_rejected() {
     let service = ConfigManager::without_managed_config_for_tests(tmp.path().to_path_buf());
     let error = service
         .write_value(ConfigValueWriteParams {
-            file_path: Some(tmp.path().join(CONFIG_TOML_FILE).display().to_string()),
+            file_path: Some(api_path(tmp.path().join(CONFIG_TOML_FILE))),
             key_path: "model_providers.openai.name".to_string(),
             value: serde_json::json!("OpenAI Override"),
             merge_strategy: MergeStrategy::Replace,
@@ -837,7 +843,7 @@ async fn write_value_rejects_invalid_guardian_review_threshold() -> Result<()> {
 
     let error = service
         .write_value(ConfigValueWriteParams {
-            file_path: Some(path.display().to_string()),
+            file_path: Some(api_path(&path)),
             key_path: "features.guardianv2.review_threshold".to_string(),
             value: serde_json::json!(2.0),
             merge_strategy: MergeStrategy::Replace,
@@ -873,7 +879,7 @@ personality = true
 
     let error = service
         .write_value(ConfigValueWriteParams {
-            file_path: Some(tmp.path().join(CONFIG_TOML_FILE).display().to_string()),
+            file_path: Some(api_path(tmp.path().join(CONFIG_TOML_FILE))),
             key_path: "features.personality".to_string(),
             value: serde_json::json!(false),
             merge_strategy: MergeStrategy::Replace,
@@ -913,7 +919,7 @@ async fn write_value_rejects_exact_managed_requirement() {
 
     let error = service
         .write_value(ConfigValueWriteParams {
-            file_path: Some(path.display().to_string()),
+            file_path: Some(api_path(&path)),
             key_path: "allow_login_shell".to_string(),
             value: serde_json::json!(true),
             merge_strategy: MergeStrategy::Replace,
@@ -1040,7 +1046,7 @@ sandbox_private_desktop = false
 
     service
         .write_value(ConfigValueWriteParams {
-            file_path: Some(path.display().to_string()),
+            file_path: Some(api_path(&path)),
             key_path: "windows.sandbox".to_string(),
             value: serde_json::json!("elevated"),
             merge_strategy: MergeStrategy::Replace,
@@ -1091,7 +1097,7 @@ async fn read_reports_managed_overrides_user_and_session_flags() {
     assert_eq!(
         response.origins.get("model").expect("origin").name,
         ApiConfigLayerSource::LegacyManagedConfigTomlFromFile {
-            file: managed_file.clone()
+            file: managed_file.clone().into()
         },
     );
     let layers = response.layers.expect("layers");
@@ -1107,7 +1113,9 @@ async fn read_reports_managed_overrides_user_and_session_flags() {
     };
     assert_eq!(
         layers.first().unwrap().name,
-        ApiConfigLayerSource::LegacyManagedConfigTomlFromFile { file: managed_file }
+        ApiConfigLayerSource::LegacyManagedConfigTomlFromFile {
+            file: managed_file.into()
+        }
     );
     assert_eq!(
         layers.get(1).unwrap().name,
@@ -1116,7 +1124,7 @@ async fn read_reports_managed_overrides_user_and_session_flags() {
     assert_eq!(
         layers.get(2).unwrap().name,
         ApiConfigLayerSource::User {
-            file: user_file,
+            file: user_file.into(),
             profile: None
         }
     );
@@ -1140,7 +1148,7 @@ async fn write_value_reports_managed_override() {
 
     let result = service
         .write_value(ConfigValueWriteParams {
-            file_path: Some(tmp.path().join(CONFIG_TOML_FILE).display().to_string()),
+            file_path: Some(api_path(tmp.path().join(CONFIG_TOML_FILE))),
             key_path: "approval_policy".to_string(),
             value: serde_json::json!("on-request"),
             merge_strategy: MergeStrategy::Replace,
@@ -1153,7 +1161,9 @@ async fn write_value_reports_managed_override() {
     let overridden = result.overridden_metadata.expect("overridden metadata");
     assert_eq!(
         overridden.overriding_layer.name,
-        ApiConfigLayerSource::LegacyManagedConfigTomlFromFile { file: managed_file }
+        ApiConfigLayerSource::LegacyManagedConfigTomlFromFile {
+            file: managed_file.into()
+        }
     );
     assert_eq!(overridden.effective_value, serde_json::json!("never"));
 }
@@ -1198,14 +1208,14 @@ async fn multi_agent_v2_boolean_layer_owns_enabled_origin_and_overrides() {
         assert_eq!(
             read.origins.get(path).expect("managed feature origin").name,
             ApiConfigLayerSource::LegacyManagedConfigTomlFromFile {
-                file: managed_file.clone(),
+                file: managed_file.clone().into(),
             },
         );
     }
 
     let result = service
         .write_value(ConfigValueWriteParams {
-            file_path: Some(user_path.display().to_string()),
+            file_path: Some(api_path(&user_path)),
             key_path: "features.multi_agent_v2.enabled".to_string(),
             value: serde_json::json!(true),
             merge_strategy: MergeStrategy::Upsert,
@@ -1217,7 +1227,9 @@ async fn multi_agent_v2_boolean_layer_owns_enabled_origin_and_overrides() {
     let overridden = result.overridden_metadata.expect("overridden metadata");
     assert_eq!(
         overridden.overriding_layer.name,
-        ApiConfigLayerSource::LegacyManagedConfigTomlFromFile { file: managed_file }
+        ApiConfigLayerSource::LegacyManagedConfigTomlFromFile {
+            file: managed_file.into()
+        }
     );
     assert_eq!(overridden.effective_value, serde_json::json!(false));
 }
@@ -1245,7 +1257,7 @@ async fn structured_feature_toggle_ignores_unrelated_managed_settings() -> Resul
 
     service
         .write_value(ConfigValueWriteParams {
-            file_path: Some(user_path.display().to_string()),
+            file_path: Some(api_path(&user_path)),
             key_path: "features.network_proxy".to_string(),
             value: serde_json::Value::Null,
             merge_strategy: MergeStrategy::Replace,
@@ -1261,7 +1273,7 @@ async fn structured_feature_toggle_ignores_unrelated_managed_settings() -> Resul
 
     let result = service
         .write_value(ConfigValueWriteParams {
-            file_path: Some(user_path.display().to_string()),
+            file_path: Some(api_path(&user_path)),
             key_path: "features.network_proxy".to_string(),
             value: serde_json::json!(true),
             merge_strategy: MergeStrategy::Replace,
@@ -1285,7 +1297,7 @@ async fn structured_feature_toggle_ignores_unrelated_managed_settings() -> Resul
     );
     profile_service
         .write_value(ConfigValueWriteParams {
-            file_path: Some(selected_path.display().to_string()),
+            file_path: Some(api_path(&selected_path)),
             key_path: "features.network_proxy".to_string(),
             value: serde_json::Value::Null,
             merge_strategy: MergeStrategy::Replace,
@@ -1311,7 +1323,7 @@ async fn structured_feature_toggle_ignores_unrelated_managed_settings() -> Resul
                     merge_strategy: MergeStrategy::Replace,
                 },
             ],
-            file_path: Some(user_path.display().to_string()),
+            file_path: Some(api_path(&user_path)),
             expected_version: None,
             reload_user_config: false,
         })
@@ -1356,7 +1368,7 @@ alpha = "a"
     let service = ConfigManager::without_managed_config_for_tests(tmp.path().to_path_buf());
     service
         .write_value(ConfigValueWriteParams {
-            file_path: Some(path.display().to_string()),
+            file_path: Some(api_path(&path)),
             key_path: "mcp_servers.linear".to_string(),
             value: overlay.clone(),
             merge_strategy: MergeStrategy::Upsert,
@@ -1386,7 +1398,7 @@ beta = "b"
 
     service
         .write_value(ConfigValueWriteParams {
-            file_path: Some(path.display().to_string()),
+            file_path: Some(api_path(&path)),
             key_path: "mcp_servers.linear".to_string(),
             value: overlay,
             merge_strategy: MergeStrategy::Replace,
@@ -1615,7 +1627,7 @@ custom = true
         let service = ConfigManager::without_managed_config_for_tests(tmp.path().to_path_buf());
         service
             .write_value(ConfigValueWriteParams {
-                file_path: Some(path.display().to_string()),
+                file_path: Some(api_path(&path)),
                 key_path: key_path.to_string(),
                 value,
                 merge_strategy: MergeStrategy::Upsert,
@@ -1653,7 +1665,7 @@ async fn clear_shell_environment_filter_ignores_ascii_case() -> Result<()> {
     let service = ConfigManager::without_managed_config_for_tests(tmp.path().to_path_buf());
     let response = service
         .write_value(ConfigValueWriteParams {
-            file_path: Some(path.display().to_string()),
+            file_path: Some(api_path(&path)),
             key_path: "shell_environment_policy.filters.AWS_*".to_string(),
             value: serde_json::Value::Null,
             merge_strategy: MergeStrategy::Upsert,
@@ -1697,7 +1709,7 @@ set = { KEEP = "1", OTHER = "2", GH_HOST = "github.stale.example" } # keep this 
     let service = ConfigManager::without_managed_config_for_tests(tmp.path().to_path_buf());
     service
         .write_value(ConfigValueWriteParams {
-            file_path: Some(path.display().to_string()),
+            file_path: Some(api_path(&path)),
             key_path: "shell_environment_policy.inherit".to_string(),
             value: serde_json::json!("core"),
             merge_strategy: MergeStrategy::Upsert,
@@ -1719,7 +1731,7 @@ set = { KEEP = "1", OTHER = "2", GH_HOST = "github.stale.example" } # keep this 
     {
         service
             .write_value(ConfigValueWriteParams {
-                file_path: Some(path.display().to_string()),
+                file_path: Some(api_path(&path)),
                 key_path: "shell_environment_policy.set.gh_host".to_string(),
                 value: serde_json::json!("github.trusted.example"),
                 merge_strategy: MergeStrategy::Upsert,
@@ -1766,7 +1778,7 @@ set = { KEEP = "1", OTHER = "2" } # keep this inline table
 
     let response = service
         .write_value(ConfigValueWriteParams {
-            file_path: Some(path.display().to_string()),
+            file_path: Some(api_path(&path)),
             key_path: "shell_environment_policy.filters.aws_*".to_string(),
             value: serde_json::json!("include"),
             merge_strategy: MergeStrategy::Upsert,
@@ -1786,7 +1798,7 @@ set = { KEEP = "1", OTHER = "2" } # keep this inline table
     );
     service
         .write_value(ConfigValueWriteParams {
-            file_path: Some(path.display().to_string()),
+            file_path: Some(api_path(&path)),
             key_path: "shell_environment_policy.filters.AWS_*".to_string(),
             value: serde_json::json!("exclude"),
             merge_strategy: MergeStrategy::Upsert,
@@ -1815,7 +1827,7 @@ async fn shell_environment_upsert_rejects_case_variant_filters_in_one_edit() -> 
 
     let error = service
         .write_value(ConfigValueWriteParams {
-            file_path: Some(path.display().to_string()),
+            file_path: Some(api_path(&path)),
             key_path: "shell_environment_policy.filters".to_string(),
             value: serde_json::json!({"AWS_*": "include", "aws_*": "exclude"}),
             merge_strategy: MergeStrategy::Upsert,
@@ -1881,7 +1893,7 @@ exclude = ["AWS_*"]
 
         let response = service
             .write_value(ConfigValueWriteParams {
-                file_path: Some(path.display().to_string()),
+                file_path: Some(api_path(&path)),
                 key_path: key_path.to_string(),
                 value,
                 merge_strategy: MergeStrategy::Upsert,
@@ -1895,7 +1907,9 @@ exclude = ["AWS_*"]
             .expect("managed representation should override the user edit");
         assert_eq!(
             overridden.overriding_layer.name,
-            ApiConfigLayerSource::LegacyManagedConfigTomlFromFile { file: managed_file }
+            ApiConfigLayerSource::LegacyManagedConfigTomlFromFile {
+                file: managed_file.into()
+            }
         );
         assert_eq!(overridden.effective_value, expected_effective_value);
         service

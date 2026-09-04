@@ -14,7 +14,7 @@ fn thread_settings_for_test(
     codex_app_server_protocol::ThreadSettingsUpdatedNotification {
         thread_id: thread_id.to_string(),
         thread_settings: codex_app_server_protocol::ThreadSettings {
-            cwd: test_path_buf("/tmp/thread-settings").abs(),
+            cwd: test_path_buf("/tmp/thread-settings").abs().into(),
             approval_policy: AskForApproval::OnRequest,
             approvals_reviewer: codex_app_server_protocol::ApprovalsReviewer::AutoReview,
             sandbox_policy: codex_app_server_protocol::SandboxPolicy::ReadOnly {
@@ -53,17 +53,19 @@ fn configured_thread_session(thread_id: ThreadId) -> crate::session_state::Threa
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
-        permission_profile: PermissionProfile::read_only(),
+        execution_context: crate::session_state::SessionExecutionContext::native(
+            test_path_buf("/tmp/thread-settings").abs(),
+            vec![test_path_buf("/tmp/thread-settings").abs()],
+            PermissionProfile::read_only(),
+            None,
+        ),
         active_permission_profile: None,
-        cwd: test_path_buf("/tmp/thread-settings").abs(),
-        runtime_workspace_roots: vec![test_path_buf("/tmp/thread-settings").abs()],
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
         collaboration_mode: None,
         personality: None,
         message_history: None,
         network_proxy: None,
-        rollout_path: None,
     }
 }
 
@@ -350,7 +352,7 @@ async fn thread_settings_updated_updates_visible_state_without_transcript() {
     chat.set_feature_enabled(Feature::Apps, /*enabled*/ true);
     let thread_id = ThreadId::new();
     let mut session = configured_thread_session(thread_id);
-    session.cwd = test_path_buf("/tmp/original-workspace").abs();
+    session.set_native_cwd_and_roots(test_path_buf("/tmp/original-workspace").abs(), Vec::new());
     chat.handle_thread_session(session);
     let previous_generation = chat.connector_scope_generation();
     let old_app = serde_json::from_str(r#"{"id":"old","name":"Old","isAccessible":true}"#)
@@ -575,7 +577,9 @@ async fn live_app_server_user_message_omits_unsupported_media() {
                         url: "https://example.com/one.wav".to_string(),
                     },
                     AppServerUserInput::LocalAudio {
-                        path: test_path_buf("/tmp/two.wav"),
+                        path: codex_utils_path_uri::LegacyAppPathString::from_path(&test_path_buf(
+                            "/tmp/two.wav",
+                        )),
                     },
                 ],
             },
@@ -849,7 +853,7 @@ async fn live_app_server_file_change_item_started_preserves_changes() {
             item: AppServerThreadItem::FileChange {
                 id: "patch-1".to_string(),
                 changes: vec![FileUpdateChange {
-                    path: "foo.txt".to_string(),
+                    path: codex_utils_path_uri::LegacyAppPathString::from_string("foo.txt"),
                     kind: PatchChangeKind::Add,
                     diff: "hello\n".to_string(),
                 }],

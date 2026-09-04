@@ -144,11 +144,15 @@ async fn projection_failure_still_publishes_released_closed_and_degraded() -> Re
         ..Default::default()
     })
     .await?;
-    let rollout_path = thread.path.as_ref().expect("thread rollout path");
-    let rollout = std::fs::read_to_string(rollout_path)?;
+    let rollout_path = codex_utils_absolute_path::AbsolutePathBuf::try_from(
+        thread.path.as_ref().expect("thread rollout path").clone(),
+    )?;
+    let rollout = std::fs::read_to_string(rollout_path.as_path())?;
     let duplicate = rollout.lines().last().expect("last rollout record");
     writeln!(
-        OpenOptions::new().append(true).open(rollout_path)?,
+        OpenOptions::new()
+            .append(true)
+            .open(rollout_path.as_path())?,
         "{duplicate}"
     )?;
 

@@ -468,7 +468,11 @@ async fn spawned_descendant_usage_exhausts_root_goal_budget_once() -> anyhow::Re
         .handle(tool_call(
             "create_goal",
             "call-create-goal",
-            json!({ "objective": "account for the entire agent tree", "token_budget": 62 }),
+            json!({
+                "expected_revision": 0,
+                "objective": "account for the entire agent tree",
+                "token_budget": 62,
+            }),
         ))
         .await?;
 
@@ -523,7 +527,10 @@ async fn grandchild_usage_rolls_up_after_parent_runtime_unloads() -> anyhow::Res
         .handle(tool_call(
             "create_goal",
             "call-create-goal",
-            json!({ "objective": "account for evicted agent trees" }),
+            json!({
+                "expected_revision": 0,
+                "objective": "account for evicted agent trees",
+            }),
         ))
         .await?;
 
@@ -571,9 +578,14 @@ async fn subagent_usage_resets_when_root_goal_is_replaced() -> anyhow::Result<()
         .handle(tool_call(
             "create_goal",
             "call-create-first-goal",
-            json!({ "objective": "first goal" }),
+            json!({ "expected_revision": 0, "objective": "first goal" }),
         ))
         .await?;
+    let first_goal = runtime
+        .thread_goals()
+        .get_thread_goal(thread_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("first goal should exist"))?;
     child
         .record_token_usage_with_last(
             "child-turn",
@@ -584,7 +596,11 @@ async fn subagent_usage_resets_when_root_goal_is_replaced() -> anyhow::Result<()
     let completion = tool_call(
         "update_goal",
         "call-complete-first-goal",
-        json!({ "status": "complete" }),
+        json!({
+            "expected_goal_id": first_goal.goal_id,
+            "expected_revision": first_goal.revision,
+            "status": "complete",
+        }),
     );
     let completed = tool_by_name(&tools, "update_goal")
         .handle(completion.clone())
@@ -593,6 +609,9 @@ async fn subagent_usage_resets_when_root_goal_is_replaced() -> anyhow::Result<()
         json!(25),
         completed.code_mode_result(&completion.payload)["goal"]["tokensUsed"]
     );
+    let complete_revision = completed.code_mode_result(&completion.payload)["revision"]
+        .as_i64()
+        .ok_or_else(|| anyhow::anyhow!("completed goal revision should be returned"))?;
 
     child
         .record_token_usage_with_last(
@@ -605,7 +624,10 @@ async fn subagent_usage_resets_when_root_goal_is_replaced() -> anyhow::Result<()
         .handle(tool_call(
             "create_goal",
             "call-create-second-goal",
-            json!({ "objective": "replacement goal" }),
+            json!({
+                "expected_revision": complete_revision,
+                "objective": "replacement goal",
+            }),
         ))
         .await?;
     child
@@ -897,7 +919,10 @@ async fn failed_execution_turns_block_goal_unless_a_tool_succeeds() -> anyhow::R
             .handle(tool_call(
                 "create_goal",
                 "call-create-goal",
-                json!({ "objective": "ship goal extension backend" }),
+                json!({
+                    "expected_revision": 0,
+                    "objective": "ship goal extension backend",
+                }),
             ))
             .await?;
 
