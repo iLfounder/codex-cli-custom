@@ -21,16 +21,15 @@ async fn chatgpt_cost_requires_visible_amount_and_matching_settlement(
     expected: Option<&str>,
 ) {
     let server = MockServer::start().await;
-    let mut runtime = test_runtime(
-        &server,
-        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing()),
-    )
-    .await;
+    let auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    let mut runtime = test_runtime(&server, Arc::clone(&auth_manager)).await;
     let thread_id = ThreadId::new();
     runtime.turns.insert(
         "turn-1".to_string(),
         TurnCostEntry {
             thread_id,
+            auth_manager: Arc::clone(&auth_manager),
             session_telemetry: test_session_telemetry(thread_id),
             expected_response_ids: HashSet::from(["resp-one".to_string(), "resp-two".to_string()]),
             status: TurnCostStatus::Completed,
@@ -50,7 +49,7 @@ async fn chatgpt_cost_requires_visible_amount_and_matching_settlement(
         .mount(&server)
         .await;
     let costs = runtime
-        .query_turn_costs(&["turn-1".to_string()])
+        .query_turn_costs(&["turn-1".to_string()], Some(&auth_manager))
         .await
         .expect("query")
         .expect("SiWC enabled");

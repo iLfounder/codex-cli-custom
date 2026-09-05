@@ -40,25 +40,7 @@ async fn disconnected_cold_resume_rolls_back_exact_thread_and_writer() -> Result
         /*git_info*/ None,
     )?;
     let initialize_barrier = codex_home.path().join("allow-mcp-initialize");
-    std::fs::write(&initialize_barrier, "ready")?;
-    let mut config = OpenOptions::new()
-        .append(true)
-        .open(codex_home.path().join("config.toml"))?;
-    writeln!(
-        config,
-        r#"
-[mcp_servers.listener-stall]
-command = {}
-required = true
-startup_timeout_sec = 60
-
-[mcp_servers.listener-stall.env]
-MCP_TEST_INITIALIZE_BARRIER_FILE = {}
-"#,
-        toml::Value::String(core_test_support::stdio_server_bin()?),
-        toml::Value::String(initialize_barrier.to_string_lossy().into_owned()),
-    )?;
-    drop(config);
+    let initialize_started = codex_home.path().join("mcp-initialize-started");
 
     let (mut process, bind_addr) = spawn_websocket_server(codex_home.path()).await?;
     let mut requester = connect_websocket(bind_addr).await?;
@@ -80,7 +62,29 @@ MCP_TEST_INITIALIZE_BARRIER_FILE = {}
     .await?;
     let throwaway: ThreadStartResponse =
         to_response(read_response_for_id(&mut requester, /*id*/ 2).await?)?;
-    std::fs::remove_file(&initialize_barrier)?;
+
+    // Only the cold resume starts this MCP server, so its signal cannot come from the
+    // throwaway thread's asynchronously initialized MCP connections.
+    let mut config = OpenOptions::new()
+        .append(true)
+        .open(codex_home.path().join("config.toml"))?;
+    writeln!(
+        config,
+        r#"
+[mcp_servers.listener-stall]
+command = {}
+required = true
+startup_timeout_sec = 60
+
+[mcp_servers.listener-stall.env]
+MCP_TEST_INITIALIZE_BARRIER_FILE = {}
+MCP_TEST_INITIALIZE_STARTED_FILE = {}
+"#,
+        toml::Value::String(core_test_support::stdio_server_bin()?),
+        toml::Value::String(initialize_barrier.to_string_lossy().into_owned()),
+        toml::Value::String(initialize_started.to_string_lossy().into_owned()),
+    )?;
+    drop(config);
 
     send_request(
         &mut requester,
@@ -92,6 +96,13 @@ MCP_TEST_INITIALIZE_BARRIER_FILE = {}
         })?),
     )
     .await?;
+    timeout(DEFAULT_READ_TIMEOUT, async {
+        while !initialize_started.is_file() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .context("timed out waiting for cold-resume MCP initialize entry")?;
     requester
         .close(None)
         .await

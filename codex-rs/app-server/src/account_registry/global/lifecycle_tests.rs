@@ -230,7 +230,8 @@ async fn registry_fixture(
         auth_manager,
         models_manager,
         Arc::new(codex_thread_store::InMemoryThreadStore::default()),
-    );
+    )
+    .expect("create account registry");
     registry.global_directory_user_home = Some(owner_home.to_path_buf());
     registry.token_manager_client = Some(
         TokenManagerClient::new(

@@ -52,6 +52,7 @@ const SMALL_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAA
 const APP_ONLY_CWD_MARKER_FILE_ENV: &str = "MCP_TEST_APP_ONLY_CWD_MARKER_FILE";
 const DYNAMIC_SERVER_METADATA_ENV: &str = "MCP_TEST_DYNAMIC_SERVER_METADATA";
 const INITIALIZE_BARRIER_FILE_ENV: &str = "MCP_TEST_INITIALIZE_BARRIER_FILE";
+const INITIALIZE_STARTED_FILE_ENV: &str = "MCP_TEST_INITIALIZE_STARTED_FILE";
 const SERVER_INSTRUCTIONS_ENV: &str = "MCP_TEST_SERVER_INSTRUCTIONS";
 
 fn dynamic_server_process_label() -> Option<String> {
@@ -510,6 +511,10 @@ impl ServerHandler for TestToolServer {
         request: InitializeRequestParams,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<InitializeResult, McpError> {
+        if let Some(started_file) = std::env::var_os(INITIALIZE_STARTED_FILE_ENV) {
+            std::fs::write(started_file, "started")
+                .map_err(|err| McpError::internal_error(err.to_string(), /*data*/ None))?;
+        }
         if let Ok(barrier_file) = std::env::var(INITIALIZE_BARRIER_FILE_ENV) {
             while !std::path::Path::new(&barrier_file).is_file() {
                 sleep(Duration::from_millis(10)).await;

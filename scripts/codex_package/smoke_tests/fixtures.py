@@ -52,6 +52,7 @@ class SmokePackage:
 
         # Isolate package configuration and state from the user's Codex setup.
         environment["CODEX_HOME"] = str(config_dir)
+        environment["CODEX_TEST_OWNER_HOME"] = str(directory)
         # Shell startup files can replace PATH and hide the packaged ripgrep.
         environment.pop("BASH_ENV", None)
         environment["ZDOTDIR"] = str(directory)

@@ -285,6 +285,7 @@ async fn registry_for_home_and_store(
         models_manager,
         thread_store,
     )
+    .expect("create account registry")
 }
 
 #[tokio::test]

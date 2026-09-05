@@ -938,7 +938,7 @@ pub async fn run_main_with_transport_options(
             .then_some(plugin_startup_config),
             account_failover_mode: codex_app_server_protocol::AccountFailoverMode::Disabled,
             legacy_admission,
-        }));
+        })?);
         let mut thread_created_rx = processor.thread_created_receiver();
         let mut running_turn_count_rx = processor.subscribe_running_assistant_turn_count();
         let mut connections = HashMap::<ConnectionId, ConnectionState>::new();

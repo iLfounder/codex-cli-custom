@@ -444,6 +444,7 @@ fn request_admission(request: &ClientRequest) -> RequestAdmission {
         | ClientRequest::SkillsConfigWrite { .. }
         | ClientRequest::PluginInstall { .. }
         | ClientRequest::PluginUninstall { .. }
+        | ClientRequest::PluginReconcile { .. }
         | ClientRequest::TurnStart { .. }
         | ClientRequest::ThreadPresentationAppend { .. }
         | ClientRequest::TurnSteer { .. }

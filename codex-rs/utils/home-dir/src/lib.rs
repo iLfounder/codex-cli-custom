@@ -42,13 +42,47 @@ pub fn find_codex_home() -> std::io::Result<AbsolutePathBuf> {
     find_codex_home_from_env(codex_home_env.as_deref())
 }
 
-/// Returns the current OS user's home directory without consulting
-/// `CODEX_HOME`.
+/// Returns the owner home directory without consulting `CODEX_HOME`.
 ///
 /// Owner-scoped services use this path for discovery state that must remain
 /// stable while numbered Codex accounts select different configuration homes.
+/// Trusted test launchers may explicitly set `CODEX_TEST_OWNER_HOME`, including
+/// when exercising release artifacts. It must name an existing absolute
+/// directory and is canonicalized before use. An invalid override is an
+/// `InvalidInput` error, never a fallback to the real OS owner or unmanaged mode.
+/// Without this override, the existing OS owner discovery is unchanged.
 pub fn find_owner_home() -> std::io::Result<AbsolutePathBuf> {
-    let owner_home = home_dir().ok_or_else(|| {
+    let owner_home_env = std::env::var_os("CODEX_TEST_OWNER_HOME");
+    find_owner_home_from_env(owner_home_env.as_deref(), home_dir)
+}
+
+fn find_owner_home_from_env(
+    owner_home_env: Option<&std::ffi::OsStr>,
+    default_owner_home: impl FnOnce() -> Option<PathBuf>,
+) -> std::io::Result<AbsolutePathBuf> {
+    if let Some(value) = owner_home_env {
+        let path = Path::new(value);
+        if value.is_empty() || !path.is_absolute() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "CODEX_TEST_OWNER_HOME must be a nonempty absolute directory path",
+            ));
+        }
+        let canonical = path.canonicalize().map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("failed to resolve CODEX_TEST_OWNER_HOME: {error}"),
+            )
+        })?;
+        if !canonical.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "CODEX_TEST_OWNER_HOME must be a directory",
+            ));
+        }
+        return AbsolutePathBuf::from_absolute_path(canonical);
+    }
+    let owner_home = default_owner_home().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "Could not find owner home directory",
@@ -479,6 +513,10 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "account_catalog_tests.rs"]
 mod account_catalog_tests;
+
+#[cfg(test)]
+#[path = "owner_home_tests.rs"]
+mod owner_home_tests;

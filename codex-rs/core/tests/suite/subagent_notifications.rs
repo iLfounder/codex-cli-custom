@@ -822,8 +822,24 @@ async fn subagent_stop_replaces_stop_and_skips_internal_subagents() -> Result<()
         .await?;
 
     test.submit_turn(TURN_1_PROMPT).await?;
-    let _ = wait_for_requests(&first_child_request).await?;
-    let _ = wait_for_requests(&second_child_request).await?;
+    // ResponseMock also records requests rejected by the later body matcher.
+    // Wait for each actual child request before checking its completed hook log.
+    for (mock, text) in [
+        (&first_child_request, CHILD_PROMPT),
+        (&second_child_request, SUBAGENT_STOP_CONTINUATION),
+    ] {
+        timeout(Duration::from_secs(10), async {
+            loop {
+                if mock.requests().iter().any(|request| {
+                    request.body_contains_text(text) && !request.body_contains_text(SPAWN_CALL_ID)
+                }) {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+    }
 
     let subagent_stop_inputs = wait_for_hook_log(
         test.codex_home_path(),

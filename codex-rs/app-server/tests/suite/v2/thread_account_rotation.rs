@@ -45,6 +45,7 @@ async fn global_rotation_create_cas_and_notification_use_public_rpc() -> Result<
         .without_auto_env()
         .with_env_overrides(&[
             ("HOME", Some(owner_home_env.as_ref())),
+            ("CODEX_TEST_OWNER_HOME", Some(owner_home_env.as_ref())),
             (
                 "CODEX_APP_SERVER_TEST_TOKEN_MANAGER_URL",
                 Some(endpoint.as_str()),

@@ -263,7 +263,7 @@ async fn build_test_processor(
         outgoing_tx,
         analytics_events_client.clone(),
     ));
-    let processor = Arc::new(MessageProcessor::new(MessageProcessorArgs {
+    let processor = MessageProcessor::new(MessageProcessorArgs {
         outgoing,
         analytics_events_client,
         arg0_paths: Arg0DispatchPaths::default(),
@@ -283,7 +283,9 @@ async fn build_test_processor(
         plugin_startup_tasks: Some(PluginStartupConfig::Current),
         account_failover_mode: codex_app_server_protocol::AccountFailoverMode::Disabled,
         legacy_admission: crate::legacy_admission::LegacyAdmissionGate::default(),
-    }));
+    })
+    .expect("create message processor");
+    let processor = Arc::new(processor);
     (processor, outgoing_rx)
 }
 

@@ -164,6 +164,7 @@ pub struct TestAppServer {
     _attribution_settings_server: Option<MockServer>,
     _owned_install_dir: Option<TempDir>,
     _owned_codex_home: Option<TempDir>,
+    _owned_owner_home: Option<TempDir>,
 }
 
 pub const DEFAULT_CLIENT_NAME: &str = "codex-app-server-tests";
@@ -235,6 +236,22 @@ impl TestAppServer {
         args: &[&str],
     ) -> anyhow::Result<Self> {
         let mut cmd = Command::new(program);
+        let explicit_owner = env_overrides
+            .iter()
+            .rev()
+            .find(|(key, _)| *key == "CODEX_TEST_OWNER_HOME");
+        ensure!(
+            !matches!(explicit_owner, Some((_, None))),
+            "TestAppServer cannot remove CODEX_TEST_OWNER_HOME; select an isolated owner instead"
+        );
+        let owned_owner_home =
+            if explicit_owner.is_none() && std::env::var_os("CODEX_TEST_OWNER_HOME").is_none() {
+                let owner_home = TempDir::new()?;
+                cmd.env("CODEX_TEST_OWNER_HOME", owner_home.path());
+                Some(owner_home)
+            } else {
+                None
+            };
 
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
@@ -310,6 +327,7 @@ impl TestAppServer {
             _attribution_settings_server: None,
             _owned_install_dir: None,
             _owned_codex_home: None,
+            _owned_owner_home: owned_owner_home,
         })
     }
 

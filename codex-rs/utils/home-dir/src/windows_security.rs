@@ -369,7 +369,7 @@ mod windows {
 pub fn is_owner_private(path: &Path) -> io::Result<bool> {
     #[cfg(windows)]
     {
-        return windows::is_owner_private(path);
+        windows::is_owner_private(path)
     }
     #[cfg(not(windows))]
     {
@@ -384,7 +384,7 @@ pub fn is_owner_private(path: &Path) -> io::Result<bool> {
 pub fn ensure_owner_private(path: &Path) -> io::Result<()> {
     #[cfg(windows)]
     {
-        return windows::ensure_owner_private(path);
+        windows::ensure_owner_private(path)
     }
     #[cfg(not(windows))]
     {

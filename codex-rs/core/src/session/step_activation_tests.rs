@@ -239,16 +239,24 @@ async fn activation_resolves_model_metadata_from_the_captured_execution_account(
     turn.execution_account = Arc::new(crate::execution_account::ExecutionAccountContext {
         models_manager: Arc::new(StaticModelsManager::new(
             /*auth_manager*/ None,
-            ModelsResponse { models: account_models },
+            ModelsResponse {
+                models: account_models,
+            },
         )),
         ..turn.execution_account.as_ref().clone()
     });
     let current = turn.current_settings.load_full();
-    let updated = session.prepare_step_settings_activation(
-        &turn,
-        &current,
-        &StepSettingsUpdate { model: Some(MODEL_B.to_string()), ..Default::default() },
-    ).await.expect("resolve using captured account catalog");
+    let updated = session
+        .prepare_step_settings_activation(
+            &turn,
+            &current,
+            &StepSettingsUpdate {
+                model: Some(MODEL_B.to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("resolve using captured account catalog");
     assert_eq!(
         (&updated.model_info.slug, &updated.model_info.display_name),
         (&MODEL_B.to_string(), &expected_display_name),

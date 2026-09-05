@@ -73,6 +73,7 @@ async fn exact_c_browser_cancel_aborts_connection_owned_lifecycle() -> Result<()
         .without_auto_env()
         .with_env_overrides(&[
             ("HOME", Some(owner_home_env.as_ref())),
+            ("CODEX_TEST_OWNER_HOME", Some(owner_home_env.as_ref())),
             (
                 "CODEX_APP_SERVER_TEST_TOKEN_MANAGER_URL",
                 Some(endpoint.as_str()),
@@ -160,6 +161,7 @@ async fn exact_c_disconnect_aborts_connection_owned_lifecycle() -> Result<()> {
         .without_auto_env()
         .with_env_overrides(&[
             ("HOME", Some(owner_home_env.as_ref())),
+            ("CODEX_TEST_OWNER_HOME", Some(owner_home_env.as_ref())),
             (
                 "CODEX_APP_SERVER_TEST_TOKEN_MANAGER_URL",
                 Some(endpoint.as_str()),
@@ -352,6 +354,7 @@ async fn start_managed_app(
         .without_auto_env()
         .with_env_overrides(&[
             ("HOME", Some(owner_home_env.as_ref())),
+            ("CODEX_TEST_OWNER_HOME", Some(owner_home_env.as_ref())),
             (
                 "CODEX_APP_SERVER_TEST_TOKEN_MANAGER_URL",
                 Some(endpoint.as_str()),

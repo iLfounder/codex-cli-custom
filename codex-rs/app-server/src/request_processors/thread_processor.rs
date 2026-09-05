@@ -4640,6 +4640,12 @@ impl ThreadRequestProcessor {
                     )
                 })?;
 
+            // Auto-attach waits for our thread-list permit, so register the loaded child
+            // before the listener composes its resume response.
+            self.thread_watch_manager
+                .upsert_thread(&child_thread_id.to_string())
+                .await;
+
             let cold_resume_history = paginated_resume.then(|| thread_history.get_rollout_items());
             // Attach to the resolved child with only the caller's history-paging preferences.
             let attach_params = ThreadResumeParams {

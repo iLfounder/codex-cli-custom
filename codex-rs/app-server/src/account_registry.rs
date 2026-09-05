@@ -431,8 +431,8 @@ impl AccountRegistry {
         default_auth_manager: Arc<AuthManager>,
         default_models_manager: SharedModelsManager,
         thread_store: Arc<dyn ThreadStore>,
-    ) -> Self {
-        let global_directory_user_home = global::GlobalAccountDirectory::user_home();
+    ) -> std::io::Result<Self> {
+        let global_directory_user_home = global::GlobalAccountDirectory::user_home()?;
         let global_directory = global_directory_user_home
             .as_deref()
             .map_or_else(global::GlobalAccountDirectory::default, |user_home| {
@@ -485,7 +485,7 @@ impl AccountRegistry {
                 .cmp(&right.manifest.account_slot_id)
         });
 
-        Self {
+        Ok(Self {
             auth_config_template: config.auth_config(),
             thread_store,
             config_manager,
@@ -509,7 +509,7 @@ impl AccountRegistry {
             global_active_logins: StdMutex::new(HashMap::new()),
             global_catalog_refresh: Semaphore::new(/*permits*/ 1),
             token_manager_client,
-        }
+        })
     }
 
     fn refresh_global_directory(&self) -> global::GlobalAccountDirectory {

@@ -1524,6 +1524,7 @@ mod tests {
                         phase: None,
                         memory_citation: None,
                         delivery: None,
+                        questions: None,
                     },
                 ))],
             })
@@ -1550,6 +1551,7 @@ mod tests {
                         phase: None,
                         memory_citation: None,
                         delivery: None,
+                        questions: None,
                     },
                 ))],
             })

@@ -881,7 +881,9 @@ enabled = false
         .await?;
     let request_id = mcp
         .send_hooks_list_request(HooksListParams {
-            cwds: vec![cwd.path().to_path_buf()],
+            cwds: vec![codex_utils_path_uri::LegacyAppPathString::from_path(
+                cwd.path(),
+            )],
         })
         .await?;
     let HooksListResponse { data } =
@@ -892,7 +894,7 @@ enabled = false
     assert_eq!(
         data,
         vec![HooksListEntry {
-            cwd: cwd.path().to_path_buf(),
+            cwd: codex_utils_path_uri::LegacyAppPathString::from_path(cwd.path()),
             hooks: vec![HookMetadata {
                 key: format!("{plugin_id}:hooks/hooks.json:stop:0:1"),
                 event_name: HookEventName::Stop,
@@ -904,7 +906,7 @@ enabled = false
                 timeout_sec: 5,
                 status_message: None,
                 additional_context_limit: None,
-                source_path,
+                source_path: source_path.into(),
                 source: HookSource::Plugin,
                 plugin_id: Some(plugin_id),
                 display_order: 1,

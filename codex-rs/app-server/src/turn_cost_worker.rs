@@ -400,34 +400,29 @@ impl WorkerRuntime {
         }
     }
 
-    async fn poll_entries(
-        &mut self,
-        turn_ids: &[String],
-        auth_manager: Option<Arc<AuthManager>>,
-    ) {
-        let costs =
-            match tokio::time::timeout(
-                REQUEST_TIMEOUT,
-                self.query_turn_costs(turn_ids, auth_manager.as_ref()),
-            )
-            .await
-            {
-                Ok(Ok(Some(costs))) => costs,
-                Ok(Ok(None)) => return,
-                Ok(Err(error)) => {
-                    warn!(
-                        status = error.status().map(|status| status.as_u16()),
-                        "failed to query turn costs"
-                    );
-                    self.retry_entries(turn_ids);
-                    return;
-                }
-                Err(_) => {
-                    warn!("timed out querying turn costs");
-                    self.retry_entries(turn_ids);
-                    return;
-                }
-            };
+    async fn poll_entries(&mut self, turn_ids: &[String], auth_manager: Option<Arc<AuthManager>>) {
+        let costs = match tokio::time::timeout(
+            REQUEST_TIMEOUT,
+            self.query_turn_costs(turn_ids, auth_manager.as_ref()),
+        )
+        .await
+        {
+            Ok(Ok(Some(costs))) => costs,
+            Ok(Ok(None)) => return,
+            Ok(Err(error)) => {
+                warn!(
+                    status = error.status().map(|status| status.as_u16()),
+                    "failed to query turn costs"
+                );
+                self.retry_entries(turn_ids);
+                return;
+            }
+            Err(_) => {
+                warn!("timed out querying turn costs");
+                self.retry_entries(turn_ids);
+                return;
+            }
+        };
         let costs_by_turn: HashMap<String, ApiKeyTurnCost> = costs
             .into_iter()
             .map(|cost| (cost.turn_id.clone(), cost))

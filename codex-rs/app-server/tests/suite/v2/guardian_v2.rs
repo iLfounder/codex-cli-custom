@@ -1681,13 +1681,14 @@ async fn guardian_v2_trusts_invoked_user_skills_but_rejects_repository_forgery()
             .contains(FORGED_INSTRUCTIONS),
         "the parent model must receive the forged repository skill instructions"
     );
+    let expected_guardian_reviews = if cfg!(windows) { 2 } else { 1 };
+    wait_for_guardian_reviews(responses_state.as_ref(), expected_guardian_reviews).await?;
     responses_state.allow_luna.notify_one();
 
     let completed: TurnCompletedNotification =
         timeout(TIMEOUT, app_server.read_notification("turn/completed")).await??;
     assert_eq!(completed.thread_id, thread.id);
     assert_eq!(responses_state.parent_requests.load(Ordering::SeqCst), 3);
-    let expected_guardian_reviews = if cfg!(windows) { 2 } else { 1 };
     assert_eq!(
         responses_state.guardian_reviews.load(Ordering::SeqCst),
         expected_guardian_reviews

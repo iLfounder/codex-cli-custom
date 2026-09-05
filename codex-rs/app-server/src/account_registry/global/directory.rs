@@ -21,8 +21,14 @@ pub(crate) struct GlobalAccountDirectory {
 }
 
 impl GlobalAccountDirectory {
-    pub(crate) fn user_home() -> Option<PathBuf> {
-        find_owner_home().ok().map(Into::into)
+    pub(crate) fn user_home() -> std::io::Result<Option<PathBuf>> {
+        match find_owner_home() {
+            Ok(home) => Ok(Some(home.into())),
+            // Only absent OS discovery is optional. Explicit test-owner errors
+            // are InvalidInput and must stop startup before catalog access.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     pub(crate) fn load_from(user_home: &Path, process_home: &Path) -> Self {

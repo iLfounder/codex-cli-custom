@@ -161,7 +161,8 @@ impl PreparedExecutionAccountRuntime for PreparedGuardianV2AccountRuntime {
                     ..Default::default()
                 });
                 thread_store.insert(GuardianV2Enabled {
-                    computer_use_only: config.review_scope == GuardianV2ReviewScope::ComputerUseOnly,
+                    computer_use_only: config.review_scope
+                        == GuardianV2ReviewScope::ComputerUseOnly,
                 });
             }
             _ => {

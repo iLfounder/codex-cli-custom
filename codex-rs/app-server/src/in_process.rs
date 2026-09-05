@@ -443,72 +443,71 @@ async fn start_uninitialized(
     let (client_tx, mut client_rx) = mpsc::channel::<InProcessClientMessage>(channel_capacity);
     let (event_tx, event_rx) = mpsc::channel::<InProcessServerEvent>(channel_capacity);
 
+    let (outgoing_tx, outgoing_rx) = mpsc::channel::<OutgoingEnvelope>(channel_capacity);
+    let analytics_events_client =
+        analytics_events_client_from_config(Arc::clone(&auth_manager), args.config.as_ref());
+    let analytics_events_flush_client = analytics_events_client.clone();
+    let outgoing_message_sender = Arc::new(OutgoingMessageSender::new(
+        outgoing_tx,
+        analytics_events_client.clone(),
+    ));
+
+    let (writer_tx, mut writer_rx) = mpsc::channel::<QueuedOutgoingMessage>(channel_capacity);
+    let outbound_initialized = Arc::new(AtomicBool::new(false));
+    let outbound_experimental_api_enabled = Arc::new(AtomicBool::new(false));
+    let outbound_opted_out_notification_methods = Arc::new(RwLock::new(HashSet::new()));
+
+    let mut outbound_connections = HashMap::<ConnectionId, OutboundConnectionState>::new();
+    outbound_connections.insert(
+        IN_PROCESS_CONNECTION_ID,
+        OutboundConnectionState::new(
+            writer_tx,
+            Arc::clone(&outbound_initialized),
+            Arc::clone(&outbound_experimental_api_enabled),
+            Arc::clone(&outbound_opted_out_notification_methods),
+            /*disconnect_sender*/ None,
+        ),
+    );
+    let (outbound_shutdown_tx, outbound_shutdown_rx) = oneshot::channel();
+    let processor_outgoing = Arc::clone(&outgoing_message_sender);
+    let config_manager = ConfigManager::new(
+        args.config.codex_home.to_path_buf(),
+        args.cli_overrides,
+        args.loader_overrides,
+        args.strict_config,
+        args.cloud_config_bundle,
+        args.arg0_paths.clone(),
+        args.thread_config_loader,
+    );
+    let (processor_tx, mut processor_rx) = mpsc::channel::<ProcessorCommand>(channel_capacity);
+    let processor = Arc::new(MessageProcessor::new(MessageProcessorArgs {
+        outgoing: Arc::clone(&processor_outgoing),
+        analytics_events_client,
+        arg0_paths: args.arg0_paths,
+        config: args.config,
+        config_manager,
+        environment_manager: args.environment_manager,
+        feedback: args.feedback,
+        log_db: args.log_db,
+        state_db: args.state_db,
+        config_warnings: args.config_warnings,
+        session_source: args.session_source,
+        auth_manager,
+        installation_id,
+        code_mode_session_provider: None,
+        rpc_transport: AppServerRpcTransport::InProcess,
+        remote_control_handle: None,
+        plugin_startup_tasks: Some(PluginStartupConfig::Current),
+        account_failover_mode,
+        legacy_admission: crate::legacy_admission::LegacyAdmissionGate::default(),
+    })?);
     let runtime_handle = tokio::spawn(async move {
-        let (outgoing_tx, outgoing_rx) = mpsc::channel::<OutgoingEnvelope>(channel_capacity);
-        let analytics_events_client =
-            analytics_events_client_from_config(Arc::clone(&auth_manager), args.config.as_ref());
-        let analytics_events_flush_client = analytics_events_client.clone();
-        let outgoing_message_sender = Arc::new(OutgoingMessageSender::new(
-            outgoing_tx,
-            analytics_events_client.clone(),
-        ));
-
-        let (writer_tx, mut writer_rx) = mpsc::channel::<QueuedOutgoingMessage>(channel_capacity);
-        let outbound_initialized = Arc::new(AtomicBool::new(false));
-        let outbound_experimental_api_enabled = Arc::new(AtomicBool::new(false));
-        let outbound_opted_out_notification_methods = Arc::new(RwLock::new(HashSet::new()));
-
-        let mut outbound_connections = HashMap::<ConnectionId, OutboundConnectionState>::new();
-        outbound_connections.insert(
-            IN_PROCESS_CONNECTION_ID,
-            OutboundConnectionState::new(
-                writer_tx,
-                Arc::clone(&outbound_initialized),
-                Arc::clone(&outbound_experimental_api_enabled),
-                Arc::clone(&outbound_opted_out_notification_methods),
-                /*disconnect_sender*/ None,
-            ),
-        );
-        let (outbound_shutdown_tx, outbound_shutdown_rx) = oneshot::channel();
         let mut outbound_handle = tokio::spawn(run_outbound_router(
             outgoing_rx,
             outbound_connections,
             outbound_shutdown_rx,
         ));
-
-        let processor_outgoing = Arc::clone(&outgoing_message_sender);
-        let config_manager = ConfigManager::new(
-            args.config.codex_home.to_path_buf(),
-            args.cli_overrides,
-            args.loader_overrides,
-            args.strict_config,
-            args.cloud_config_bundle,
-            args.arg0_paths.clone(),
-            args.thread_config_loader,
-        );
-        let (processor_tx, mut processor_rx) = mpsc::channel::<ProcessorCommand>(channel_capacity);
         let mut processor_handle = tokio::spawn(async move {
-            let processor = Arc::new(MessageProcessor::new(MessageProcessorArgs {
-                outgoing: Arc::clone(&processor_outgoing),
-                analytics_events_client,
-                arg0_paths: args.arg0_paths,
-                config: args.config,
-                config_manager,
-                environment_manager: args.environment_manager,
-                feedback: args.feedback,
-                log_db: args.log_db,
-                state_db: args.state_db,
-                config_warnings: args.config_warnings,
-                session_source: args.session_source,
-                auth_manager,
-                installation_id,
-                code_mode_session_provider: None,
-                rpc_transport: AppServerRpcTransport::InProcess,
-                remote_control_handle: None,
-                plugin_startup_tasks: Some(PluginStartupConfig::Current),
-                account_failover_mode,
-                legacy_admission: crate::legacy_admission::LegacyAdmissionGate::default(),
-            }));
             let mut thread_created_rx = processor.thread_created_receiver();
             let session = Arc::new(ConnectionSessionState::new());
             let mut listen_for_threads = true;

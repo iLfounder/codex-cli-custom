@@ -171,11 +171,13 @@ impl TokenManagerClient {
             client,
             snapshots_url,
             events_url,
-            control: super::directory::GlobalAccountDirectory::user_home().map(|home| {
-                Arc::new(TokenManagerControl::new(
-                    home.join(CONTROL_SOCKET_RELATIVE_PATH),
-                ))
-            }),
+            control: super::directory::GlobalAccountDirectory::user_home()
+                .map_err(|_| CatalogError::Request)?
+                .map(|home| {
+                    Arc::new(TokenManagerControl::new(
+                        home.join(CONTROL_SOCKET_RELATIVE_PATH),
+                    ))
+                }),
         })
     }
 

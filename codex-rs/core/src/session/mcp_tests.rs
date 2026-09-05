@@ -39,7 +39,9 @@ fn mcp_account_runtime(
     )
     .into_inner();
     let mutable = Arc::get_mut(&mut runtime).expect("unshared account runtime");
-    Arc::make_mut(&mut mutable.execution_account).binding.slot_id = slot_id.to_string();
+    Arc::make_mut(&mut mutable.execution_account)
+        .binding
+        .slot_id = slot_id.to_string();
     mutable.services.mcp_manager = Arc::new(McpManager::new_with_extensions(
         Arc::clone(&mutable.services.plugins_manager),
         Arc::new(extensions.build()),
@@ -73,10 +75,8 @@ async fn mcp_config_projection_uses_published_and_captured_account_managers() {
 
     pretty_assertions::assert_eq!(
         (
-            codex_mcp::configured_mcp_servers(&published_config)
-                .remove("account-marker"),
-            codex_mcp::configured_mcp_servers(&candidate_config)
-                .remove("account-marker"),
+            codex_mcp::configured_mcp_servers(&published_config).remove("account-marker"),
+            codex_mcp::configured_mcp_servers(&candidate_config).remove("account-marker"),
             session.execution_account().binding.slot_id.clone(),
         ),
         (

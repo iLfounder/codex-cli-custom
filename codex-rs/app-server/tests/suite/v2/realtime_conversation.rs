@@ -1278,6 +1278,7 @@ async fn realtime_timeline_splits_accepted_steering_and_persists_promoted_artifa
             .mcp
             .send_turn_steer_request(TurnSteerParams {
                 thread_id: harness.thread_id.clone(),
+                expected_execution_account: None,
                 input,
                 expected_turn_id,
                 additional_context: None,
