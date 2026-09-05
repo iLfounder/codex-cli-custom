@@ -179,29 +179,12 @@ async fn windows_real_remote_goal_continues_offline_and_rejoins_with_draft() -> 
             "fixture refused the first-response release"
         );
         let completed = wait_fixture(&http, &status_url, /*completed*/ 5).await?;
-        ensure!(
-            completed.phases
-                == [
-                    "pwd",
-                    "first_turn_complete",
-                    "get_goal",
-                    "update_goal",
-                    "goal_complete"
-                ],
-            "fixture response order differs from the five-step contract"
-        );
-        let ids = &completed.turn_ids;
-        ensure!(
-            ids.len() == 5
-                && ids
-                    .iter()
-                    .all(|id| id.as_ref().is_some_and(|id| !id.is_empty()))
-                && ids[0] == ids[1]
-                && ids[2] == ids[3]
-                && ids[3] == ids[4]
-                && ids[0] != ids[2],
-            "expected one initial turn and a separate automatic goal continuation"
-        );
+        validate_goal_exchanges(
+            completed.response_count,
+            completed.completed_response_count,
+            &completed.phases,
+            &completed.turn_ids,
+        )?;
         let goal = rpc(&observer, "thread/goal/get", json!({"threadId": thread_id})).await?;
         ensure!(
             goal["goal"]["status"] == "complete"
@@ -232,6 +215,16 @@ async fn windows_real_remote_goal_continues_offline_and_rejoins_with_draft() -> 
                         .iter()
                         .filter_map(|turn| turn["items"].as_array())
                         .flatten()
+                        .filter(|item| item["type"] == "commandExecution")
+                        .count()
+                        == 1,
+                    "goal resync must not replay pwd"
+                );
+                ensure!(
+                    turns
+                        .iter()
+                        .filter_map(|turn| turn["items"].as_array())
+                        .flatten()
                         .any(|item| {
                             item["type"] == "commandExecution"
                                 && item["cwd"] == cwd
@@ -250,9 +243,9 @@ async fn windows_real_remote_goal_continues_offline_and_rejoins_with_draft() -> 
             );
             tokio::time::sleep(Duration::from_millis(/*millis*/ 25)).await;
         }
-        Ok::<_, anyhow::Error>(())
+        Ok::<_, anyhow::Error>(completed)
     };
-    tokio::time::timeout(Duration::from_secs(/*secs*/ 40), offline)
+    let completed = tokio::time::timeout(Duration::from_secs(/*secs*/ 40), offline)
         .await
         .context("offline continuation exceeded the recovery window")??;
     restore_tx
@@ -292,7 +285,10 @@ async fn windows_real_remote_goal_continues_offline_and_rejoins_with_draft() -> 
     terminal.wait_for(&["Status: complete", &objective]).await?;
     let final_status = fixture_status(&http, &status_url).await?;
     ensure!(
-        final_status.response_count == 5 && final_status.completed_response_count == 5,
+        final_status.response_count == completed.response_count
+            && final_status.completed_response_count == completed.completed_response_count
+            && final_status.phases == completed.phases
+            && final_status.turn_ids == completed.turn_ids,
         "navigation or recovery issued an unexpected model request"
     );
     ensure!(!proxy.0.is_finished(), "TCP proxy exited unexpectedly");
@@ -350,7 +346,7 @@ async fn wait_fixture(
     loop {
         let state = fixture_status(http, url).await?;
         ensure!(
-            state.response_count <= 5 && state.completed_response_count <= state.response_count,
+            state.response_count <= 11 && state.completed_response_count <= state.response_count,
             "fixture received unexpected requests"
         );
         if completed == 0 && state.observed {
@@ -360,7 +356,13 @@ async fn wait_fixture(
             );
             return Ok(state);
         }
-        if completed == 5 && state.completed_response_count == 5 {
+        if completed == 5
+            && state
+                .phases
+                .last()
+                .is_some_and(|phase| phase == "goal_complete")
+            && state.completed_response_count == state.response_count
+        {
             ensure!(state.released, "completed fixture was never released");
             return Ok(state);
         }
@@ -370,6 +372,38 @@ async fn wait_fixture(
         );
         tokio::time::sleep(Duration::from_millis(/*millis*/ 25)).await;
     }
+}
+
+// The fixture permits at most three CAS resyncs, never another command or turn.
+pub(super) fn validate_goal_exchanges(
+    response_count: usize,
+    completed_response_count: usize,
+    phases: &[String],
+    turn_ids: &[Option<String>],
+) -> Result<()> {
+    ensure!(
+        (5..=11).contains(&response_count)
+            && response_count % 2 == 1
+            && completed_response_count == response_count
+            && phases.len() == response_count
+            && phases[..4] == ["pwd", "first_turn_complete", "get_goal", "update_goal"]
+            && phases.last().is_some_and(|phase| phase == "goal_complete")
+            && phases[4..response_count - 1]
+                .chunks_exact(2)
+                .all(|pair| { pair == ["get_goal_resync", "update_goal_retry"] }),
+        "expected five goal exchanges plus bounded CAS resync pairs"
+    );
+    ensure!(
+        turn_ids.len() == response_count
+            && turn_ids
+                .iter()
+                .all(|id| id.as_ref().is_some_and(|id| !id.is_empty()))
+            && turn_ids[0] == turn_ids[1]
+            && turn_ids[2..].iter().all(|id| id == &turn_ids[2])
+            && turn_ids[0] != turn_ids[2],
+        "expected one initial turn and a separate automatic goal continuation"
+    );
+    Ok(())
 }
 
 pub(super) async fn rpc(

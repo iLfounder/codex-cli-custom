@@ -169,6 +169,7 @@ async fn start_terminal_with_config(
     });
     configure(&mut config);
     config["projects"][local_cwd.to_string_lossy().as_ref()] = json!({"trust_level": "trusted"});
+    let config: toml::Value = serde_json::from_value(config)?;
     std::fs::write(codex_home.join("config.toml"), toml::to_string(&config)?)?;
 
     // Do not inherit account, auth, provider, or user startup configuration.

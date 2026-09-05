@@ -13,6 +13,9 @@ use codex_app_server_protocol::SessionRuntimeCapability;
 use codex_app_server_protocol::SessionRuntimeIdentity;
 use codex_app_server_protocol::SessionRuntimeLifecycle;
 use codex_app_server_protocol::SessionRuntimeLifecycleState;
+use codex_app_server_protocol::SessionRuntimeOperation;
+use codex_app_server_protocol::SessionRuntimeOperationAction;
+use codex_app_server_protocol::SessionRuntimeOperationStatus;
 use codex_app_server_protocol::SessionRuntimePersistence;
 use codex_app_server_protocol::SessionRuntimePersistenceHealth;
 use codex_app_server_protocol::SessionRuntimeSnapshot;
@@ -356,4 +359,110 @@ async fn rotation_is_exposed_only_with_the_matching_available_capability() {
     }];
     assert_eq!(app.apply_account_snapshot(visible), true);
     assert_eq!(app.account_rotation_snapshot(), Some(&rotation));
+}
+
+enum SwitchReadyTiming {
+    BeforeEscape,
+    AfterEscape,
+}
+
+async fn account_switch_validation_preserves_picker_dismissal(timing: SwitchReadyTiming) {
+    let mut app = make_test_app().await;
+    let app_server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config))
+        .await
+        .expect("test app server");
+    display_snapshot_thread(&mut app);
+    let thread_id = ThreadId::from_string(THREAD_ID).expect("thread id");
+    let mut initial = picker_snapshot("epoch-a", THREAD_ID, 1, 1);
+    initial.slots.data = vec![listed_account("C1", 1), listed_account("C2", 2)];
+    initial.runtime.snapshot.account.current = Some(SessionRuntimeAccountRef {
+        account_slot_id: "C1".to_string(),
+        execution_generation: 1,
+    });
+    assert!(app.apply_account_snapshot(initial));
+    // Account detail acceptance leaves this parent list open.
+    app.open_account_picker(&app_server);
+    assert!(app.replace_account_picker_if_present(Some("C2")));
+    app.pending_account_control = Some(PendingAccountControl::Switch {
+        operation_id: "switch-c2".to_string(),
+        thread_id,
+        target_slot_id: "C2".to_string(),
+        instance_epoch: "epoch-a".to_string(),
+        ready_state_revision: None,
+        ready_generation: None,
+        validation_in_flight: false,
+    });
+    if matches!(timing, SwitchReadyTiming::AfterEscape) {
+        app.chat_widget
+            .handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.chat_widget.no_modal_or_popup_active());
+    }
+    // Exercise the real switch-reply -> Ready -> validation-request path.
+    app.handle_account_switch_finished(
+        &app_server,
+        "switch-c2",
+        Ok(SessionRuntimeOperation {
+            operation_id: "switch-c2".to_string(),
+            request_fingerprint: "synthetic-switch".to_string(),
+            action: SessionRuntimeOperationAction::ThreadAccountSwitch,
+            status: SessionRuntimeOperationStatus::Ready,
+            thread_id: Some(THREAD_ID.to_string()),
+            account_slot_id: Some("C2".to_string()),
+            state_revision: Some(2),
+            writer_generation: None,
+            execution_generation: Some(2),
+            error: None,
+            updated_at: 0,
+        }),
+    );
+    assert!(matches!(
+        app.pending_account_control,
+        Some(PendingAccountControl::Switch {
+            ready_state_revision: Some(2),
+            ready_generation: Some(2),
+            validation_in_flight: true,
+            ..
+        })
+    ));
+    if matches!(timing, SwitchReadyTiming::BeforeEscape) {
+        app.chat_widget
+            .handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    }
+    assert!(app.chat_widget.no_modal_or_popup_active());
+
+    // Deliver the authoritative reply after dismissal, without depending on
+    // transport scheduling or requiring a real account switch in this UI test.
+    let mut refreshed = picker_snapshot("epoch-a", THREAD_ID, 2, 2);
+    refreshed.slots.data = vec![listed_account("C1", 1), listed_account("C2", 2)];
+    for slot in &mut refreshed.slots.data {
+        slot.registry_revision = 2;
+    }
+    refreshed.runtime.snapshot.account.current = Some(SessionRuntimeAccountRef {
+        account_slot_id: "C2".to_string(),
+        execution_generation: 2,
+    });
+    let expected = refreshed.runtime.snapshot.clone();
+    app.handle_account_state_refreshed(
+        &app_server,
+        thread_id,
+        app.account_request_generation,
+        Ok(refreshed),
+    );
+    assert_eq!(app.account_runtime, Some(("epoch-a".to_string(), expected)));
+    assert!(app.pending_account_control.is_none());
+    assert!(app.chat_widget.no_modal_or_popup_active());
+    app_server
+        .shutdown()
+        .await
+        .expect("shutdown test app server");
+}
+
+#[tokio::test]
+async fn switch_ready_then_escape_dismisses_the_only_account_picker() {
+    account_switch_validation_preserves_picker_dismissal(SwitchReadyTiming::BeforeEscape).await;
+}
+
+#[tokio::test]
+async fn switch_ready_after_escape_does_not_reopen_the_account_picker() {
+    account_switch_validation_preserves_picker_dismissal(SwitchReadyTiming::AfterEscape).await;
 }
