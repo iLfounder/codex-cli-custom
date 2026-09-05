@@ -776,7 +776,10 @@ pub(crate) enum AppEvent {
     },
 
     /// Result of computing a `/diff` command.
-    DiffResult { scope: WorkspaceRequestScope, text: String },
+    DiffResult {
+        scope: WorkspaceRequestScope,
+        text: String,
+    },
 
     /// Open the app link view in the bottom pane.
     OpenAppLink {
@@ -865,7 +868,8 @@ pub(crate) enum AppEvent {
         scope: WorkspaceRequestScope,
         cwd: PathBuf,
         result: Result<PluginListResponse, String>,
-        marketplace_management: Option<Result<crate::marketplace_management::MarketplaceManagement, String>>,
+        marketplace_management:
+            Option<Result<crate::marketplace_management::MarketplaceManagement, String>>,
     },
 
     /// Open the plugin list from an already cached response.
@@ -1095,12 +1099,14 @@ pub(crate) enum AppEvent {
 
     /// Fetch MCP inventory via app-server RPCs and render it into history.
     FetchMcpInventory {
+        scope: WorkspaceRequestScope,
         detail: McpServerStatusDetail,
         thread_id: Option<ThreadId>,
     },
 
     /// Result of fetching MCP inventory via app-server RPCs.
     McpInventoryLoaded {
+        scope: WorkspaceRequestScope,
         result: Result<Vec<McpServerStatus>, String>,
         detail: McpServerStatusDetail,
         thread_id: Option<ThreadId>,

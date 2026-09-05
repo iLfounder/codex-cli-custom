@@ -49,6 +49,7 @@ enum HistoryCapabilities {
     LegacyDynamicToolsAndHistory,
     ForkHydrationFails,
     ThreadListFails,
+    ResumeFails,
 }
 
 /// Returns and resets `(thread/loaded/list, thread/read)` request counts.
@@ -185,7 +186,18 @@ async fn start_recording_app_server_with_history(
                             .is_some_and(|tools| {
                                 tools.iter().any(|tool| tool["type"] == "namespace")
                             });
-                    let response = if request.method == "thread/list"
+                    let response = if history_capabilities == HistoryCapabilities::ResumeFails
+                        && request.method == "thread/resume"
+                    {
+                        JSONRPCMessage::Error(JSONRPCError {
+                            id: request_id,
+                            error: JSONRPCErrorError {
+                                code: -32603,
+                                data: None,
+                                message: "live attachment unavailable".to_string(),
+                            },
+                        })
+                    } else if request.method == "thread/list"
                         && std::mem::take(&mut reject_thread_list)
                     {
                         JSONRPCMessage::Error(JSONRPCError {
@@ -388,6 +400,132 @@ async fn make_history_test_app() -> Result<(App, tempfile::TempDir)> {
     app.config.codex_home = codex_home.path().to_path_buf().abs();
     app.config.sqlite = SqliteConfig::new_for_testing(codex_home.path().abs());
     Ok((app, codex_home))
+}
+
+#[tokio::test]
+async fn attach_read_fallback_preserves_cached_permissions_and_fresh_paths() -> Result<()> {
+    use crate::session_state::SessionExecutionContext;
+    use clap::Parser;
+
+    for mode in [
+        crate::app_server_session::ThreadParamsMode::Embedded,
+        crate::app_server_session::ThreadParamsMode::Remote,
+    ] {
+        let (mut app, _codex_home) = make_history_test_app().await?;
+        let thread_id = create_history_rollout(
+            &app.config,
+            ThreadHistoryMode::Legacy,
+            "Existing user message",
+        )?;
+        let mut primary = test_thread_session(ThreadId::new(), test_path_buf("/tmp/primary"));
+        let mut cached = test_thread_session(thread_id, test_path_buf("/tmp/stale-cwd"));
+        let fresh_root = test_path_buf("/tmp/fresh-root").abs();
+        let stale_root = test_path_buf("/tmp/stale-root").abs();
+        if mode == crate::app_server_session::ThreadParamsMode::Remote {
+            app.app_server_target = AppServerTarget::Remote {
+                endpoint: crate::resolve_remote_addr("ws://127.0.0.1:4500")?,
+            };
+            primary.execution_context = SessionExecutionContext::Remote {
+                cwd: LegacyAppPathString::from_string("/srv/primary"),
+                runtime_workspace_roots: vec![LegacyAppPathString::from_abs_path(&fresh_root)],
+                sandbox: codex_app_server_protocol::SandboxPolicy::ReadOnly {
+                    network_access: false,
+                },
+                rollout_path: None,
+            };
+            cached.execution_context = SessionExecutionContext::Remote {
+                cwd: LegacyAppPathString::from_string("/srv/stale-cwd"),
+                runtime_workspace_roots: vec![LegacyAppPathString::from_abs_path(&stale_root)],
+                sandbox: codex_app_server_protocol::SandboxPolicy::ReadOnly {
+                    network_access: true,
+                },
+                rollout_path: Some(LegacyAppPathString::from_string("/srv/stale-rollout")),
+            };
+        } else {
+            primary.set_native_cwd_and_roots(test_path_buf("/tmp/primary").abs(), vec![fresh_root]);
+            cached
+                .set_native_cwd_and_roots(test_path_buf("/tmp/stale-cwd").abs(), vec![stale_root]);
+            cached.set_native_permission_profile(PermissionProfile::workspace_write());
+        }
+        cached.approval_policy = AskForApproval::UnlessTrusted;
+        cached.approvals_reviewer = ApprovalsReviewer::AutoReview;
+        cached.active_permission_profile = Some(
+            codex_protocol::models::ActivePermissionProfile::new("cached"),
+        );
+        app.primary_session_configured = Some(primary);
+        let mut channel = ThreadEventChannel::new_with_session(
+            THREAD_EVENT_CHANNEL_CAPACITY,
+            cached.clone(),
+            Vec::new(),
+        );
+        channel.mark_replay_only();
+        app.thread_event_channels.insert(thread_id, channel);
+        let (mut server, requests, proxy) = start_recording_app_server_with_history(
+            &app.config,
+            HistoryCapabilities::ResumeFails,
+            /*blocked_thread_list*/ None,
+            /*failed_thread_name*/ None,
+            mode,
+        )
+        .await?;
+        let mut cli = crate::Cli::try_parse_from([
+            "codex",
+            "--model",
+            "gpt-5.4",
+            "-C",
+            "/srv/initial-cli-cwd",
+        ])?;
+        cli.config_overrides.raw_overrides = vec![
+            "model_reasoning_effort=high".to_string(),
+            "service_tier=fast".to_string(),
+        ];
+        server = server
+            .with_remote_invocation_overrides(
+                crate::capture_remote_invocation_overrides(&cli)
+                    .expect("allowed remote invocation"),
+            )
+            .with_remote_cwd_override(Some(LegacyAppPathString::from_string("/srv/override")));
+        let thread = server
+            .thread_read(thread_id, /*include_turns*/ false)
+            .await?;
+        let mut expected = app.session_state_for_thread_read(thread_id, &thread).await;
+        match &mut expected.execution_context {
+            SessionExecutionContext::Native {
+                permission_profile, ..
+            } => {
+                *permission_profile = PermissionProfile::workspace_write();
+            }
+            SessionExecutionContext::Remote { sandbox, .. } => {
+                *sandbox = codex_app_server_protocol::SandboxPolicy::ReadOnly {
+                    network_access: true,
+                };
+            }
+        }
+        expected.approval_policy = cached.approval_policy;
+        expected.approvals_reviewer = cached.approvals_reviewer;
+        expected.active_permission_profile = cached.active_permission_profile;
+        expected.model.clear();
+        assert!(
+            !app.attach_live_thread_for_selection(&mut server, thread_id)
+                .await?
+        );
+        let channel = app
+            .thread_event_channels
+            .get(&thread_id)
+            .expect("replay channel");
+        assert_eq!(channel.attachment(), ThreadEventAttachment::ReplayOnly);
+        assert_eq!(channel.store.lock().await.session.as_ref(), Some(&expected));
+        let resumes = recorded_params(&requests, "thread/resume");
+        assert_eq!(resumes.len(), 1);
+        assert_eq!(resumes[0]["threadId"], thread_id.to_string());
+        assert!(resumes[0]["cwd"].is_null());
+        assert!(resumes[0]["model"].is_null());
+        assert!(resumes[0]["serviceTier"].is_null());
+        assert!(resumes[0]["config"].is_null());
+        server.shutdown().await?;
+        proxy.await??;
+    }
+    Ok(())
 }
 
 #[tokio::test]
@@ -2945,10 +3083,21 @@ async fn changing_directory_preserves_project_trust_permissions_history_and_hook
         generation: app.chat_widget.connector_scope_generation(),
     };
     let (cwd, result) = (current.clone(), Err("stale skills".into()));
-    let skills = AppEvent::SkillsListLoaded { scope: scope.clone(), cwd, result };
+    let skills = AppEvent::SkillsListLoaded {
+        scope: scope.clone(),
+        cwd,
+        result,
+    };
     let (cwd, plugins) = (current.clone(), Some(vec![]));
-    let plugins = AppEvent::PluginMentionsLoaded { scope: scope.clone(), cwd, plugins };
-    let diff = AppEvent::DiffResult { scope, text: "stale diff".to_string() };
+    let plugins = AppEvent::PluginMentionsLoaded {
+        scope: scope.clone(),
+        cwd,
+        plugins,
+    };
+    let diff = AppEvent::DiffResult {
+        scope,
+        text: "stale diff".to_string(),
+    };
     let branch = AppEvent::SyncThreadGitBranch {
         thread_id: original,
         branch: "stale".to_string(),

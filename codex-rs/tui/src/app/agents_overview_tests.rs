@@ -16,6 +16,8 @@ use codex_app_server_protocol::ThreadArchivedNotification;
 use codex_app_server_protocol::ThreadClosedNotification;
 use codex_app_server_protocol::ThreadDeletedNotification;
 use codex_app_server_protocol::ThreadNameUpdatedNotification;
+use codex_app_server_protocol::ThreadResumeParams;
+use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadSource;
 use codex_app_server_protocol::ThreadStartedNotification;
 use codex_app_server_protocol::ThreadStatus;
@@ -810,6 +812,16 @@ async fn overview_selection_applies_user_permissions_only_to_unloaded_threads() 
         )
         .await?
         .session;
+    let loaded_baseline: ThreadResumeResponse = app_server
+        .request_handle()
+        .request_typed(ClientRequest::ThreadResume {
+            request_id: RequestId::String("overview-loaded-permissions-baseline".to_string()),
+            params: ThreadResumeParams {
+                thread_id: loaded.thread_id.to_string(),
+                ..ThreadResumeParams::default()
+            },
+        })
+        .await?;
     app.harness_overrides.sandbox_mode = Some(codex_protocol::config_types::SandboxMode::ReadOnly);
     app.harness_overrides.approval_policy =
         Some(codex_protocol::protocol::AskForApproval::UnlessTrusted);
@@ -822,25 +834,28 @@ async fn overview_selection_applies_user_permissions_only_to_unloaded_threads() 
         AskForApproval::UnlessTrusted,
     ));
     let mut tui = crate::tui::test_support::make_test_tui()?;
-    for (thread_id, expected_permissions, expected_approval) in [
+    let read_only_sandbox = codex_app_server_protocol::SandboxPolicy::ReadOnly {
+        network_access: false,
+    };
+    for (thread_id, expected_sandbox, expected_approval) in [
         (
             loaded.thread_id,
-            loaded.native_permission_profile().expect("native session").clone(),
+            loaded_baseline.sandbox,
             loaded.approval_policy,
         ),
         (
             thread_ids[1],
-            PermissionProfile::read_only(),
+            read_only_sandbox.clone(),
             codex_app_server_protocol::AskForApproval::UnlessTrusted,
         ),
         (
             thread_ids[2],
-            PermissionProfile::read_only(),
+            read_only_sandbox.clone(),
             codex_app_server_protocol::AskForApproval::UnlessTrusted,
         ),
         (
             thread_ids[3],
-            PermissionProfile::read_only(),
+            read_only_sandbox,
             codex_app_server_protocol::AskForApproval::UnlessTrusted,
         ),
     ] {
@@ -862,24 +877,28 @@ async fn overview_selection_applies_user_permissions_only_to_unloaded_threads() 
         }
         app.select_agents_overview_thread(&mut tui, &mut app_server, thread_id)
             .await?;
-        let observed = app_server
-            .resume_thread(
-                app.config.clone(),
-                thread_id,
-                crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
-            )
-            .await?
-            .session;
+        // Embedded display profiles come from the caller's config; inspect the
+        // server response directly to verify that attaching preserves its policy.
+        let observed: ThreadResumeResponse = app_server
+            .request_handle()
+            .request_typed(ClientRequest::ThreadResume {
+                request_id: RequestId::String(format!("verify-overview-permissions-{thread_id}")),
+                params: ThreadResumeParams {
+                    thread_id: thread_id.to_string(),
+                    ..ThreadResumeParams::default()
+                },
+            })
+            .await?;
         assert_eq!(
             (
                 app.primary_thread_id,
-                observed.native_permission_profile().expect("native session").clone(),
+                observed.sandbox,
                 observed.approval_policy,
-                observed.approvals_reviewer,
+                observed.approvals_reviewer.to_core(),
             ),
             (
                 Some(thread_id),
-                expected_permissions,
+                expected_sandbox,
                 expected_approval,
                 ApprovalsReviewer::User
             ),
@@ -971,7 +990,10 @@ async fn overview_cold_resume_honors_working_directory_selection() -> Result<()>
             .await?
             .session;
         assert_eq!(
-            (app.config.cwd.clone(), observed.native_cwd().expect("native session").clone()),
+            (
+                app.config.cwd.clone(),
+                observed.native_cwd().expect("native session").clone()
+            ),
             (expected_cwd.clone(), expected_cwd),
         );
         app_server.shutdown().await?;

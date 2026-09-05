@@ -2736,11 +2736,64 @@ async fn slash_mcp_requests_inventory_via_app_server() {
     assert_matches!(
         rx.try_recv(),
         Ok(AppEvent::FetchMcpInventory {
+            scope,
             detail: McpServerStatusDetail::ToolsAndAuthOnly,
             thread_id: Some(actual_thread_id)
-        }) if actual_thread_id == thread_id
+        }) if actual_thread_id == thread_id && scope == chat.workspace_request_scope()
     );
     assert!(op_rx.try_recv().is_err(), "expected no core op to be sent");
+}
+
+#[tokio::test]
+async fn slash_mcp_before_remote_session_does_not_leave_a_spinner() {
+    use crate::workspace_command::WorkspaceCommand;
+    use crate::workspace_command::WorkspaceCommandError;
+    use crate::workspace_command::WorkspaceCommandExecutor;
+    use crate::workspace_command::WorkspaceCommandOutput;
+    use std::future::Future;
+    use std::pin::Pin;
+
+    struct PendingRemoteRunner;
+    impl WorkspaceCommandExecutor for PendingRemoteRunner {
+        fn uses_remote_workspace(&self) -> bool {
+            true
+        }
+
+        fn run(
+            &self,
+            _command: WorkspaceCommand,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<WorkspaceCommandOutput, WorkspaceCommandError>>
+                    + Send
+                    + '_,
+            >,
+        > {
+            panic!("MCP inventory must not issue a workspace command before session initialization")
+        }
+    }
+
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.workspace_command_runner = Some(Arc::new(PendingRemoteRunner));
+    assert!(!chat.workspace_requests_ready());
+
+    chat.dispatch_command(SlashCommand::Mcp);
+
+    assert!(chat.transcript.active_cell.is_none());
+    let mut messages = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            AppEvent::InsertHistoryCell(cell) => messages.push(cell.display_lines(/*width*/ 80)),
+            AppEvent::FetchMcpInventory { .. } => panic!("no pre-session MCP request expected"),
+            _ => {}
+        }
+    }
+    assert_eq!(messages.len(), 1);
+    insta::assert_snapshot!(
+        lines_to_single_string(&messages[0]),
+        @"■ '/mcp' is unavailable before the session starts."
+    );
+    assert!(op_rx.try_recv().is_err());
 }
 
 #[tokio::test]
@@ -2755,9 +2808,10 @@ async fn slash_mcp_verbose_requests_full_inventory_via_app_server() {
     assert_matches!(
         rx.try_recv(),
         Ok(AppEvent::FetchMcpInventory {
+            scope,
             detail: McpServerStatusDetail::Full,
             thread_id: Some(actual_thread_id)
-        }) if actual_thread_id == thread_id
+        }) if actual_thread_id == thread_id && scope == chat.workspace_request_scope()
     );
     assert!(op_rx.try_recv().is_err(), "expected no core op to be sent");
 }

@@ -66,7 +66,14 @@ impl ChatWidget {
             settings: fallback_default,
         };
 
-        let active_cell = Some(Self::placeholder_session_header_cell(&config));
+        let directory_display = workspace_command_runner
+            .as_ref()
+            .filter(|runner| runner.uses_remote_workspace())
+            .map(|_| "loading");
+        let active_cell = Some(Self::placeholder_session_header_cell(
+            &config,
+            directory_display,
+        ));
 
         let current_cwd = Some(config.cwd.to_path_buf());
         let effective_service_tier = crate::service_tier_resolution::effective_service_tier(

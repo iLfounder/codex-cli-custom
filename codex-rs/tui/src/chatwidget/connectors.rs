@@ -114,6 +114,7 @@ impl ChatWidget {
 
     /// Revoke cached app data and pending work before its account or thread changes.
     pub(crate) fn invalidate_connector_scope(&mut self) {
+        self.clear_mcp_inventory_loading();
         let generation = ConnectorScopeGeneration(
             NEXT_CONNECTOR_SCOPE_GENERATION.fetch_add(1, Ordering::Relaxed),
         );

@@ -32,10 +32,17 @@ impl MarketplaceManagement {
             metadata.active_user_git.clear();
             if let Some(marketplaces) = layer.config.get("marketplaces") {
                 if let Some(entries) = marketplaces.as_object() {
-                    metadata.active_user_git.extend(entries.iter().filter_map(|(name, config)| {
-                        (config.get("source_type").and_then(serde_json::Value::as_str) == Some("git"))
-                            .then(|| name.clone())
-                    }));
+                    metadata.active_user_git.extend(
+                        entries
+                            .iter()
+                            .filter(|&(_name, config)| {
+                                config
+                                    .get("source_type")
+                                    .and_then(serde_json::Value::as_str)
+                                    == Some("git")
+                            })
+                            .map(|(name, _config)| name.clone()),
+                    );
                 }
                 if layer.disabled_reason.is_none() {
                     if let Some(entries) = marketplaces.as_object() {
@@ -65,56 +72,22 @@ pub(crate) async fn fetch_marketplace_management(
     let response: ConfigReadResponse = request_handle
         .request_typed(ClientRequest::ConfigRead {
             request_id: RequestId::String(format!("marketplace-management-{}", Uuid::new_v4())),
-            params: ConfigReadParams { include_layers: true, cwd: Some(cwd) },
+            params: ConfigReadParams {
+                include_layers: true,
+                cwd: Some(cwd),
+            },
         })
         .await
-        .map_err(|_| "Could not read remote marketplace management settings. Refresh /plugins to retry.".to_string())?;
-    let layers = response.layers.ok_or_else(|| "The server did not return marketplace configuration layers.".to_string())?;
+        .map_err(|_| {
+            "Could not read remote marketplace management settings. Refresh /plugins to retry."
+                .to_string()
+        })?;
+    let layers = response
+        .layers
+        .ok_or_else(|| "The server did not return marketplace configuration layers.".to_string())?;
     Ok(MarketplaceManagement::from_layers(&layers))
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use pretty_assertions::assert_eq;
-    use serde_json::json;
-
-    fn user_layer(profile: Option<&str>, config: serde_json::Value) -> ConfigLayer {
-        ConfigLayer {
-            name: ConfigLayerSource::User {
-                file: LegacyAppPathString::from_string("/server/codex/config.toml"),
-                profile: profile.map(str::to_string),
-            },
-            version: "test".to_string(),
-            config,
-            disabled_reason: None,
-        }
-    }
-
-    #[test]
-    fn remote_management_merges_enabled_user_names_but_upgrades_only_active_profile_git() {
-        let mut system = user_layer(None, json!({"marketplaces": {"managed": {"source_type": "git"}}}));
-        system.name = ConfigLayerSource::System { file: LegacyAppPathString::from_string("/etc/codex/config.toml") };
-        let mut disabled = user_layer(None, json!({"marketplaces": {"disabled": {"source_type": "git"}}}));
-        disabled.disabled_reason = Some("disabled fixture".to_string());
-        let metadata = MarketplaceManagement::from_layers(&[
-            user_layer(Some("work"), json!({"marketplaces": {"profile": {"source_type": "git"}, "local": {"source_type": "local"}}})),
-            disabled,
-            user_layer(None, json!({"marketplaces": {"base": {"source_type": "git"}}})),
-            system,
-        ]);
-        assert_eq!(metadata.user_configured, HashSet::from(["base".to_string(), "profile".to_string(), "local".to_string()]));
-        assert_eq!(metadata.active_user_git, HashSet::from(["profile".to_string()]));
-    }
-
-    #[test]
-    fn empty_active_profile_does_not_inherit_upgrade_authority() {
-        let metadata = MarketplaceManagement::from_layers(&[
-            user_layer(Some("work"), json!({})),
-            user_layer(None, json!({"marketplaces": {"base": {"source_type": "git"}}})),
-        ]);
-        assert!(metadata.is_user_configured("base"));
-        assert!(!metadata.is_user_configured_git("base"));
-        assert!(!metadata.is_user_configured("windows-only"));
-    }
-}
+#[path = "marketplace_management_tests.rs"]
+mod tests;

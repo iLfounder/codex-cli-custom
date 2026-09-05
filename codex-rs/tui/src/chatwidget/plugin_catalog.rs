@@ -910,8 +910,7 @@ impl ChatWidget {
                 .filter(|(_, plugin, _)| plugin.installed)
                 .count();
             let tab_id = marketplace_tab_id(marketplace);
-            let can_remove_marketplace =
-                self.marketplace_is_user_configured(&marketplace.name);
+            let can_remove_marketplace = self.marketplace_is_user_configured(&marketplace.name);
             let can_upgrade_marketplace = marketplace.path.is_some()
                 && self.marketplace_is_user_configured_git(&marketplace.name);
             if can_remove_marketplace || can_upgrade_marketplace {
@@ -1125,7 +1124,7 @@ impl ChatWidget {
                 selected_description: Some("Install this plugin now.".to_string()),
                 actions: vec![Box::new(move |tx| {
                     tx.send(AppEvent::OpenPluginInstallLoading {
-                            scope: install_cwd_scope.clone(),
+                        scope: install_cwd_scope.clone(),
                         plugin_display_name: plugin_display_name.clone(),
                     });
                     tx.send(AppEvent::FetchPluginInstall {

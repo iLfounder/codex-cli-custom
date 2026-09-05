@@ -214,6 +214,7 @@ impl App {
                 }
                 let current_plugin_command_subject = self.current_plugin_command_catalog_subject();
                 if previous_plugin_command_subject != current_plugin_command_subject {
+                    self.clear_committed_mcp_inventory_on_scope_change();
                     self.chat_widget.invalidate_connector_scope();
                     self.refresh_startup_skills(app_server_client);
                     self.refresh_plugin_mentions(app_server_client);
@@ -384,6 +385,7 @@ impl App {
                             | AuthMode::PersonalAccessToken
                     )
                 );
+                self.clear_committed_mcp_inventory_on_scope_change();
                 self.chat_widget.update_account_state(
                     status_account_display_from_auth_mode(
                         notification.auth_mode,

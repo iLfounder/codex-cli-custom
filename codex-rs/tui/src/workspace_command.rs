@@ -163,7 +163,10 @@ pub(crate) struct AppServerWorkspaceCommandRunner {
 impl AppServerWorkspaceCommandRunner {
     /// Creates a runner from an app-server request handle owned by the current TUI session.
     pub(crate) fn new(request_handle: AppServerRequestHandle, remote_workspace: bool) -> Self {
-        Self { request_handle, remote_workspace }
+        Self {
+            request_handle,
+            remote_workspace,
+        }
     }
 }
 

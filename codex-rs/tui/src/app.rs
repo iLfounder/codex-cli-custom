@@ -226,6 +226,7 @@ mod app_server_events;
 pub(crate) mod app_server_requests;
 mod backend_banner_fallback;
 mod background_requests;
+mod canonical_reconnect;
 mod config_persistence;
 mod connector_mentions;
 mod dynamic_thread_controls;
@@ -246,7 +247,6 @@ mod plugin_mentions;
 mod rate_limit_refresh;
 mod recap;
 mod reconnect;
-mod canonical_reconnect;
 #[cfg(test)]
 #[path = "app/reconnect_tests.rs"]
 mod reconnect_tests;
@@ -667,10 +667,12 @@ pub(crate) struct App {
     // Serialize plugin enablement writes per plugin so stale completions cannot
     // overwrite a newer toggle, even if the plugin is toggled from different
     // cwd contexts.
-    pending_plugin_enabled_writes: HashMap<(crate::app_event::WorkspaceRequestScope, String), Option<bool>>,
+    pending_plugin_enabled_writes:
+        HashMap<(crate::app_event::WorkspaceRequestScope, String), Option<bool>>,
     // Serialize hook enablement writes per hook so stale completions cannot
     // persist an older toggle after a newer one.
-    pending_hook_enabled_writes: HashMap<(crate::app_event::WorkspaceRequestScope, String), Option<bool>>,
+    pending_hook_enabled_writes:
+        HashMap<(crate::app_event::WorkspaceRequestScope, String), Option<bool>>,
     recap: recap::RecapState,
 }
 

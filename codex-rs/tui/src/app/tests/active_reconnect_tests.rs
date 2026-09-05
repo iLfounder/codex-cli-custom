@@ -1,4 +1,4 @@
-//! Active recovery keeps local input and policy while reusing ordinary thread resume.
+//! Active recovery keeps local input and server policy while reusing ordinary thread resume.
 
 use super::*;
 use crate::app::reconnect::ReconnectPresentation;
@@ -45,7 +45,6 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
             Some(None),
             /*developer_instructions*/ None,
         );
-        let expected_submitted_mode = expected_mode.clone();
         if edit_offline {
             app.chat_widget
                 .restore_user_message_to_composer("unacknowledged prompt".into());
@@ -94,9 +93,9 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
                         assert!(!recovered_queue);
                         let params = request.params.as_ref().unwrap();
                         assert_eq!(params["input"][0]["text"], "fresh follow-up");
-                        assert_eq!(params["approvalPolicy"], "on-request");
-                        assert_eq!(params["sandboxPolicy"]["type"], "readOnly");
-                        assert_eq!(params["collaborationMode"], json!(expected_submitted_mode));
+                        assert!(params["approvalPolicy"].is_null());
+                        assert!(params["sandboxPolicy"].is_null());
+                        assert!(params["collaborationMode"].is_null());
                         Some(json!({"result": {"turn": {"id": "fresh", "items": [], "status": "inProgress"}}}))
                     }
                     method => panic!("unexpected reconnect request: {method}"),
@@ -200,6 +199,25 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
         );
         app.finish_reconnect(&mut tui, &mut session, &mut events, connected)
             .await?;
+        let restored = app.thread_event_channels[&id]
+            .store
+            .lock()
+            .await
+            .snapshot()
+            .session
+            .expect("restored session");
+        assert_eq!(
+            (restored.approval_policy, restored.execution_context),
+            (
+                AskForApproval::Never,
+                crate::session_state::SessionExecutionContext::Remote {
+                    cwd: codex_utils_path_uri::LegacyAppPathString::from_abs_path(&app.config.cwd),
+                    runtime_workspace_roots: Vec::new(),
+                    sandbox: codex_app_server_protocol::SandboxPolicy::DangerFullAccess,
+                    rollout_path: None,
+                }
+            ),
+        );
         assert!(!app.reconnect.offline);
         assert_eq!(app.last_subagent_backfill_attempt, None);
         assert!(

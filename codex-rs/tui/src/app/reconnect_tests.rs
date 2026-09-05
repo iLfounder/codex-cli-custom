@@ -123,10 +123,11 @@ async fn same_identity_reconnect_replaces_unmaterialized_thread_without_sending_
         .set_queue_autosend_suppressed(/*suppressed*/ true);
     app.chat_widget
         .restore_user_message_to_composer("keep this queued input".into());
-    app.chat_widget.handle_key_event(crossterm::event::KeyEvent::new(
-        crossterm::event::KeyCode::Enter,
-        crossterm::event::KeyModifiers::NONE,
-    ));
+    app.chat_widget
+        .handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
     let old_sender = app.app_event_tx.clone();
     app.chat_widget.insert_str("do not autosend this draft");
     app.handle_supervised_disconnect("connection interrupted".to_string());
@@ -142,13 +143,21 @@ async fn same_identity_reconnect_replaces_unmaterialized_thread_without_sending_
         "do not autosend this draft edited offline"
     );
     assert!(app.chat_widget.has_queued_follow_up_messages());
-    assert!(app.chat_widget.capture_thread_input_state().unwrap().recovered_queue);
+    assert!(
+        app.chat_widget
+            .capture_thread_input_state()
+            .unwrap()
+            .recovered_queue
+    );
     assert!(old_sender.app_event_tx.is_closed());
     let reconnect_events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
     assert!(!reconnect_events.iter().any(|event| matches!(
         event,
         AppEvent::CodexOp(AppCommand::UserTurn { .. })
-            | AppEvent::SubmitThreadOp { op: AppCommand::UserTurn { .. }, .. }
+            | AppEvent::SubmitThreadOp {
+                op: AppCommand::UserTurn { .. },
+                ..
+            }
     )));
     let reconnect_messages = reconnect_events
         .into_iter()

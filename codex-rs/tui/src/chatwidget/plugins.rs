@@ -8,9 +8,9 @@ use super::plugin_catalog::marketplace_tab_id_matching_saved_id;
 use super::plugin_catalog::merge_remote_marketplaces;
 use super::plugin_catalog::plugin_detail_hint_line;
 use crate::app_event::AppEvent;
-use crate::app_event::WorkspaceRequestScope;
 use crate::app_event::PluginLocation;
 use crate::app_event::PluginRemoteSectionError;
+use crate::app_event::WorkspaceRequestScope;
 use crate::bottom_pane::ColumnWidthMode;
 use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
@@ -77,7 +77,9 @@ impl ChatWidget {
 
     pub(super) fn marketplace_is_user_configured(&self, name: &str) -> bool {
         if self.uses_remote_workspace() {
-            self.plugins_fetch_state.marketplace_management.as_ref()
+            self.plugins_fetch_state
+                .marketplace_management
+                .as_ref()
                 .is_some_and(|metadata| metadata.is_user_configured(name))
         } else {
             super::plugin_catalog::marketplace_is_user_configured(&self.config, name)
@@ -86,7 +88,9 @@ impl ChatWidget {
 
     pub(super) fn marketplace_is_user_configured_git(&self, name: &str) -> bool {
         if self.uses_remote_workspace() {
-            self.plugins_fetch_state.marketplace_management.as_ref()
+            self.plugins_fetch_state
+                .marketplace_management
+                .as_ref()
                 .is_some_and(|metadata| metadata.is_user_configured_git(name))
         } else {
             super::plugin_catalog::marketplace_is_user_configured_git(&self.config, name)
@@ -127,8 +131,8 @@ impl ChatWidget {
         if self.config.cwd.as_path() != cwd.as_path() {
             return;
         }
-        let request_was_in_flight =
-            self.plugins_fetch_state.in_flight_scope.as_ref() == Some(&self.workspace_request_scope());
+        let request_was_in_flight = self.plugins_fetch_state.in_flight_scope.as_ref()
+            == Some(&self.workspace_request_scope());
         if request_was_in_flight {
             self.plugins_fetch_state.in_flight_scope = None;
         }
@@ -233,12 +237,17 @@ impl ChatWidget {
 
     fn prefetch_plugins(&mut self) {
         let cwd = self.config.cwd.to_path_buf();
-        if self.plugins_fetch_state.in_flight_scope.as_ref() == Some(&self.workspace_request_scope()) {
+        if self.plugins_fetch_state.in_flight_scope.as_ref()
+            == Some(&self.workspace_request_scope())
+        {
             return;
         }
 
         self.on_plugins_list_fetch_started(cwd.clone());
-        self.app_event_tx.send(AppEvent::FetchPluginsList { scope: self.workspace_request_scope(), cwd });
+        self.app_event_tx.send(AppEvent::FetchPluginsList {
+            scope: self.workspace_request_scope(),
+            cwd,
+        });
     }
 
     pub(crate) fn on_plugins_list_fetch_started(&mut self, cwd: PathBuf) {
@@ -758,8 +767,7 @@ impl ChatWidget {
             );
             return true;
         }
-        if marketplace.path.is_none()
-            || !self.marketplace_is_user_configured_git(&marketplace.name)
+        if marketplace.path.is_none() || !self.marketplace_is_user_configured_git(&marketplace.name)
         {
             return false;
         }

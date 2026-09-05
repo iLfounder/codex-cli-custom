@@ -5,7 +5,10 @@ use super::*;
 impl ChatWidget {
     pub(super) fn uses_remote_workspace(&self) -> bool {
         self.current_remote_cwd.is_some()
-            || self.workspace_command_runner.as_ref().is_some_and(|runner| runner.uses_remote_workspace())
+            || self
+                .workspace_command_runner
+                .as_ref()
+                .is_some_and(|runner| runner.uses_remote_workspace())
     }
 
     pub(crate) fn workspace_requests_ready(&self) -> bool {

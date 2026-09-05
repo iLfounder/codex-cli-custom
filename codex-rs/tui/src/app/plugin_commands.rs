@@ -1,6 +1,7 @@
 //! Exact-thread plugin command catalog, invocation, and ephemeral presentation projection.
 
 use super::*;
+use crate::app_event::WorkspaceRequestScope;
 use crate::app_server_session::invoke_plugin_command;
 use crate::app_server_session::list_plugin_commands;
 use crate::bottom_pane::slash_commands::PluginSlashCommand;
@@ -14,7 +15,6 @@ use codex_app_server_protocol::SessionRuntimeSnapshot;
 use codex_app_server_protocol::ThreadPresentation;
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use crate::app_event::WorkspaceRequestScope;
 
 const MAX_PRESENTATIONS: usize = 128;
 const MAX_RUNTIME_SUBJECTS: usize = 128;

@@ -10,9 +10,9 @@
 //! rather than a user-visible error. The status line can then render whichever pieces are available
 //! without blocking the rest of the UI.
 
+use codex_utils_path_uri::LegacyAppPathString;
 #[cfg(test)]
 use std::collections::VecDeque;
-use codex_utils_path_uri::LegacyAppPathString;
 
 use serde::Deserialize;
 
@@ -195,7 +195,10 @@ async fn branch_diff_stats_to_default_branch(
 /// `origin` is prioritized because most repositories use it as the canonical upstream. Other
 /// remotes are still tried so fork or enterprise layouts with a differently named upstream can
 /// produce branch-change stats when their remote HEAD is configured.
-async fn get_git_remotes(runner: &dyn WorkspaceCommandExecutor, cwd: &LegacyAppPathString) -> Option<Vec<String>> {
+async fn get_git_remotes(
+    runner: &dyn WorkspaceCommandExecutor,
+    cwd: &LegacyAppPathString,
+) -> Option<Vec<String>> {
     let output = run_git_command(runner, cwd, &["remote"]).await.ok()?;
     if !output.success() {
         return None;
@@ -392,7 +395,10 @@ async fn open_pull_request_for_head_commit(
 }
 
 /// Returns the current `HEAD` SHA for commit-based PR lookup.
-async fn current_head_sha(runner: &dyn WorkspaceCommandExecutor, cwd: &LegacyAppPathString) -> Option<String> {
+async fn current_head_sha(
+    runner: &dyn WorkspaceCommandExecutor,
+    cwd: &LegacyAppPathString,
+) -> Option<String> {
     let output = run_git_command(runner, cwd, &["rev-parse", "HEAD"])
         .await
         .ok()?;
@@ -523,13 +529,24 @@ mod tests {
     async fn git_and_gh_probes_preserve_each_requests_portable_cwd() {
         let runner = FakeRunner::new(vec![
             response(&["git", "branch", "--show-current"], 0, "main\n"),
-            response(&["gh", "pr", "view", "--json", "number,url,state"], 0,
-                r#"{"number":42,"url":"https://github.com/example/repo/pull/42","state":"OPEN"}"#),
+            response(
+                &["gh", "pr", "view", "--json", "number,url,state"],
+                0,
+                r#"{"number":42,"url":"https://github.com/example/repo/pull/42","state":"OPEN"}"#,
+            ),
         ]);
         let posix = LegacyAppPathString::from_string("/Users/test/project-a");
         let windows = LegacyAppPathString::from_string(r"C:\work\project-b");
-        assert_eq!(current_branch_name(&runner, &posix).await.as_deref(), Some("main"));
-        assert_eq!(open_pull_request(&runner, &windows).await.map(|pr| pr.number), Some(42));
+        assert_eq!(
+            current_branch_name(&runner, &posix).await.as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            open_pull_request(&runner, &windows)
+                .await
+                .map(|pr| pr.number),
+            Some(42)
+        );
         let commands = runner.seen.lock().expect("seen lock");
         assert_eq!(commands[0].cwd.as_ref(), Some(&posix));
         assert_eq!(commands[1].cwd.as_ref(), Some(&windows));
@@ -572,9 +589,12 @@ mod tests {
             ),
         ]);
 
-        let stats = branch_diff_stats_to_default_branch(&runner, &LegacyAppPathString::from_string("/repo"))
-            .await
-            .expect("branch diff stats");
+        let stats = branch_diff_stats_to_default_branch(
+            &runner,
+            &LegacyAppPathString::from_string("/repo"),
+        )
+        .await
+        .expect("branch diff stats");
 
         assert_eq!(
             stats,
@@ -758,10 +778,7 @@ mod tests {
                     + '_,
             >,
         > {
-            self.seen
-                .lock()
-                .expect("seen lock")
-                .push(command.clone());
+            self.seen.lock().expect("seen lock").push(command.clone());
             Box::pin(async move {
                 let mut responses = self.responses.lock().expect("responses lock");
                 let index = responses

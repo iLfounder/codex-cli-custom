@@ -222,6 +222,7 @@ pub(crate) mod update_action;
 pub use update_action::UpdateAction;
 #[cfg(not(debug_assertions))]
 pub use update_action::get_update_action;
+mod marketplace_management;
 mod update_prompt;
 #[cfg(any(not(debug_assertions), test))]
 mod update_versions;
@@ -234,7 +235,6 @@ mod width;
 #[cfg(any(target_os = "windows", test))]
 mod windows_sandbox;
 mod workspace_command;
-mod marketplace_management;
 mod workspace_messages;
 
 mod wrapping;
@@ -1002,8 +1002,7 @@ async fn cloud_config_bundle_for_app_server_target(
     codex_home: &Path,
 ) -> std::io::Result<CloudConfigBundleLoader> {
     cloud_config_bundle_loader_for_storage(
-        app_server_target
-            .client_auth_config(bootstrap_auth_config(codex_home, bootstrap_config)?),
+        app_server_target.client_auth_config(bootstrap_auth_config(codex_home, bootstrap_config)?),
         /*enable_codex_api_key_env*/ false,
     )
     .await

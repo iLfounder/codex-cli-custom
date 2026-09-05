@@ -342,7 +342,8 @@ impl App {
                         None
                     } else {
                         target_thread.path.as_ref().and_then(|path| {
-                            path.to_inferred_abs_path().map(AbsolutePathBuf::into_path_buf)
+                            path.to_inferred_abs_path()
+                                .map(AbsolutePathBuf::into_path_buf)
                         })
                     },
                     thread_id: root_thread_id,

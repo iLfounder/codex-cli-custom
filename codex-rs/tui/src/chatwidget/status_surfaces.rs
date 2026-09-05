@@ -613,10 +613,7 @@ impl ChatWidget {
     ///
     /// The resulting `StatusLineBranchUpdated` event carries the lookup cwd so callers can reject
     /// stale completions after directory changes.
-    fn request_status_line_branch(
-        &mut self,
-        cwd: codex_utils_path_uri::LegacyAppPathString,
-    ) {
+    fn request_status_line_branch(&mut self, cwd: codex_utils_path_uri::LegacyAppPathString) {
         if !self.workspace_requests_ready() {
             return;
         }
@@ -632,14 +629,15 @@ impl ChatWidget {
         let generation = self.connector_scope_generation();
         tokio::spawn(async move {
             let branch = branch_summary::current_branch_name(runner.as_ref(), &cwd).await;
-            tx.send(AppEvent::StatusLineBranchUpdated { cwd, generation, branch });
+            tx.send(AppEvent::StatusLineBranchUpdated {
+                cwd,
+                generation,
+                branch,
+            });
         });
     }
 
-    fn request_status_line_git_summary(
-        &mut self,
-        cwd: codex_utils_path_uri::LegacyAppPathString,
-    ) {
+    fn request_status_line_git_summary(&mut self, cwd: codex_utils_path_uri::LegacyAppPathString) {
         if !self.workspace_requests_ready() {
             return;
         }
@@ -654,9 +652,12 @@ impl ChatWidget {
         let tx = self.app_event_tx.clone();
         let generation = self.connector_scope_generation();
         tokio::spawn(async move {
-            let summary =
-                branch_summary::status_line_git_summary(runner.as_ref(), &cwd).await;
-            tx.send(AppEvent::StatusLineGitSummaryUpdated { cwd, generation, summary });
+            let summary = branch_summary::status_line_git_summary(runner.as_ref(), &cwd).await;
+            tx.send(AppEvent::StatusLineGitSummaryUpdated {
+                cwd,
+                generation,
+                summary,
+            });
         });
     }
 

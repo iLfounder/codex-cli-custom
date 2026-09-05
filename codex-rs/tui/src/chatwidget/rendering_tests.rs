@@ -145,8 +145,10 @@ fn active_transcript_preserves_clipped_markdown_hyperlinks() {
 #[tokio::test]
 async fn initial_session_header_starts_at_the_top_of_the_viewport() {
     let (mut widget, _sender, _events, _operations) = make_chatwidget_manual_with_sender().await;
-    widget.transcript.active_cell =
-        Some(ChatWidget::placeholder_session_header_cell(&widget.config));
+    widget.transcript.active_cell = Some(ChatWidget::placeholder_session_header_cell(
+        &widget.config,
+        /*directory_display*/ None,
+    ));
 
     let frame = render_frame(&widget, /*width*/ 48);
     let header = frame
@@ -175,6 +177,35 @@ async fn initial_session_header_starts_at_the_top_of_the_viewport() {
     │ directory: /tmp/project               │
     ╰───────────────────────────────────────╯
     ");
+}
+
+#[tokio::test]
+async fn remote_session_header_does_not_present_local_directory_while_loading() {
+    let (mut widget, _sender, _events, _operations) = make_chatwidget_manual_with_sender().await;
+    widget.transcript.active_cell = Some(ChatWidget::placeholder_session_header_cell(
+        &widget.config,
+        Some("loading"),
+    ));
+
+    let frame = render_frame(&widget, /*width*/ 48);
+    let header = frame
+        .content
+        .chunks(usize::from(frame.area.width))
+        .take(/*n*/ 6)
+        .map(|row| {
+            row.iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replace(crate::version::CODEX_CLI_VERSION, "<VERSION>");
+
+    assert!(header.contains("directory: loading"));
+    assert!(!header.contains(&widget.config.cwd.display().to_string()));
+    insta::assert_snapshot!("remote_session_header_loading", header);
 }
 
 #[tokio::test]

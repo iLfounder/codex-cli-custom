@@ -274,6 +274,7 @@ async fn handle_mcp_inventory_result_respects_origin_thread() {
         )));
 
     app.handle_mcp_inventory_result(
+        app.chat_widget.workspace_request_scope(),
         Ok(vec![McpServerStatus {
             name: "docs".to_string(),
             runtime_status: None,
@@ -297,6 +298,7 @@ async fn handle_mcp_inventory_result_respects_origin_thread() {
         )));
 
     app.handle_mcp_inventory_result(
+        app.chat_widget.workspace_request_scope(),
         Ok(Vec::new()),
         McpServerStatusDetail::ToolsAndAuthOnly,
         Some(ThreadId::new()),

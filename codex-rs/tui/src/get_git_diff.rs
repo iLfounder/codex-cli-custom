@@ -284,13 +284,21 @@ mod tests {
         let cwd = LegacyAppPathString::from_string(r"C:\work\remote-repo");
         let args = ["rev-parse", "--is-inside-work-tree"];
         let mut argv = git_command(FsmonitorOverride::Disabled, &args);
-        *argv.iter_mut().find(|arg| *arg == "core.hooksPath=/dev/null").expect("hooks override") =
-            "core.hooksPath=NUL".to_string();
+        *argv
+            .iter_mut()
+            .find(|arg| *arg == "core.hooksPath=/dev/null")
+            .expect("hooks override") = "core.hooksPath=NUL".to_string();
         let runner = FakeRunner::new(vec![response(argv, 128, "")]);
-        assert_eq!(get_git_diff(&runner, &cwd).await, Ok((false, String::new())));
+        assert_eq!(
+            get_git_diff(&runner, &cwd).await,
+            Ok((false, String::new()))
+        );
         assert_command_metadata(&runner.commands(), &cwd);
         assert_eq!(workspace_null_device(&cwd), "NUL");
-        assert_eq!(workspace_null_device(&LegacyAppPathString::from_string("/work/repo")), "/dev/null");
+        assert_eq!(
+            workspace_null_device(&LegacyAppPathString::from_string("/work/repo")),
+            "/dev/null"
+        );
     }
 
     #[tokio::test]
@@ -934,9 +942,13 @@ mod tests {
         > {
             Box::pin(async move {
                 let mut process = ProcessCommand::new(&command.argv[0]);
-                process
-                    .args(&command.argv[1..])
-                    .current_dir(command.cwd.expect("test command cwd").to_inferred_abs_path().expect("native test cwd"));
+                process.args(&command.argv[1..]).current_dir(
+                    command
+                        .cwd
+                        .expect("test command cwd")
+                        .to_inferred_abs_path()
+                        .expect("native test cwd"),
+                );
                 for (key, value) in command.env {
                     match value {
                         Some(value) => {

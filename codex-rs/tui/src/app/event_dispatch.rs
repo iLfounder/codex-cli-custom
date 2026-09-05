@@ -17,7 +17,6 @@ use crate::app_server_session::turn_permissions_overrides;
 use crate::config_update::format_config_error;
 use crate::external_agent_config_migration::flow::ExternalAgentConfigMigrationFlowOutcome;
 use crate::pager_overlay::TranscriptHistoryState;
-use crate::session_resume::cwds_differ;
 use codex_app_server_protocol::ThreadGoalStatus;
 #[cfg(target_os = "windows")]
 use codex_config::types::WindowsSandboxModeToml;
@@ -1343,15 +1342,16 @@ impl App {
                         .on_plugin_enabled_set(cwd, plugin_id, enabled, result);
                 }
             }
-            AppEvent::FetchMcpInventory { detail, thread_id } => {
-                self.fetch_mcp_inventory(app_server, detail, thread_id);
+            AppEvent::FetchMcpInventory { scope, detail, thread_id } => {
+                self.fetch_mcp_inventory(app_server, scope, detail, thread_id);
             }
             AppEvent::McpInventoryLoaded {
+                scope,
                 result,
                 detail,
                 thread_id,
             } => {
-                self.handle_mcp_inventory_result(result, detail, thread_id);
+                self.handle_mcp_inventory_result(scope, result, detail, thread_id);
             }
             AppEvent::SkillsListLoaded { result, .. } => {
                 self.handle_skills_list_result(
@@ -3110,7 +3110,7 @@ impl App {
                     && current_scope
                     && (result.is_err() || queued_enabled != enabled)
                 {
-                    self.spawn_hook_enabled_write(app_server, scope.clone(), key.clone(), queued_enabled);
+                    self.spawn_hook_enabled_write(app_server, scope.clone(), key, queued_enabled);
                     false
                 } else {
                     true

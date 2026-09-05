@@ -505,7 +505,29 @@ impl App {
                     && let Some(cached) = channel.store.lock().await.session.as_ref()
                 {
                     session.approval_policy = cached.approval_policy;
-                    session.permission_profile = cached.permission_profile.clone();
+                    match (&mut session.execution_context, &cached.execution_context) {
+                        (
+                            crate::session_state::SessionExecutionContext::Native {
+                                permission_profile,
+                                ..
+                            },
+                            crate::session_state::SessionExecutionContext::Native {
+                                permission_profile: cached_profile,
+                                ..
+                            },
+                        ) => *permission_profile = cached_profile.clone(),
+                        (
+                            crate::session_state::SessionExecutionContext::Remote {
+                                sandbox, ..
+                            },
+                            crate::session_state::SessionExecutionContext::Remote {
+                                sandbox: cached_sandbox,
+                                ..
+                            },
+                        ) => *sandbox = cached_sandbox.clone(),
+                        // A cached context from a different execution host is not transferable.
+                        _ => {}
+                    }
                     session.active_permission_profile = cached.active_permission_profile.clone();
                     session.approvals_reviewer = cached.approvals_reviewer;
                 }

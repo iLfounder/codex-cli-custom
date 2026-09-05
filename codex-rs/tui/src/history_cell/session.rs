@@ -139,6 +139,7 @@ pub(crate) fn new_session_info(
         config.cwd.to_path_buf(),
         CODEX_CLI_VERSION,
     )
+    .with_directory_display(session.remote_cwd().map(|cwd| cwd.as_str().to_owned()))
     .with_yolo_mode(match session.native_permission_profile() {
         Some(permission_profile) => {
             has_yolo_permissions(session.approval_policy, permission_profile)
@@ -238,6 +239,7 @@ pub(crate) struct SessionHeaderHistoryCell {
     reasoning_effort: Option<ReasoningEffortConfig>,
     show_fast_status: bool,
     directory: PathBuf,
+    directory_display: Option<String>,
     yolo_mode: bool,
 }
 
@@ -274,6 +276,7 @@ impl SessionHeaderHistoryCell {
             reasoning_effort,
             show_fast_status,
             directory,
+            directory_display: None,
             yolo_mode: false,
         }
     }
@@ -283,7 +286,23 @@ impl SessionHeaderHistoryCell {
         self
     }
 
+    /// Display a remote directory or pending-session label without local path interpretation.
+    pub(crate) fn with_directory_display(mut self, directory_display: Option<String>) -> Self {
+        self.directory_display = directory_display;
+        self
+    }
+
     fn format_directory(&self, max_width: Option<usize>) -> String {
+        if let Some(directory) = &self.directory_display {
+            return match max_width {
+                Some(max_width) => truncate_line_with_ellipsis_if_overflow(
+                    Line::from(directory.clone()),
+                    max_width,
+                )
+                .to_string(),
+                None => directory.clone(),
+            };
+        }
         Self::format_directory_inner(&self.directory, max_width)
     }
 

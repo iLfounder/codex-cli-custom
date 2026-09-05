@@ -316,7 +316,8 @@ async fn git_completions_from_before_workspace_round_trip_do_not_clear_current_r
     chat.invalidate_connector_scope();
     chat.current_remote_cwd = Some(cwd.clone());
     chat.invalidate_connector_scope();
-    chat.config.tui_status_line = Some(vec!["git-branch".to_string(), "branch-changes".to_string()]);
+    chat.config.tui_status_line =
+        Some(vec!["git-branch".to_string(), "branch-changes".to_string()]);
     chat.status_line_branch_cwd = Some(cwd.clone());
     chat.status_line_branch_pending = true;
     chat.status_line_git_summary_cwd = Some(cwd.clone());
@@ -352,11 +353,28 @@ async fn remote_git_lookup_waits_for_server_cwd_before_sending_a_command() {
     #[derive(Default)]
     struct RemoteRunner(Mutex<Vec<WorkspaceCommand>>);
     impl WorkspaceCommandExecutor for RemoteRunner {
-        fn uses_remote_workspace(&self) -> bool { true }
+        fn uses_remote_workspace(&self) -> bool {
+            true
+        }
 
-        fn run(&self, command: WorkspaceCommand) -> Pin<Box<dyn Future<Output = Result<WorkspaceCommandOutput, WorkspaceCommandError>> + Send + '_>> {
+        fn run(
+            &self,
+            command: WorkspaceCommand,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<WorkspaceCommandOutput, WorkspaceCommandError>>
+                    + Send
+                    + '_,
+            >,
+        > {
             self.0.lock().expect("commands lock").push(command);
-            Box::pin(async { Ok(WorkspaceCommandOutput { exit_code: 0, stdout: "main\n".to_string(), stderr: String::new() }) })
+            Box::pin(async {
+                Ok(WorkspaceCommandOutput {
+                    exit_code: 0,
+                    stdout: "main\n".to_string(),
+                    stderr: String::new(),
+                })
+            })
         }
     }
 

@@ -149,14 +149,8 @@ impl App {
                     self.chat_widget
                         .restore_reconnected_input(pending.input_state.take());
                 }
-                self.finish_reconnect_projection(
-                    tui,
-                    app_server,
-                    app_event_rx,
-                    bootstrap,
-                    thread,
-                )
-                .await
+                self.finish_reconnect_projection(tui, app_server, app_event_rx, bootstrap, thread)
+                    .await
             }
             Err(error) => Err(error),
         };

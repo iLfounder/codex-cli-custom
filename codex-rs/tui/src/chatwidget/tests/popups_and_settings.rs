@@ -20,7 +20,10 @@ async fn account_update_revokes_plugin_workspace_cache_and_old_scope() {
     let cwd = chat.config.cwd.to_path_buf();
     chat.on_plugins_loaded(cwd, Ok(plugins_test_response(Vec::new())));
     let old_scope = chat.workspace_request_scope();
-    assert_eq!(chat.plugins_fetch_state.cache_scope.as_ref(), Some(&old_scope));
+    assert_eq!(
+        chat.plugins_fetch_state.cache_scope.as_ref(),
+        Some(&old_scope)
+    );
 
     chat.update_account_state(
         /*status_account_display*/ None, /*plan_type*/ None,
@@ -412,7 +415,9 @@ async fn plugins_popup_upgrades_user_configured_git_marketplace_from_marketplace
     chat.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
 
     match rx.try_recv() {
-        Ok(AppEvent::OpenMarketplaceUpgradeLoading { marketplace_name, .. }) => {
+        Ok(AppEvent::OpenMarketplaceUpgradeLoading {
+            marketplace_name, ..
+        }) => {
             assert_eq!(marketplace_name, Some("repo".to_string()));
         }
         other => panic!("expected OpenMarketplaceUpgradeLoading event, got {other:?}"),
@@ -460,19 +465,32 @@ async fn remote_marketplace_actions_follow_server_user_layers_not_windows_config
         } else {
             serde_json::json!({})
         };
-        chat.on_marketplace_management_loaded(Some(Ok(MarketplaceManagement::from_layers(&[ConfigLayer {
-            name: ApiConfigLayerSource::User {
-                file: LegacyAppPathString::from_string("/server/codex/config.toml"), profile: None,
+        chat.on_marketplace_management_loaded(Some(Ok(MarketplaceManagement::from_layers(&[
+            ConfigLayer {
+                name: ApiConfigLayerSource::User {
+                    file: LegacyAppPathString::from_string("/server/codex/config.toml"),
+                    profile: None,
+                },
+                version: "test".to_string(),
+                config: server_config,
+                disabled_reason: None,
             },
-            version: "test".to_string(), config: server_config, disabled_reason: None,
-        }]))));
-        render_loaded_plugins_popup(&mut chat, plugins_test_response(vec![
-            plugins_test_curated_marketplace(Vec::new()),
-            plugins_test_repo_marketplace(vec![plugins_test_summary(
-                "plugin-debug", "debug", Some("Debug Plugin"), Some("Server plugin."),
-                false, true, PluginInstallPolicy::Available,
-            )]),
-        ]));
+        ]))));
+        render_loaded_plugins_popup(
+            &mut chat,
+            plugins_test_response(vec![
+                plugins_test_curated_marketplace(Vec::new()),
+                plugins_test_repo_marketplace(vec![plugins_test_summary(
+                    "plugin-debug",
+                    "debug",
+                    Some("Debug Plugin"),
+                    Some("Server plugin."),
+                    false,
+                    true,
+                    PluginInstallPolicy::Available,
+                )]),
+            ]),
+        );
         while rx.try_recv().is_ok() {}
         let popup = select_plugins_tab_containing(&mut chat, 100, "Repo Marketplace.");
         assert_eq!(popup.contains("ctrl + u upgrade"), server_has_repo);
@@ -485,8 +503,16 @@ async fn remote_marketplace_actions_follow_server_user_layers_not_windows_config
         chat.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         let mut sent_upgrade = false;
         while let Ok(event) = rx.try_recv() {
-            if let AppEvent::FetchMarketplaceUpgrade { scope, marketplace_name, .. } = event {
-                assert_eq!(scope.cwd, LegacyAppPathString::from_string("/server/project"));
+            if let AppEvent::FetchMarketplaceUpgrade {
+                scope,
+                marketplace_name,
+                ..
+            } = event
+            {
+                assert_eq!(
+                    scope.cwd,
+                    LegacyAppPathString::from_string("/server/project")
+                );
                 assert_eq!(marketplace_name.as_deref(), Some("repo"));
                 sent_upgrade = true;
             }

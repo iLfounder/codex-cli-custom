@@ -675,6 +675,43 @@ fn ps_output_empty_snapshot() {
 }
 
 #[tokio::test]
+async fn session_info_uses_remote_directory_without_local_path_interpretation() {
+    let mut config = test_config().await;
+    config.cwd = test_path_buf("/windows-client-project").abs();
+    config.show_tooltips = false;
+    let local_cwd = config.cwd.clone();
+    let mut headers = Vec::new();
+    for directory in ["/server/project", r"C:\remote\project"] {
+        let mut session = session_configured_event("server-model");
+        session.execution_context = crate::session_state::SessionExecutionContext::Remote {
+            cwd: codex_utils_path_uri::LegacyAppPathString::from_string(directory),
+            runtime_workspace_roots: Vec::new(),
+            sandbox: codex_app_server_protocol::SandboxPolicy::ReadOnly {
+                network_access: false,
+            },
+            rollout_path: None,
+        };
+        let cell = new_session_info(
+            &config,
+            "server-model",
+            &session,
+            /*is_first_event*/ false,
+            /*tooltip_override*/ None,
+            /*auth_plan*/ None,
+            /*show_fast_status*/ false,
+        );
+        let rendered = render_lines(&cell.display_lines(/*width*/ 80))
+            .join("\n")
+            .replace(CODEX_CLI_VERSION, "<VERSION>");
+        assert!(rendered.contains(directory));
+        assert!(!rendered.contains("windows-client-project"));
+        headers.push(rendered);
+    }
+    assert_eq!(config.cwd, local_cwd);
+    insta::assert_snapshot!("session_info_remote_directories", headers.join("\n\n"));
+}
+
+#[tokio::test]
 async fn session_info_uses_availability_nux_tooltip_override() {
     let config = test_config().await;
     let cell = new_session_info(

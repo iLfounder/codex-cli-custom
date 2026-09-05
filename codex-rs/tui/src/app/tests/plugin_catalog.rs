@@ -1,11 +1,13 @@
 use std::time::Duration;
 
 use codex_app_server_protocol::PluginUninstallResponse;
+use pretty_assertions::assert_eq;
 
 use super::*;
 
 fn set_remote_plugin_workspace(app: &mut App, thread_id: ThreadId, cwd: &str) {
-    let mut session = test_thread_session(thread_id, app.chat_widget.config_ref().cwd.to_path_buf());
+    let mut session =
+        test_thread_session(thread_id, app.chat_widget.config_ref().cwd.to_path_buf());
     session.execution_context = crate::session_state::SessionExecutionContext::Remote {
         cwd: LegacyAppPathString::from_string(cwd),
         runtime_workspace_roots: Vec::new(),
@@ -18,12 +20,14 @@ fn set_remote_plugin_workspace(app: &mut App, thread_id: ThreadId, cwd: &str) {
 #[tokio::test]
 async fn workspace_aba_drops_old_catalog_work_without_clearing_current_flight() -> Result<()> {
     let (mut app, mut rx, _op_rx) = make_test_app_with_channels().await;
-    app.chat_widget.set_feature_enabled(Feature::Plugins, /*enabled*/ true);
+    app.chat_widget
+        .set_feature_enabled(Feature::Plugins, /*enabled*/ true);
     let cwd = app.chat_widget.config_ref().cwd.to_path_buf();
     let mut tui = crate::tui::test_support::make_test_tui()?;
     let mut server = Box::pin(crate::start_embedded_app_server_for_picker(
         app.chat_widget.config_ref(),
-    )).await?;
+    ))
+    .await?;
     let thread_id = ThreadId::new();
     set_remote_plugin_workspace(&mut app, thread_id, "/remote/a");
     let old_scope = app.chat_widget.workspace_request_scope();
@@ -37,43 +41,79 @@ async fn workspace_aba_drops_old_catalog_work_without_clearing_current_flight() 
     while rx.try_recv().is_ok() {}
 
     let stale_events = [
-        AppEvent::FetchPluginsList { scope: old_scope.clone(), cwd: cwd.clone() },
-        AppEvent::FetchHooksList { scope: old_scope.clone(), cwd: cwd.clone() },
+        AppEvent::FetchPluginsList {
+            scope: old_scope.clone(),
+            cwd: cwd.clone(),
+        },
+        AppEvent::FetchHooksList {
+            scope: old_scope.clone(),
+            cwd: cwd.clone(),
+        },
         AppEvent::PluginsLoaded {
             marketplace_management: None,
-            scope: old_scope.clone(), cwd: cwd.clone(), result: Err("old catalog".into()),
+            scope: old_scope.clone(),
+            cwd: cwd.clone(),
+            result: Err("old catalog".into()),
         },
         AppEvent::PluginRemoteSectionsLoaded {
-            scope: old_scope.clone(), cwd: cwd.clone(), marketplaces: Vec::new(), section_errors: Vec::new(),
+            scope: old_scope.clone(),
+            cwd: cwd.clone(),
+            marketplaces: Vec::new(),
+            section_errors: Vec::new(),
         },
         AppEvent::HooksLoaded {
-            scope: old_scope.clone(), cwd: cwd.clone(), result: Err("old hooks".into()),
+            scope: old_scope.clone(),
+            cwd: cwd.clone(),
+            result: Err("old hooks".into()),
         },
         AppEvent::SkillsListLoaded {
-            scope: old_scope.clone(), cwd: cwd.clone(), result: Err("old skills".into()),
+            scope: old_scope.clone(),
+            cwd: cwd.clone(),
+            result: Err("old skills".into()),
         },
         AppEvent::PluginMentionsLoaded {
-            scope: old_scope.clone(), cwd: cwd.clone(), plugins: None,
+            scope: old_scope.clone(),
+            cwd: cwd.clone(),
+            plugins: None,
         },
-        AppEvent::DiffResult { scope: old_scope, text: "old diff".into() },
+        AppEvent::DiffResult {
+            scope: old_scope,
+            text: "old diff".into(),
+        },
     ];
     for event in stale_events {
         app.handle_event(&mut tui, &mut server, event).await?;
     }
-    assert!(rx.try_recv().is_err(), "stale work must not start fetches or publish errors");
+    assert!(
+        rx.try_recv().is_err(),
+        "stale work must not start fetches or publish errors"
+    );
     assert!(app.overlay.is_none());
     app.chat_widget.add_plugins_output();
-    assert!(rx.try_recv().is_err(), "old completion must retain the current flight");
+    assert!(
+        rx.try_recv().is_err(),
+        "old completion must retain the current flight"
+    );
 
-    app.handle_event(&mut tui, &mut server, AppEvent::PluginsLoaded {
-        marketplace_management: None,
-        scope: current_scope.clone(), cwd: cwd.clone(),
-        result: Ok(codex_app_server_protocol::PluginListResponse {
-            marketplaces: Vec::new(), marketplace_load_errors: Vec::new(), featured_plugin_ids: Vec::new(),
-        }),
-    }).await?;
+    app.handle_event(
+        &mut tui,
+        &mut server,
+        AppEvent::PluginsLoaded {
+            marketplace_management: None,
+            scope: current_scope.clone(),
+            cwd: cwd.clone(),
+            result: Ok(codex_app_server_protocol::PluginListResponse {
+                marketplaces: Vec::new(),
+                marketplace_load_errors: Vec::new(),
+                featured_plugin_ids: Vec::new(),
+            }),
+        },
+    )
+    .await?;
     app.chat_widget.add_plugins_output();
-    assert!(matches!(rx.try_recv(), Ok(AppEvent::FetchPluginsList { scope, .. }) if scope == current_scope));
+    assert!(
+        matches!(rx.try_recv(), Ok(AppEvent::FetchPluginsList { scope, .. }) if scope == current_scope)
+    );
     server.shutdown().await?;
     Ok(())
 }
@@ -88,30 +128,44 @@ async fn stale_toggle_completion_releases_only_its_own_workspace_write() -> Resu
     let plugin_id = "plugin-fixture".to_string();
     let hook_key = "hook-fixture".to_string();
     for scope in [&old_scope, &current_scope] {
-        app.pending_plugin_enabled_writes.insert((scope.clone(), plugin_id.clone()), None);
-        app.pending_hook_enabled_writes.insert((scope.clone(), hook_key.clone()), None);
+        app.pending_plugin_enabled_writes
+            .insert((scope.clone(), plugin_id.clone()), None);
+        app.pending_hook_enabled_writes
+            .insert((scope.clone(), hook_key.clone()), None);
     }
     while rx.try_recv().is_ok() {}
     let mut tui = crate::tui::test_support::make_test_tui()?;
     let mut server = Box::pin(crate::start_embedded_app_server_for_picker(
         app.chat_widget.config_ref(),
-    )).await?;
+    ))
+    .await?;
     for event in [
         AppEvent::PluginEnabledSet {
-            scope: old_scope.clone(), cwd, plugin_id: plugin_id.clone(), enabled: true,
+            scope: old_scope.clone(),
+            cwd,
+            plugin_id: plugin_id.clone(),
+            enabled: true,
             result: Err("old write failed".into()),
         },
         AppEvent::HookEnabledSet {
-            scope: old_scope.clone(), key: hook_key.clone(), enabled: true,
+            scope: old_scope.clone(),
+            key: hook_key.clone(),
+            enabled: true,
             result: Err("old write failed".into()),
         },
     ] {
         app.handle_event(&mut tui, &mut server, event).await?;
     }
     assert_eq!(app.pending_plugin_enabled_writes.len(), 1);
-    assert!(app.pending_plugin_enabled_writes.contains_key(&(current_scope.clone(), plugin_id)));
+    assert!(
+        app.pending_plugin_enabled_writes
+            .contains_key(&(current_scope.clone(), plugin_id))
+    );
     assert_eq!(app.pending_hook_enabled_writes.len(), 1);
-    assert!(app.pending_hook_enabled_writes.contains_key(&(current_scope, hook_key)));
+    assert!(
+        app.pending_hook_enabled_writes
+            .contains_key(&(current_scope, hook_key))
+    );
     server.shutdown().await?;
     Ok(())
 }

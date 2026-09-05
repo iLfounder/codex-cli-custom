@@ -2700,9 +2700,7 @@ fn thread_resume_params_from_config(
     remote_cwd_override: Option<&LegacyAppPathString>,
     model_settings: ResumeModelSettings,
 ) -> ThreadResumeParams {
-    let has_remote_overrides =
-        remote_invocation_overrides.is_some_and(RemoteInvocationOverrides::has_lifecycle_overrides);
-    if model_settings == ResumeModelSettings::PreserveExistingThread && !has_remote_overrides {
+    if model_settings == ResumeModelSettings::PreserveExistingThread {
         return ThreadResumeParams {
             thread_id: thread_id.to_string(),
             dynamic_tools: Some(thread_control_dynamic_tools()),
@@ -4250,23 +4248,61 @@ mod tests {
         let config = build_config(&temp_dir).await;
         let thread_id = ThreadId::new();
 
-        let params = thread_resume_params_from_config(
-            config,
-            thread_id,
-            ThreadParamsMode::Embedded,
-            /*remote_invocation_overrides*/ None,
-            /*remote_cwd_override*/ None,
-            ResumeModelSettings::PreserveExistingThread,
-        );
-
-        assert_eq!(
-            params,
-            ThreadResumeParams {
-                thread_id: thread_id.to_string(),
-                dynamic_tools: Some(thread_control_dynamic_tools()),
-                ..ThreadResumeParams::default()
-            }
-        );
+        let mut cli = crate::Cli::try_parse_from([
+            "codex",
+            "--model",
+            "gpt-5.4",
+            "-C",
+            "/Volumes/original-cli-cwd",
+        ])
+        .expect("valid CLI");
+        cli.config_overrides.raw_overrides = vec![
+            "model_reasoning_effort=high".to_string(),
+            "service_tier=fast".to_string(),
+        ];
+        let overrides = crate::capture_remote_invocation_overrides(&cli).expect("remote overrides");
+        let remote_cwd = LegacyAppPathString::from_string("/Volumes/remote-cwd-override");
+        for mode in [ThreadParamsMode::Embedded, ThreadParamsMode::Remote] {
+            let params = thread_resume_params_from_config(
+                config.clone(),
+                thread_id,
+                mode,
+                Some(&overrides),
+                Some(&remote_cwd),
+                ResumeModelSettings::PreserveExistingThread,
+            );
+            assert_eq!(
+                serde_json::to_value(params).expect("resume request JSON"),
+                serde_json::to_value(ThreadResumeParams {
+                    thread_id: thread_id.to_string(),
+                    dynamic_tools: Some(thread_control_dynamic_tools()),
+                    ..ThreadResumeParams::default()
+                })
+                .expect("attach-only request JSON")
+            );
+        }
+        // Both modes used by an explicit CLI resume still forward the narrow remote allowlist.
+        for model_settings in [
+            ResumeModelSettings::RestoreFromThread,
+            ResumeModelSettings::OverrideFromCurrentConfig,
+        ] {
+            let params = thread_resume_params_from_config(
+                config.clone(),
+                thread_id,
+                ThreadParamsMode::Remote,
+                Some(&overrides),
+                Some(&remote_cwd),
+                model_settings,
+            );
+            let json = serde_json::to_value(params).expect("explicit resume request JSON");
+            assert_eq!(json["model"], "gpt-5.4");
+            assert_eq!(json["cwd"], remote_cwd.as_str());
+            assert_eq!(json["serviceTier"], "fast");
+            assert_eq!(
+                json["config"],
+                serde_json::json!({"model_reasoning_effort": "high"})
+            );
+        }
     }
 
     #[tokio::test]

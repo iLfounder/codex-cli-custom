@@ -282,7 +282,10 @@ impl HooksBrowserView {
             });
         }
         if !updates.is_empty() {
-            self.app_event_tx.send(AppEvent::TrustHooks { scope: self.scope.clone(), updates });
+            self.app_event_tx.send(AppEvent::TrustHooks {
+                scope: self.scope.clone(),
+                updates,
+            });
         }
     }
 

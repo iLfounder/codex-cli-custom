@@ -415,6 +415,7 @@ async fn title_and_recap_use_server_provider_profile_and_mcp_configuration() -> 
     std::fs::write(
         server_home.path().join("config.toml"),
         "model_provider = 'mac-provider'\n\
+         default_permissions = 'mac-profile'\n\
          [model_providers.mac-provider]\nname = 'Mac provider'\n\
          [permissions.mac-profile.filesystem]\n':root' = 'read'\n\
          [mcp_servers.mac-only]\ncommand = 'missing-mac-mcp'\nrequired = true\n",
@@ -439,7 +440,9 @@ async fn title_and_recap_use_server_provider_profile_and_mcp_configuration() -> 
     session.execution_context = crate::session_state::SessionExecutionContext::Remote {
         cwd: server_config.cwd.clone().into(),
         runtime_workspace_roots: Vec::new(),
-        sandbox: codex_app_server_protocol::SandboxPolicy::ReadOnly { network_access: false },
+        sandbox: codex_app_server_protocol::SandboxPolicy::ReadOnly {
+            network_access: false,
+        },
         rollout_path: None,
     };
     let mut tui = crate::tui::test_support::make_test_tui()?;
@@ -453,7 +456,8 @@ async fn title_and_recap_use_server_provider_profile_and_mcp_configuration() -> 
         },
         ThreadAttachPresentation::SessionLineage,
         /*initial_user_message*/ None,
-    ).await?;
+    )
+    .await?;
     prepare_eligible_recap(&mut app, thread_id);
     while app_event_rx.try_recv().is_ok() {}
 
@@ -468,11 +472,16 @@ async fn title_and_recap_use_server_provider_profile_and_mcp_configuration() -> 
     app.request_recap(&app_server, thread_id, RecapTrigger::Manual);
     for _ in 0..2 {
         let event = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), app_event_rx.recv())
-            .await?.expect("temporary request start event");
-        assert!(matches!(event,
-            AppEvent::ThreadTitleStarted { result: Ok(_), .. }
-                | AppEvent::RecapStarted { result: Ok(_), .. }
-        ), "unexpected event: {event:?}");
+            .await?
+            .expect("temporary request start event");
+        assert!(
+            matches!(
+                event,
+                AppEvent::ThreadTitleStarted { result: Ok(_), .. }
+                    | AppEvent::RecapStarted { result: Ok(_), .. }
+            ),
+            "unexpected event: {event:?}"
+        );
     }
     let starts = recorded_params(&requests, "thread/start");
     assert_eq!(starts.len(), 2);

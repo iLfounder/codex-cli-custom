@@ -268,7 +268,12 @@ where
             "account/read" => {
                 Some(json!({"result": {"account": null, "requiresOpenaiAuth": false}}))
             }
-            "model/list" => Some(json!({"result": {"data": [], "nextCursor": null}})),
+            "model/list" => Some(json!({"result": {"data": [{
+                "id": "gpt-test", "model": "gpt-test", "displayName": "gpt-test",
+                "description": "Reconnect fixture model", "hidden": false, "isDefault": true,
+                "supportedReasoningEfforts": [{"reasoningEffort": "medium", "description": "Medium"}],
+                "defaultReasoningEffort": "medium", "inputModalities": ["text"]
+            }], "nextCursor": null}})),
             "configRequirements/read" => Some(json!({"result": {"requirements": null}})),
             _ => respond(request).await,
         };
@@ -311,6 +316,7 @@ async fn lost_initial_thread_reply_keeps_startup_draft_offline() -> Result<()> {
             session.request_handle(),
             app.config.clone(),
             ThreadParamsMode::Remote,
+            /*remote_invocation_overrides*/ None,
             /*remote_cwd_override*/ None,
             session.thread_tool_transport(),
         )

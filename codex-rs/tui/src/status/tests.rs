@@ -312,9 +312,13 @@ async fn remote_status_uses_server_reasoning_summary_instead_of_local_config() {
             /*refreshing_rate_limits*/ false,
         );
         let lines = render_lines(&cell.display_lines(/*width*/ 100));
-        let model_row = lines.iter().find_map(|line| line.split_once("Model:").map(|(_, value)| {
-            value.trim().trim_end_matches('│').trim().to_string()
-        })).expect("model status row");
+        let model_row = lines
+            .iter()
+            .find_map(|line| {
+                line.split_once("Model:")
+                    .map(|(_, value)| value.trim().trim_end_matches('│').trim().to_string())
+            })
+            .expect("model status row");
         model_rows.push(model_row);
     }
     assert_snapshot!(model_rows.join("\n"), @"

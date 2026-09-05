@@ -72,9 +72,13 @@ impl App {
     pub(super) fn fetch_mcp_inventory(
         &mut self,
         app_server: &AppServerSession,
+        scope: crate::app_event::WorkspaceRequestScope,
         detail: McpServerStatusDetail,
         thread_id: Option<ThreadId>,
     ) {
+        if !self.chat_widget.matches_workspace_request_scope(&scope) {
+            return;
+        }
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         let request_thread_id = self.mcp_inventory_request_thread_id(thread_id);
@@ -83,6 +87,7 @@ impl App {
                 .await
                 .map_err(|err| err.to_string());
             app_event_tx.send(AppEvent::McpInventoryLoaded {
+                scope,
                 result,
                 detail,
                 thread_id,
@@ -354,9 +359,13 @@ impl App {
                 fetch_plugins_list(request_handle.clone(), request_cwd.clone()),
                 async {
                     if remote {
-                        Some(crate::marketplace_management::fetch_marketplace_management(
-                            request_handle.clone(), request_cwd.clone(),
-                        ).await)
+                        Some(
+                            crate::marketplace_management::fetch_marketplace_management(
+                                request_handle.clone(),
+                                request_cwd.clone(),
+                            )
+                            .await,
+                        )
                     } else {
                         None
                     }
@@ -379,7 +388,7 @@ impl App {
                 )
                 .await;
                 app_event_tx.send(AppEvent::PluginRemoteSectionsLoaded {
-                scope: scope.clone(),
+                    scope: scope.clone(),
                     cwd,
                     marketplaces,
                     section_errors,
@@ -564,8 +573,7 @@ impl App {
             return;
         }
 
-        self.pending_plugin_enabled_writes
-            .insert(key, None);
+        self.pending_plugin_enabled_writes.insert(key, None);
         self.spawn_plugin_enabled_write(app_server, scope, cwd, plugin_id, enabled);
     }
 
@@ -687,7 +695,11 @@ impl App {
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         if !self.config.features.enabled(Feature::Plugins) {
-            app_event_tx.send(AppEvent::PluginMentionsLoaded { scope, cwd, plugins: None });
+            app_event_tx.send(AppEvent::PluginMentionsLoaded {
+                scope,
+                cwd,
+                plugins: None,
+            });
             return;
         }
 
@@ -824,10 +836,15 @@ impl App {
     /// instead of the full table.
     pub(super) fn handle_mcp_inventory_result(
         &mut self,
+        scope: crate::app_event::WorkspaceRequestScope,
         result: Result<Vec<McpServerStatus>, String>,
         detail: McpServerStatusDetail,
         thread_id: Option<ThreadId>,
     ) {
+        // Reject old account/workspace results before touching the current request's spinner.
+        if !self.chat_widget.matches_workspace_request_scope(&scope) {
+            return;
+        }
         if thread_id.is_some() && thread_id != self.current_displayed_thread_id() {
             return;
         }
@@ -854,6 +871,18 @@ impl App {
             .add_to_history(history_cell::new_mcp_tools_output_from_statuses(
                 &statuses, detail,
             ));
+    }
+
+    /// Scope changes abandon every old inventory request before new requests can start.
+    pub(super) fn clear_committed_mcp_inventory_on_scope_change(&mut self) {
+        let previous_len = self.transcript_cells.len();
+        self.transcript_cells
+            .retain(|cell| !cell.as_any().is::<history_cell::McpInventoryLoadingCell>());
+        if previous_len != self.transcript_cells.len()
+            && let Some(Overlay::Transcript(overlay)) = &mut self.overlay
+        {
+            overlay.replace_cells(self.transcript_cells.clone());
+        }
     }
 
     pub(super) fn clear_committed_mcp_inventory_loading(&mut self) {
@@ -1476,6 +1505,10 @@ pub(super) fn mcp_inventory_maps_from_statuses(statuses: Vec<McpServerStatus>) -
 
     (tools, resources, resource_templates, auth_statuses)
 }
+
+#[cfg(test)]
+#[path = "mcp_inventory_scope_tests.rs"]
+mod mcp_inventory_scope_tests;
 
 #[cfg(test)]
 mod tests {

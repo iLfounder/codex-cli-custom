@@ -1506,7 +1506,10 @@ impl ChatWidget {
     }
 
     /// Build a placeholder header cell while the session is configuring.
-    fn placeholder_session_header_cell(config: &Config) -> Box<dyn HistoryCell> {
+    fn placeholder_session_header_cell(
+        config: &Config,
+        directory_display: Option<&str>,
+    ) -> Box<dyn HistoryCell> {
         let placeholder_style = Style::default().add_modifier(Modifier::DIM | Modifier::ITALIC);
         Box::new(
             history_cell::SessionHeaderHistoryCell::new_with_style(
@@ -1517,6 +1520,7 @@ impl ChatWidget {
                 config.cwd.to_path_buf(),
                 CODEX_CLI_VERSION,
             )
+            .with_directory_display(directory_display.map(str::to_owned))
             .with_yolo_mode(history_cell::is_yolo_mode(config)),
         )
     }
@@ -1599,6 +1603,10 @@ impl ChatWidget {
     /// The spinner lives in `active_cell` and is cleared by
     /// [`clear_mcp_inventory_loading`] once the result arrives.
     pub(crate) fn add_mcp_output(&mut self, detail: McpServerStatusDetail) {
+        if !self.workspace_requests_ready() {
+            self.add_error_message("'/mcp' is unavailable before the session starts.".to_string());
+            return;
+        }
         self.flush_answer_stream_with_separator();
         self.flush_active_cell();
         self.transcript.active_cell = Some(Box::new(history_cell::new_mcp_inventory_loading(
@@ -1607,6 +1615,7 @@ impl ChatWidget {
         self.bump_active_cell_revision();
         self.request_redraw();
         self.app_event_tx.send(AppEvent::FetchMcpInventory {
+            scope: self.workspace_request_scope(),
             detail,
             thread_id: self.thread_id(),
         });
