@@ -1,0 +1,2995 @@
+mod archive_thread;
+mod create_thread;
+mod delete_thread;
+mod helpers;
+mod list_threads;
+mod live_writer;
+mod model_context;
+mod move_thread_to_section;
+mod paginated_fork;
+mod pending_thread_metadata;
+mod prepared_resume;
+mod projects;
+mod read_thread;
+mod revert_thread;
+mod rollout_migration;
+// This lands before the reader PRs that consume the shared lineage resolver.
+#[allow(dead_code)]
+mod rollout_lineage;
+mod search_threads;
+mod thread_history;
+mod thread_history_materialization;
+mod thread_rollout_resolver;
+mod thread_sections;
+mod unarchive_thread;
+mod update_thread_metadata;
+mod writer_lock;
+
+#[cfg(test)]
+#[path = "pending_thread_metadata_tests.rs"]
+mod pending_thread_metadata_tests;
+#[cfg(test)]
+#[path = "runtime_snapshot_tests.rs"]
+mod runtime_snapshot_tests;
+#[cfg(test)]
+mod test_support;
+#[cfg(test)]
+#[path = "thread_transition_tests.rs"]
+mod thread_transition_tests;
+
+use codex_protocol::ThreadId;
+use codex_protocol::protocol::ExecutionAccountBinding;
+use codex_protocol::protocol::ThreadHistoryMode;
+use codex_rollout::RolloutRecorder;
+use codex_rollout::StateDbHandle;
+use codex_state::SqliteConfig;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tokio::sync::OnceCell;
+use tokio::sync::OwnedMutexGuard;
+use tokio::sync::OwnedRwLockReadGuard;
+use tokio::sync::OwnedRwLockWriteGuard;
+use tokio::sync::RwLock;
+
+use crate::AbortThreadTransition;
+use crate::AppendThreadItemsParams;
+use crate::ArchiveThreadParams;
+use crate::ArchiveThreadsParams;
+use crate::CommitThreadTransition;
+use crate::CommittedThreadTransitions;
+use crate::CreateProjectParams;
+use crate::CreateThreadParams;
+use crate::CreateThreadSectionParams;
+use crate::CreatedProject;
+use crate::DeleteThreadParams;
+use crate::DeleteThreadSectionParams;
+use crate::DeleteThreadsParams;
+use crate::DeletedProject;
+use crate::ItemPage;
+use crate::ListItemsParams;
+use crate::ListProjectsParams;
+use crate::ListThreadSectionsParams;
+use crate::ListThreadsParams;
+use crate::ListTimelineParams;
+use crate::ListTurnsParams;
+use crate::LoadThreadHistoryParams;
+use crate::MarkThreadTransitionPrepared;
+use crate::MoveProjectParams;
+use crate::MoveThreadToSectionParams;
+use crate::PersistContext;
+use crate::PrepareForkParams;
+use crate::PrepareThreadResumeParams;
+use crate::PreparedFork;
+use crate::PreparedThreadResume;
+use crate::PreparedThreadResumeAuthority;
+use crate::ProjectMoveOutcome;
+use crate::ReadThreadByRolloutPathParams;
+use crate::ReadThreadParams;
+use crate::RenameThreadSectionParams;
+use crate::ResumeThreadParams;
+use crate::RevertThreadParams;
+use crate::RuntimePersistenceHealth;
+use crate::RuntimePersistencePosition;
+use crate::RuntimeWriterOwnership;
+use crate::SearchThreadOccurrencesParams;
+use crate::SearchThreadsParams;
+use crate::StoredModelContext;
+use crate::StoredProject;
+use crate::StoredProjectsPage;
+use crate::StoredThread;
+use crate::StoredThreadHistory;
+use crate::StoredThreadSection;
+use crate::StoredThreadSectionsPage;
+use crate::ThreadMetadataPatch;
+use crate::ThreadOccurrenceSearchPage;
+use crate::ThreadPage;
+use crate::ThreadSearchPage;
+use crate::ThreadStore;
+use crate::ThreadStoreError;
+use crate::ThreadStoreFuture;
+use crate::ThreadStoreResult;
+use crate::ThreadStoreRuntimeSnapshot;
+use crate::ThreadTransitionAbortOutcome;
+use crate::ThreadTransitionClaimOutcome;
+use crate::ThreadTransitionCommitOutcome;
+use crate::ThreadTransitionIntent;
+use crate::ThreadTransitionPreparation;
+use crate::ThreadTransitionRecord;
+use crate::ThreadWriterEvidence;
+use crate::TimelinePage;
+use crate::TurnPage;
+use crate::UpdateProjectParams;
+use crate::UpdateThreadMetadataParams;
+use crate::UpdatedProject;
+use crate::local::writer_lock::WriterLockCoordinator;
+use crate::local::writer_lock::WriterLockGuard;
+
+pub use rollout_migration::RolloutMigrationFailureReason;
+pub use rollout_migration::RolloutMigrationMode;
+pub use rollout_migration::RolloutMigrationOptions;
+pub use rollout_migration::RolloutMigrationOutcome;
+pub use rollout_migration::RolloutMigrationProgress;
+pub use rollout_migration::RolloutMigrationReport;
+pub use rollout_migration::RolloutMigrationStatus;
+pub use writer_lock::ThreadWriterAuthority;
+pub use writer_lock::ThreadWriterOwnership;
+pub use writer_lock::WriterControlCapability;
+
+const WRITER_CONTROL_UNAVAILABLE_REASON: &str =
+    "persistent writer control requires the state database";
+const COLD_JSONL_POSITION_UNAVAILABLE_REASON: &str =
+    "cold JSONL position is unavailable without a live recorder";
+const LEGACY_POSITION_UNAVAILABLE_REASON: &str =
+    "legacy history has no paginated persistence position";
+const STATE_DB_POSITION_UNAVAILABLE_REASON: &str =
+    "SQLite projection position requires the state database";
+const SQLITE_PROJECTION_UNAVAILABLE_REASON: &str =
+    "paginated SQLite projection position is unavailable";
+const PROJECTION_FAILED_REASON: &str = "projection_failed";
+
+/// Local filesystem/SQLite-backed implementation of [`ThreadStore`].
+///
+/// Local storage has two compatibility surfaces. Rollout JSONL files are the
+/// durable replay format and remain readable without SQLite, including older
+/// files that encode metadata in `SessionMeta` items and name-index entries.
+/// The SQLite state DB, when available, is the queryable metadata index used by
+/// list/read paths for fast lookup.
+///
+/// Live appends still write canonical JSONL history, but append-derived
+/// metadata is observed above the store and applied through
+/// [`ThreadStore::update_thread_metadata`]. This implementation applies that
+/// patch literally to SQLite while keeping the JSONL/name-index compatibility
+/// behavior needed for SQLite-less reads, repair, and old local rollout files.
+#[derive(Clone)]
+pub struct LocalThreadStore {
+    pub(super) config: LocalThreadStoreConfig,
+    live_recorders: Arc<Mutex<HashMap<ThreadId, LiveRecorderEntry>>>,
+    pending_thread_metadata: pending_thread_metadata::PendingThreadMetadataRegistry,
+    live_writer_locks: Arc<LiveWriterLocks>,
+    writer_lock_coordinator: Arc<WriterLockCoordinator>,
+    state_db: Option<StateDbHandle>,
+    thread_history_db: Arc<OnceCell<sqlx::SqlitePool>>,
+    projection_failures: Arc<Mutex<HashMap<ThreadId, ProjectionFailureEvidence>>>,
+}
+
+#[derive(Clone, Copy)]
+struct ProjectionFailureEvidence {
+    jsonl: Option<RuntimePersistencePosition>,
+}
+
+struct LiveRecorderEntry {
+    recorder: RolloutRecorder,
+    // Rollout projection rows are keyed by immutable rollout ID, not the stable thread ID used
+    // to find this live writer.
+    rollout_id: ThreadId,
+    // Local rollout files are materialized lazily, but metadata updates can arrive before the
+    // canonical SessionMeta is durable. Retain the mode captured when live persistence was opened
+    // so missing SQLite rows can still be seeded.
+    history_mode: ThreadHistoryMode,
+    writer_lock: WriterLockGuard,
+}
+
+#[derive(Default)]
+struct LiveWriterLocks {
+    // Keep per-thread locks after a writer goes idle. Removing one while another caller is about
+    // to acquire it could let two operations for the same thread run at once.
+    by_thread: Mutex<HashMap<ThreadId, Arc<ThreadCoordination>>>,
+}
+
+#[derive(Default)]
+struct ThreadCoordination {
+    // Serialize writes and capture consistent fork snapshots.
+    writer: Arc<Mutex<()>>,
+    // Forks hold a shared lease until their child reference is durable; deletion, archive, and
+    // unarchive require exclusive access. Keeping this separate from `writer` lets the source
+    // accept writes during child initialization, including MCP startup that can take 30 seconds.
+    // Operations that need both locks must acquire `lifecycle` before `writer`.
+    lifecycle: Arc<RwLock<()>>,
+}
+
+impl LiveWriterLocks {
+    async fn coordination(&self, thread_id: ThreadId) -> Arc<ThreadCoordination> {
+        self.by_thread
+            .lock()
+            .await
+            .entry(thread_id)
+            .or_default()
+            .clone()
+    }
+
+    async fn lock(&self, thread_id: ThreadId) -> OwnedMutexGuard<()> {
+        self.coordination(thread_id)
+            .await
+            .writer
+            .clone()
+            .lock_owned()
+            .await
+    }
+
+    async fn reserve_lifecycle(&self, thread_id: ThreadId) -> OwnedRwLockReadGuard<()> {
+        self.coordination(thread_id)
+            .await
+            .lifecycle
+            .clone()
+            .read_owned()
+            .await
+    }
+
+    async fn lock_lifecycle(&self, thread_id: ThreadId) -> OwnedRwLockWriteGuard<()> {
+        self.coordination(thread_id)
+            .await
+            .lifecycle
+            .clone()
+            .write_owned()
+            .await
+    }
+}
+
+/// Process-scoped configuration for local thread storage.
+///
+/// This describes where local storage lives. New-thread rollout metadata such
+/// as cwd, provider, and memory mode is supplied when live persistence is opened.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalThreadStoreConfig {
+    pub codex_home: PathBuf,
+    pub sqlite: SqliteConfig,
+    /// Provider used only when older local metadata does not contain one.
+    pub default_model_provider_id: String,
+}
+
+impl LocalThreadStoreConfig {
+    pub fn from_config(config: &impl codex_rollout::RolloutConfigView) -> Self {
+        Self {
+            codex_home: config.codex_home().to_path_buf(),
+            sqlite: config.sqlite_config().clone(),
+            default_model_provider_id: config.model_provider_id().to_string(),
+        }
+    }
+}
+
+impl std::fmt::Debug for LocalThreadStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalThreadStore")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+impl LocalThreadStore {
+    /// Create a local store using an already initialized state DB handle.
+    pub fn new(config: LocalThreadStoreConfig, state_db: Option<StateDbHandle>) -> Self {
+        let writer_lock_coordinator = Arc::new(WriterLockCoordinator::new(config.sqlite.home()));
+        Self {
+            config,
+            live_recorders: Arc::new(Mutex::new(HashMap::new())),
+            pending_thread_metadata:
+                pending_thread_metadata::PendingThreadMetadataRegistry::default(),
+            live_writer_locks: Arc::new(LiveWriterLocks::default()),
+            writer_lock_coordinator,
+            state_db,
+            thread_history_db: Arc::new(OnceCell::new()),
+            projection_failures: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Return the state DB handle used by local rollout writers.
+    pub async fn state_db(&self) -> Option<StateDbHandle> {
+        self.state_db.clone()
+    }
+
+    /// Check the durable thread binding authority for an account slot.
+    pub async fn durable_execution_account_slot_in_use(
+        &self,
+        account_slot_id: &str,
+    ) -> ThreadStoreResult<bool> {
+        if self.state_db.is_none() {
+            return Ok(false);
+        }
+        let pool = self
+            .config
+            .sqlite
+            .open_read_only_pool(
+                &self.config.sqlite.state_db_path(),
+                /*busy_timeout*/ None,
+            )
+            .await
+            .map_err(|err| ThreadStoreError::Internal {
+                message: format!("failed to open execution account binding store: {err}"),
+            })?;
+        let result = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM thread_execution_account_bindings WHERE slot_id = ?)",
+        )
+        .bind(account_slot_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|err| ThreadStoreError::Internal {
+            message: format!("failed to scan execution account bindings: {err}"),
+        });
+        pool.close().await;
+        result
+    }
+
+    /// Probe current writer ownership and persistent control metadata without
+    /// creating, deleting, or taking ownership of a thread lock.
+    pub async fn probe_writer_authority(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreResult<ThreadWriterAuthority> {
+        let ownership = self.writer_lock_coordinator.probe(thread_id)?;
+        let Some(state_db) = self.state_db.as_ref() else {
+            return Ok(ThreadWriterAuthority {
+                ownership,
+                generation: None,
+                control: WriterControlCapability::Disabled {
+                    reason: WRITER_CONTROL_UNAVAILABLE_REASON.to_string(),
+                },
+            });
+        };
+        let generation = state_db.writer_generation(thread_id).await.map_err(|err| {
+            ThreadStoreError::Internal {
+                message: format!("failed to read writer generation for {thread_id}: {err}"),
+            }
+        })?;
+        Ok(ThreadWriterAuthority {
+            ownership,
+            generation: generation.as_ref().map(|generation| generation.generation),
+            control: WriterControlCapability::Enabled {
+                store_id: state_db.writer_store_id().to_string(),
+            },
+        })
+    }
+
+    async fn thread_history_db(&self) -> ThreadStoreResult<&sqlx::SqlitePool> {
+        if self.state_db.is_none() {
+            return Err(ThreadStoreError::Unsupported {
+                operation: "paginated_history",
+            });
+        }
+        self.thread_history_db
+            .get_or_try_init(|| async {
+                codex_state::open_thread_history_db(&self.config.sqlite).await
+            })
+            .await
+            .map_err(|err| ThreadStoreError::Internal {
+                message: format!("failed to open thread history database: {err}"),
+            })
+    }
+
+    /// Read a local rollout-backed thread by path.
+    pub async fn read_thread_by_rollout_path(
+        &self,
+        rollout_path: PathBuf,
+        include_archived: bool,
+        include_history: bool,
+    ) -> ThreadStoreResult<StoredThread> {
+        read_thread::read_thread_by_rollout_path(
+            self,
+            rollout_path,
+            include_archived,
+            include_history,
+        )
+        .await
+    }
+
+    /// Return the live local rollout path for legacy local-only code paths.
+    pub async fn live_rollout_path(&self, thread_id: ThreadId) -> ThreadStoreResult<PathBuf> {
+        live_writer::rollout_path(self, thread_id).await
+    }
+
+    pub(super) async fn ensure_live_recorder_absent(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreResult<()> {
+        if self.live_recorders.lock().await.contains_key(&thread_id) {
+            return Err(ThreadStoreError::InvalidRequest {
+                message: format!("thread {thread_id} already has a live local writer"),
+            });
+        }
+        Ok(())
+    }
+
+    async fn acquire_writer_lock(&self, thread_id: ThreadId) -> ThreadStoreResult<WriterLockGuard> {
+        let writer_lock = self.writer_lock_coordinator.acquire(thread_id)?;
+        let Some(state_db) = self.state_db.as_ref() else {
+            return Ok(writer_lock);
+        };
+        let generation = state_db
+            .next_writer_generation(thread_id)
+            .await
+            .map_err(|err| ThreadStoreError::Internal {
+                message: format!("failed to advance writer generation for {thread_id}: {err}"),
+            })?;
+        Ok(writer_lock.with_generation(generation))
+    }
+
+    async fn acquire_writer_locks(
+        &self,
+        thread_ids: &[ThreadId],
+    ) -> ThreadStoreResult<Vec<WriterLockGuard>> {
+        let mut writer_locks = Vec::with_capacity(thread_ids.len());
+        for &thread_id in thread_ids {
+            if self.live_recorders.lock().await.contains_key(&thread_id) {
+                continue;
+            }
+            writer_locks.push(self.acquire_writer_lock(thread_id).await?);
+        }
+        Ok(writer_locks)
+    }
+
+    async fn insert_live_recorder(
+        &self,
+        thread_id: ThreadId,
+        recorder: RolloutRecorder,
+        rollout_id: ThreadId,
+        history_mode: ThreadHistoryMode,
+        writer_lock: WriterLockGuard,
+    ) -> ThreadStoreResult<()> {
+        match self.live_recorders.lock().await.entry(thread_id) {
+            Entry::Occupied(entry) => Err(ThreadStoreError::InvalidRequest {
+                message: format!("thread {} already has a live local writer", entry.key()),
+            }),
+            Entry::Vacant(entry) => {
+                entry.insert(LiveRecorderEntry {
+                    recorder,
+                    rollout_id,
+                    history_mode,
+                    writer_lock,
+                });
+                Ok(())
+            }
+        }
+    }
+
+    async fn load_history(
+        &self,
+        params: LoadThreadHistoryParams,
+    ) -> ThreadStoreResult<StoredThreadHistory> {
+        if let Ok(rollout_path) = live_writer::rollout_path(self, params.thread_id).await {
+            if !params.include_archived
+                && helpers::rollout_path_is_archived(
+                    self.config.codex_home.as_path(),
+                    rollout_path.as_path(),
+                )
+            {
+                return Err(ThreadStoreError::InvalidRequest {
+                    message: format!("thread {} is archived", params.thread_id),
+                });
+            }
+            return read_thread::read_thread_by_rollout_path(
+                self,
+                rollout_path,
+                /*include_archived*/ true,
+                /*include_history*/ true,
+            )
+            .await?
+            .history
+            .ok_or_else(|| ThreadStoreError::Internal {
+                message: format!("failed to load history for thread {}", params.thread_id),
+            });
+        }
+
+        read_thread::read_thread(
+            self,
+            ReadThreadParams {
+                thread_id: params.thread_id,
+                include_archived: params.include_archived,
+                include_history: true,
+            },
+        )
+        .await?
+        .history
+        .ok_or_else(|| ThreadStoreError::Internal {
+            message: format!("failed to load history for thread {}", params.thread_id),
+        })
+    }
+
+    async fn read_thread_by_rollout_path_params(
+        &self,
+        params: ReadThreadByRolloutPathParams,
+    ) -> ThreadStoreResult<StoredThread> {
+        read_thread::read_thread_by_rollout_path(
+            self,
+            params.rollout_path,
+            params.include_archived,
+            params.include_history,
+        )
+        .await
+    }
+
+    /// Lists projection-backed turns without enabling app-server routing yet.
+    pub async fn list_turns(&self, params: ListTurnsParams) -> ThreadStoreResult<TurnPage> {
+        thread_history::list_turns(self, params).await
+    }
+
+    /// Lists projection-backed items without enabling app-server routing yet.
+    pub async fn list_items(&self, params: ListItemsParams) -> ThreadStoreResult<ItemPage> {
+        thread_history::list_items(self, params).await
+    }
+
+    /// Lists bounded ordinary and realtime items from the rollout projection.
+    pub async fn list_timeline(
+        &self,
+        params: ListTimelineParams,
+    ) -> ThreadStoreResult<TimelinePage> {
+        thread_history::list_timeline(self, params).await
+    }
+
+    /// Searches projection-backed visible messages within one paginated thread.
+    pub async fn search_thread_occurrences(
+        &self,
+        params: SearchThreadOccurrencesParams,
+    ) -> ThreadStoreResult<ThreadOccurrenceSearchPage> {
+        thread_history::search_thread_occurrences(self, params).await
+    }
+}
+
+impl ThreadStore for LocalThreadStore {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn writer_control_capability(&self) -> WriterControlCapability {
+        match self.state_db.as_ref() {
+            Some(state_db) => WriterControlCapability::Enabled {
+                store_id: state_db.writer_store_id().to_string(),
+            },
+            None => WriterControlCapability::Disabled {
+                reason: WRITER_CONTROL_UNAVAILABLE_REASON.to_string(),
+            },
+        }
+    }
+
+    fn runtime_snapshot(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreFuture<'_, ThreadStoreRuntimeSnapshot> {
+        Box::pin(async move {
+            let authority = self.probe_writer_authority(thread_id).await?;
+            let live = {
+                let recorders = self.live_recorders.lock().await;
+                recorders
+                    .get(&thread_id)
+                    .map(|entry| (entry.recorder.clone(), entry.history_mode))
+            };
+            let projection_failure = self
+                .projection_failures
+                .lock()
+                .await
+                .get(&thread_id)
+                .copied();
+            let (jsonl, live_history_mode) =
+                match live {
+                    Some((recorder, history_mode)) => {
+                        let progress = recorder.progress().await.map_err(|err| {
+                            ThreadStoreError::Internal {
+                                message: format!(
+                                    "failed to read live rollout progress for {thread_id}: {err}"
+                                ),
+                            }
+                        })?;
+                        (
+                            progress.map(|progress| RuntimePersistencePosition {
+                                ordinal: progress.end_ordinal_exclusive,
+                                offset: progress.end_byte_offset,
+                            }),
+                            Some(history_mode),
+                        )
+                    }
+                    None => (projection_failure.and_then(|failure| failure.jsonl), None),
+                };
+            let relinquish_projection_failed = projection_failure.is_some();
+            let projection = match thread_history::projection_state(self, thread_id).await {
+                Ok(projection) => projection,
+                Err(_) if relinquish_projection_failed => None,
+                Err(err) => return Err(err),
+            };
+            let sqlite = projection.as_ref().map(|state| RuntimePersistencePosition {
+                ordinal: state.next_ordinal,
+                offset: state.next_byte_offset,
+            });
+            let history_mode = if live_history_mode.is_some() {
+                live_history_mode
+            } else if let Some(state_db) = self.state_db.as_ref() {
+                state_db
+                    .get_thread(thread_id)
+                    .await
+                    .map_err(|err| ThreadStoreError::Internal {
+                        message: format!("failed to read history mode for {thread_id}: {err}"),
+                    })?
+                    .map(|thread| thread.history_mode)
+            } else {
+                None
+            };
+            let persistence_deny_reason = if relinquish_projection_failed {
+                Some(PROJECTION_FAILED_REASON.to_string())
+            } else if self.state_db.is_none() {
+                Some(STATE_DB_POSITION_UNAVAILABLE_REASON.to_string())
+            } else if jsonl.is_none() && matches!(history_mode, Some(ThreadHistoryMode::Legacy)) {
+                Some(LEGACY_POSITION_UNAVAILABLE_REASON.to_string())
+            } else if jsonl.is_none() && sqlite.is_some() {
+                Some(COLD_JSONL_POSITION_UNAVAILABLE_REASON.to_string())
+            } else if jsonl.is_none() || sqlite.is_none() {
+                Some(SQLITE_PROJECTION_UNAVAILABLE_REASON.to_string())
+            } else {
+                None
+            };
+            let (writer_store_id, writer_deny_reason) = match authority.control {
+                WriterControlCapability::Enabled { store_id } => (Some(store_id), None),
+                WriterControlCapability::Disabled { reason } => (None, Some(reason)),
+            };
+            Ok(ThreadStoreRuntimeSnapshot {
+                writer_ownership: match authority.ownership {
+                    ThreadWriterOwnership::None => RuntimeWriterOwnership::None,
+                    ThreadWriterOwnership::OwnedHere => RuntimeWriterOwnership::OwnedHere,
+                    ThreadWriterOwnership::OwnedElsewhere => RuntimeWriterOwnership::OwnedElsewhere,
+                },
+                writer_store_id,
+                writer_generation: authority.generation,
+                writer_deny_reason,
+                jsonl,
+                sqlite,
+                lag: jsonl
+                    .zip(sqlite)
+                    .map(|(jsonl, sqlite)| jsonl.ordinal.saturating_sub(sqlite.ordinal)),
+                flush_health: if jsonl.is_some() {
+                    RuntimePersistenceHealth::Healthy
+                } else {
+                    RuntimePersistenceHealth::Unknown
+                },
+                materialize_health: if relinquish_projection_failed {
+                    RuntimePersistenceHealth::Degraded
+                } else if sqlite.is_some() {
+                    RuntimePersistenceHealth::Healthy
+                } else {
+                    RuntimePersistenceHealth::Unknown
+                },
+                flushed_at: None,
+                materialized_at: None,
+                persistence_deny_reason,
+            })
+        })
+    }
+
+    fn execution_account_binding(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Ok(Some(ExecutionAccountBinding {
+                    slot_id: "default".to_string(),
+                    generation: 1,
+                }));
+            };
+            state_db
+                .execution_account_binding(thread_id)
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!("failed to read execution account binding: {err}"),
+                })
+        })
+    }
+
+    fn initialize_execution_account_binding(
+        &self,
+        thread_id: ThreadId,
+        initial: ExecutionAccountBinding,
+    ) -> ThreadStoreFuture<'_, ExecutionAccountBinding> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                if initial.slot_id == "default" && initial.generation == 1 {
+                    return Ok(initial);
+                }
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "initialize_non_default_execution_account_binding",
+                });
+            };
+            state_db
+                .initialize_execution_account_binding(thread_id, &initial)
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!("failed to initialize execution account binding: {err}"),
+                })
+        })
+    }
+
+    fn compare_and_swap_execution_account_binding(
+        &self,
+        thread_id: ThreadId,
+        expected: ExecutionAccountBinding,
+        next_slot_id: String,
+    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
+        self.compare_and_swap_execution_account_binding_with_intent(
+            thread_id,
+            expected,
+            next_slot_id,
+            crate::AccountBindingCommitIntent::PinFixed,
+        )
+    }
+
+    fn compare_and_swap_execution_account_binding_with_intent(
+        &self,
+        thread_id: ThreadId,
+        expected: ExecutionAccountBinding,
+        next_slot_id: String,
+        intent: crate::AccountBindingCommitIntent,
+    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "compare_and_swap_execution_account_binding_with_intent",
+                });
+            };
+            state_db
+                .compare_and_swap_execution_account_binding_with_intent(
+                    thread_id,
+                    &expected,
+                    next_slot_id.as_str(),
+                    intent,
+                )
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!("failed to compare and swap execution account binding: {err}"),
+                })
+        })
+    }
+
+    fn thread_account_rotation_policy(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreFuture<'_, crate::ThreadAccountRotationPolicy> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Ok(crate::ThreadAccountRotationPolicy::virtual_fixed(
+                    &ExecutionAccountBinding {
+                        slot_id: "default".to_string(),
+                        generation: 1,
+                    },
+                ));
+            };
+            let binding = state_db
+                .execution_account_binding(thread_id)
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!("failed to read execution account binding: {err}"),
+                })?
+                .unwrap_or(ExecutionAccountBinding {
+                    slot_id: "default".to_string(),
+                    generation: 1,
+                });
+            let override_profile = state_db
+                .thread_account_rotation_override(thread_id)
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!("failed to read thread account rotation override: {err}"),
+                })?;
+            let (profile, revision) = if let Some(profile) = override_profile {
+                let revision =
+                    crate::ThreadAccountRotationPolicyRevision::Override(profile.revision);
+                (Some(profile), revision)
+            } else {
+                let profile = state_db
+                    .account_rotation_global_profile()
+                    .await
+                    .map_err(|err| ThreadStoreError::Internal {
+                        message: format!("failed to read global account rotation profile: {err}"),
+                    })?;
+                let revision = crate::ThreadAccountRotationPolicyRevision::Inherit(
+                    profile.as_ref().map_or(0, |profile| profile.revision),
+                );
+                (profile, revision)
+            };
+            let Some(profile) = profile else {
+                return Ok(crate::ThreadAccountRotationPolicy::virtual_fixed(&binding));
+            };
+            let cursor = state_db
+                .thread_account_rotation_cursor(thread_id)
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!("failed to read thread account rotation cursor: {err}"),
+                })?;
+            Ok(crate::ThreadAccountRotationPolicy::from_profile(
+                profile,
+                revision,
+                cursor.map(|cursor| cursor.last_committed_account_slot_id),
+            ))
+        })
+    }
+
+    fn account_rotation_global_profile(
+        &self,
+    ) -> ThreadStoreFuture<'_, Option<crate::AccountRotationProfile>> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Ok(None);
+            };
+            state_db
+                .account_rotation_global_profile()
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!("failed to read global account rotation profile: {err}"),
+                })
+        })
+    }
+
+    fn compare_and_swap_account_rotation_global_profile(
+        &self,
+        expected_revision: u64,
+        update: crate::AccountRotationProfileUpdate,
+    ) -> ThreadStoreFuture<'_, Option<crate::AccountRotationProfile>> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "compare_and_swap_account_rotation_global_profile",
+                });
+            };
+            state_db
+                .compare_and_swap_account_rotation_global_profile(expected_revision, &update)
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!(
+                        "failed to compare and swap global account rotation profile: {err}"
+                    ),
+                })
+        })
+    }
+
+    fn thread_account_rotation_override(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreFuture<'_, Option<crate::AccountRotationProfile>> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Ok(None);
+            };
+            state_db
+                .thread_account_rotation_override(thread_id)
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!("failed to read thread account rotation override: {err}"),
+                })
+        })
+    }
+
+    fn compare_and_swap_thread_account_rotation_override(
+        &self,
+        thread_id: ThreadId,
+        expected_revision: u64,
+        update: crate::AccountRotationProfileUpdate,
+    ) -> ThreadStoreFuture<'_, Option<crate::AccountRotationProfile>> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "compare_and_swap_thread_account_rotation_override",
+                });
+            };
+            state_db
+                .compare_and_swap_thread_account_rotation_override(
+                    thread_id,
+                    expected_revision,
+                    &update,
+                )
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!(
+                        "failed to compare and swap thread account rotation override: {err}"
+                    ),
+                })
+        })
+    }
+
+    fn reset_thread_account_rotation_override(
+        &self,
+        thread_id: ThreadId,
+        expected_revision: u64,
+    ) -> ThreadStoreFuture<'_, bool> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "reset_thread_account_rotation_override",
+                });
+            };
+            state_db
+                .reset_thread_account_rotation_override(thread_id, expected_revision)
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!("failed to reset thread account rotation override: {err}"),
+                })
+        })
+    }
+
+    fn compare_and_swap_thread_account_rotation_cursor_for_binding(
+        &self,
+        thread_id: ThreadId,
+        expected_binding: ExecutionAccountBinding,
+        accepted_account_slot_id: String,
+    ) -> ThreadStoreFuture<'_, Option<()>> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "compare_and_swap_thread_account_rotation_cursor_for_binding",
+                });
+            };
+            state_db
+                .compare_and_swap_thread_account_rotation_cursor_for_binding(
+                    thread_id,
+                    &expected_binding,
+                    accepted_account_slot_id.as_str(),
+                )
+                .await
+                .map(|policy| policy.map(|_| ()))
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!(
+                        "failed to compare and swap thread account rotation cursor: {err}"
+                    ),
+                })
+        })
+    }
+
+    fn compare_and_swap_successful_account_rotation(
+        &self,
+        thread_id: ThreadId,
+        expected_binding: ExecutionAccountBinding,
+        accepted_account_slot_id: String,
+        binding_transition: crate::SuccessfulAccountBindingTransition,
+    ) -> ThreadStoreFuture<'_, Option<crate::SuccessfulAccountRotationCommit>> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "compare_and_swap_successful_account_rotation",
+                });
+            };
+            state_db
+                .compare_and_swap_successful_account_rotation(
+                    thread_id,
+                    &expected_binding,
+                    accepted_account_slot_id.as_str(),
+                    binding_transition,
+                )
+                .await
+                .map(|commit| {
+                    commit.map(|commit| crate::SuccessfulAccountRotationCommit {
+                        binding: commit.binding,
+                    })
+                })
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!(
+                        "failed to commit successful account rotation atomically: {err}"
+                    ),
+                })
+        })
+    }
+
+    fn execution_account_slot_runtime_state(
+        &self,
+        slot_id: String,
+    ) -> ThreadStoreFuture<'_, (u64, Vec<(ThreadId, ExecutionAccountBinding)>)> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "execution_account_slot_runtime_state",
+                });
+            };
+            state_db
+                .execution_account_slot_runtime_state(slot_id.as_str())
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!("failed to read execution account slot runtime: {err}"),
+                })
+        })
+    }
+
+    fn compare_and_swap_execution_account_slot_runtime(
+        &self,
+        slot_id: String,
+        expected_runtime_version: u64,
+        expected_bindings: Vec<(ThreadId, ExecutionAccountBinding)>,
+    ) -> ThreadStoreFuture<'_, Option<(u64, Vec<(ThreadId, ExecutionAccountBinding)>)>> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "compare_and_swap_execution_account_slot_runtime",
+                });
+            };
+            state_db
+                .compare_and_swap_execution_account_slot_runtime(
+                    slot_id.as_str(),
+                    expected_runtime_version,
+                    &expected_bindings,
+                )
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!(
+                        "failed to compare and swap execution account slot runtime: {err}"
+                    ),
+                })
+        })
+    }
+
+    fn claim_thread_transition(
+        &self,
+        intent: ThreadTransitionIntent,
+        reserved_current_thread_id: ThreadId,
+        origin_instance_epoch: String,
+        initiator_client_incarnation: String,
+        previous_writer: ThreadWriterEvidence,
+    ) -> ThreadStoreFuture<'_, ThreadTransitionClaimOutcome> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "claim_thread_transition",
+                });
+            };
+            state_db
+                .claim_thread_transition(
+                    &intent,
+                    reserved_current_thread_id,
+                    &origin_instance_epoch,
+                    &initiator_client_incarnation,
+                    &previous_writer,
+                )
+                .await
+                .map_err(|error| {
+                    match error.downcast_ref::<codex_state::ThreadTransitionConflict>() {
+                        Some(conflict) => ThreadStoreError::Conflict {
+                            message: conflict.reason().to_string(),
+                        },
+                        None => ThreadStoreError::Internal {
+                            message: format!("thread transition storage failed: {error}"),
+                        },
+                    }
+                })
+        })
+    }
+
+    fn mark_thread_transition_prepared(
+        &self,
+        request: MarkThreadTransitionPrepared,
+    ) -> ThreadStoreFuture<'_, ThreadTransitionPreparation> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "mark_thread_transition_prepared",
+                });
+            };
+            state_db
+                .mark_thread_transition_prepared(&request)
+                .await
+                .map_err(|error| {
+                    match error.downcast_ref::<codex_state::ThreadTransitionConflict>() {
+                        Some(conflict) => ThreadStoreError::Conflict {
+                            message: conflict.reason().to_string(),
+                        },
+                        None => ThreadStoreError::Internal {
+                            message: format!("thread transition storage failed: {error}"),
+                        },
+                    }
+                })
+        })
+    }
+
+    fn abort_thread_transition(
+        &self,
+        request: AbortThreadTransition,
+    ) -> ThreadStoreFuture<'_, ThreadTransitionAbortOutcome> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "abort_thread_transition",
+                });
+            };
+            state_db
+                .abort_thread_transition(&request)
+                .await
+                .map_err(|error| {
+                    match error.downcast_ref::<codex_state::ThreadTransitionConflict>() {
+                        Some(conflict) => ThreadStoreError::Conflict {
+                            message: conflict.reason().to_string(),
+                        },
+                        None => ThreadStoreError::Internal {
+                            message: format!("thread transition storage failed: {error}"),
+                        },
+                    }
+                })
+        })
+    }
+
+    fn commit_thread_transition(
+        &self,
+        request: CommitThreadTransition,
+    ) -> ThreadStoreFuture<'_, ThreadTransitionCommitOutcome> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "commit_thread_transition",
+                });
+            };
+            state_db
+                .commit_thread_transition(&request)
+                .await
+                .map_err(|error| {
+                    match error.downcast_ref::<codex_state::ThreadTransitionConflict>() {
+                        Some(conflict) => ThreadStoreError::Conflict {
+                            message: conflict.reason().to_string(),
+                        },
+                        None => ThreadStoreError::Internal {
+                            message: format!("thread transition storage failed: {error}"),
+                        },
+                    }
+                })
+        })
+    }
+
+    fn thread_transition_by_id(
+        &self,
+        transition_id: String,
+    ) -> ThreadStoreFuture<'_, Option<ThreadTransitionRecord>> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "thread_transition_by_id",
+                });
+            };
+            state_db
+                .thread_transition_by_id(&transition_id)
+                .await
+                .map_err(|error| {
+                    match error.downcast_ref::<codex_state::ThreadTransitionConflict>() {
+                        Some(conflict) => ThreadStoreError::Conflict {
+                            message: conflict.reason().to_string(),
+                        },
+                        None => ThreadStoreError::Internal {
+                            message: format!("thread transition storage failed: {error}"),
+                        },
+                    }
+                })
+        })
+    }
+
+    fn committed_thread_transitions_for_threads(
+        &self,
+        thread_ids: Vec<ThreadId>,
+    ) -> ThreadStoreFuture<'_, HashMap<ThreadId, CommittedThreadTransitions>> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "committed_thread_transitions_for_threads",
+                });
+            };
+            state_db
+                .committed_thread_transitions_for_threads(&thread_ids)
+                .await
+                .map_err(|error| {
+                    match error.downcast_ref::<codex_state::ThreadTransitionConflict>() {
+                        Some(conflict) => ThreadStoreError::Conflict {
+                            message: conflict.reason().to_string(),
+                        },
+                        None => ThreadStoreError::Internal {
+                            message: format!("thread transition storage failed: {error}"),
+                        },
+                    }
+                })
+        })
+    }
+
+    fn turn_execution_account(
+        &self,
+        thread_id: ThreadId,
+        turn_id: String,
+    ) -> ThreadStoreFuture<'_, Option<ExecutionAccountBinding>> {
+        Box::pin(async move {
+            let Some(state_db) = self.state_db.as_ref() else {
+                return Ok(None);
+            };
+            state_db
+                .turn_execution_account(thread_id, turn_id.as_str())
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!("failed to read turn execution account: {err}"),
+                })
+        })
+    }
+
+    fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move { live_writer::create_thread(self, params).await })
+    }
+
+    fn stage_pending_thread_metadata(
+        &self,
+        thread_id: ThreadId,
+        patch: ThreadMetadataPatch,
+    ) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move {
+            if self.state_db.is_none() {
+                return Err(ThreadStoreError::InvalidRequest {
+                    message: "pending thread metadata requires a state db".to_string(),
+                });
+            }
+            if patch.rollout_path.is_some() {
+                return Err(ThreadStoreError::InvalidRequest {
+                    message: "pending thread metadata cannot set rollout_path".to_string(),
+                });
+            }
+            self.pending_thread_metadata.stage(thread_id, patch).await
+        })
+    }
+
+    fn remove_pending_thread_metadata(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.pending_thread_metadata.remove(thread_id).await;
+            Ok(())
+        })
+    }
+
+    fn resume_thread(&self, params: ResumeThreadParams) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move { live_writer::resume_thread(self, params).await })
+    }
+
+    fn prepare_thread_resume(
+        &self,
+        params: PrepareThreadResumeParams,
+    ) -> ThreadStoreFuture<'_, PreparedThreadResume> {
+        Box::pin(async move { prepared_resume::prepare(self, params).await })
+    }
+
+    fn activate_prepared_thread_resume(
+        &self,
+        authority: PreparedThreadResumeAuthority,
+        params: ResumeThreadParams,
+    ) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move { prepared_resume::activate(self, authority, params.metadata).await })
+    }
+
+    fn append_items(&self, params: AppendThreadItemsParams) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move { live_writer::append_items(self, params).await })
+    }
+
+    fn persist_thread(
+        &self,
+        thread_id: ThreadId,
+        _context: PersistContext,
+    ) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move { live_writer::persist_thread(self, thread_id).await })
+    }
+
+    fn flush_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move { live_writer::flush_thread(self, thread_id).await })
+    }
+
+    fn shutdown_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move { live_writer::shutdown_thread(self, thread_id).await })
+    }
+
+    fn relinquish_thread(
+        &self,
+        thread_id: ThreadId,
+        expected_writer_generation: u64,
+    ) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move {
+            live_writer::relinquish_thread(self, thread_id, expected_writer_generation).await
+        })
+    }
+
+    fn validate_writer_generation(
+        &self,
+        thread_id: ThreadId,
+        expected_writer_generation: u64,
+    ) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move {
+            let _live_writer_guard = self.live_writer_locks.lock(thread_id).await;
+            let live_recorders = self.live_recorders.lock().await;
+            let entry = live_recorders
+                .get(&thread_id)
+                .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
+            if entry.writer_lock.generation() != Some(expected_writer_generation) {
+                return Err(ThreadStoreError::Conflict {
+                    message: format!(
+                        "thread {thread_id} writer generation does not match expected generation {expected_writer_generation}"
+                    ),
+                });
+            }
+            Ok(())
+        })
+    }
+
+    fn discard_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move { live_writer::discard_thread(self, thread_id).await })
+    }
+
+    fn load_history(
+        &self,
+        params: LoadThreadHistoryParams,
+    ) -> ThreadStoreFuture<'_, StoredThreadHistory> {
+        Box::pin(LocalThreadStore::load_history(self, params))
+    }
+
+    fn load_latest_model_context(
+        &self,
+        params: LoadThreadHistoryParams,
+    ) -> ThreadStoreFuture<'_, StoredModelContext> {
+        Box::pin(async move { model_context::load_latest_model_context(self, params).await })
+    }
+
+    fn prepare_fork(&self, params: PrepareForkParams) -> ThreadStoreFuture<'_, PreparedFork> {
+        Box::pin(async move { paginated_fork::prepare(self, params).await })
+    }
+
+    fn revert_thread(&self, params: RevertThreadParams) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move { revert_thread::revert(self, params).await })
+    }
+
+    fn read_thread(&self, params: ReadThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
+        Box::pin(async move { read_thread::read_thread(self, params).await })
+    }
+
+    fn read_thread_by_rollout_path(
+        &self,
+        params: ReadThreadByRolloutPathParams,
+    ) -> ThreadStoreFuture<'_, StoredThread> {
+        Box::pin(LocalThreadStore::read_thread_by_rollout_path_params(
+            self, params,
+        ))
+    }
+
+    fn list_threads(&self, params: ListThreadsParams) -> ThreadStoreFuture<'_, ThreadPage> {
+        Box::pin(async move { list_threads::list_threads(self, params).await })
+    }
+
+    fn supports_thread_sections(&self) -> bool {
+        self.state_db.is_some()
+    }
+
+    fn list_thread_sections(
+        &self,
+        params: ListThreadSectionsParams,
+    ) -> ThreadStoreFuture<'_, StoredThreadSectionsPage> {
+        Box::pin(async move { thread_sections::list_thread_sections(self, params).await })
+    }
+
+    fn create_thread_section(
+        &self,
+        params: CreateThreadSectionParams,
+    ) -> ThreadStoreFuture<'_, StoredThreadSection> {
+        Box::pin(async move { thread_sections::create_thread_section(self, params).await })
+    }
+
+    fn rename_thread_section(
+        &self,
+        params: RenameThreadSectionParams,
+    ) -> ThreadStoreFuture<'_, Option<StoredThreadSection>> {
+        Box::pin(async move { thread_sections::rename_thread_section(self, params).await })
+    }
+
+    fn delete_thread_section(
+        &self,
+        params: DeleteThreadSectionParams,
+    ) -> ThreadStoreFuture<'_, bool> {
+        Box::pin(async move { thread_sections::delete_thread_section(self, params).await })
+    }
+
+    fn supports_projects(&self) -> bool {
+        self.state_db.is_some()
+    }
+
+    fn list_projects(
+        &self,
+        params: ListProjectsParams,
+    ) -> ThreadStoreFuture<'_, StoredProjectsPage> {
+        Box::pin(async move { projects::list_projects(self, params).await })
+    }
+
+    fn read_project(&self, project_id: String) -> ThreadStoreFuture<'_, Option<StoredProject>> {
+        Box::pin(async move { projects::read_project(self, project_id).await })
+    }
+
+    fn create_project(&self, params: CreateProjectParams) -> ThreadStoreFuture<'_, CreatedProject> {
+        Box::pin(async move { projects::create_project(self, params).await })
+    }
+
+    fn update_project(
+        &self,
+        params: UpdateProjectParams,
+    ) -> ThreadStoreFuture<'_, Option<UpdatedProject>> {
+        Box::pin(async move { projects::update_project(self, params).await })
+    }
+
+    fn move_project(
+        &self,
+        params: MoveProjectParams,
+    ) -> ThreadStoreFuture<'_, Option<ProjectMoveOutcome>> {
+        Box::pin(async move { projects::move_project(self, params).await })
+    }
+
+    fn delete_project(&self, project_id: String) -> ThreadStoreFuture<'_, Option<DeletedProject>> {
+        Box::pin(async move { projects::delete_project(self, project_id).await })
+    }
+
+    fn supports_paginated_history_lists(&self) -> bool {
+        self.state_db.is_some()
+    }
+
+    fn list_turns(&self, params: ListTurnsParams) -> ThreadStoreFuture<'_, TurnPage> {
+        Box::pin(LocalThreadStore::list_turns(self, params))
+    }
+
+    fn list_items(&self, params: ListItemsParams) -> ThreadStoreFuture<'_, ItemPage> {
+        Box::pin(LocalThreadStore::list_items(self, params))
+    }
+
+    fn list_timeline(&self, params: ListTimelineParams) -> ThreadStoreFuture<'_, TimelinePage> {
+        Box::pin(LocalThreadStore::list_timeline(self, params))
+    }
+
+    fn search_threads(
+        &self,
+        params: SearchThreadsParams,
+    ) -> ThreadStoreFuture<'_, ThreadSearchPage> {
+        Box::pin(async move { search_threads::search_threads(self, params).await })
+    }
+
+    fn search_thread_occurrences(
+        &self,
+        params: SearchThreadOccurrencesParams,
+    ) -> ThreadStoreFuture<'_, ThreadOccurrenceSearchPage> {
+        Box::pin(LocalThreadStore::search_thread_occurrences(self, params))
+    }
+
+    fn update_thread_metadata(
+        &self,
+        params: UpdateThreadMetadataParams,
+    ) -> ThreadStoreFuture<'_, Option<StoredThread>> {
+        Box::pin(async move {
+            update_thread_metadata::update_thread_metadata(self, params)
+                .await
+                .map(Some)
+        })
+    }
+
+    fn move_thread_to_section(
+        &self,
+        params: MoveThreadToSectionParams,
+    ) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move { move_thread_to_section::move_thread_to_section(self, params).await })
+    }
+
+    fn archive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move {
+            archive_thread::archive_threads(
+                self,
+                ArchiveThreadsParams {
+                    thread_ids: vec![params.thread_id],
+                    writer_lock_thread_ids: Vec::new(),
+                },
+            )
+            .await
+            .map(|_| ())
+        })
+    }
+
+    fn archive_threads(
+        &self,
+        params: ArchiveThreadsParams,
+    ) -> ThreadStoreFuture<'_, Vec<ThreadId>> {
+        Box::pin(async move { archive_thread::archive_threads(self, params).await })
+    }
+
+    fn unarchive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
+        Box::pin(async move { unarchive_thread::unarchive_thread(self, params).await })
+    }
+
+    fn delete_thread(&self, params: DeleteThreadParams) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move { delete_thread::delete_thread(self, params).await })
+    }
+
+    fn delete_threads(&self, params: DeleteThreadsParams) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move { delete_thread::delete_threads(self, params).await })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[path = "prepared_resume_tests.rs"]
+    mod prepared_resume_tests;
+
+    #[path = "relinquish_tests.rs"]
+    mod relinquish_tests;
+
+    use std::sync::Arc;
+
+    use codex_protocol::ThreadId;
+    use codex_protocol::config_types::ReasoningSummary;
+    use codex_protocol::items::TurnItem;
+    use codex_protocol::items::UserMessageItem;
+    use codex_protocol::models::BaseInstructions;
+    use codex_protocol::models::FunctionCallOutputPayload;
+    use codex_protocol::models::MessagePhase;
+    use codex_protocol::models::ResponseItem;
+    use codex_protocol::protocol::AgentMessageEvent;
+    use codex_protocol::protocol::AskForApproval;
+    use codex_protocol::protocol::EventMsg;
+    use codex_protocol::protocol::ExecutionAccountBinding;
+    use codex_protocol::protocol::ItemCompletedEvent;
+    use codex_protocol::protocol::SandboxPolicy;
+    use codex_protocol::protocol::SessionSource;
+    use codex_protocol::protocol::ThreadHistoryMode;
+    use codex_protocol::protocol::ThreadMemoryMode;
+    use codex_protocol::protocol::TurnCompleteEvent;
+    use codex_protocol::protocol::TurnContextItem;
+    use codex_protocol::protocol::TurnStartedEvent;
+    use codex_protocol::protocol::UserMessageEvent;
+    use codex_rollout::RolloutItem;
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::LiveThread;
+    use crate::ThreadPersistenceMetadata;
+    use crate::local::test_support::test_config;
+    use crate::local::test_support::write_archived_session_file;
+    use crate::local::test_support::write_session_file;
+    use crate::local::test_support::write_session_file_with_history_mode;
+
+    #[tokio::test]
+    async fn live_writer_lifecycle_writes_and_closes() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let thread_id = ThreadId::default();
+
+        store
+            .create_thread(create_thread_params(thread_id))
+            .await
+            .expect("create live thread");
+        let rollout_path = store
+            .live_rollout_path(thread_id)
+            .await
+            .expect("load rollout path");
+
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![user_message_item("first live write")],
+            })
+            .await
+            .expect("append live item");
+        store
+            .persist_thread(thread_id, PersistContext::Standard)
+            .await
+            .expect("persist live thread");
+        store
+            .flush_thread(thread_id)
+            .await
+            .expect("flush live thread");
+
+        assert_rollout_contains_message(rollout_path.as_path(), "first live write").await;
+
+        store
+            .shutdown_thread(thread_id)
+            .await
+            .expect("shutdown live thread");
+        let err = store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![user_message_item("write after shutdown")],
+            })
+            .await
+            .expect_err("shutdown should remove the live thread writer");
+        assert!(
+            matches!(err, ThreadStoreError::ThreadNotFound { thread_id: missing } if missing == thread_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_append_items_does_not_update_sqlite_metadata() {
+        // This pins the ThreadStore contract: raw appends are history-only. Callers that need
+        // metadata updates must use LiveThread or call update_thread_metadata explicitly.
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = LocalThreadStore::new(config, Some(runtime.clone()));
+        let thread_id = ThreadId::default();
+
+        store
+            .create_thread(create_thread_params(thread_id))
+            .await
+            .expect("create live thread");
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![user_message_item("raw append")],
+            })
+            .await
+            .expect("append raw item");
+        store.flush_thread(thread_id).await.expect("flush thread");
+
+        assert_eq!(
+            runtime
+                .get_thread(thread_id)
+                .await
+                .expect("sqlite metadata read"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_append_records_turn_execution_account_after_durable_jsonl() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = LocalThreadStore::new(config, Some(runtime));
+        let thread_id = ThreadId::default();
+        let binding = ExecutionAccountBinding {
+            slot_id: "secondary".to_string(),
+            generation: 3,
+        };
+
+        store
+            .create_thread(create_thread_params(thread_id))
+            .await
+            .expect("create legacy thread");
+        store
+            .initialize_execution_account_binding(thread_id, binding.clone())
+            .await
+            .expect("initialize binding");
+        let context = serde_json::from_value(serde_json::json!({
+            "turn_id": "turn-legacy",
+            "execution_account": {"slotId": "secondary", "generation": 3},
+            "cwd": std::env::current_dir().expect("current directory"),
+            "approval_policy": "never",
+            "sandbox_policy": {"type": "danger-full-access"},
+            "model": "test-model",
+            "summary": "auto"
+        }))
+        .expect("turn context");
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![RolloutItem::TurnContext(context)],
+            })
+            .await
+            .expect("append legacy turn context");
+
+        assert_eq!(
+            store
+                .turn_execution_account(thread_id, "turn-legacy".to_string())
+                .await
+                .expect("read turn binding"),
+            Some(binding)
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_execution_account_slot_scan_reads_binding_authority() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = LocalThreadStore::new(config, Some(runtime));
+        let thread_id = ThreadId::default();
+
+        store
+            .initialize_execution_account_binding(
+                thread_id,
+                ExecutionAccountBinding {
+                    slot_id: "secondary".to_string(),
+                    generation: 1,
+                },
+            )
+            .await
+            .expect("initialize durable binding");
+
+        assert!(
+            store
+                .durable_execution_account_slot_in_use("secondary")
+                .await
+                .expect("scan durable bindings")
+        );
+        assert!(
+            !store
+                .durable_execution_account_slot_in_use("unused")
+                .await
+                .expect("scan durable bindings")
+        );
+    }
+
+    #[tokio::test]
+    async fn execution_account_slot_runtime_batch_cas_uses_state_authority() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = LocalThreadStore::new(config, Some(runtime));
+        let thread_id = ThreadId::default();
+        store
+            .initialize_execution_account_binding(
+                thread_id,
+                ExecutionAccountBinding {
+                    slot_id: "secondary".to_string(),
+                    generation: 4,
+                },
+            )
+            .await
+            .expect("initialize durable binding");
+
+        let legacy = store
+            .execution_account_slot_runtime_state("secondary".to_string())
+            .await
+            .expect("read legacy runtime state");
+        assert_eq!(legacy.0, 0);
+        assert_eq!(
+            store
+                .compare_and_swap_execution_account_slot_runtime(
+                    "secondary".to_string(),
+                    legacy.0,
+                    legacy.1,
+                )
+                .await
+                .expect("commit runtime state"),
+            Some((
+                1,
+                vec![(
+                    thread_id,
+                    ExecutionAccountBinding {
+                        slot_id: "secondary".to_string(),
+                        generation: 5,
+                    },
+                )],
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn live_thread_observes_appended_items_into_sqlite_metadata() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = Arc::new(LocalThreadStore::new(config, Some(runtime.clone())));
+        let thread_id = ThreadId::default();
+        let live_thread = LiveThread::create(store.clone(), create_thread_params(thread_id))
+            .await
+            .expect("create live thread");
+
+        live_thread
+            .append_items(&[user_message_item("observed append")])
+            .await
+            .expect("append observed item");
+        live_thread.flush().await.expect("flush thread");
+
+        let metadata = runtime
+            .get_thread(thread_id)
+            .await
+            .expect("sqlite metadata read")
+            .expect("sqlite metadata");
+        assert_eq!(
+            metadata.first_user_message.as_deref(),
+            Some("observed append")
+        );
+        assert_eq!(metadata.preview.as_deref(), Some("observed append"));
+        assert_eq!(metadata.title, "observed append");
+    }
+
+    #[tokio::test]
+    async fn paginated_resume_prefers_explicit_rollout_path_over_stale_sqlite_path() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = Arc::new(LocalThreadStore::new(config, Some(runtime.clone())));
+        let uuid = uuid::Uuid::from_u128(228);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
+        let rollout_path = write_session_file_with_history_mode(
+            home.path(),
+            "2025-01-03T12-00-00",
+            uuid,
+            ThreadHistoryMode::Paginated,
+        )
+        .expect("paginated session file");
+        let stale_rollout_path = home.path().join("stale-rollout.jsonl");
+        tokio::fs::write(&stale_rollout_path, "malformed session metadata\n")
+            .await
+            .expect("write stale rollout");
+        let mut builder = codex_state::ThreadMetadataBuilder::new(
+            thread_id,
+            stale_rollout_path,
+            chrono::Utc::now(),
+            SessionSource::Cli,
+        );
+        builder.history_mode = ThreadHistoryMode::Paginated;
+        builder.cwd = home.path().to_path_buf();
+        let mut metadata = builder.build("test-provider");
+        metadata.preview = Some("original user message".to_string());
+        metadata.first_user_message = Some("original user message".to_string());
+        metadata.title = "original user message".to_string();
+        runtime
+            .upsert_thread(&metadata)
+            .await
+            .expect("update stale sqlite rollout path");
+
+        let resumed = LiveThread::resume(
+            store,
+            ThreadHistoryMode::Paginated,
+            ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(rollout_path.clone()),
+                history: Some(Arc::new(vec![user_message_item("bounded suffix")])),
+                include_archived: false,
+                metadata: ThreadPersistenceMetadata {
+                    cwd: Some(home.path().to_path_buf()),
+                    model_provider: "test-provider".to_string(),
+                    memory_mode: ThreadMemoryMode::Enabled,
+                },
+            },
+        )
+        .await
+        .expect("resume paginated thread from its requested rollout");
+        assert_eq!(
+            resumed.local_rollout_path().await.expect("live rollout"),
+            Some(rollout_path)
+        );
+        resumed.shutdown().await.expect("shutdown resumed writer");
+
+        let metadata = runtime
+            .get_thread(thread_id)
+            .await
+            .expect("sqlite metadata read")
+            .expect("sqlite metadata");
+        assert_eq!(
+            (
+                metadata.preview.as_deref(),
+                metadata.title.as_str(),
+                metadata.first_user_message.as_deref(),
+            ),
+            (
+                Some("original user message"),
+                "original user message",
+                Some("original user message"),
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn live_thread_does_not_derive_metadata_from_inherited_items() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = Arc::new(LocalThreadStore::new(config, Some(runtime.clone())));
+        let thread_id = ThreadId::default();
+        let mut params = create_thread_params(thread_id);
+        params.history_mode = ThreadHistoryMode::Paginated;
+        let cwd = std::env::current_dir().expect("current directory");
+        let turn_context = |model: &str, approval_policy| {
+            RolloutItem::TurnContext(TurnContextItem {
+                turn_id: Some("turn-1".to_string()),
+                root_turn_id: None,
+                execution_account: None,
+                cwd: serde_json::from_value(serde_json::json!(cwd)).expect("absolute cwd"),
+                workspace_roots: None,
+                current_date: None,
+                timezone: None,
+                approval_policy,
+                approvals_reviewer: None,
+                sandbox_policy: SandboxPolicy::DangerFullAccess,
+                permission_profile: None,
+                active_permission_profile: None,
+                network: None,
+                file_system_sandbox_policy: None,
+                model: model.to_string(),
+                comp_hash: None,
+                personality: None,
+                collaboration_mode: None,
+                multi_agent_version: None,
+                multi_agent_mode: None,
+                realtime_active: None,
+                cyber_access_program: None,
+                effort: None,
+                summary: ReasoningSummary::Auto,
+            })
+        };
+
+        let live_thread = LiveThread::create_with_inherited_model_context(
+            store,
+            params,
+            &[turn_context("parent-model", AskForApproval::Never)],
+        )
+        .await
+        .expect("create live thread with inherited context");
+        live_thread
+            .persist(PersistContext::Standard)
+            .await
+            .expect("persist thread");
+        let inherited_metadata = runtime
+            .get_thread(thread_id)
+            .await
+            .expect("sqlite metadata read")
+            .expect("sqlite metadata");
+        assert_eq!(inherited_metadata.model, None);
+
+        live_thread
+            .append_items(&[turn_context("child-model", AskForApproval::OnRequest)])
+            .await
+            .expect("append child context");
+        let child_metadata = runtime
+            .get_thread(thread_id)
+            .await
+            .expect("sqlite metadata read")
+            .expect("sqlite metadata");
+        assert_eq!(child_metadata.model.as_deref(), Some("child-model"));
+        assert_eq!(child_metadata.approval_mode, "on-request");
+    }
+
+    #[tokio::test]
+    async fn live_thread_output_advances_updated_at_but_not_recency_at() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = Arc::new(LocalThreadStore::new(config, Some(runtime.clone())));
+        let thread_id = ThreadId::default();
+        let live_thread = LiveThread::create(store, create_thread_params(thread_id))
+            .await
+            .expect("create live thread");
+
+        live_thread
+            .append_items(&[user_message_item("start thread")])
+            .await
+            .expect("append initial user message");
+        live_thread.flush().await.expect("flush thread");
+        let before_turn_start = runtime
+            .get_thread(thread_id)
+            .await
+            .expect("sqlite metadata read")
+            .expect("sqlite metadata");
+
+        live_thread
+            .append_items(&[RolloutItem::EventMsg(EventMsg::TurnStarted(
+                TurnStartedEvent {
+                    turn_id: "turn-1".to_string(),
+                    trace_id: None,
+                    started_at: None,
+                    model_context_window: None,
+                    collaboration_mode_kind: Default::default(),
+                },
+            ))])
+            .await
+            .expect("append turn start");
+        live_thread.flush().await.expect("flush thread");
+        let after_turn_start = runtime
+            .get_thread(thread_id)
+            .await
+            .expect("sqlite metadata read")
+            .expect("sqlite metadata");
+        assert!(after_turn_start.recency_at > before_turn_start.recency_at);
+
+        live_thread
+            .append_items(&[
+                RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                    message: "commentary".to_string(),
+                    phase: Some(MessagePhase::Commentary),
+                    memory_citation: None,
+                    delivery: None,
+                    questions: None,
+                })),
+                RolloutItem::ResponseItem(
+                    ResponseItem::FunctionCallOutput {
+                        id: None,
+                        call_id: Some("call-1".to_string()),
+                        name: None,
+                        namespace: None,
+                        output: FunctionCallOutputPayload::from_text("tool output".to_string()),
+                        internal_chat_message_metadata_passthrough: None,
+                    }
+                    .into(),
+                ),
+                RolloutItem::EventMsg(EventMsg::TokenCount(
+                    codex_protocol::protocol::TokenCountEvent {
+                        info: None,
+                        rate_limits: None,
+                    },
+                )),
+                RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+                    turn_id: "turn-1".to_string(),
+                    started_at: None,
+                    last_agent_message: None,
+                    error: None,
+                    completed_at: None,
+                    duration_ms: None,
+                    time_to_first_token_ms: None,
+                })),
+            ])
+            .await
+            .expect("append post-start items");
+        live_thread.flush().await.expect("flush thread");
+        let completed = runtime
+            .get_thread(thread_id)
+            .await
+            .expect("sqlite metadata read")
+            .expect("sqlite metadata");
+
+        assert!(completed.updated_at > after_turn_start.updated_at);
+        assert_eq!(completed.recency_at, after_turn_start.recency_at);
+    }
+
+    #[tokio::test]
+    async fn live_thread_shutdown_does_not_materialize_empty_thread_metadata() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = Arc::new(LocalThreadStore::new(config, Some(runtime.clone())));
+        let thread_id = ThreadId::default();
+        let live_thread = LiveThread::create(store.clone(), create_thread_params(thread_id))
+            .await
+            .expect("create live thread");
+        let rollout_path = store
+            .live_rollout_path(thread_id)
+            .await
+            .expect("live rollout path");
+
+        live_thread.shutdown().await.expect("shutdown thread");
+
+        assert!(
+            !tokio::fs::try_exists(rollout_path.as_path())
+                .await
+                .expect("rollout path should be checkable")
+        );
+        assert_eq!(
+            runtime
+                .get_thread(thread_id)
+                .await
+                .expect("sqlite metadata read"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn live_thread_memory_mode_update_before_rollout_materializes_keeps_history_mode() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = Arc::new(LocalThreadStore::new(config, Some(runtime.clone())));
+        let thread_id = ThreadId::default();
+        let live_thread = LiveThread::create(store.clone(), create_thread_params(thread_id))
+            .await
+            .expect("create live thread");
+
+        live_thread
+            .update_memory_mode(ThreadMemoryMode::Disabled, /*include_archived*/ false)
+            .await
+            .expect("update memory mode");
+
+        assert_eq!(
+            runtime
+                .get_thread(thread_id)
+                .await
+                .expect("sqlite metadata read")
+                .expect("sqlite metadata")
+                .history_mode,
+            ThreadHistoryMode::Legacy
+        );
+        assert_eq!(
+            runtime
+                .get_thread_memory_mode(thread_id)
+                .await
+                .expect("thread memory mode should be readable")
+                .as_deref(),
+            Some("disabled")
+        );
+    }
+
+    #[tokio::test]
+    async fn live_thread_shutdown_with_buffered_items_materializes_before_metadata_read() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = Arc::new(LocalThreadStore::new(config, Some(runtime.clone())));
+        let thread_id = ThreadId::default();
+        let live_thread = LiveThread::create(store.clone(), create_thread_params(thread_id))
+            .await
+            .expect("create live thread");
+        let rollout_path = store
+            .live_rollout_path(thread_id)
+            .await
+            .expect("live rollout path");
+
+        live_thread
+            .append_items(&[RolloutItem::EventMsg(EventMsg::TokenCount(
+                codex_protocol::protocol::TokenCountEvent {
+                    info: None,
+                    rate_limits: None,
+                },
+            ))])
+            .await
+            .expect("append metadata-only item");
+        live_thread.shutdown().await.expect("shutdown thread");
+
+        assert!(
+            tokio::fs::try_exists(rollout_path.as_path())
+                .await
+                .expect("rollout path should be checkable")
+        );
+        let metadata = runtime
+            .get_thread(thread_id)
+            .await
+            .expect("sqlite metadata read")
+            .expect("sqlite metadata");
+        assert_eq!(metadata.rollout_path, rollout_path);
+    }
+
+    #[tokio::test]
+    async fn live_thread_resume_loads_history_before_observing_metadata() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = Arc::new(LocalThreadStore::new(config, Some(runtime.clone())));
+        let uuid = uuid::Uuid::from_u128(401);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
+        let rollout_path =
+            write_session_file(home.path(), "2025-01-03T17-00-00", uuid).expect("session file");
+        let live_thread = LiveThread::resume(
+            store,
+            ThreadHistoryMode::Legacy,
+            ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(rollout_path),
+                history: None,
+                include_archived: false,
+                metadata: ThreadPersistenceMetadata {
+                    cwd: Some(home.path().to_path_buf()),
+                    model_provider: "different-provider".to_string(),
+                    memory_mode: ThreadMemoryMode::Enabled,
+                },
+            },
+        )
+        .await
+        .expect("resume live thread");
+
+        live_thread
+            .append_items(&[user_message_item("new live append")])
+            .await
+            .expect("append after resume");
+
+        let metadata = runtime
+            .get_thread(thread_id)
+            .await
+            .expect("sqlite metadata read")
+            .expect("sqlite metadata");
+        assert_eq!(
+            metadata.created_at.to_rfc3339(),
+            "2025-01-03T17:00:00+00:00"
+        );
+        assert_eq!(metadata.model_provider, "test-provider");
+        assert_eq!(
+            metadata.first_user_message.as_deref(),
+            Some("Hello from user")
+        );
+    }
+
+    #[tokio::test]
+    async fn live_thread_resume_loads_history_from_explicit_external_rollout_path() {
+        let home = TempDir::new().expect("temp dir");
+        let external_home = TempDir::new().expect("external temp dir");
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = Arc::new(LocalThreadStore::new(config, Some(runtime.clone())));
+        let uuid = uuid::Uuid::from_u128(402);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
+        let rollout_path = write_session_file(external_home.path(), "2025-01-03T17-30-00", uuid)
+            .expect("external session file");
+        let live_thread = LiveThread::resume(
+            store,
+            ThreadHistoryMode::Legacy,
+            ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(rollout_path),
+                history: None,
+                include_archived: false,
+                metadata: ThreadPersistenceMetadata {
+                    cwd: Some(home.path().to_path_buf()),
+                    model_provider: "different-provider".to_string(),
+                    memory_mode: ThreadMemoryMode::Enabled,
+                },
+            },
+        )
+        .await
+        .expect("resume external live thread");
+
+        live_thread
+            .append_items(&[user_message_item("new external append")])
+            .await
+            .expect("append after external resume");
+
+        let metadata = runtime
+            .get_thread(thread_id)
+            .await
+            .expect("sqlite metadata read")
+            .expect("sqlite metadata");
+        assert_eq!(
+            metadata.created_at.to_rfc3339(),
+            "2025-01-03T17:30:00+00:00"
+        );
+        assert_eq!(metadata.model_provider, "test-provider");
+        assert_eq!(
+            metadata.first_user_message.as_deref(),
+            Some("Hello from user")
+        );
+    }
+
+    #[tokio::test]
+    async fn create_thread_rejects_missing_cwd() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let competing_store =
+            LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        for history_mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
+            let thread_id = ThreadId::default();
+            let mut params = create_thread_params(thread_id);
+            params.history_mode = history_mode;
+            params.metadata.cwd = None;
+
+            let err = store
+                .create_thread(params)
+                .await
+                .expect_err("local thread store should require cwd");
+
+            assert!(matches!(
+                err,
+                ThreadStoreError::InvalidRequest { message }
+                    if message == "local thread store requires a cwd"
+            ));
+
+            let mut valid_params = create_thread_params(thread_id);
+            valid_params.history_mode = history_mode;
+            competing_store
+                .create_thread(valid_params)
+                .await
+                .expect("failed initialization should release cross-process writer ownership");
+        }
+    }
+
+    #[tokio::test]
+    async fn discard_thread_drops_unmaterialized_live_writer() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        for history_mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
+            let thread_id = ThreadId::default();
+            let mut params = create_thread_params(thread_id);
+            params.history_mode = history_mode;
+
+            store
+                .create_thread(params)
+                .await
+                .expect("create live thread");
+            let rollout_path = store
+                .live_rollout_path(thread_id)
+                .await
+                .expect("load rollout path");
+            assert!(!rollout_path.exists());
+
+            let lock_path = home
+                .path()
+                .join("thread-writer-locks")
+                .join(format!("{thread_id}.lock"));
+            assert!(lock_path.exists());
+            store
+                .discard_thread(thread_id)
+                .await
+                .expect("discard live thread");
+
+            assert!(!rollout_path.exists());
+            assert!(!lock_path.exists());
+            let err = store
+                .append_items(AppendThreadItemsParams {
+                    thread_id,
+                    items: vec![user_message_item("write after discard")],
+                })
+                .await
+                .expect_err("discard should remove the live thread writer");
+            assert!(
+                matches!(err, ThreadStoreError::ThreadNotFound { thread_id: missing } if missing == thread_id)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_thread_reopens_live_writer_and_appends() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let thread_id = ThreadId::default();
+
+        let first_store = LocalThreadStore::new(config.clone(), /*state_db*/ None);
+        first_store
+            .create_thread(create_thread_params(thread_id))
+            .await
+            .expect("create initial thread");
+        first_store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![user_message_item("before resume")],
+            })
+            .await
+            .expect("append initial item");
+        first_store
+            .persist_thread(thread_id, PersistContext::Standard)
+            .await
+            .expect("persist initial thread");
+        first_store
+            .flush_thread(thread_id)
+            .await
+            .expect("flush initial thread");
+        let rollout_path = first_store
+            .live_rollout_path(thread_id)
+            .await
+            .expect("load rollout path");
+        first_store
+            .shutdown_thread(thread_id)
+            .await
+            .expect("shutdown initial writer");
+
+        let resumed_store = LocalThreadStore::new(config, /*state_db*/ None);
+        resumed_store
+            .resume_thread(ResumeThreadParams {
+                thread_id,
+                rollout_path: None,
+                history: None,
+                include_archived: true,
+                metadata: thread_metadata(),
+            })
+            .await
+            .expect("resume live thread");
+        resumed_store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![user_message_item("after resume")],
+            })
+            .await
+            .expect("append resumed item");
+        resumed_store
+            .flush_thread(thread_id)
+            .await
+            .expect("flush resumed thread");
+
+        assert_rollout_contains_message(rollout_path.as_path(), "before resume").await;
+        assert_rollout_contains_message(rollout_path.as_path(), "after resume").await;
+    }
+
+    #[tokio::test]
+    async fn live_writers_reject_cross_process_create_and_resume() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let primary = LocalThreadStore::new(config.clone(), /*state_db*/ None);
+        let secondary = LocalThreadStore::new(config, /*state_db*/ None);
+
+        for history_mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
+            let thread_id = ThreadId::default();
+            let mut create_params = create_thread_params(thread_id);
+            create_params.history_mode = history_mode;
+
+            primary
+                .create_thread(create_params.clone())
+                .await
+                .expect("create live thread");
+            primary
+                .persist_thread(thread_id, PersistContext::Standard)
+                .await
+                .expect("persist thread for resume");
+            let rollout_path = primary
+                .live_rollout_path(thread_id)
+                .await
+                .expect("load rollout path");
+            let resume_params = ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(rollout_path),
+                history: None,
+                include_archived: true,
+                metadata: thread_metadata(),
+            };
+
+            let error = secondary
+                .create_thread(create_params)
+                .await
+                .expect_err("competing create should fail");
+            assert!(matches!(error, ThreadStoreError::Conflict { .. }));
+
+            let error = secondary
+                .resume_thread(resume_params.clone())
+                .await
+                .expect_err("competing resume should fail");
+            assert!(matches!(error, ThreadStoreError::Conflict { .. }));
+
+            primary
+                .shutdown_thread(thread_id)
+                .await
+                .expect("shutdown should release writer ownership");
+            secondary
+                .resume_thread(resume_params)
+                .await
+                .expect("resume after shutdown should acquire writer ownership");
+        }
+    }
+
+    #[tokio::test]
+    async fn create_thread_rejects_duplicate_live_writer() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let thread_id = ThreadId::default();
+
+        store
+            .create_thread(create_thread_params(thread_id))
+            .await
+            .expect("create live thread");
+
+        let err = store
+            .create_thread(create_thread_params(thread_id))
+            .await
+            .expect_err("duplicate live writer should fail");
+
+        assert!(matches!(err, ThreadStoreError::InvalidRequest { .. }));
+        assert!(err.to_string().contains("already has a live local writer"));
+    }
+
+    #[tokio::test]
+    async fn resume_thread_rejects_duplicate_live_writer() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let thread_id = ThreadId::default();
+
+        store
+            .create_thread(create_thread_params(thread_id))
+            .await
+            .expect("create live thread");
+        let rollout_path = store
+            .live_rollout_path(thread_id)
+            .await
+            .expect("live rollout path");
+        let err = store
+            .resume_thread(ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(rollout_path),
+                history: None,
+                include_archived: true,
+                metadata: thread_metadata(),
+            })
+            .await
+            .expect_err("duplicate live resume should fail");
+        assert!(matches!(err, ThreadStoreError::InvalidRequest { .. }));
+        assert!(err.to_string().contains("already has a live local writer"));
+    }
+
+    #[tokio::test]
+    async fn resume_thread_rejects_missing_cwd() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let competing_store =
+            LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let uuid = uuid::Uuid::from_u128(408);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
+        let rollout_path = write_session_file_with_history_mode(
+            home.path(),
+            "2025-01-04T11-30-00",
+            uuid,
+            ThreadHistoryMode::Paginated,
+        )
+        .expect("session file");
+        let err = store
+            .resume_thread(ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(rollout_path.clone()),
+                history: None,
+                include_archived: true,
+                metadata: ThreadPersistenceMetadata {
+                    cwd: None,
+                    model_provider: "test-provider".to_string(),
+                    memory_mode: ThreadMemoryMode::Enabled,
+                },
+            })
+            .await
+            .expect_err("missing cwd should fail");
+
+        assert!(matches!(err, ThreadStoreError::InvalidRequest { .. }));
+        assert!(err.to_string().contains("requires a cwd"));
+
+        competing_store
+            .resume_thread(ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(rollout_path),
+                history: None,
+                include_archived: true,
+                metadata: thread_metadata(),
+            })
+            .await
+            .expect("failed initialization should release cross-process writer ownership");
+    }
+
+    #[tokio::test]
+    async fn load_history_uses_live_writer_rollout_path() {
+        let home = TempDir::new().expect("temp dir");
+        let external_home = TempDir::new().expect("external temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let uuid = uuid::Uuid::from_u128(404);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
+        let rollout_path = write_session_file(external_home.path(), "2025-01-04T10-00-00", uuid)
+            .expect("external session file");
+
+        store
+            .resume_thread(ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(rollout_path),
+                history: None,
+                include_archived: true,
+                metadata: thread_metadata(),
+            })
+            .await
+            .expect("resume live thread");
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![user_message_item("external history item")],
+            })
+            .await
+            .expect("append live item");
+        store
+            .flush_thread(thread_id)
+            .await
+            .expect("flush live thread");
+
+        let history = store
+            .load_history(LoadThreadHistoryParams {
+                thread_id,
+                include_archived: false,
+            })
+            .await
+            .expect("load external live history");
+
+        assert!(history.items.iter().any(|item| {
+            matches!(
+                item,
+                RolloutItem::EventMsg(EventMsg::UserMessage(event)) if event.message == "external history item"
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn read_thread_uses_live_writer_rollout_path_for_external_resume() {
+        let home = TempDir::new().expect("temp dir");
+        let external_home = TempDir::new().expect("external temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let uuid = uuid::Uuid::from_u128(406);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
+        let rollout_path = write_session_file(external_home.path(), "2025-01-04T11-00-00", uuid)
+            .expect("external session file");
+
+        store
+            .resume_thread(ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(rollout_path.clone()),
+                history: None,
+                include_archived: true,
+                metadata: thread_metadata(),
+            })
+            .await
+            .expect("resume live thread");
+
+        let thread = store
+            .read_thread(ReadThreadParams {
+                thread_id,
+                include_archived: false,
+                include_history: true,
+            })
+            .await
+            .expect("read external live thread");
+
+        assert_eq!(thread.rollout_path, Some(rollout_path));
+        assert!(thread.history.expect("history").items.iter().any(|item| {
+            matches!(
+                item,
+                RolloutItem::EventMsg(EventMsg::UserMessage(event)) if event.message == "Hello from user"
+            )
+        }));
+
+        let error = store
+            .prepare_fork(PrepareForkParams {
+                thread_id,
+                boundary: crate::ForkBoundary::Latest,
+            })
+            .await
+            .expect_err("external rollouts cannot be referenced by thread id");
+        assert!(error.to_string().contains("must be in Codex home"));
+    }
+
+    #[tokio::test]
+    async fn load_history_uses_live_writer_rollout_path_for_archived_source() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let uuid = uuid::Uuid::from_u128(405);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
+        let rollout_path = write_archived_session_file(home.path(), "2025-01-04T10-30-00", uuid)
+            .expect("archived session file");
+
+        store
+            .resume_thread(ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(rollout_path),
+                history: None,
+                include_archived: true,
+                metadata: thread_metadata(),
+            })
+            .await
+            .expect("resume live archived thread");
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![user_message_item("archived live history item")],
+            })
+            .await
+            .expect("append live item");
+        store
+            .flush_thread(thread_id)
+            .await
+            .expect("flush live thread");
+
+        let err = store
+            .read_thread(ReadThreadParams {
+                thread_id,
+                include_archived: false,
+                include_history: false,
+            })
+            .await
+            .expect_err("active-only read should reject archived live thread");
+        assert!(matches!(
+            err,
+            ThreadStoreError::ThreadNotFound {
+                thread_id: missing_thread_id
+            } if missing_thread_id == thread_id
+        ));
+
+        let err = store
+            .load_history(LoadThreadHistoryParams {
+                thread_id,
+                include_archived: false,
+            })
+            .await
+            .expect_err("active-only history should reject archived live thread");
+        assert!(
+            matches!(err, ThreadStoreError::InvalidRequest { .. }),
+            "unexpected active-only history error: {err:?}"
+        );
+        assert!(err.to_string().contains("archived"));
+
+        let history = store
+            .load_history(LoadThreadHistoryParams {
+                thread_id,
+                include_archived: true,
+            })
+            .await
+            .expect("load archived live history");
+
+        assert!(history.items.iter().any(|item| {
+            matches!(
+                item,
+                RolloutItem::EventMsg(EventMsg::UserMessage(event)) if event.message == "archived live history item"
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn read_thread_by_rollout_path_includes_history() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let thread_id = ThreadId::default();
+
+        store
+            .create_thread(create_thread_params(thread_id))
+            .await
+            .expect("create thread");
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![user_message_item("path read")],
+            })
+            .await
+            .expect("append item");
+        store.flush_thread(thread_id).await.expect("flush thread");
+        let rollout_path = store
+            .live_rollout_path(thread_id)
+            .await
+            .expect("load rollout path");
+
+        let thread = store
+            .read_thread_by_rollout_path(
+                rollout_path,
+                /*include_archived*/ true,
+                /*include_history*/ true,
+            )
+            .await
+            .expect("read thread by rollout path");
+
+        assert_eq!(thread.thread_id, thread_id);
+        assert_eq!(thread.history_mode, ThreadHistoryMode::Legacy);
+        assert_eq!(
+            thread
+                .history
+                .as_ref()
+                .expect("history")
+                .items
+                .iter()
+                .filter(|item| matches!(item, RolloutItem::EventMsg(EventMsg::UserMessage(_))))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn paginated_threads_allow_metadata_reads_and_resume_but_reject_legacy_history_paths() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let uuid = uuid::Uuid::from_u128(408);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
+        let rollout_path = write_session_file_with_history_mode(
+            home.path(),
+            "2025-01-04T12-00-00",
+            uuid,
+            ThreadHistoryMode::Paginated,
+        )
+        .expect("session file");
+
+        let thread = store
+            .read_thread(ReadThreadParams {
+                thread_id,
+                include_archived: false,
+                include_history: false,
+            })
+            .await
+            .expect("metadata read");
+        assert_eq!(thread.history_mode, ThreadHistoryMode::Paginated);
+        assert!(thread.history.is_none());
+
+        let thread = store
+            .read_thread_by_rollout_path(
+                rollout_path.clone(),
+                /*include_archived*/ true,
+                /*include_history*/ false,
+            )
+            .await
+            .expect("metadata path read");
+        assert_eq!(thread.history_mode, ThreadHistoryMode::Paginated);
+        assert!(thread.history.is_none());
+
+        assert_paginated_threads_unsupported(
+            store
+                .read_thread(ReadThreadParams {
+                    thread_id,
+                    include_archived: false,
+                    include_history: true,
+                })
+                .await
+                .expect_err("full history read should fail"),
+        );
+        assert_paginated_threads_unsupported(
+            store
+                .read_thread_by_rollout_path(
+                    rollout_path.clone(),
+                    /*include_archived*/ true,
+                    /*include_history*/ true,
+                )
+                .await
+                .expect_err("full history path read should fail"),
+        );
+        assert_paginated_threads_unsupported(
+            store
+                .load_history(LoadThreadHistoryParams {
+                    thread_id,
+                    include_archived: false,
+                })
+                .await
+                .expect_err("history load should fail"),
+        );
+        store
+            .resume_thread(ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(rollout_path),
+                history: None,
+                include_archived: false,
+                metadata: thread_metadata(),
+            })
+            .await
+            .expect("resume should succeed");
+    }
+
+    #[tokio::test]
+    async fn paginated_live_appends_use_paginated_history_mode() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let thread_id = ThreadId::default();
+        let mut create_params = create_thread_params(thread_id);
+        create_params.history_mode = ThreadHistoryMode::Paginated;
+        store
+            .create_thread(create_params)
+            .await
+            .expect("create paginated thread");
+        let paginated_item = RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
+            thread_id,
+            turn_id: "turn-1".to_string(),
+            item: TurnItem::UserMessage(UserMessageItem {
+                id: "item-1".to_string(),
+                client_id: None,
+                content: Vec::new(),
+            }),
+            started_at_ms: Some(0),
+            completed_at_ms: 1,
+        }));
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![
+                    user_message_item("legacy event should not persist"),
+                    paginated_item,
+                ],
+            })
+            .await
+            .expect("append paginated item");
+        let rollout_path = store
+            .live_rollout_path(thread_id)
+            .await
+            .expect("paginated rollout path");
+        let (items, _, _) = RolloutRecorder::load_rollout_items(rollout_path.as_path())
+            .await
+            .expect("load paginated rollout");
+        assert!(items.iter().any(|item| {
+            matches!(
+                item,
+                RolloutItem::EventMsg(EventMsg::ItemCompleted(event))
+                    if event.turn_id == "turn-1"
+            )
+        }));
+        assert!(!items.iter().any(|item| {
+            matches!(
+                item,
+                RolloutItem::EventMsg(EventMsg::UserMessage(event))
+                    if event.message == "legacy event should not persist"
+            )
+        }));
+    }
+
+    fn create_thread_params(thread_id: ThreadId) -> CreateThreadParams {
+        CreateThreadParams {
+            session_id: thread_id.into(),
+            thread_id,
+            extra_config: None,
+            forked_from_id: None,
+            parent_thread_id: None,
+            source: SessionSource::Exec,
+            thread_source: None,
+            originator: "test_originator".to_string(),
+            base_instructions: BaseInstructions::default(),
+            dynamic_tools: Vec::new(),
+            selected_capability_roots: Vec::new(),
+            multi_agent_version: None,
+            history_mode: ThreadHistoryMode::Legacy,
+            history_base: None,
+            subagent_history_start_ordinal: None,
+            initial_window_id: uuid::Uuid::now_v7().to_string(),
+            metadata: thread_metadata(),
+        }
+    }
+
+    fn assert_paginated_threads_unsupported(err: ThreadStoreError) {
+        assert!(matches!(
+            err,
+            ThreadStoreError::Unsupported {
+                operation: "paginated_threads"
+            }
+        ));
+    }
+
+    fn thread_metadata() -> ThreadPersistenceMetadata {
+        ThreadPersistenceMetadata {
+            cwd: Some(std::env::current_dir().expect("cwd")),
+            model_provider: "test-provider".to_string(),
+            memory_mode: ThreadMemoryMode::Enabled,
+        }
+    }
+
+    fn user_message_item(message: &str) -> RolloutItem {
+        RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+            client_id: None,
+            message: message.to_string(),
+            images: None,
+            local_images: Vec::new(),
+            text_elements: Vec::new(),
+            ..Default::default()
+        }))
+    }
+
+    async fn assert_rollout_contains_message(path: &std::path::Path, expected: &str) {
+        let (items, _, _) = RolloutRecorder::load_rollout_items(path)
+            .await
+            .expect("load rollout items");
+        assert!(items.iter().any(|item| {
+            matches!(
+                item,
+                RolloutItem::EventMsg(EventMsg::UserMessage(event)) if event.message == expected
+            )
+        }));
+    }
+}

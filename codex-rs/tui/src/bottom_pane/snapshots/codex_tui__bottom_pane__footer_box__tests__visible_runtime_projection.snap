@@ -1,0 +1,17 @@
+---
+source: tui/src/bottom_pane/footer_box_tests.rs
+assertion_line: 188
+expression: rendered
+---
+╭──────────────────────────────────────────────────────────────────────╮
+│                                                                      │
+│ Status: ready                                                        │
+│ Account user@example.test · Plan Plus                                │
+│ Slot 2 · id C2                                               healthy │
+│ id session-1                                                         │
+│                                                       quota Week 68% │
+│ Thread focused work · id thread-1                                    │
+│ Runtime idle                                                         │
+│ Rotation quota aware · switch stable                                 │
+│                                                                      │
+╰──────────────────────────────────────────────────────────────────────╯

@@ -1,0 +1,46 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "LegacyAppPathString": {
+      "type": "string"
+    },
+    "PluginListMarketplaceKind": {
+      "enum": [
+        "local",
+        "vertical",
+        "workspace-directory",
+        "shared-with-me",
+        "created-by-me-remote"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "cwds": {
+      "description": "Optional working directories used to discover repo marketplaces. When omitted, only home-scoped marketplaces and the official curated marketplace are considered.",
+      "items": {
+        "$ref": "#/definitions/LegacyAppPathString"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "forceRefetch": {
+      "description": "Whether the client requests a fresh remote plugin catalog fetch.",
+      "type": "boolean"
+    },
+    "marketplaceKinds": {
+      "description": "Optional marketplace kind filter. When omitted, only local marketplaces are queried, plus the default remote catalog when enabled by feature flag.",
+      "items": {
+        "$ref": "#/definitions/PluginListMarketplaceKind"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    }
+  },
+  "title": "PluginListParams",
+  "type": "object"
+}

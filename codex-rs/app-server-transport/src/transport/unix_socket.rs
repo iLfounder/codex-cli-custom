@@ -1,0 +1,221 @@
+use std::fs::OpenOptions;
+use std::io::ErrorKind;
+use std::io::Result as IoResult;
+use std::path::Path;
+
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
+
+use super::TransportEvent;
+use crate::supervisor::publish_supervised_ready_identity_from_env;
+use crate::transport::websocket::run_websocket_connection;
+use codex_uds::UnixListener;
+use codex_uds::UnixStream;
+use codex_utils_absolute_path::AbsolutePathBuf;
+use futures::StreamExt;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tokio::time::Duration;
+use tokio_tungstenite::accept_async;
+use tokio_util::sync::CancellationToken;
+use tracing::error;
+use tracing::info;
+use tracing::warn;
+
+#[cfg(unix)]
+const CONTROL_SOCKET_MODE: u32 = 0o600;
+
+pub async fn start_control_socket_acceptor(
+    socket_path: AbsolutePathBuf,
+    transport_event_tx: mpsc::Sender<TransportEvent>,
+    shutdown_token: CancellationToken,
+) -> IoResult<JoinHandle<()>> {
+    prepare_control_socket_path(socket_path.as_path()).await?;
+    let listener = UnixListener::bind(socket_path.as_path()).await?;
+    let socket_guard = ControlSocketFileGuard { socket_path };
+    set_control_socket_permissions(socket_guard.socket_path.as_path()).await?;
+    let supervised_ready_guard = publish_supervised_ready_identity_from_env().await?;
+    info!(
+        socket_path = %socket_guard.socket_path.display(),
+        "app-server control socket listening"
+    );
+
+    Ok(tokio::spawn(run_control_socket_acceptor(
+        listener,
+        transport_event_tx,
+        shutdown_token,
+        socket_guard,
+        supervised_ready_guard,
+    )))
+}
+
+async fn run_control_socket_acceptor(
+    mut listener: UnixListener,
+    transport_event_tx: mpsc::Sender<TransportEvent>,
+    shutdown_token: CancellationToken,
+    socket_guard: ControlSocketFileGuard,
+    supervised_ready_guard: Option<crate::supervisor::SupervisedReadyFileGuard>,
+) {
+    let _socket_guard = socket_guard;
+    let _supervised_ready_guard = supervised_ready_guard;
+    loop {
+        let stream = tokio::select! {
+            _ = shutdown_token.cancelled() => {
+                break;
+            }
+            result = listener.accept() => {
+                match result {
+                    Ok(stream) => stream,
+                    Err(err) => {
+                        if matches!(
+                            err.kind(),
+                            ErrorKind::ConnectionAborted | ErrorKind::ConnectionReset | ErrorKind::Interrupted
+                        ) {
+                            warn!("recoverable control socket accept error: {err}");
+                            continue;
+                        }
+                        error!("control socket accept error: {err}");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+                }
+            }
+        };
+
+        let transport_event_tx = transport_event_tx.clone();
+        tokio::spawn(async move {
+            let websocket_stream = match accept_async(stream).await {
+                Ok(websocket_stream) => websocket_stream,
+                Err(err) => {
+                    warn!("failed to upgrade control socket websocket connection: {err}");
+                    return;
+                }
+            };
+            let (websocket_writer, websocket_reader) = websocket_stream.split();
+            run_websocket_connection(websocket_writer, websocket_reader, transport_event_tx).await;
+        });
+    }
+    info!("control socket acceptor shutting down");
+}
+
+pub async fn prepare_control_socket_path(socket_path: &Path) -> IoResult<()> {
+    if let Some(parent) = socket_path.parent() {
+        codex_uds::prepare_private_socket_directory(parent).await?;
+    }
+
+    match UnixStream::connect(socket_path).await {
+        Ok(_stream) => {
+            return Err(std::io::Error::new(
+                ErrorKind::AddrInUse,
+                format!(
+                    "app-server control socket is already in use at {}",
+                    socket_path.display()
+                ),
+            ));
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(err) if err.kind() == ErrorKind::ConnectionRefused => {}
+        Err(err) => {
+            if !socket_path.exists() {
+                return Ok(());
+            }
+            return Err(err);
+        }
+    }
+
+    if !socket_path.try_exists()? {
+        return Ok(());
+    }
+
+    if !codex_uds::is_stale_socket_path(socket_path).await? {
+        return Err(std::io::Error::new(
+            ErrorKind::AlreadyExists,
+            format!(
+                "app-server control socket path exists and is not a socket: {}",
+                socket_path.display()
+            ),
+        ));
+    }
+    tokio::fs::remove_file(socket_path).await
+}
+
+pub struct AppServerStartupLock {
+    _file: std::fs::File,
+}
+
+pub async fn acquire_app_server_startup_lock(
+    startup_lock_path: AbsolutePathBuf,
+) -> IoResult<AppServerStartupLock> {
+    if let Some(parent) = startup_lock_path.as_path().parent() {
+        codex_uds::prepare_private_socket_directory(parent).await?;
+    }
+    let startup_lock_path = startup_lock_path.as_path().to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut options = OpenOptions::new();
+        options.create(true).truncate(false).read(true).write(true);
+        #[cfg(windows)]
+        options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
+        let file = options.open(&startup_lock_path)?;
+        #[cfg(windows)]
+        {
+            let opened_identity = codex_utils_home_dir::file_identity_from_file(&file)?;
+            codex_utils_home_dir::ensure_owner_private(&startup_lock_path)?;
+            if opened_identity != codex_utils_home_dir::file_identity(&startup_lock_path)?
+                || !codex_utils_home_dir::is_owner_private(&startup_lock_path)?
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "app-server startup lock changed while securing its ACL",
+                ));
+            }
+        }
+        file.lock()?;
+        Ok(AppServerStartupLock { _file: file })
+    })
+    .await
+    .map_err(|err| std::io::Error::other(format!("startup lock task failed: {err}")))?
+}
+
+#[cfg(unix)]
+async fn set_control_socket_permissions(socket_path: &Path) -> IoResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    tokio::fs::set_permissions(
+        socket_path,
+        std::fs::Permissions::from_mode(CONTROL_SOCKET_MODE),
+    )
+    .await
+}
+
+#[cfg(not(unix))]
+async fn set_control_socket_permissions(socket_path: &Path) -> IoResult<()> {
+    // Windows AF_UNIX endpoints do not expose Unix mode bits.  Their pathname
+    // is nevertheless resolved through the containing directory, so enforce
+    // an owner-only Windows DACL on any filesystem rendezvous entry (and fail
+    // closed if the endpoint cannot be inspected).
+    #[cfg(windows)]
+    {
+        if socket_path.exists() {
+            codex_utils_home_dir::ensure_owner_private(socket_path)?;
+        }
+    }
+    Ok(())
+}
+
+struct ControlSocketFileGuard {
+    socket_path: AbsolutePathBuf,
+}
+
+impl Drop for ControlSocketFileGuard {
+    fn drop(&mut self) {
+        if let Err(err) = std::fs::remove_file(self.socket_path.as_path())
+            && err.kind() != ErrorKind::NotFound
+        {
+            warn!(
+                socket_path = %self.socket_path.display(),
+                %err,
+                "failed to remove app-server control socket file"
+            );
+        }
+    }
+}

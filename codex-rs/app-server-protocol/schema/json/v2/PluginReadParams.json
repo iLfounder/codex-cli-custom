@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "LegacyAppPathString": {
+      "type": "string"
+    }
+  },
+  "properties": {
+    "marketplacePath": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/LegacyAppPathString"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "pluginName": {
+      "type": "string"
+    },
+    "remoteMarketplaceName": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "pluginName"
+  ],
+  "title": "PluginReadParams",
+  "type": "object"
+}

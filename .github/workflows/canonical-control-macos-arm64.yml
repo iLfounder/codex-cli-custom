@@ -1,0 +1,179 @@
+name: Canonical control macOS arm64 package
+
+on:
+  push:
+    branches:
+      - ci/canonical-control-macos-arm64
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: canonical-control-macos-arm64-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-package:
+    name: release build and package / macOS arm64
+    runs-on: macos-15
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"
+      CARGO_PROFILE_RELEASE_INCREMENTAL: "false"
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_TERM_COLOR: always
+      SCCACHE_GHA_ENABLED: "on"
+      SCCACHE_IDLE_TIMEOUT: "0"
+      SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-ci
+
+      - name: Set up package-builder Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+
+      - name: Install compiler cache
+        id: install_sccache
+        continue-on-error: true
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.17.0"
+          disable_annotations: true
+
+      - name: Configure compiler cache
+        if: steps.install_sccache.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${SCCACHE_PATH:-}"
+          test -x "$SCCACHE_PATH"
+          "$SCCACHE_PATH" --start-server
+          echo "RUSTC_WRAPPER=$SCCACHE_PATH" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_RUSTC_WRAPPER=$SCCACHE_PATH" >> "$GITHUB_ENV"
+
+      - name: Configure checksum-verified rusty_v8 artifacts
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: aarch64-apple-darwin
+
+      - name: Build release binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release \
+            -p codex-cli --bin codex \
+            -p codex-app-server --bin codex-app-server \
+            -p codex-code-mode-host --bin codex-code-mode-host \
+            -p codex-responses-api-proxy --bin codex-responses-api-proxy
+
+      - name: Assemble canonical packages and provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist="$RUNNER_TEMP/canonical-control-dist"
+          mkdir -p "$dist"
+          strip -x \
+            "$CARGO_TARGET_DIR/release/codex" \
+            "$CARGO_TARGET_DIR/release/codex-app-server" \
+            "$CARGO_TARGET_DIR/release/codex-code-mode-host" \
+            "$CARGO_TARGET_DIR/release/codex-responses-api-proxy"
+
+          export CODEX_REPO_ROOT="$GITHUB_WORKSPACE"
+          python3 "$GITHUB_WORKSPACE/scripts/build_codex_package.py" \
+            --target aarch64-apple-darwin \
+            --variant codex \
+            --package-version 0.149.0 \
+            --package-dir "$RUNNER_TEMP/codex-package-aarch64-apple-darwin" \
+            --archive-output "$dist/codex-package-aarch64-apple-darwin.tar.gz" \
+            --entrypoint-bin "$CARGO_TARGET_DIR/release/codex" \
+            --code-mode-host-bin "$CARGO_TARGET_DIR/release/codex-code-mode-host"
+          python3 "$GITHUB_WORKSPACE/scripts/build_codex_package.py" \
+            --target aarch64-apple-darwin \
+            --variant codex-app-server \
+            --package-version 0.149.0 \
+            --package-dir "$RUNNER_TEMP/codex-app-server-package-aarch64-apple-darwin" \
+            --archive-output "$dist/codex-app-server-package-aarch64-apple-darwin.tar.gz" \
+            --entrypoint-bin "$CARGO_TARGET_DIR/release/codex-app-server" \
+            --code-mode-host-bin "$CARGO_TARGET_DIR/release/codex-code-mode-host"
+
+          cp "$CARGO_TARGET_DIR/release/codex-responses-api-proxy" "$dist/"
+          cp "$GITHUB_WORKSPACE/LICENSE" "$GITHUB_WORKSPACE/NOTICE" "$dist/"
+          chmod 0755 "$dist/codex-responses-api-proxy"
+          {
+            printf 'source_commit=%s\n' "$GITHUB_SHA"
+            printf 'source_tree=%s\n' "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD^{tree})"
+            printf 'cargo_lock_sha256=%s\n' "$(shasum -a 256 Cargo.lock | awk '{print $1}')"
+            printf 'package_builder_sha256=%s\n' "$(shasum -a 256 "$GITHUB_WORKSPACE/scripts/build_codex_package.py" | awk '{print $1}')"
+            printf 'workflow_sha256=%s\n' "$(shasum -a 256 "$GITHUB_WORKSPACE/.github/workflows/canonical-control-macos-arm64.yml" | awk '{print $1}')"
+            printf 'profile=release\n'
+            printf 'incremental=false\n'
+            printf 'lto=false\n'
+            printf 'codegen_units=8\n'
+            printf 'cargo_targets=codex,codex-app-server,codex-code-mode-host,codex-responses-api-proxy\n'
+            printf 'runner_arch=%s\n' "$(uname -m)"
+            rustc --version
+            cargo --version
+            python3 -VV 2>&1
+            sw_vers
+          } > "$dist/BUILD-METADATA.txt"
+
+          primary="$RUNNER_TEMP/verify-primary"
+          app_server="$RUNNER_TEMP/verify-app-server"
+          mkdir -p "$primary" "$app_server"
+          tar -xzf "$dist/codex-package-aarch64-apple-darwin.tar.gz" -C "$primary"
+          tar -xzf "$dist/codex-app-server-package-aarch64-apple-darwin.tar.gz" -C "$app_server"
+          test -x "$primary/bin/codex"
+          test -x "$primary/bin/codex-code-mode-host"
+          test -x "$primary/codex-path/rg"
+          test -x "$primary/codex-resources/zsh/bin/zsh"
+          test -x "$app_server/bin/codex-app-server"
+          test -x "$app_server/bin/codex-code-mode-host"
+          test -x "$app_server/codex-path/rg"
+          test -x "$app_server/codex-resources/zsh/bin/zsh"
+          cmp "$primary/bin/codex-code-mode-host" "$app_server/bin/codex-code-mode-host"
+          test "$("$primary/bin/codex" --version)" = "codex-cli 0.149.0"
+          test "$("$app_server/bin/codex-app-server" --version)" = "codex-app-server 0.149.0"
+          file \
+            "$primary/bin/codex" \
+            "$primary/bin/codex-code-mode-host" \
+            "$app_server/bin/codex-app-server" \
+            "$dist/codex-responses-api-proxy"
+
+      - name: Finalize and verify build artifact checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist="$RUNNER_TEMP/canonical-control-dist"
+          (
+            cd "$dist"
+            shasum -a 256 \
+              codex-package-aarch64-apple-darwin.tar.gz \
+              codex-app-server-package-aarch64-apple-darwin.tar.gz \
+              codex-responses-api-proxy \
+              BUILD-METADATA.txt LICENSE NOTICE > SHA256SUMS
+            shasum -a 256 -c SHA256SUMS
+          )
+
+      - name: Upload immutable build artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: canonical-control-macos-arm64-build-${{ github.sha }}
+          path: ${{ runner.temp }}/canonical-control-dist/
+          if-no-files-found: error
+          retention-days: 14

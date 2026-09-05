@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "LegacyAppPathString": {
+      "type": "string"
+    }
+  },
+  "description": "Filesystem watch notification emitted for `fs/watch` subscribers.",
+  "properties": {
+    "changedPaths": {
+      "description": "File or directory paths associated with this event.",
+      "items": {
+        "$ref": "#/definitions/LegacyAppPathString"
+      },
+      "type": "array"
+    },
+    "watchId": {
+      "description": "Watch identifier previously provided to `fs/watch`.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "changedPaths",
+    "watchId"
+  ],
+  "title": "FsChangedNotification",
+  "type": "object"
+}

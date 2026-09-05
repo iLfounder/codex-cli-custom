@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "LegacyAppPathString": {
+      "type": "string"
+    }
+  },
+  "properties": {
+    "cwds": {
+      "description": "When empty, defaults to the current session working directory.",
+      "items": {
+        "$ref": "#/definitions/LegacyAppPathString"
+      },
+      "type": "array"
+    },
+    "forceReload": {
+      "description": "When true, bypass the skills cache and re-scan skills from disk.",
+      "type": "boolean"
+    },
+    "threadId": {
+      "description": "When set, resolve account-bound plugins for this thread.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "title": "SkillsListParams",
+  "type": "object"
+}

@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "LegacyAppPathString": {
+      "type": "string"
+    }
+  },
+  "properties": {
+    "alreadyAdded": {
+      "type": "boolean"
+    },
+    "installedRoot": {
+      "$ref": "#/definitions/LegacyAppPathString"
+    },
+    "marketplaceName": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "alreadyAdded",
+    "installedRoot",
+    "marketplaceName"
+  ],
+  "title": "MarketplaceAddResponse",
+  "type": "object"
+}

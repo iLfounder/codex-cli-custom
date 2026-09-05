@@ -1,0 +1,1249 @@
+use crate::legacy_admission::LegacyAdmissionPermit;
+use crate::outgoing_message::ConnectionId;
+use crate::outgoing_message::ConnectionRequestId;
+use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::ThreadGoal;
+use codex_app_server_protocol::ThreadHistoryBuilder;
+use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadSettings;
+use codex_app_server_protocol::Turn;
+use codex_app_server_protocol::TurnError;
+use codex_core::CodexThread;
+use codex_core::ThreadConfigSnapshot;
+use codex_file_watcher::WatchRegistration;
+use codex_protocol::ThreadId;
+#[cfg(test)]
+use codex_protocol::config_types::MultiAgentMode;
+use codex_protocol::items::AgentMessageContent as CoreAgentMessageContent;
+use codex_protocol::items::TurnItem as CoreTurnItem;
+use codex_protocol::models::MessagePhase;
+use codex_protocol::protocol::EventMsg;
+use codex_rollout::RolloutItem;
+use codex_rollout::state_db::StateDbHandle;
+use codex_utils_path_uri::LegacyAppPathString;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use std::sync::Weak;
+use tokio::sync::Mutex;
+use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::Semaphore;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
+use tokio::sync::watch;
+use tracing::error;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PendingInterrupt {
+    pub(crate) request_id: ConnectionRequestId,
+    pub(crate) turn_id: String,
+}
+
+type PendingInterruptQueue = Vec<PendingInterrupt>;
+
+pub(crate) struct PendingThreadResumeRequest {
+    pub(crate) request_id: ConnectionRequestId,
+    pub(crate) history_items: Vec<RolloutItem>,
+    /// Usage attribution already resolved while cold-loading a paginated child.
+    pub(crate) cold_resume_token_usage_turn_id: Option<String>,
+    pub(crate) config_snapshot: ThreadConfigSnapshot,
+    pub(crate) instruction_sources: Vec<LegacyAppPathString>,
+    pub(crate) thread_summary: codex_app_server_protocol::Thread,
+    pub(crate) emit_thread_goal_update: bool,
+    pub(crate) thread_goal_state_db: Option<StateDbHandle>,
+    pub(crate) include_turns: bool,
+    pub(crate) initial_turns_page:
+        Option<codex_app_server_protocol::ThreadResumeInitialTurnsPageParams>,
+    pub(crate) paginated_turns: Option<Vec<Turn>>,
+    pub(crate) paginated_initial_turns_page: Option<codex_app_server_protocol::TurnsPage>,
+    pub(crate) paginated_initial_turns_page_with_active_slot:
+        Option<codex_app_server_protocol::TurnsPage>,
+    pub(crate) resume_cursor_store: Option<Arc<dyn codex_thread_store::ThreadStore>>,
+    pub(crate) redact_resume_payloads: bool,
+}
+
+// ThreadListenerCommand is used to perform operations in the context of the thread listener, for serialization purposes.
+pub(crate) enum ThreadListenerCommand {
+    // SendThreadResumeResponse is used to resume an already running thread by sending the thread's history to the client and atomically subscribing for new updates.
+    SendThreadResumeResponse(Box<PendingThreadResumeRequest>),
+    // EmitThreadGoalUpdated is used to order goal updates with running-thread resume responses and goal clears.
+    EmitThreadGoalUpdated {
+        turn_id: Option<String>,
+        goal: ThreadGoal,
+    },
+    // EmitThreadQueueChanged orders durable queue updates with thread notifications.
+    EmitThreadQueueChanged,
+    // EmitWarning is used to order extension warnings with other thread notifications.
+    EmitWarning {
+        message: String,
+    },
+    // EmitThreadGoalCleared is used to order app-server goal clears with running-thread resume responses.
+    EmitThreadGoalCleared {
+        turn_id: Option<String>,
+        previous_goal: Option<ThreadGoal>,
+        revision: i64,
+    },
+    // EmitThreadGoalSnapshot is used to read and emit the latest goal state in the listener order.
+    EmitThreadGoalSnapshot {
+        state_db: StateDbHandle,
+    },
+    // ResolveServerRequest is used to notify the client that the request has been resolved.
+    // It is executed in the thread listener's context to ensure that the resolved notification is ordered with regard to the request itself.
+    ResolveServerRequest {
+        request_id: RequestId,
+        completion_tx: oneshot::Sender<()>,
+    },
+}
+
+/// Per-conversation accumulation of the latest states e.g. error message while a turn runs.
+#[derive(Default, Clone)]
+pub(crate) struct TurnSummary {
+    pub(crate) started_at: Option<i64>,
+    pub(crate) command_execution_started: HashSet<String>,
+    pub(crate) last_error: Option<TurnError>,
+    pub(crate) last_agent_message: Option<ThreadItem>,
+}
+
+#[derive(Default)]
+pub(crate) struct ThreadState {
+    pub(crate) pending_interrupts: PendingInterruptQueue,
+    pub(crate) pending_rollbacks: Option<ConnectionRequestId>,
+    pub(crate) turn_summary: TurnSummary,
+    pub(crate) last_terminal_turn_id: Option<String>,
+    admitted_turn_id: Option<String>,
+    legacy_admission_turns: HashMap<String, LegacyAdmissionPermit>,
+    /// Lets an internal runtime replacement wait until the old listener has processed Core's
+    /// `ShutdownComplete` event before that listener is superseded.
+    shutdown_drain_waiter: Option<oneshot::Sender<()>>,
+    pub(crate) cancel_tx: Option<oneshot::Sender<()>>,
+    pub(crate) experimental_raw_events: bool,
+    pub(crate) listener_generation: u64,
+    last_thread_settings: Option<ThreadSettings>,
+    listener_command_tx: Option<mpsc::UnboundedSender<ThreadListenerCommand>>,
+    current_turn_history: ThreadHistoryBuilder,
+    listener_thread: Option<Weak<CodexThread>>,
+    watch_registration: WatchRegistration,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ThreadSubscriptionSnapshot {
+    pub(crate) subscriber_count: u32,
+    pub(crate) client_incarnations: Vec<String>,
+    pub(crate) active_turn_id: Option<String>,
+    pub(crate) settings: Option<ThreadSettings>,
+    pub(crate) unload_at: Option<i64>,
+}
+
+pub(crate) enum PendingUnloadSubscription<T> {
+    PendingUnload,
+    ConnectionClosed,
+    TransitionInProgress,
+    Subscribed(T),
+}
+
+pub(crate) enum ConversationSubscription {
+    PendingUnload,
+    ConnectionClosed,
+    TransitionInProgress,
+    Subscribed {
+        thread_state: Arc<Mutex<ThreadState>>,
+        subscription_changed: bool,
+        transition_admission_permit: Option<OwnedSemaphorePermit>,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum InitiatorTransitionReconnect {
+    PreserveReservation,
+    AbortReservation,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RelinquishReservation {
+    Reserved,
+    AlreadyClosing,
+    OtherSubscribersPresent,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ThreadTransitionReservationPhase {
+    Preparing,
+    Prepared,
+    InitiatorUnsubscribed,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ThreadTransitionReservation {
+    pub(crate) transition_id: String,
+    pub(crate) initiator_connection_id: ConnectionId,
+    pub(crate) initiator_client_incarnation: String,
+    pub(crate) current_thread_id: Option<ThreadId>,
+    pub(crate) phase: ThreadTransitionReservationPhase,
+    pub(crate) invalid_reason: Option<&'static str>,
+}
+
+struct StoredThreadTransitionReservation {
+    snapshot: ThreadTransitionReservation,
+    _admission_permit: OwnedSemaphorePermit,
+}
+
+impl ThreadState {
+    fn runtime_snapshot(&self) -> (Option<String>, Option<ThreadSettings>) {
+        (
+            self.active_turn_snapshot().map(|turn| turn.id),
+            self.last_thread_settings.clone(),
+        )
+    }
+
+    pub(crate) fn listener_matches(&self, conversation: &Arc<CodexThread>) -> bool {
+        self.listener_thread
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .is_some_and(|existing| Arc::ptr_eq(&existing, conversation))
+    }
+
+    pub(crate) fn set_listener(
+        &mut self,
+        cancel_tx: oneshot::Sender<()>,
+        conversation: &Arc<CodexThread>,
+        watch_registration: WatchRegistration,
+        thread_settings_baseline: ThreadSettings,
+    ) -> (mpsc::UnboundedReceiver<ThreadListenerCommand>, u64) {
+        self.admitted_turn_id = None;
+        if let Some(previous) = self.cancel_tx.replace(cancel_tx) {
+            let _ = previous.send(());
+        }
+        self.listener_generation = self.listener_generation.wrapping_add(1);
+        self.last_thread_settings = Some(thread_settings_baseline);
+        let (listener_command_tx, listener_command_rx) = mpsc::unbounded_channel();
+        self.listener_command_tx = Some(listener_command_tx);
+        self.listener_thread = Some(Arc::downgrade(conversation));
+        self.watch_registration = watch_registration;
+        (listener_command_rx, self.listener_generation)
+    }
+
+    pub(crate) fn clear_listener(&mut self) {
+        if let Some(cancel_tx) = self.cancel_tx.take() {
+            let _ = cancel_tx.send(());
+        }
+        self.shutdown_drain_waiter = None;
+        self.admitted_turn_id = None;
+        self.listener_command_tx = None;
+        self.current_turn_history.reset();
+        self.listener_thread = None;
+        self.watch_registration = WatchRegistration::default();
+    }
+
+    pub(crate) fn set_experimental_raw_events(&mut self, enabled: bool) {
+        self.experimental_raw_events = enabled;
+    }
+
+    pub(crate) fn listener_command_tx(
+        &self,
+    ) -> Option<mpsc::UnboundedSender<ThreadListenerCommand>> {
+        self.listener_command_tx.clone()
+    }
+
+    pub(crate) fn active_turn_snapshot(&self) -> Option<Turn> {
+        self.current_turn_history.active_turn_snapshot()
+    }
+
+    pub(crate) fn register_admitted_turn(
+        &mut self,
+        turn_id: String,
+        legacy_admission_permit: Option<LegacyAdmissionPermit>,
+    ) {
+        self.admitted_turn_id = None;
+        if self.last_terminal_turn_id.as_deref() == Some(turn_id.as_str()) {
+            return;
+        }
+        if let Some(permit) = legacy_admission_permit
+            && permit.is_counted()
+            && !self.legacy_admission_turns.contains_key(&turn_id)
+        {
+            self.legacy_admission_turns.insert(turn_id.clone(), permit);
+        }
+        if self.current_turn_history.has_active_turn()
+            && self.current_turn_history.active_turn_id() == Some(turn_id.as_str())
+        {
+            return;
+        }
+        self.admitted_turn_id = Some(turn_id);
+    }
+
+    pub(crate) fn interruptible_turn_id(&self) -> Option<&str> {
+        if let Some(turn_id) = self.admitted_turn_id.as_deref() {
+            return Some(turn_id);
+        }
+        if self.current_turn_history.has_active_turn() {
+            self.current_turn_history.active_turn_id()
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn register_shutdown_drain_waiter(&mut self) -> oneshot::Receiver<()> {
+        let (completion_tx, completion_rx) = oneshot::channel();
+        self.shutdown_drain_waiter = Some(completion_tx);
+        completion_rx
+    }
+
+    pub(crate) fn take_shutdown_drain_waiter(&mut self) -> Option<oneshot::Sender<()>> {
+        self.shutdown_drain_waiter.take()
+    }
+
+    pub(crate) fn track_current_turn_event(&mut self, event_turn_id: &str, event: &EventMsg) {
+        if let EventMsg::TurnStarted(payload) = event {
+            self.turn_summary.started_at = payload.started_at;
+        }
+        if let EventMsg::ItemCompleted(payload) = event
+            && let CoreTurnItem::AgentMessage(item) = &payload.item
+            && matches!(item.phase, Some(MessagePhase::FinalAnswer) | None)
+            && item.content.iter().any(|content| {
+                matches!(content, CoreAgentMessageContent::Text { text } if !text.trim().is_empty())
+            })
+        {
+            self.turn_summary.last_agent_message =
+                Some(ThreadItem::from(CoreTurnItem::AgentMessage(item.clone())));
+        }
+        self.current_turn_history.handle_event(event);
+        if let EventMsg::TurnStarted(payload) = event
+            && self.admitted_turn_id.as_deref() == Some(payload.turn_id.as_str())
+        {
+            self.admitted_turn_id = None;
+        }
+        if matches!(event, EventMsg::TurnAborted(_) | EventMsg::TurnComplete(_)) {
+            self.last_terminal_turn_id = Some(event_turn_id.to_string());
+            self.legacy_admission_turns.remove(event_turn_id);
+            if self.admitted_turn_id.as_deref() == Some(event_turn_id) {
+                self.admitted_turn_id = None;
+            }
+            if !self.current_turn_history.has_active_turn() {
+                self.current_turn_history.reset();
+            }
+        }
+    }
+
+    pub(crate) fn note_thread_settings(&mut self, thread_settings: ThreadSettings) -> bool {
+        let changed = self.last_thread_settings.as_ref() != Some(&thread_settings);
+        self.last_thread_settings = Some(thread_settings);
+        changed
+    }
+}
+
+#[cfg(test)]
+#[path = "thread_state_tests.rs"]
+mod turn_admission_tests;
+
+pub(crate) async fn resolve_server_request_on_thread_listener(
+    thread_state: &Arc<Mutex<ThreadState>>,
+    request_id: RequestId,
+) {
+    let (completion_tx, completion_rx) = oneshot::channel();
+    let listener_command_tx = {
+        let state = thread_state.lock().await;
+        state.listener_command_tx()
+    };
+    let Some(listener_command_tx) = listener_command_tx else {
+        error!("failed to remove pending client request: thread listener is not running");
+        return;
+    };
+
+    if listener_command_tx
+        .send(ThreadListenerCommand::ResolveServerRequest {
+            request_id,
+            completion_tx,
+        })
+        .is_err()
+    {
+        error!(
+            "failed to remove pending client request: thread listener command channel is closed"
+        );
+        return;
+    }
+
+    if let Err(err) = completion_rx.await {
+        error!("failed to remove pending client request: {err}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_app_server_protocol::ApprovalsReviewer;
+    use codex_app_server_protocol::AskForApproval;
+    use codex_app_server_protocol::SandboxPolicy;
+    use codex_protocol::config_types::CollaborationMode;
+    use codex_protocol::config_types::ModeKind;
+    use codex_protocol::config_types::Settings;
+    use codex_utils_absolute_path::AbsolutePathBuf;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn note_thread_settings_reports_only_effective_changes() {
+        let mut state = ThreadState::default();
+        let initial = thread_settings("mock-model");
+        let updated = thread_settings("mock-model-2");
+
+        let results = vec![
+            state.note_thread_settings(initial.clone()),
+            state.note_thread_settings(initial),
+            state.note_thread_settings(updated.clone()),
+            state.note_thread_settings(updated),
+        ];
+
+        assert_eq!(results, vec![true, false, true, false]);
+    }
+
+    #[tokio::test]
+    async fn unload_target_updates_and_clears_in_runtime_snapshot() {
+        let manager = ThreadStateManager::new();
+        let thread_id = ThreadId::default();
+        manager.thread_state(thread_id).await;
+
+        manager.set_unload_at(thread_id, Some(123)).await;
+        assert_eq!(
+            manager.runtime_snapshot(thread_id).await.unload_at,
+            Some(123)
+        );
+
+        manager.set_unload_at(thread_id, None).await;
+        assert_eq!(manager.runtime_snapshot(thread_id).await.unload_at, None);
+    }
+
+    fn thread_settings(model: &str) -> ThreadSettings {
+        ThreadSettings {
+            cwd: AbsolutePathBuf::from_absolute_path("/tmp")
+                .expect("absolute path")
+                .into(),
+            approval_policy: AskForApproval::OnRequest,
+            approvals_reviewer: ApprovalsReviewer::User,
+            sandbox_policy: SandboxPolicy::ReadOnly {
+                network_access: false,
+            },
+            active_permission_profile: None,
+            model: model.to_string(),
+            model_provider: "mock_provider".to_string(),
+            service_tier: None,
+            effort: None,
+            summary: None,
+            collaboration_mode: CollaborationMode {
+                mode: ModeKind::Default,
+                settings: Settings {
+                    model: model.to_string(),
+                    reasoning_effort: None,
+                    developer_instructions: None,
+                },
+            },
+            multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
+            personality: None,
+        }
+    }
+}
+
+struct ThreadEntry {
+    state: Arc<Mutex<ThreadState>>,
+    connection_ids: HashSet<ConnectionId>,
+    has_connections_watcher: watch::Sender<bool>,
+    unload_at: Option<i64>,
+    transition_admission: Arc<Semaphore>,
+}
+
+impl Default for ThreadEntry {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ThreadState::default())),
+            connection_ids: HashSet::new(),
+            has_connections_watcher: watch::channel(false).0,
+            unload_at: None,
+            transition_admission: Arc::new(Semaphore::new(/*permits*/ 1)),
+        }
+    }
+}
+
+impl ThreadEntry {
+    fn update_has_connections(&self) {
+        let _ = self.has_connections_watcher.send_if_modified(|current| {
+            let prev = *current;
+            *current = !self.connection_ids.is_empty();
+            prev != *current
+        });
+    }
+}
+
+#[derive(Default)]
+struct ThreadStateManagerInner {
+    live_connections: HashMap<ConnectionId, LiveConnection>,
+    threads: HashMap<ThreadId, ThreadEntry>,
+    thread_ids_by_connection: HashMap<ConnectionId, HashSet<ThreadId>>,
+    transition_reservations: HashMap<ThreadId, StoredThreadTransitionReservation>,
+}
+
+#[derive(Clone, Copy)]
+struct LiveConnection {
+    capabilities: ConnectionCapabilities,
+    incarnation: uuid::Uuid,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ConnectionCapabilities {
+    pub(crate) request_attestation: bool,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct ThreadStateManager {
+    state: Arc<Mutex<ThreadStateManagerInner>>,
+    // Extension event sinks are synchronous, so they need an await-free way to
+    // enqueue work on the active per-thread listener.
+    listener_commands:
+        Arc<StdMutex<HashMap<ThreadId, mpsc::UnboundedSender<ThreadListenerCommand>>>>,
+    runtime_engine: Arc<StdMutex<Option<Weak<crate::session_runtime::SessionRuntimeEngine>>>>,
+}
+
+impl ThreadStateManager {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn attach_runtime_engine(
+        &self,
+        runtime_engine: &Arc<crate::session_runtime::SessionRuntimeEngine>,
+    ) {
+        *self
+            .runtime_engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(Arc::downgrade(runtime_engine));
+    }
+
+    fn runtime_engine(&self) -> Option<Arc<crate::session_runtime::SessionRuntimeEngine>> {
+        self.runtime_engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(Weak::upgrade)
+    }
+
+    pub(crate) async fn publish_runtime(&self, thread_id: ThreadId) {
+        if let Some(runtime_engine) = self.runtime_engine() {
+            runtime_engine.publish_thread(thread_id).await;
+        }
+    }
+
+    pub(crate) fn mark_runtime_dirty(&self) {
+        if let Some(runtime_engine) = self.runtime_engine() {
+            runtime_engine.mark_dirty();
+        }
+    }
+
+    pub(crate) async fn connection_initialized(
+        &self,
+        connection_id: ConnectionId,
+        capabilities: ConnectionCapabilities,
+    ) {
+        self.state.lock().await.live_connections.insert(
+            connection_id,
+            LiveConnection {
+                capabilities,
+                incarnation: uuid::Uuid::new_v4(),
+            },
+        );
+    }
+
+    pub(crate) async fn reserve_thread_transition(
+        &self,
+        previous_thread_id: ThreadId,
+        connection_id: ConnectionId,
+        transition_id: String,
+    ) -> Result<String, &'static str> {
+        let admission = {
+            let state = self.state.lock().await;
+            if let Some(reservation) = state.transition_reservations.get(&previous_thread_id) {
+                if reservation.snapshot.transition_id == transition_id
+                    && reservation.snapshot.initiator_connection_id == connection_id
+                {
+                    return Ok(reservation.snapshot.initiator_client_incarnation.clone());
+                }
+                return Err("outgoing_transition_conflict");
+            }
+            state
+                .threads
+                .get(&previous_thread_id)
+                .ok_or("caller_not_subscribed")?
+                .transition_admission
+                .clone()
+        };
+        let admission_permit = match admission.try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let state = self.state.lock().await;
+                if let Some(reservation) = state.transition_reservations.get(&previous_thread_id)
+                    && reservation.snapshot.transition_id == transition_id
+                    && reservation.snapshot.initiator_connection_id == connection_id
+                {
+                    return Ok(reservation.snapshot.initiator_client_incarnation.clone());
+                }
+                return Err("outgoing_transition_conflict");
+            }
+        };
+        let mut state = self.state.lock().await;
+        if let Some(reservation) = state.transition_reservations.get(&previous_thread_id) {
+            if reservation.snapshot.transition_id == transition_id
+                && reservation.snapshot.initiator_connection_id == connection_id
+            {
+                return Ok(reservation.snapshot.initiator_client_incarnation.clone());
+            }
+            return Err("outgoing_transition_conflict");
+        }
+        let incarnation = state
+            .live_connections
+            .get(&connection_id)
+            .ok_or("caller_not_subscribed")?
+            .incarnation;
+        let entry = state
+            .threads
+            .get(&previous_thread_id)
+            .ok_or("caller_not_subscribed")?;
+        if !entry.connection_ids.contains(&connection_id) {
+            return Err("caller_not_subscribed");
+        }
+        let incarnation = incarnation.to_string();
+        state.transition_reservations.insert(
+            previous_thread_id,
+            StoredThreadTransitionReservation {
+                snapshot: ThreadTransitionReservation {
+                    transition_id,
+                    initiator_connection_id: connection_id,
+                    initiator_client_incarnation: incarnation.clone(),
+                    current_thread_id: None,
+                    phase: ThreadTransitionReservationPhase::Preparing,
+                    invalid_reason: None,
+                },
+                _admission_permit: admission_permit,
+            },
+        );
+        Ok(incarnation)
+    }
+
+    pub(crate) async fn mark_thread_transition_prepared(
+        &self,
+        previous_thread_id: ThreadId,
+        transition_id: &str,
+        current_thread_id: ThreadId,
+    ) -> Result<(), &'static str> {
+        let mut state = self.state.lock().await;
+        let reservation = &mut state
+            .transition_reservations
+            .get_mut(&previous_thread_id)
+            .ok_or("transition_not_prepared")?
+            .snapshot;
+        if reservation.transition_id != transition_id {
+            return Err("transition_id_conflict");
+        }
+        if let Some(reason) = reservation.invalid_reason {
+            return Err(reason);
+        }
+        reservation.current_thread_id = Some(current_thread_id);
+        reservation.phase = ThreadTransitionReservationPhase::Prepared;
+        Ok(())
+    }
+
+    pub(crate) async fn thread_transition_reservation(
+        &self,
+        previous_thread_id: ThreadId,
+    ) -> Option<ThreadTransitionReservation> {
+        self.state
+            .lock()
+            .await
+            .transition_reservations
+            .get(&previous_thread_id)
+            .map(|reservation| reservation.snapshot.clone())
+    }
+
+    pub(crate) async fn release_thread_transition(
+        &self,
+        previous_thread_id: ThreadId,
+        transition_id: &str,
+    ) {
+        let mut state = self.state.lock().await;
+        if state
+            .transition_reservations
+            .get(&previous_thread_id)
+            .is_some_and(|reservation| reservation.snapshot.transition_id == transition_id)
+        {
+            state.transition_reservations.remove(&previous_thread_id);
+        }
+    }
+
+    pub(crate) async fn acquire_thread_mutation_permit(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<OwnedSemaphorePermit, &'static str> {
+        let admission = {
+            let state = self.state.lock().await;
+            state
+                .threads
+                .get(&thread_id)
+                .ok_or("transition_thread_unavailable")?
+                .transition_admission
+                .clone()
+        };
+        admission
+            .try_acquire_owned()
+            .map_err(|_| "thread_transition_in_progress")
+    }
+
+    fn invalidate_transition_for_mutation(
+        state: &mut ThreadStateManagerInner,
+        thread_id: ThreadId,
+        reason: &'static str,
+    ) {
+        if let Some(reservation) = state.transition_reservations.get_mut(&thread_id) {
+            reservation.snapshot.invalid_reason.get_or_insert(reason);
+        }
+    }
+
+    pub(crate) async fn first_attestation_capable_connection_for_thread(
+        &self,
+        thread_id: ThreadId,
+    ) -> Option<ConnectionId> {
+        let state = self.state.lock().await;
+        state
+            .threads
+            .get(&thread_id)?
+            .connection_ids
+            .iter()
+            .filter_map(|connection_id| {
+                state
+                    .live_connections
+                    .get(connection_id)?
+                    .capabilities
+                    .request_attestation
+                    .then_some(*connection_id)
+            })
+            .min_by_key(|connection_id| connection_id.0)
+    }
+
+    pub(crate) async fn wait_for_thread_subscriber(&self, thread_id: ThreadId) {
+        let mut has_connections = {
+            let mut state = self.state.lock().await;
+            state
+                .threads
+                .entry(thread_id)
+                .or_default()
+                .has_connections_watcher
+                .subscribe()
+        };
+        while !*has_connections.borrow_and_update() {
+            if has_connections.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+
+    pub(crate) async fn subscribed_connection_ids(&self, thread_id: ThreadId) -> Vec<ConnectionId> {
+        let state = self.state.lock().await;
+        state
+            .threads
+            .get(&thread_id)
+            .map(|thread_entry| thread_entry.connection_ids.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    pub(crate) async fn runtime_snapshot(&self, thread_id: ThreadId) -> ThreadSubscriptionSnapshot {
+        let (state_handle, subscriber_count, client_incarnations, unload_at) = {
+            let state = self.state.lock().await;
+            let Some(entry) = state.threads.get(&thread_id) else {
+                return ThreadSubscriptionSnapshot::default();
+            };
+            let mut client_incarnations = entry
+                .connection_ids
+                .iter()
+                .filter_map(|connection_id| {
+                    state
+                        .live_connections
+                        .get(connection_id)
+                        .map(|connection| connection.incarnation.to_string())
+                })
+                .collect::<Vec<_>>();
+            client_incarnations.sort();
+            (
+                entry.state.clone(),
+                u32::try_from(entry.connection_ids.len()).unwrap_or(u32::MAX),
+                client_incarnations,
+                entry.unload_at,
+            )
+        };
+        let (active_turn_id, settings) = state_handle.lock().await.runtime_snapshot();
+        ThreadSubscriptionSnapshot {
+            subscriber_count,
+            client_incarnations,
+            active_turn_id,
+            settings,
+            unload_at,
+        }
+    }
+
+    pub(crate) async fn caller_subscription(
+        &self,
+        thread_id: ThreadId,
+        connection_id: ConnectionId,
+    ) -> (bool, u32) {
+        let state = self.state.lock().await;
+        let Some(entry) = state.threads.get(&thread_id) else {
+            return (false, 0);
+        };
+        (
+            entry.connection_ids.contains(&connection_id),
+            u32::try_from(entry.connection_ids.len()).unwrap_or(u32::MAX),
+        )
+    }
+
+    /// Atomically fence new subscriptions and validate the caller's existing subscription set.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "the pending-unload fence must cover subscriber validation and reservation"
+    )]
+    pub(crate) async fn reserve_relinquish(
+        &self,
+        pending_thread_unloads: &Mutex<HashSet<ThreadId>>,
+        thread_id: ThreadId,
+        connection_id: ConnectionId,
+    ) -> RelinquishReservation {
+        let mut pending = pending_thread_unloads.lock().await;
+        if pending.contains(&thread_id) {
+            return RelinquishReservation::AlreadyClosing;
+        }
+        let state = self.state.lock().await;
+        let Some(entry) = state.threads.get(&thread_id) else {
+            pending.insert(thread_id);
+            return RelinquishReservation::Reserved;
+        };
+        let caller_subscribed = entry.connection_ids.contains(&connection_id);
+        if entry.connection_ids.len() > 1 || (entry.connection_ids.len() == 1 && !caller_subscribed)
+        {
+            return RelinquishReservation::OtherSubscribersPresent;
+        }
+        pending.insert(thread_id);
+        RelinquishReservation::Reserved
+    }
+
+    pub(crate) async fn set_unload_at(&self, thread_id: ThreadId, unload_at: Option<i64>) {
+        self.mark_runtime_dirty();
+        let changed = {
+            let mut state = self.state.lock().await;
+            let Some(entry) = state.threads.get_mut(&thread_id) else {
+                return;
+            };
+            if entry.unload_at == unload_at {
+                false
+            } else {
+                entry.unload_at = unload_at;
+                true
+            }
+        };
+        if changed {
+            self.publish_runtime(thread_id).await;
+        }
+    }
+
+    pub(crate) async fn thread_state(&self, thread_id: ThreadId) -> Arc<Mutex<ThreadState>> {
+        let mut state = self.state.lock().await;
+        state.threads.entry(thread_id).or_default().state.clone()
+    }
+
+    pub(crate) fn current_listener_command_tx(
+        &self,
+        thread_id: ThreadId,
+    ) -> Option<mpsc::UnboundedSender<ThreadListenerCommand>> {
+        self.listener_commands
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&thread_id)
+            .cloned()
+    }
+
+    pub(crate) fn register_listener_command_tx(
+        &self,
+        thread_id: ThreadId,
+        tx: mpsc::UnboundedSender<ThreadListenerCommand>,
+    ) {
+        self.listener_commands
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(thread_id, tx);
+    }
+
+    pub(crate) fn unregister_listener_command_tx(&self, thread_id: ThreadId) {
+        self.listener_commands
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&thread_id);
+    }
+
+    pub(crate) async fn remove_thread_state(&self, thread_id: ThreadId) {
+        self.mark_runtime_dirty();
+        let thread_state = {
+            let mut state = self.state.lock().await;
+            Self::invalidate_transition_for_mutation(
+                &mut state,
+                thread_id,
+                "transition_thread_unavailable",
+            );
+            let thread_state = state
+                .threads
+                .remove(&thread_id)
+                .map(|thread_entry| thread_entry.state);
+            state.thread_ids_by_connection.retain(|_, thread_ids| {
+                thread_ids.remove(&thread_id);
+                !thread_ids.is_empty()
+            });
+            thread_state
+        };
+        self.unregister_listener_command_tx(thread_id);
+
+        if let Some(thread_state) = thread_state {
+            let mut thread_state = thread_state.lock().await;
+            tracing::debug!(
+                thread_id = %thread_id,
+                listener_generation = thread_state.listener_generation,
+                had_listener = thread_state.cancel_tx.is_some(),
+                had_active_turn = thread_state.active_turn_snapshot().is_some(),
+                "clearing thread listener during thread-state teardown"
+            );
+            thread_state.clear_listener();
+        }
+        self.publish_runtime(thread_id).await;
+    }
+
+    pub(crate) async fn clear_all_listeners(&self) {
+        let thread_states = {
+            let state = self.state.lock().await;
+            state
+                .threads
+                .iter()
+                .map(|(thread_id, thread_entry)| (*thread_id, thread_entry.state.clone()))
+                .collect::<Vec<_>>()
+        };
+
+        for (thread_id, thread_state) in thread_states {
+            self.unregister_listener_command_tx(thread_id);
+            {
+                let mut thread_state = thread_state.lock().await;
+                tracing::debug!(
+                    thread_id = %thread_id,
+                    listener_generation = thread_state.listener_generation,
+                    had_listener = thread_state.cancel_tx.is_some(),
+                    had_active_turn = thread_state.active_turn_snapshot().is_some(),
+                    "clearing thread listener during app-server shutdown"
+                );
+                thread_state.clear_listener();
+            }
+            self.set_unload_at(thread_id, None).await;
+        }
+    }
+
+    pub(crate) async fn unsubscribe_connection_from_thread(
+        &self,
+        thread_id: ThreadId,
+        connection_id: ConnectionId,
+    ) -> bool {
+        self.mark_runtime_dirty();
+        {
+            let mut state = self.state.lock().await;
+            if !state.threads.contains_key(&thread_id) {
+                return false;
+            }
+
+            if !state
+                .thread_ids_by_connection
+                .get(&connection_id)
+                .is_some_and(|thread_ids| thread_ids.contains(&thread_id))
+            {
+                return false;
+            }
+
+            if let Some(reservation) = state.transition_reservations.get_mut(&thread_id)
+                && reservation.snapshot.initiator_connection_id == connection_id
+            {
+                if reservation.snapshot.phase == ThreadTransitionReservationPhase::Prepared
+                    && reservation.snapshot.invalid_reason.is_none()
+                {
+                    reservation.snapshot.phase =
+                        ThreadTransitionReservationPhase::InitiatorUnsubscribed;
+                } else {
+                    reservation
+                        .snapshot
+                        .invalid_reason
+                        .get_or_insert("unexpected_subscriber_mutation");
+                }
+            }
+
+            if let Some(thread_ids) = state.thread_ids_by_connection.get_mut(&connection_id) {
+                thread_ids.remove(&thread_id);
+                if thread_ids.is_empty() {
+                    state.thread_ids_by_connection.remove(&connection_id);
+                }
+            }
+            if let Some(thread_entry) = state.threads.get_mut(&thread_id) {
+                thread_entry.connection_ids.remove(&connection_id);
+                thread_entry.update_has_connections();
+            }
+        };
+
+        self.publish_runtime(thread_id).await;
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn has_subscribers(&self, thread_id: ThreadId) -> bool {
+        self.state
+            .lock()
+            .await
+            .threads
+            .get(&thread_id)
+            .is_some_and(|thread_entry| !thread_entry.connection_ids.is_empty())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn try_ensure_connection_subscribed(
+        &self,
+        thread_id: ThreadId,
+        connection_id: ConnectionId,
+        experimental_raw_events: bool,
+    ) -> Option<Arc<Mutex<ThreadState>>> {
+        let subscription = self
+            .try_ensure_connection_subscribed_without_runtime_publish(
+                thread_id,
+                connection_id,
+                experimental_raw_events,
+                InitiatorTransitionReconnect::AbortReservation,
+            )
+            .await;
+        let ConversationSubscription::Subscribed { thread_state, .. } = subscription else {
+            return None;
+        };
+        self.publish_runtime(thread_id).await;
+        Some(thread_state)
+    }
+
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "the pending-unload fence must cover the subscriber-state mutation"
+    )]
+    pub(crate) async fn try_ensure_connection_subscribed_unless_pending_unload(
+        &self,
+        pending_thread_unloads: &Mutex<HashSet<ThreadId>>,
+        thread_id: ThreadId,
+        connection_id: ConnectionId,
+        experimental_raw_events: bool,
+    ) -> ConversationSubscription {
+        let pending_thread_unloads = pending_thread_unloads.lock().await;
+        if pending_thread_unloads.contains(&thread_id) {
+            return ConversationSubscription::PendingUnload;
+        }
+        self.try_ensure_connection_subscribed_without_runtime_publish(
+            thread_id,
+            connection_id,
+            experimental_raw_events,
+            InitiatorTransitionReconnect::PreserveReservation,
+        )
+        .await
+    }
+
+    async fn try_ensure_connection_subscribed_without_runtime_publish(
+        &self,
+        thread_id: ThreadId,
+        connection_id: ConnectionId,
+        experimental_raw_events: bool,
+        initiator_reconnect: InitiatorTransitionReconnect,
+    ) -> ConversationSubscription {
+        let (thread_state, subscription_changed, transition_admission_permit) = {
+            let mut state = self.state.lock().await;
+            if !state.live_connections.contains_key(&connection_id) {
+                return ConversationSubscription::ConnectionClosed;
+            }
+            let already_subscribed = state
+                .thread_ids_by_connection
+                .get(&connection_id)
+                .is_some_and(|thread_ids| thread_ids.contains(&thread_id));
+            if !already_subscribed && state.transition_reservations.contains_key(&thread_id) {
+                let aborts_transition = matches!(
+                    initiator_reconnect,
+                    InitiatorTransitionReconnect::AbortReservation
+                ) && state
+                    .transition_reservations
+                    .get(&thread_id)
+                    .is_some_and(|reservation| {
+                        reservation.snapshot.initiator_connection_id == connection_id
+                            && reservation.snapshot.phase
+                                == ThreadTransitionReservationPhase::InitiatorUnsubscribed
+                    });
+                if aborts_transition {
+                    state.transition_reservations.remove(&thread_id);
+                } else {
+                    return ConversationSubscription::TransitionInProgress;
+                }
+            }
+            let transition_admission_permit = if already_subscribed {
+                None
+            } else {
+                let admission = state
+                    .threads
+                    .entry(thread_id)
+                    .or_default()
+                    .transition_admission
+                    .clone();
+                let Ok(permit) = admission.try_acquire_owned() else {
+                    return ConversationSubscription::TransitionInProgress;
+                };
+                Some(permit)
+            };
+            if !already_subscribed {
+                self.mark_runtime_dirty();
+            }
+            state
+                .thread_ids_by_connection
+                .entry(connection_id)
+                .or_default()
+                .insert(thread_id);
+            let thread_entry = state.threads.entry(thread_id).or_default();
+            thread_entry.connection_ids.insert(connection_id);
+            thread_entry.update_has_connections();
+            (
+                thread_entry.state.clone(),
+                !already_subscribed,
+                transition_admission_permit,
+            )
+        };
+        {
+            let mut thread_state_guard = thread_state.lock().await;
+            if experimental_raw_events {
+                thread_state_guard.set_experimental_raw_events(/*enabled*/ true);
+            }
+        }
+        ConversationSubscription::Subscribed {
+            thread_state,
+            subscription_changed,
+            transition_admission_permit,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn try_add_connection_to_thread(
+        &self,
+        thread_id: ThreadId,
+        connection_id: ConnectionId,
+    ) -> bool {
+        let subscribed = matches!(
+            self.try_ensure_connection_subscribed_without_runtime_publish(
+                thread_id,
+                connection_id,
+                /*experimental_raw_events*/ false,
+                InitiatorTransitionReconnect::AbortReservation,
+            )
+            .await,
+            ConversationSubscription::Subscribed { .. }
+        );
+        if subscribed {
+            self.publish_runtime(thread_id).await;
+        }
+        subscribed
+    }
+
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "the pending-unload fence must cover the subscriber-state mutation"
+    )]
+    pub(crate) async fn try_add_connection_to_thread_unless_pending_unload(
+        &self,
+        pending_thread_unloads: &Mutex<HashSet<ThreadId>>,
+        thread_id: ThreadId,
+        connection_id: ConnectionId,
+    ) -> PendingUnloadSubscription<()> {
+        let subscription = {
+            let pending_thread_unloads = pending_thread_unloads.lock().await;
+            if pending_thread_unloads.contains(&thread_id) {
+                return PendingUnloadSubscription::PendingUnload;
+            }
+            self.try_ensure_connection_subscribed_without_runtime_publish(
+                thread_id,
+                connection_id,
+                /*experimental_raw_events*/ false,
+                InitiatorTransitionReconnect::AbortReservation,
+            )
+            .await
+        };
+        match subscription {
+            ConversationSubscription::ConnectionClosed => {
+                PendingUnloadSubscription::ConnectionClosed
+            }
+            ConversationSubscription::TransitionInProgress => {
+                PendingUnloadSubscription::TransitionInProgress
+            }
+            ConversationSubscription::Subscribed { .. } => {
+                self.publish_runtime(thread_id).await;
+                PendingUnloadSubscription::Subscribed(())
+            }
+            ConversationSubscription::PendingUnload => {
+                unreachable!("pending unload is checked before the subscription attempt")
+            }
+        }
+    }
+
+    pub(crate) async fn remove_connection(&self, connection_id: ConnectionId) -> Vec<ThreadId> {
+        self.mark_runtime_dirty();
+        let (empty_thread_ids, affected_thread_ids) = {
+            let mut state = self.state.lock().await;
+            state.live_connections.remove(&connection_id);
+            let thread_ids = state
+                .thread_ids_by_connection
+                .remove(&connection_id)
+                .unwrap_or_default();
+            let aborted_transition_threads = state
+                .transition_reservations
+                .iter()
+                .filter_map(|(thread_id, reservation)| {
+                    (reservation.snapshot.initiator_connection_id == connection_id)
+                        .then_some(*thread_id)
+                })
+                .collect::<Vec<_>>();
+            for thread_id in aborted_transition_threads {
+                state.transition_reservations.remove(&thread_id);
+            }
+            for thread_id in &thread_ids {
+                if let Some(thread_entry) = state.threads.get_mut(thread_id) {
+                    thread_entry.connection_ids.remove(&connection_id);
+                    thread_entry.update_has_connections();
+                }
+            }
+            let empty_thread_ids = thread_ids
+                .iter()
+                .copied()
+                .filter(|thread_id| {
+                    state
+                        .threads
+                        .get(thread_id)
+                        .is_some_and(|thread_entry| thread_entry.connection_ids.is_empty())
+                })
+                .collect::<Vec<_>>();
+            (empty_thread_ids, thread_ids)
+        };
+        for thread_id in affected_thread_ids {
+            self.publish_runtime(thread_id).await;
+        }
+        empty_thread_ids
+    }
+
+    pub(crate) async fn subscribe_to_has_connections(
+        &self,
+        thread_id: ThreadId,
+    ) -> Option<watch::Receiver<bool>> {
+        let state = self.state.lock().await;
+        state
+            .threads
+            .get(&thread_id)
+            .map(|thread_entry| thread_entry.has_connections_watcher.subscribe())
+    }
+}

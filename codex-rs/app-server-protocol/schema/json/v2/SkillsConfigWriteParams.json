@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "LegacyAppPathString": {
+      "type": "string"
+    }
+  },
+  "properties": {
+    "enabled": {
+      "type": "boolean"
+    },
+    "name": {
+      "description": "Name-based selector.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "path": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/LegacyAppPathString"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Path-based selector."
+    }
+  },
+  "required": [
+    "enabled"
+  ],
+  "title": "SkillsConfigWriteParams",
+  "type": "object"
+}

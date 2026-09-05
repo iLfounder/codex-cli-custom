@@ -1,0 +1,1329 @@
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::io;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use std::sync::RwLock;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use codex_app_server_protocol::AccountSlotCapability;
+use codex_app_server_protocol::AccountSlotCatalogKind;
+use codex_app_server_protocol::AccountSlotHealth;
+use codex_app_server_protocol::AccountSlotListParams;
+use codex_app_server_protocol::AccountSlotListResponse;
+use codex_app_server_protocol::AccountSlotSnapshot;
+use codex_app_server_protocol::AccountSlotStatus;
+use codex_app_server_protocol::JSONRPCErrorError;
+use codex_backend_client::Client as BackendClient;
+use codex_core::ExecutionAccountContext;
+use codex_core::ExecutionAccountResolver;
+use codex_core::ExecutionAccountResolverFuture;
+use codex_core::config::Config;
+use codex_core::execution_account::ExecutionAccountTransitionResolverFuture;
+use codex_core::execution_account::ResolvedExecutionAccountTransition;
+use codex_core::path_utils::write_atomically;
+use codex_login::AuthConfig;
+use codex_login::AuthManager;
+use codex_login::AuthSourceKind;
+use codex_model_provider::ProviderAccount;
+use codex_model_provider::create_model_provider;
+use codex_models_manager::manager::SharedModelsManager;
+use codex_protocol::config_types::ForcedLoginMethod;
+use codex_protocol::error::CodexErr;
+use codex_protocol::protocol::ExecutionAccountBinding;
+use codex_thread_store::ThreadStore;
+use serde::Deserialize;
+use serde::Serialize;
+use sha2::Digest;
+use sha2::Sha256;
+use tokio::sync::Mutex;
+use tokio::sync::OwnedMutexGuard;
+use tokio::sync::Semaphore;
+use uuid::Uuid;
+
+use crate::auth_mode::auth_mode_to_api;
+use crate::config_manager::ConfigManager;
+use crate::error_code::internal_error;
+use crate::error_code::invalid_params;
+use crate::error_code::invalid_request;
+
+const MANIFEST_FILE: &str = "account-slots.toml";
+const PRIVATE_HOMES_DIR: &str = "accounts";
+const MANIFEST_SCHEMA_VERSION: u32 = 1;
+const DEFAULT_SLOT_ID: &str = "default";
+const DEFAULT_LIST_LIMIT: usize = 50;
+const MAX_LIST_LIMIT: usize = 100;
+const MAX_MANIFEST_SLOTS: usize = 1_000;
+const TOKEN_MANAGER_URL: &str = "http://127.0.0.1:3101/";
+const TEST_TOKEN_MANAGER_URL_ENV_VAR: &str = "CODEX_APP_SERVER_TEST_TOKEN_MANAGER_URL";
+
+fn resolve_token_manager_base_url(test_override: Option<&str>) -> Option<url::Url> {
+    let url = url::Url::parse(test_override.unwrap_or(TOKEN_MANAGER_URL)).ok()?;
+    let is_loopback_ip = matches!(url.host(), Some(url::Host::Ipv4(address)) if address.is_loopback())
+        || matches!(url.host(), Some(url::Host::Ipv6(address)) if address.is_loopback());
+    if url.scheme() != "http"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !is_loopback_ip
+    {
+        return None;
+    }
+    Some(url)
+}
+
+fn token_manager_base_url() -> Option<url::Url> {
+    match std::env::var_os(TEST_TOKEN_MANAGER_URL_ENV_VAR) {
+        Some(test_override) => test_override
+            .to_str()
+            .and_then(|test_override| resolve_token_manager_base_url(Some(test_override))),
+        None => resolve_token_manager_base_url(/*test_override*/ None),
+    }
+}
+
+const DENY_MANIFEST_INVALID: &str = "account_slot_manifest_invalid";
+const DENY_HOST_ACCESS_TOKEN: &str = "host_owned_codex_access_token";
+const DENY_HOST_EXTERNAL_AUTH: &str = "host_owned_external_auth";
+const DENY_HOST_PROVIDER_AUTH: &str = "host_owned_provider_auth";
+const DENY_HOST_WORKLOAD_IDENTITY: &str = "host_owned_workload_identity";
+const DENY_LOGIN_NOT_AVAILABLE: &str = "account_slot_login_not_available";
+const DENY_SWITCH_NOT_AVAILABLE: &str = "thread_account_switch_not_available";
+const DENY_DEFAULT_LOGIN_EXTERNAL_AUTH: &str = "external_auth_active";
+const DENY_DEFAULT_LOGIN_METHOD: &str = "chatgpt_login_not_allowed";
+const DENY_DEFAULT_LOGOUT_PROVIDER: &str = "provider_managed_logout_not_allowed";
+const DENY_DEFAULT_WORKLOAD_IDENTITY: &str = "workload_identity_managed_auth";
+
+pub(crate) fn default_logout_uses_host_managed_provider(
+    config: &Config,
+    auth_manager: &Arc<AuthManager>,
+) -> bool {
+    if !config.model_provider.is_amazon_bedrock() {
+        return false;
+    }
+
+    let provider = create_model_provider(
+        config.model_provider.clone(),
+        Some(Arc::clone(auth_manager)),
+    );
+    !matches!(
+        provider.account_state(),
+        Ok(state)
+            if matches!(
+                state.account,
+                Some(ProviderAccount::AmazonBedrock {
+                    uses_codex_managed_credentials: true,
+                })
+            )
+    )
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AccountSlotsManifest {
+    schema_version: u32,
+    revision: u64,
+    slots: Vec<AccountSlotManifest>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AccountSlotManifest {
+    account_slot_id: String,
+    label: String,
+    auth_home: PathBuf,
+    is_default: bool,
+    status: ManifestSlotStatus,
+    attempt_generation: u64,
+    updated_at: i64,
+    error_code: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum ManifestSlotStatus {
+    LoginRequired,
+    Ready,
+    Failed,
+}
+
+impl From<ManifestSlotStatus> for AccountSlotStatus {
+    fn from(status: ManifestSlotStatus) -> Self {
+        match status {
+            ManifestSlotStatus::LoginRequired => Self::LoginRequired,
+            ManifestSlotStatus::Ready => Self::Ready,
+            ManifestSlotStatus::Failed => Self::Failed,
+        }
+    }
+}
+
+impl AccountSlotsManifest {
+    fn load(path: &Path, process_home: &Path) -> io::Result<Option<Self>> {
+        let contents = match std::fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let manifest: Self = toml::from_str(&contents)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid manifest"))?;
+        manifest.validate(process_home)?;
+        Ok(Some(manifest))
+    }
+
+    fn persist(&self, path: &Path) -> io::Result<()> {
+        let contents = toml::to_string(self)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid manifest"))?;
+        write_atomically(path, &contents)
+    }
+
+    fn validate(&self, process_home: &Path) -> io::Result<()> {
+        if self.schema_version != MANIFEST_SCHEMA_VERSION
+            || self.revision == 0
+            || self.slots.is_empty()
+            || self.slots.len() > MAX_MANIFEST_SLOTS
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid manifest metadata",
+            ));
+        }
+
+        let private_homes_root = process_home.join(PRIVATE_HOMES_DIR);
+        let mut slot_ids = HashSet::with_capacity(self.slots.len());
+        let mut default_count = 0;
+        for slot in &self.slots {
+            if slot.label.trim().is_empty()
+                || slot.label.len() > 128
+                || !slot.auth_home.is_absolute()
+                || !slot_ids.insert(slot.account_slot_id.as_str())
+                || slot
+                    .error_code
+                    .as_ref()
+                    .is_some_and(|code| !valid_manifest_token(code))
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid account slot",
+                ));
+            }
+            if slot.is_default {
+                default_count += 1;
+                if slot.account_slot_id != DEFAULT_SLOT_ID || slot.auth_home != process_home {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid default account home",
+                    ));
+                }
+            } else {
+                if !valid_account_slot_id(&slot.account_slot_id) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid account slot id",
+                    ));
+                }
+                validate_private_auth_home(
+                    process_home,
+                    &private_homes_root,
+                    &slot.account_slot_id,
+                    &slot.auth_home,
+                )?;
+            }
+        }
+        if default_count != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "manifest must contain one default slot",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn valid_account_slot_id(value: &str) -> bool {
+    Uuid::parse_str(value).is_ok_and(|uuid| uuid.simple().to_string() == value)
+}
+
+fn validate_private_auth_home(
+    process_home: &Path,
+    private_homes_root: &Path,
+    account_slot_id: &str,
+    auth_home: &Path,
+) -> io::Result<()> {
+    let slot_root = private_homes_root.join(account_slot_id);
+    if auth_home != slot_root
+        && (auth_home.parent() != Some(slot_root.as_path()) || auth_home.file_name().is_none())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid private account home",
+        ));
+    }
+
+    reject_symlink(private_homes_root)?;
+    reject_symlink(&slot_root)?;
+    reject_symlink(auth_home)?;
+
+    let canonical_private_root = match private_homes_root.canonicalize() {
+        Ok(path) => path,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let canonical_process_home = process_home.canonicalize()?;
+    if canonical_private_root.parent() != Some(canonical_process_home.as_path()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "private account root escapes process home",
+        ));
+    }
+
+    let canonical_auth_home = match auth_home.canonicalize() {
+        Ok(path) => path,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let canonical_slot_root = slot_root.canonicalize()?;
+    if canonical_slot_root.parent() != Some(canonical_private_root.as_path())
+        || canonical_slot_root.file_name() != Some(std::ffi::OsStr::new(account_slot_id))
+        || (canonical_auth_home != canonical_slot_root
+            && canonical_auth_home.parent() != Some(canonical_slot_root.as_path()))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "private account home escapes private root",
+        ));
+    }
+    Ok(())
+}
+
+fn reject_symlink(path: &Path) -> io::Result<()> {
+    match path.symlink_metadata() {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "private account path must not be a symlink",
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn valid_manifest_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+}
+
+#[derive(Clone)]
+struct AccountSlotRecord {
+    manifest: AccountSlotManifest,
+    account_number: u32,
+    runtime: Arc<AccountRuntimeCell>,
+    binding_transition: Arc<Mutex<()>>,
+    active_login_operation_id: Option<String>,
+    active_login_cancelable: bool,
+    active_logout_operation_id: Option<String>,
+    completed_login_operation_id: Option<String>,
+}
+
+pub(crate) struct AccountRuntimeBundle {
+    pub(crate) runtime_version: AtomicU64,
+    pub(crate) auth_manager: Arc<AuthManager>,
+    pub(crate) models_manager: SharedModelsManager,
+}
+
+#[derive(Default)]
+struct AccountRuntimeCell(StdMutex<Option<Arc<AccountRuntimeBundle>>>);
+
+impl AccountRuntimeCell {
+    fn get(&self) -> Option<Arc<AccountRuntimeBundle>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn set(&self, runtime: Arc<AccountRuntimeBundle>) -> Result<(), Arc<AccountRuntimeBundle>> {
+        let mut current = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if current.is_some() {
+            return Err(runtime);
+        }
+        *current = Some(runtime);
+        Ok(())
+    }
+
+    fn replace(&self, runtime: Arc<AccountRuntimeBundle>) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(runtime);
+    }
+}
+
+struct AccountRegistryState {
+    revision: u64,
+    slots: Vec<AccountSlotRecord>,
+    manifest_error: Option<&'static str>,
+    manifest_present: bool,
+    projection_dirty: bool,
+}
+
+#[derive(Default)]
+struct GlobalInventoryRevision {
+    directory_fingerprint: Option<[u8; 32]>,
+    fingerprint: Option<[u8; 32]>,
+    revision: u64,
+    notified_directory_fingerprint: Option<[u8; 32]>,
+    notified_revision: u64,
+}
+
+#[derive(Clone, Copy)]
+struct GlobalInventoryUpdate {
+    revision: u64,
+}
+
+pub(crate) struct AccountRegistry {
+    config: Arc<Config>,
+    config_manager: ConfigManager,
+    auth_config_template: AuthConfig,
+    thread_store: Arc<dyn ThreadStore>,
+    state: RwLock<AccountRegistryState>,
+    mutation_lock: Mutex<()>,
+    browser_login: StdMutex<Option<BrowserLoginOwner>>,
+    quota_cache: quota::QuotaCache,
+    exhaustion_hints: Mutex<HashSet<rotation::ExhaustionHintKey>>,
+    global_catalog: Arc<global::GlobalAccountCatalog>,
+    global_inventory_revision: StdMutex<GlobalInventoryRevision>,
+    global_directory_user_home: Option<PathBuf>,
+    global_directory: RwLock<global::GlobalAccountDirectory>,
+    global_runtimes: Mutex<HashMap<global::AccountId, Arc<global::GlobalAccountRuntime>>>,
+    global_active_logins: StdMutex<HashMap<global::AccountId, String>>,
+    global_catalog_refresh: Semaphore,
+    token_manager_client: Option<global::TokenManagerClient>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RotationSlotIdentity {
+    pub(crate) account_slot_id: String,
+    pub(crate) account_number: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum BrowserLoginOwner {
+    Default(String),
+    Slot(String),
+}
+
+impl AccountRegistry {
+    pub(crate) fn new(
+        config: Arc<Config>,
+        config_manager: ConfigManager,
+        default_auth_manager: Arc<AuthManager>,
+        default_models_manager: SharedModelsManager,
+        thread_store: Arc<dyn ThreadStore>,
+    ) -> std::io::Result<Self> {
+        let global_directory_user_home = global::GlobalAccountDirectory::user_home()?;
+        let global_directory = global_directory_user_home
+            .as_deref()
+            .map_or_else(global::GlobalAccountDirectory::default, |user_home| {
+                global::GlobalAccountDirectory::load_from(user_home, &config.codex_home)
+            });
+        let token_manager_client = token_manager_base_url().and_then(|url| {
+            global::TokenManagerClient::new(config.http_client_factory(), url).ok()
+        });
+        let manifest_path = config.codex_home.join(MANIFEST_FILE);
+        let (manifest, manifest_error, manifest_present) =
+            match AccountSlotsManifest::load(&manifest_path, &config.codex_home) {
+                Ok(Some(manifest)) => (manifest, None, true),
+                Ok(None) => (virtual_default_manifest(&config.codex_home), None, false),
+                Err(_) => (
+                    virtual_default_manifest(&config.codex_home),
+                    Some(DENY_MANIFEST_INVALID),
+                    false,
+                ),
+            };
+        let default_runtime = Arc::new(AccountRuntimeBundle {
+            runtime_version: AtomicU64::new(0),
+            auth_manager: default_auth_manager,
+            models_manager: default_models_manager,
+        });
+        let account_numbers = assign_account_numbers(&manifest.slots);
+        let mut slots = manifest
+            .slots
+            .into_iter()
+            .zip(account_numbers)
+            .map(|(manifest, account_number)| {
+                let runtime = Arc::new(AccountRuntimeCell::default());
+                if manifest.is_default {
+                    let _ = runtime.set(Arc::clone(&default_runtime));
+                }
+                AccountSlotRecord {
+                    manifest,
+                    account_number,
+                    runtime,
+                    binding_transition: Arc::new(Mutex::new(())),
+                    active_login_operation_id: None,
+                    active_login_cancelable: false,
+                    active_logout_operation_id: None,
+                    completed_login_operation_id: None,
+                }
+            })
+            .collect::<Vec<_>>();
+        slots.sort_by(|left, right| {
+            left.manifest
+                .account_slot_id
+                .cmp(&right.manifest.account_slot_id)
+        });
+
+        Ok(Self {
+            auth_config_template: config.auth_config(),
+            thread_store,
+            config_manager,
+            config,
+            state: RwLock::new(AccountRegistryState {
+                revision: manifest.revision,
+                slots,
+                manifest_error,
+                manifest_present,
+                projection_dirty: false,
+            }),
+            mutation_lock: Mutex::new(()),
+            browser_login: StdMutex::new(None),
+            quota_cache: quota::QuotaCache::default(),
+            exhaustion_hints: Mutex::new(HashSet::new()),
+            global_catalog: Arc::new(global::GlobalAccountCatalog::default()),
+            global_inventory_revision: StdMutex::new(GlobalInventoryRevision::default()),
+            global_directory_user_home,
+            global_directory: RwLock::new(global_directory),
+            global_runtimes: Mutex::new(HashMap::new()),
+            global_active_logins: StdMutex::new(HashMap::new()),
+            global_catalog_refresh: Semaphore::new(/*permits*/ 1),
+            token_manager_client,
+        })
+    }
+
+    fn refresh_global_directory(&self) -> global::GlobalAccountDirectory {
+        let refreshed = self.global_directory_user_home.as_deref().map_or_else(
+            global::GlobalAccountDirectory::default,
+            |user_home| {
+                global::GlobalAccountDirectory::load_from(user_home, &self.config.codex_home)
+            },
+        );
+        if let Ok(mut directory) = self.global_directory.write() {
+            *directory = refreshed.clone();
+        }
+        refreshed
+    }
+
+    async fn global_inventory_snapshot(
+        &self,
+        directory: &global::GlobalAccountDirectory,
+        now: i64,
+    ) -> (Vec<AccountSlotSnapshot>, GlobalInventoryUpdate) {
+        let mut snapshots = Vec::with_capacity(directory.homes.len());
+        for account_id in directory.homes.keys() {
+            snapshots.push(
+                self.global_snapshot(
+                    *account_id,
+                    directory.process_account_id == Some(*account_id),
+                    /*registry_revision*/ 0,
+                    now,
+                )
+                .await,
+            );
+        }
+        let directory_fingerprint = directory.inventory_fingerprint();
+        let mut digest = Sha256::new();
+        digest.update(b"codex-visible-account-inventory/v1\0");
+        digest.update(directory_fingerprint);
+        for snapshot in &snapshots {
+            match serde_json::to_vec(snapshot) {
+                Ok(encoded) => {
+                    digest.update((encoded.len() as u64).to_be_bytes());
+                    digest.update(encoded);
+                }
+                Err(_) => digest.update(0_u64.to_be_bytes()),
+            }
+        }
+        let fingerprint = digest.finalize().into();
+        let mut state = self
+            .global_inventory_revision
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let changed = state.fingerprint != Some(fingerprint);
+        if changed {
+            state.fingerprint = Some(fingerprint);
+            state.revision = state.revision.saturating_add(1).max(1);
+        }
+        state.directory_fingerprint = Some(directory_fingerprint);
+        let update = GlobalInventoryUpdate {
+            revision: state.revision,
+        };
+        drop(state);
+        for snapshot in &mut snapshots {
+            snapshot.registry_revision = update.revision;
+        }
+        (snapshots, update)
+    }
+
+    fn claim_global_inventory_notification(&self, revision: u64) -> Option<bool> {
+        let mut state = self
+            .global_inventory_revision
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.notified_revision == revision {
+            return None;
+        }
+        let directory_changed = state.notified_directory_fingerprint != state.directory_fingerprint;
+        state.notified_revision = revision;
+        state.notified_directory_fingerprint = state.directory_fingerprint;
+        Some(directory_changed)
+    }
+
+    pub(crate) async fn list(
+        &self,
+        params: AccountSlotListParams,
+    ) -> Result<AccountSlotListResponse, JSONRPCErrorError> {
+        let global_directory = self.refresh_global_directory();
+        if global_directory.process_account_id.is_some() {
+            let (snapshots, update) = self
+                .global_inventory_snapshot(&global_directory, chrono::Utc::now().timestamp())
+                .await;
+            let limit = match params.limit.map(|limit| limit as usize) {
+                Some(0) => return Err(invalid_params("accountSlot/list limit must be positive")),
+                Some(limit) => limit.min(MAX_LIST_LIMIT),
+                None => DEFAULT_LIST_LIMIT,
+            };
+            let start = global_cursor_start(params.cursor.as_deref(), update.revision, &snapshots)?;
+            let end = start.saturating_add(limit).min(snapshots.len());
+            let data = snapshots[start..end].to_vec();
+            let next_cursor = if end < snapshots.len() {
+                Some(
+                    encode_cursor(AccountSlotCursor {
+                        revision: update.revision,
+                        after_slot_id: snapshots[end - 1].account_slot_id.clone(),
+                    })
+                    .map_err(|_| internal_error("account slot cursor could not be serialized"))?,
+                )
+            } else {
+                None
+            };
+            return Ok(AccountSlotListResponse {
+                data,
+                next_cursor,
+                registry_revision: update.revision,
+                catalog_kind: AccountSlotCatalogKind::Global,
+                multi_account: AccountSlotCapability {
+                    available: true,
+                    deny_reason: None,
+                },
+            });
+        }
+        self.reconcile().await?;
+        let (revision, slots, manifest_error) = {
+            let state = self
+                .state
+                .read()
+                .map_err(|_| internal_error("account slot registry is unavailable"))?;
+            (state.revision, state.slots.clone(), state.manifest_error)
+        };
+        let capability = self.capability(manifest_error);
+        let limit = match params.limit.map(|limit| limit as usize) {
+            Some(0) => return Err(invalid_params("accountSlot/list limit must be positive")),
+            Some(limit) => limit.min(MAX_LIST_LIMIT),
+            None => DEFAULT_LIST_LIMIT,
+        };
+        let start = cursor_start(params.cursor.as_deref(), revision, &slots)?;
+        let end = start.saturating_add(limit).min(slots.len());
+        let current_config = self.load_latest_config().await;
+        let mut data = Vec::with_capacity(end.saturating_sub(start));
+        for slot in &slots[start..end] {
+            data.push(
+                self.snapshot(slot, revision, &capability, &current_config)
+                    .await,
+            );
+        }
+        let next_cursor = if end < slots.len() {
+            Some(
+                encode_cursor(AccountSlotCursor {
+                    revision,
+                    after_slot_id: slots[end - 1].manifest.account_slot_id.clone(),
+                })
+                .map_err(|_| internal_error("account slot cursor could not be serialized"))?,
+            )
+        } else {
+            None
+        };
+
+        Ok(AccountSlotListResponse {
+            data,
+            next_cursor,
+            registry_revision: revision,
+            catalog_kind: AccountSlotCatalogKind::Legacy,
+            multi_account: capability,
+        })
+    }
+
+    pub(crate) async fn runtime_capability(
+        &self,
+    ) -> Result<AccountSlotCapability, JSONRPCErrorError> {
+        self.reconcile().await?;
+        let manifest_error = self
+            .state
+            .read()
+            .map_err(|_| internal_error("account slot registry is unavailable"))?
+            .manifest_error;
+        Ok(self.capability(manifest_error))
+    }
+
+    async fn load_latest_config(&self) -> Config {
+        match self
+            .config_manager
+            .load_latest_config(/*fallback_cwd*/ None)
+            .await
+        {
+            Ok(config) => config,
+            Err(error) => {
+                tracing::warn!("failed to reload config, using startup config: {error}");
+                self.config.as_ref().clone()
+            }
+        }
+    }
+
+    pub(crate) async fn lock_slot_binding_transition(
+        &self,
+        account_slot_id: &str,
+    ) -> Result<OwnedMutexGuard<()>, JSONRPCErrorError> {
+        let binding_transition = {
+            let state = self
+                .state
+                .read()
+                .map_err(|_| internal_error("account slot registry is unavailable"))?;
+            Arc::clone(
+                &state
+                    .slots
+                    .iter()
+                    .find(|slot| slot.manifest.account_slot_id == account_slot_id)
+                    .ok_or_else(|| invalid_request("account slot is unavailable"))?
+                    .binding_transition,
+            )
+        };
+        Ok(binding_transition.lock_owned().await)
+    }
+
+    async fn snapshot(
+        &self,
+        slot: &AccountSlotRecord,
+        revision: u64,
+        capability: &AccountSlotCapability,
+        current_config: &Config,
+    ) -> AccountSlotSnapshot {
+        let runtime = if capability.available || slot.manifest.is_default {
+            Some(self.runtime(slot).await)
+        } else {
+            None
+        };
+        let auth_mode = runtime
+            .as_ref()
+            .and_then(|runtime| runtime.auth_manager.auth_mode())
+            .map(auth_mode_to_api);
+        let status = match (slot.manifest.is_default, auth_mode) {
+            (true, Some(_)) => AccountSlotStatus::Ready,
+            _ => slot.manifest.status.into(),
+        };
+        let error_code = slot.manifest.error_code.clone();
+        let default_policy = slot.manifest.is_default.then(|| {
+            let auth_manager = runtime.as_ref().map(|runtime| &runtime.auth_manager);
+            let login_deny_reason = if auth_manager
+                .is_none_or(|auth_manager| auth_manager.is_workload_identity_selected())
+            {
+                Some(DENY_DEFAULT_WORKLOAD_IDENTITY)
+            } else if auth_manager
+                .is_some_and(|auth_manager| auth_manager.is_external_chatgpt_auth_active())
+            {
+                Some(DENY_DEFAULT_LOGIN_EXTERNAL_AUTH)
+            } else if auth_manager.is_none_or(|auth_manager| {
+                !auth_manager.is_login_method_allowed(ForcedLoginMethod::Chatgpt)
+            }) {
+                Some(DENY_DEFAULT_LOGIN_METHOD)
+            } else {
+                None
+            };
+            let logout_deny_reason = if auth_manager
+                .is_none_or(|auth_manager| auth_manager.is_workload_identity_selected())
+            {
+                Some(DENY_DEFAULT_WORKLOAD_IDENTITY)
+            } else if auth_manager.is_some_and(|auth_manager| {
+                default_logout_uses_host_managed_provider(current_config, auth_manager)
+            }) {
+                Some(DENY_DEFAULT_LOGOUT_PROVIDER)
+            } else {
+                None
+            };
+            live_registration::DefaultAccountActionPolicy {
+                login_deny_reason,
+                logout_deny_reason,
+            }
+        });
+
+        AccountSlotSnapshot {
+            account_slot_id: slot.manifest.account_slot_id.clone(),
+            account_number: slot.account_number,
+            label: slot.manifest.label.clone(),
+            is_default: slot.manifest.is_default,
+            status,
+            health: if status == AccountSlotStatus::Ready {
+                AccountSlotHealth::Healthy
+            } else {
+                AccountSlotHealth::Unavailable
+            },
+            quota: None,
+            auth_mode,
+            attempt_generation: slot.manifest.attempt_generation,
+            registry_revision: revision,
+            active_login_operation_id: if slot.active_login_cancelable {
+                slot.active_login_operation_id.clone()
+            } else {
+                None
+            },
+            error_code,
+            actions: live_registration::available_actions(
+                status,
+                capability,
+                slot.manifest.is_default,
+                slot.active_login_operation_id.is_some(),
+                slot.active_logout_operation_id.is_some(),
+                default_policy.as_ref(),
+            ),
+            updated_at: slot.manifest.updated_at,
+        }
+    }
+
+    async fn runtime(&self, slot: &AccountSlotRecord) -> Arc<AccountRuntimeBundle> {
+        if let Some(runtime) = slot.runtime.get() {
+            return runtime;
+        }
+        let runtime_version = match self
+            .thread_store
+            .execution_account_slot_runtime_state(slot.manifest.account_slot_id.clone())
+            .await
+        {
+            Ok((runtime_version, _)) => runtime_version,
+            Err(error) => {
+                tracing::warn!(
+                    account_slot_id = %slot.manifest.account_slot_id,
+                    "failed to read account runtime version; using manifest recovery projection: {error}"
+                );
+                0
+            }
+        };
+        let auth_home = if runtime_version == 0 || slot.manifest.is_default {
+            slot.manifest.auth_home.clone()
+        } else {
+            self.runtime_home(&slot.manifest.account_slot_id, runtime_version)
+        };
+        let runtime = self.build_runtime(auth_home, runtime_version).await;
+        let _ = slot.runtime.set(Arc::clone(&runtime));
+        slot.runtime.get().unwrap_or(runtime)
+    }
+
+    async fn build_runtime(
+        &self,
+        auth_home: PathBuf,
+        runtime_version: u64,
+    ) -> Arc<AccountRuntimeBundle> {
+        let mut auth_config = self.auth_config_template.clone();
+        auth_config.codex_home = auth_home.clone();
+        let auth_manager = AuthManager::shared_from_managed_auth_config(auth_config).await;
+        let provider = create_model_provider(
+            self.config.model_provider.clone(),
+            Some(Arc::clone(&auth_manager)),
+        );
+        let models_manager =
+            provider.models_manager(auth_home.clone(), self.config.model_catalog.clone());
+        Arc::new(AccountRuntimeBundle {
+            runtime_version: AtomicU64::new(runtime_version),
+            auth_manager,
+            models_manager,
+        })
+    }
+
+    pub(crate) fn runtime_home(&self, slot_id: &str, runtime_version: u64) -> PathBuf {
+        self.config
+            .codex_home
+            .join(PRIVATE_HOMES_DIR)
+            .join(slot_id)
+            .join(format!("runtime-{runtime_version}"))
+            .to_path_buf()
+    }
+
+    fn capability(&self, manifest_error: Option<&'static str>) -> AccountSlotCapability {
+        let deny_reason = match self.default_auth_source() {
+            AuthSourceKind::CodexAccessTokenEnvironment => Some(DENY_HOST_ACCESS_TOKEN),
+            AuthSourceKind::WorkloadIdentity => Some(DENY_HOST_WORKLOAD_IDENTITY),
+            AuthSourceKind::External => Some(DENY_HOST_EXTERNAL_AUTH),
+            AuthSourceKind::ManagedStore | AuthSourceKind::CodexApiKeyEnvironment => manifest_error,
+        }
+        .or_else(|| {
+            self.provider_has_host_owned_auth()
+                .then_some(DENY_HOST_PROVIDER_AUTH)
+        });
+        AccountSlotCapability {
+            available: deny_reason.is_none(),
+            deny_reason: deny_reason.map(str::to_string),
+        }
+    }
+
+    fn default_auth_source(&self) -> AuthSourceKind {
+        self.state
+            .read()
+            .ok()
+            .and_then(|state| {
+                state
+                    .slots
+                    .iter()
+                    .find(|slot| slot.manifest.is_default)
+                    .cloned()
+            })
+            .and_then(|slot| slot.runtime.get())
+            .map(|runtime| runtime.auth_manager.auth_source_kind())
+            .unwrap_or(AuthSourceKind::External)
+    }
+
+    fn provider_has_host_owned_auth(&self) -> bool {
+        let provider = &self.config.model_provider;
+        provider.auth.is_some()
+            || provider.aws.is_some()
+            || provider.experimental_bearer_token.is_some()
+            || provider
+                .env_key
+                .as_ref()
+                .is_some_and(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
+            || provider.env_http_headers.as_ref().is_some_and(|headers| {
+                headers
+                    .values()
+                    .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
+            })
+    }
+
+    async fn resolve_execution_account(
+        &self,
+        binding: ExecutionAccountBinding,
+    ) -> Result<(Arc<ExecutionAccountContext>, OwnedMutexGuard<()>), CodexErr> {
+        self.reconcile().await.map_err(|error| {
+            CodexErr::Fatal(format!(
+                "account slot reconciliation failed: {}",
+                error.message
+            ))
+        })?;
+        let binding_transition = {
+            let state = self
+                .state
+                .read()
+                .map_err(|_| CodexErr::Fatal("account slot registry is unavailable".to_string()))?;
+            let slot = state
+                .slots
+                .iter()
+                .find(|slot| slot.manifest.account_slot_id == binding.slot_id)
+                .ok_or_else(|| {
+                    CodexErr::InvalidRequest(format!(
+                        "execution account slot `{}` is unavailable",
+                        binding.slot_id
+                    ))
+                })?;
+            if slot.active_login_operation_id.is_some() || slot.active_logout_operation_id.is_some()
+            {
+                return Err(CodexErr::InvalidRequest(format!(
+                    "execution account slot `{}` is changing credentials",
+                    binding.slot_id
+                )));
+            }
+            Arc::clone(&slot.binding_transition)
+        };
+        let binding_transition = binding_transition.lock_owned().await;
+        let (slot, manifest_error) = {
+            let state = self
+                .state
+                .read()
+                .map_err(|_| CodexErr::Fatal("account slot registry is unavailable".to_string()))?;
+            (
+                state
+                    .slots
+                    .iter()
+                    .find(|slot| slot.manifest.account_slot_id == binding.slot_id)
+                    .cloned(),
+                state.manifest_error,
+            )
+        };
+        let slot = slot.ok_or_else(|| {
+            CodexErr::InvalidRequest(format!(
+                "execution account slot `{}` is unavailable",
+                binding.slot_id
+            ))
+        })?;
+        let capability = self.capability(manifest_error);
+        if !slot.manifest.is_default && !capability.available {
+            return Err(CodexErr::InvalidRequest(format!(
+                "execution account slot `{}` is unavailable: {}",
+                binding.slot_id,
+                capability
+                    .deny_reason
+                    .as_deref()
+                    .unwrap_or("multi_account_unavailable")
+            )));
+        }
+        if !slot.manifest.is_default && slot.manifest.status != ManifestSlotStatus::Ready {
+            return Err(CodexErr::InvalidRequest(format!(
+                "execution account slot `{}` is not ready",
+                binding.slot_id
+            )));
+        }
+        if slot.active_login_operation_id.is_some() || slot.active_logout_operation_id.is_some() {
+            return Err(CodexErr::InvalidRequest(format!(
+                "execution account slot `{}` is changing credentials",
+                binding.slot_id
+            )));
+        }
+        let runtime = self.runtime(&slot).await;
+        if !slot.manifest.is_default && runtime.auth_manager.auth().await.is_none() {
+            return Err(CodexErr::InvalidRequest(format!(
+                "execution account slot `{}` is not ready",
+                binding.slot_id
+            )));
+        }
+        Ok((
+            Arc::new(ExecutionAccountContext {
+                binding,
+                auth_manager: Arc::clone(&runtime.auth_manager),
+                models_manager: Arc::clone(&runtime.models_manager),
+            }),
+            binding_transition,
+        ))
+    }
+    pub(crate) async fn slot_quota_subject(
+        &self,
+        account_slot_id: &str,
+    ) -> Result<(quota::QuotaCacheKey, Arc<AuthManager>), JSONRPCErrorError> {
+        self.reconcile().await?;
+        let slot = self
+            .state
+            .read()
+            .map_err(|_| internal_error("account slot registry is unavailable"))?
+            .slots
+            .iter()
+            .find(|slot| slot.manifest.account_slot_id == account_slot_id)
+            .cloned()
+            .ok_or_else(|| invalid_request("account slot is unavailable"))?;
+        if slot.manifest.status != ManifestSlotStatus::Ready && !slot.manifest.is_default {
+            return Err(invalid_request("account slot is not ready"));
+        }
+        let runtime = self.runtime(&slot).await;
+        Ok((
+            quota::QuotaCacheKey {
+                account_slot_id: slot.manifest.account_slot_id,
+                attempt_generation: slot.manifest.attempt_generation,
+                runtime_version: runtime.runtime_version.load(Ordering::Acquire),
+            },
+            Arc::clone(&runtime.auth_manager),
+        ))
+    }
+
+    pub(crate) async fn rotation_slot_inventory(
+        &self,
+    ) -> Result<Vec<RotationSlotIdentity>, JSONRPCErrorError> {
+        let global_directory = self.refresh_global_directory();
+        Ok(global_directory
+            .homes
+            .keys()
+            .map(|account_id| RotationSlotIdentity {
+                account_slot_id: account_id.to_string(),
+                account_number: account_id.number(),
+            })
+            .collect())
+    }
+
+    pub(crate) async fn fetch_slot_quota(
+        &self,
+        key: quota::QuotaCacheKey,
+        auth_manager: Arc<AuthManager>,
+    ) -> Result<quota::QuotaSnapshot, quota::QuotaFetchError> {
+        self.quota_cache
+            .read_or_fetch(key, || async {
+                let Some(auth) = auth_manager.auth().await else {
+                    return Err(quota::QuotaFetchError::Unsupported);
+                };
+                if !auth.uses_codex_backend() {
+                    return Err(quota::QuotaFetchError::Unsupported);
+                }
+                let client = BackendClient::from_auth(
+                    self.config.chatgpt_base_url.clone(),
+                    &auth,
+                    self.config.http_client_factory(),
+                );
+                let response =
+                    client
+                        .get_rate_limits_with_reset_credits()
+                        .await
+                        .map_err(|error| {
+                            quota::QuotaFetchError::Transient(format!(
+                                "failed to fetch account slot rate limits: {error}"
+                            ))
+                        })?;
+                if response.rate_limits.is_empty() {
+                    return Err(quota::QuotaFetchError::Transient(
+                        "failed to fetch account slot rate limits: no snapshots returned"
+                            .to_string(),
+                    ));
+                }
+                let rate_limits_by_limit_id: HashMap<_, _> = response
+                    .rate_limits
+                    .iter()
+                    .cloned()
+                    .map(|snapshot| {
+                        let limit_id = snapshot
+                            .limit_id
+                            .clone()
+                            .unwrap_or_else(|| "codex".to_string());
+                        (limit_id, snapshot.into())
+                    })
+                    .collect();
+                let rate_limits = response
+                    .rate_limits
+                    .iter()
+                    .find(|snapshot| snapshot.limit_id.as_deref() == Some("codex"))
+                    .cloned()
+                    .unwrap_or_else(|| response.rate_limits[0].clone())
+                    .into();
+                Ok(quota::QuotaSnapshot {
+                    captured_at: chrono::Utc::now().timestamp(),
+                    rate_limits,
+                    rate_limits_by_limit_id,
+                })
+            })
+            .await
+    }
+
+    fn spawn_quota_refresh(
+        self: &Arc<Self>,
+        key: quota::QuotaCacheKey,
+        auth_manager: Arc<AuthManager>,
+    ) {
+        let registry = Arc::clone(self);
+        tokio::spawn(async move {
+            let _ = registry.fetch_slot_quota(key, auth_manager).await;
+        });
+    }
+
+    pub(crate) async fn invalidate_slot_quota(&self, account_slot_id: &str) {
+        self.quota_cache.invalidate_slot(account_slot_id).await;
+        self.exhaustion_hints
+            .lock()
+            .await
+            .retain(|hint| hint.account_slot_id != account_slot_id);
+    }
+}
+
+mod global;
+pub(crate) mod live_registration;
+pub(crate) mod quota;
+pub(crate) mod rotation;
+
+impl ExecutionAccountResolver for AccountRegistry {
+    fn initial_binding_for_new_thread(&self) -> ExecutionAccountBinding {
+        self.refresh_global_directory()
+            .process_account_id
+            .map_or_else(
+                || ExecutionAccountBinding {
+                    slot_id: DEFAULT_SLOT_ID.to_string(),
+                    generation: 1,
+                },
+                |account_id| ExecutionAccountBinding {
+                    slot_id: account_id.to_string(),
+                    generation: 1,
+                },
+            )
+    }
+
+    fn resolve(&self, binding: ExecutionAccountBinding) -> ExecutionAccountResolverFuture<'_> {
+        Box::pin(async move {
+            let (execution_account, _binding_transition) =
+                if global::AccountId::parse(&binding.slot_id).is_some() {
+                    self.resolve_global_execution_account(binding).await?
+                } else {
+                    self.resolve_execution_account(binding).await?
+                };
+            Ok(execution_account)
+        })
+    }
+
+    fn resolve_for_transition(
+        &self,
+        binding: ExecutionAccountBinding,
+    ) -> ExecutionAccountTransitionResolverFuture<'_> {
+        Box::pin(async move {
+            let (execution_account, binding_transition) =
+                if global::AccountId::parse(&binding.slot_id).is_some() {
+                    self.resolve_global_execution_account(binding).await?
+                } else {
+                    self.resolve_execution_account(binding).await?
+                };
+            Ok(ResolvedExecutionAccountTransition::with_readiness_lease(
+                execution_account,
+                binding_transition,
+            ))
+        })
+    }
+}
+
+fn virtual_default_manifest(process_home: &Path) -> AccountSlotsManifest {
+    AccountSlotsManifest {
+        schema_version: MANIFEST_SCHEMA_VERSION,
+        revision: 1,
+        slots: vec![AccountSlotManifest {
+            account_slot_id: DEFAULT_SLOT_ID.to_string(),
+            label: "Default account".to_string(),
+            auth_home: process_home.to_path_buf(),
+            is_default: true,
+            status: ManifestSlotStatus::LoginRequired,
+            attempt_generation: 0,
+            updated_at: 0,
+            error_code: None,
+        }],
+    }
+}
+
+fn assign_account_numbers(slots: &[AccountSlotManifest]) -> Vec<u32> {
+    let mut assigned = vec![0; slots.len()];
+    let mut used = HashSet::with_capacity(slots.len());
+    used.insert(1_u32);
+    let mut secondary_indices = slots
+        .iter()
+        .enumerate()
+        .filter_map(|(index, slot)| (!slot.is_default).then_some(index))
+        .collect::<Vec<_>>();
+    secondary_indices.sort_by(|left, right| {
+        slots[*left]
+            .account_slot_id
+            .cmp(&slots[*right].account_slot_id)
+    });
+    for (index, slot) in slots.iter().enumerate() {
+        if slot.is_default {
+            assigned[index] = 1;
+        }
+    }
+    for &index in &secondary_indices {
+        if let Some(number) = parse_account_number(&slots[index].label)
+            && used.insert(number)
+        {
+            assigned[index] = number;
+        }
+    }
+    let mut next = 2_u32;
+    for index in secondary_indices {
+        if assigned[index] != 0 {
+            continue;
+        }
+        while used.contains(&next) {
+            next = next.saturating_add(1);
+        }
+        assigned[index] = next;
+        used.insert(next);
+        next = next.saturating_add(1);
+    }
+    assigned
+}
+
+fn parse_account_number(label: &str) -> Option<u32> {
+    let number = label.strip_prefix("Account ")?.parse::<u32>().ok()?;
+    (number >= 2 && label == format!("Account {number}")).then_some(number)
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountSlotCursor {
+    revision: u64,
+    after_slot_id: String,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum CursorError {
+    Invalid,
+    Stale,
+}
+
+fn encode_cursor(cursor: AccountSlotCursor) -> Result<String, serde_json::Error> {
+    serde_json::to_vec(&cursor).map(|json| URL_SAFE_NO_PAD.encode(json))
+}
+
+fn decode_cursor(cursor: &str, revision: u64) -> Result<AccountSlotCursor, CursorError> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(cursor)
+        .map_err(|_| CursorError::Invalid)?;
+    let cursor: AccountSlotCursor =
+        serde_json::from_slice(&bytes).map_err(|_| CursorError::Invalid)?;
+    if cursor.revision != revision {
+        return Err(CursorError::Stale);
+    }
+    Ok(cursor)
+}
+
+fn cursor_start(
+    cursor: Option<&str>,
+    revision: u64,
+    slots: &[AccountSlotRecord],
+) -> Result<usize, JSONRPCErrorError> {
+    let Some(cursor) = cursor else {
+        return Ok(0);
+    };
+    let cursor = match decode_cursor(cursor, revision) {
+        Ok(cursor) => cursor,
+        Err(CursorError::Invalid) => {
+            return Err(invalid_params("accountSlot/list cursor is invalid"));
+        }
+        Err(CursorError::Stale) => {
+            return Err(invalid_params(
+                "accountSlot/list cursor is stale; restart pagination",
+            ));
+        }
+    };
+    slots
+        .iter()
+        .position(|slot| slot.manifest.account_slot_id == cursor.after_slot_id)
+        .map(|index| index + 1)
+        .ok_or_else(|| invalid_params("accountSlot/list cursor is invalid"))
+}
+
+fn global_cursor_start(
+    cursor: Option<&str>,
+    revision: u64,
+    accounts: &[AccountSlotSnapshot],
+) -> Result<usize, JSONRPCErrorError> {
+    let Some(cursor) = cursor else {
+        return Ok(0);
+    };
+    let cursor = decode_cursor(cursor, revision).map_err(|error| match error {
+        CursorError::Invalid => invalid_params("accountSlot/list cursor is invalid"),
+        CursorError::Stale => {
+            invalid_params("accountSlot/list cursor is stale; restart pagination")
+        }
+    })?;
+    accounts
+        .iter()
+        .position(|account| account.account_slot_id == cursor.after_slot_id)
+        .map(|index| index + 1)
+        .ok_or_else(|| invalid_params("accountSlot/list cursor is invalid"))
+}
+
+#[cfg(test)]
+#[path = "account_registry_tests.rs"]
+mod tests;

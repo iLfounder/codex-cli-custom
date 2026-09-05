@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "LegacyAppPathString": {
+      "type": "string"
+    },
+    "MergeStrategy": {
+      "enum": [
+        "replace",
+        "upsert"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "expectedVersion": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "filePath": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/LegacyAppPathString"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Path to the config file to write; defaults to the user's `config.toml` when omitted."
+    },
+    "keyPath": {
+      "type": "string"
+    },
+    "mergeStrategy": {
+      "$ref": "#/definitions/MergeStrategy"
+    },
+    "value": true
+  },
+  "required": [
+    "keyPath",
+    "mergeStrategy",
+    "value"
+  ],
+  "title": "ConfigValueWriteParams",
+  "type": "object"
+}

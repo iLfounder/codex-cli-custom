@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "LegacyAppPathString": {
+      "type": "string"
+    }
+  },
+  "properties": {
+    "marketplaceName": {
+      "type": "string"
+    },
+    "marketplacePath": {
+      "$ref": "#/definitions/LegacyAppPathString"
+    },
+    "pluginId": {
+      "type": "string"
+    },
+    "pluginName": {
+      "type": "string"
+    },
+    "pluginPath": {
+      "$ref": "#/definitions/LegacyAppPathString"
+    },
+    "remotePluginId": {
+      "type": "string"
+    },
+    "remoteVersion": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "marketplaceName",
+    "marketplacePath",
+    "pluginId",
+    "pluginName",
+    "pluginPath",
+    "remotePluginId"
+  ],
+  "title": "PluginShareCheckoutResponse",
+  "type": "object"
+}

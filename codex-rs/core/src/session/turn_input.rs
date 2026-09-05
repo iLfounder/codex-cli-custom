@@ -1,0 +1,1086 @@
+//! Handles reply-bearing turn-input operations.
+//!
+//! This is the one place Core decides whether submitted input starts a turn,
+//! steers an active turn, or is rejected. It replies after that decision; it
+//! does not wait for user-prompt hooks, updating the in-memory model context,
+//! rollout persistence, or sampling.
+//!
+//! Persistent thread settings apply on Started and Steered. Turn start
+//! options only apply on Started.
+
+use super::TurnInput;
+use super::account_failover::PreSemanticAccountFailover;
+use super::session::IdleExecutionAccountReservation;
+use super::session::Session;
+use super::session::SessionConfiguration;
+use super::session::SessionSettingsUpdate;
+use super::thread_settings;
+use super::turn_context::NewTurnContextOptions;
+use super::turn_context::TurnContext;
+use crate::execution_account::ExecutionAccountSwitchError;
+use crate::execution_account::TurnExecutionAccountDecision;
+use crate::execution_account::TurnExecutionAccountSelection;
+use crate::state::ActiveTurn;
+use crate::state::TurnState;
+use crate::tasks::RegularTask;
+use codex_protocol::config_types::ModeKind;
+use codex_protocol::error::CodexErr;
+use codex_protocol::error::Result as CodexResult;
+use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::AdditionalContextEntry;
+use codex_protocol::protocol::CodexErrorInfo;
+use codex_protocol::protocol::ErrorEvent;
+use codex_protocol::protocol::Event;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::ExecutionAccountBinding;
+use codex_protocol::protocol::NonSteerableTurnKind;
+use codex_protocol::protocol::ThreadSettingsOverrides;
+use codex_protocol::turn_input::NotSubmittedReason;
+use codex_protocol::turn_input::TurnInput as SubmittedTurnInput;
+use codex_protocol::turn_input::TurnInputMode;
+use codex_protocol::turn_input::TurnInputRequest;
+use codex_protocol::turn_input::TurnInputSubmission;
+use codex_protocol::turn_input::TurnStartOptions;
+use codex_protocol::user_input::UserInput;
+use futures::future::BoxFuture;
+use serde_json::Value;
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::sync::Arc;
+use uuid::Uuid;
+
+#[cfg(test)]
+#[path = "turn_input_tests.rs"]
+mod tests;
+
+/// Why input is starting a turn; shared by admission and input delivery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TurnStartKind {
+    User,
+    Automatic,
+    Recovery,
+}
+
+impl TurnStartKind {
+    fn permits_mode(self, mode: ModeKind) -> bool {
+        match self {
+            Self::User | Self::Recovery => true,
+            Self::Automatic => mode != ModeKind::Plan,
+        }
+    }
+
+    /// Automatic work may neither leave an existing Plan mode nor enter it.
+    fn permits_settings(
+        self,
+        current: &SessionConfiguration,
+        proposed: &SessionConfiguration,
+    ) -> bool {
+        self.permits_mode(current.step_settings.collaboration_mode.mode)
+            && self.permits_mode(proposed.step_settings.collaboration_mode.mode)
+    }
+}
+
+/// Thread settings and start-only options prepared before Core knows whether
+/// turn input starts or steers.
+///
+/// Thread settings are validated up front but only applied after Core accepts
+/// the input. Start-only options are only consumed by `apply_started`.
+struct PreparedTurnInputSettings {
+    thread_settings_update: Option<SessionSettingsUpdate>,
+    start_options: TurnStartOptions,
+}
+
+struct RootExecutionAccountAdmission {
+    reservation: IdleExecutionAccountReservation,
+    initial_binding: ExecutionAccountBinding,
+    accepted_binding: ExecutionAccountBinding,
+    selected_by_policy: bool,
+    failover: Option<PreSemanticAccountFailover>,
+}
+
+impl RootExecutionAccountAdmission {
+    async fn revalidate(
+        &self,
+        session: &Session,
+        client_expected_binding: Option<&ExecutionAccountBinding>,
+    ) -> CodexResult<()> {
+        if !session
+            .idle_execution_account_reservation_matches(&self.reservation)
+            .await
+            || session.execution_account().binding
+                != if self.failover.is_some() {
+                    self.initial_binding.clone()
+                } else {
+                    self.accepted_binding.clone()
+                }
+            || client_expected_binding.is_some_and(|expected| expected != &self.initial_binding)
+        {
+            return Err(CodexErr::InvalidRequest(
+                "turn execution account admission changed before start".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn commit_cursor_after_started(&self, session: &Session) {
+        if self.failover.is_some() {
+            return;
+        }
+        if !self.selected_by_policy {
+            return;
+        }
+        match session
+            .services
+            .thread_store
+            .compare_and_swap_thread_account_rotation_cursor_for_binding(
+                session.thread_id(),
+                self.accepted_binding.clone(),
+                self.accepted_binding.slot_id.clone(),
+            )
+            .await
+        {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                tracing::warn!("execution account binding changed after turn start");
+            }
+            Err(error) => {
+                tracing::warn!("failed to commit execution account rotation cursor: {error}");
+            }
+        }
+    }
+
+    fn turn_runtime(
+        &self,
+        session: &Session,
+    ) -> Option<Arc<crate::execution_account::ExecutionAccountRuntime>> {
+        self.failover
+            .as_ref()
+            .map(|failover| failover.turn_runtime(session))
+    }
+
+    fn attach_failover(&self, turn_context: &TurnContext) {
+        if let Some(failover) = &self.failover {
+            turn_context.extension_data.insert(failover.clone());
+        }
+    }
+}
+
+fn prepare_root_execution_account_admission(
+    session: &Arc<Session>,
+    initial_binding: ExecutionAccountBinding,
+) -> BoxFuture<'_, CodexResult<RootExecutionAccountAdmission>> {
+    Box::pin(async move {
+        let reservation = session
+            .reserve_idle_execution_account_preparation()
+            .await
+            .map_err(execution_account_admission_error)?;
+        let cancellation = reservation.cancellation_token();
+        let account_rotation_policy = tokio::select! {
+            _ = cancellation.cancelled() => {
+                return Err(execution_account_admission_error(ExecutionAccountSwitchError::ThreadBusy));
+            }
+            policy = session.services.thread_store.thread_account_rotation_policy(session.thread_id()) => {
+                match policy {
+                    Ok(policy) => policy,
+                    Err(codex_thread_store::ThreadStoreError::Unsupported { .. }) => {
+                        codex_thread_store::ThreadAccountRotationPolicy::virtual_fixed(&initial_binding)
+                    }
+                    Err(error) => return Err(CodexErr::InvalidRequest(error.to_string())),
+                }
+            }
+        };
+        let selection = TurnExecutionAccountSelection {
+            thread_id: session.thread_id(),
+            current_binding: initial_binding.clone(),
+            account_rotation_policy,
+            credential_revision: session
+                .execution_account()
+                .auth_manager
+                .credential_revision(),
+        };
+        let selector = session.turn_execution_account_selector();
+        if selector.pre_semantic_failover_enabled() {
+            let decision = tokio::select! {
+                _ = cancellation.cancelled() => {
+                    return Err(execution_account_admission_error(ExecutionAccountSwitchError::ThreadBusy));
+                }
+                decision = selector.select(selection.clone()) => decision?,
+            };
+            let failover =
+                super::account_failover::prepare_initial(session, selection, decision).await?;
+            return Ok(RootExecutionAccountAdmission {
+                reservation,
+                accepted_binding: failover.accepted_binding(),
+                selected_by_policy: failover.selected_by_policy(),
+                initial_binding,
+                failover: Some(failover),
+            });
+        }
+        let result = select_root_execution_account(session, &reservation, selection).await;
+        match result {
+            Ok((accepted_binding, selected_by_policy)) => Ok(RootExecutionAccountAdmission {
+                reservation,
+                initial_binding,
+                accepted_binding,
+                selected_by_policy,
+                failover: None,
+            }),
+            Err(error) => {
+                session
+                    .release_idle_execution_account_reservation(&reservation)
+                    .await;
+                Err(error)
+            }
+        }
+    })
+}
+
+async fn select_root_execution_account(
+    session: &Arc<Session>,
+    reservation: &IdleExecutionAccountReservation,
+    selection: TurnExecutionAccountSelection,
+) -> CodexResult<(ExecutionAccountBinding, bool)> {
+    let cancellation = reservation.cancellation_token();
+    let initial_binding = selection.current_binding.clone();
+    for attempt in 0..=1 {
+        let selector = session.turn_execution_account_selector();
+        let decision = tokio::select! {
+            _ = cancellation.cancelled() => {
+                return Err(execution_account_admission_error(ExecutionAccountSwitchError::ThreadBusy));
+            }
+            decision = selector.select(selection.clone()) => decision?,
+        };
+        let (target_slot_id, reprepare_current) = match decision {
+            TurnExecutionAccountDecision::Keep => return Ok((initial_binding, false)),
+            TurnExecutionAccountDecision::Select { target_slot_id } => (target_slot_id, false),
+            TurnExecutionAccountDecision::ReprepareCurrent => {
+                (initial_binding.slot_id.clone(), true)
+            }
+        };
+
+        if target_slot_id == initial_binding.slot_id && !reprepare_current {
+            return Ok((initial_binding, true));
+        }
+
+        let resolver = session
+            .turn_execution_account_transition_resolver()
+            .ok_or_else(|| {
+                execution_account_admission_error(ExecutionAccountSwitchError::PreparationFailed)
+            })?;
+        let prepared = tokio::select! {
+            _ = cancellation.cancelled() => {
+                return Err(execution_account_admission_error(ExecutionAccountSwitchError::ThreadBusy));
+            }
+            prepared = resolver.resolve(initial_binding.clone(), target_slot_id.clone()) => {
+                prepared.map_err(execution_account_admission_error)?
+            }
+        };
+        let expected_generation = initial_binding.generation.checked_add(1).ok_or_else(|| {
+            execution_account_admission_error(ExecutionAccountSwitchError::PreparationFailed)
+        })?;
+        if prepared.execution_account().binding
+            != (ExecutionAccountBinding {
+                slot_id: target_slot_id,
+                generation: expected_generation,
+            })
+        {
+            return Err(execution_account_admission_error(
+                ExecutionAccountSwitchError::PreparationFailed,
+            ));
+        }
+        let switched = session
+            .switch_execution_account_for_reserved_turn(
+                initial_binding.clone(),
+                Arc::clone(prepared.execution_account()),
+                prepared.services().clone(),
+                reservation.clone(),
+            )
+            .await;
+        match switched {
+            Ok(binding) => return Ok((binding, true)),
+            Err(ExecutionAccountSwitchError::StaleGeneration)
+                if attempt == 0 && session.execution_account().binding == initial_binding =>
+            {
+                continue;
+            }
+            Err(error) => return Err(execution_account_admission_error(error)),
+        }
+    }
+    unreachable!("bounded account selection retry must return")
+}
+
+fn execution_account_admission_error(error: ExecutionAccountSwitchError) -> CodexErr {
+    CodexErr::InvalidRequest(error.to_string())
+}
+
+impl PreparedTurnInputSettings {
+    /// Validates turn-input settings without applying them so rejected input
+    /// leaves the thread unchanged.
+    async fn prepare(
+        session: &Session,
+        thread_settings: ThreadSettingsOverrides,
+        start_options: TurnStartOptions,
+    ) -> CodexResult<Self> {
+        let thread_settings_update = if thread_settings == ThreadSettingsOverrides::default() {
+            None
+        } else {
+            let updates = thread_settings::prepare_update(thread_settings);
+            session
+                .preview_settings(&updates)
+                .await
+                .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?;
+            Some(updates)
+        };
+        Ok(Self {
+            thread_settings_update,
+            start_options,
+        })
+    }
+
+    fn required_active_final_output_json_schema(&self) -> Option<&Value> {
+        self.start_options.final_output_json_schema.as_ref()
+    }
+
+    /// Applies persistent settings and start-only options before creating a
+    /// new turn context. Returns `None` if admission rejects the candidate,
+    /// without committing its settings.
+    async fn apply_started(
+        self,
+        session: &Arc<Session>,
+        submission_id: String,
+        kind: TurnStartKind,
+        account_runtime: Option<Arc<crate::execution_account::ExecutionAccountRuntime>>,
+    ) -> CodexResult<Option<Arc<TurnContext>>> {
+        let TurnStartOptions {
+            turn_trigger,
+            final_output_json_schema,
+            service_tier,
+            parent_turn_id,
+            root_turn_id,
+            cyber_access_program,
+        } = self.start_options;
+        let emit_thread_settings_applied = self.thread_settings_update.is_some();
+        let _settings_guard = if emit_thread_settings_applied {
+            Some(thread_settings::acquire_persistence_lock(session).await)
+        } else {
+            None
+        };
+        let mut updates = self.thread_settings_update.unwrap_or_default();
+        updates.service_tier_for_turn = service_tier;
+
+        let options = NewTurnContextOptions {
+            final_output_json_schema,
+            cyber_access_program,
+        };
+        let turn_context = session
+            .new_turn_with_sub_id_if_for_account_runtime(
+                submission_id.clone(),
+                updates,
+                options,
+                |current, proposed| kind.permits_settings(current, proposed),
+                account_runtime,
+            )
+            .await?;
+        let Some((turn_context, settings_snapshot)) = turn_context else {
+            return Ok(None);
+        };
+        if let Some(turn_trigger) = turn_trigger {
+            turn_context
+                .turn_metadata_state
+                .set_turn_trigger(turn_trigger);
+        }
+        if emit_thread_settings_applied {
+            thread_settings::emit_applied(session, submission_id, settings_snapshot).await;
+        }
+        if let Some(parent_turn_id) = parent_turn_id {
+            turn_context
+                .turn_metadata_state
+                .set_parent_turn_id(parent_turn_id);
+        }
+        if let Some(root_turn_id) = root_turn_id {
+            turn_context
+                .turn_metadata_state
+                .set_root_turn_id(root_turn_id);
+        }
+        Ok(Some(turn_context))
+    }
+
+    /// Applies only persistent settings after steering succeeds. The active
+    /// turn keeps its existing context; subsequent turns see the update.
+    async fn apply_steered(self, session: &Session, submission_id: String) -> CodexResult<()> {
+        let Some(thread_settings_update) = self.thread_settings_update else {
+            return Ok(());
+        };
+        thread_settings::apply_update(session, submission_id, thread_settings_update)
+            .await
+            .map_err(|error| CodexErr::InvalidRequest(error.to_string()))
+    }
+}
+
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "turn admission and execution control share one transition fence"
+)]
+pub(super) async fn handle(
+    session: &Arc<Session>,
+    request: TurnInputRequest,
+    mode: TurnInputMode,
+    submission_id: String,
+) -> CodexResult<TurnInputSubmission> {
+    let _transition = session.execution_runtime_transition_lock.lock().await;
+    if session.execution_control_is_closing() {
+        return Err(CodexErr::InvalidRequest(
+            "thread runtime is closing".to_string(),
+        ));
+    }
+    if let Some(expected) = request.expected_execution_account.as_ref() {
+        let actual = &session.execution_account().binding;
+        if expected != actual {
+            return Ok(TurnInputSubmission::NotSubmitted {
+                reason: NotSubmittedReason::ExpectedExecutionAccountMismatch {
+                    expected: expected.clone(),
+                    actual: actual.clone(),
+                },
+            });
+        }
+    }
+    let initial_binding = session.execution_account().binding.clone();
+    match mode {
+        TurnInputMode::StartOrSteer => {
+            start_or_steer(session, request, submission_id, initial_binding).await
+        }
+        TurnInputMode::StartIfIdle => {
+            let kind = match &request.input {
+                SubmittedTurnInput::UserInput { content, .. } if !content.is_empty() => {
+                    TurnStartKind::User
+                }
+                SubmittedTurnInput::UserInput { .. }
+                | SubmittedTurnInput::ResponseItem(_)
+                | SubmittedTurnInput::InterAgentCommunication(_) => TurnStartKind::Automatic,
+            };
+            start_if_idle(session, request, submission_id, kind, initial_binding).await
+        }
+        TurnInputMode::Steer { expected_turn_id } => {
+            steer(session, request, expected_turn_id, submission_id).await
+        }
+    }
+}
+
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "turn recovery admission and execution control share one transition fence"
+)]
+pub(super) async fn handle_recovery(
+    session: &Arc<Session>,
+    thread_settings: ThreadSettingsOverrides,
+    start_options: TurnStartOptions,
+    submission_id: String,
+) -> CodexResult<TurnInputSubmission> {
+    let _transition = session.execution_runtime_transition_lock.lock().await;
+    if session.execution_control_is_closing() {
+        return Err(CodexErr::InvalidRequest(
+            "thread runtime is closing".to_string(),
+        ));
+    }
+    let request = TurnInputRequest::user_input(Vec::new())
+        .with_thread_settings(thread_settings)
+        .on_start(TurnStartOptions {
+            turn_trigger: Some("retry".to_string()),
+            ..start_options
+        });
+    let initial_binding = session.execution_account().binding.clone();
+    start_if_idle(
+        session,
+        request,
+        submission_id,
+        TurnStartKind::Recovery,
+        initial_binding,
+    )
+    .await
+}
+
+async fn start_or_steer(
+    session: &Arc<Session>,
+    request: TurnInputRequest,
+    submission_id: String,
+    initial_binding: ExecutionAccountBinding,
+) -> CodexResult<TurnInputSubmission> {
+    let TurnInputRequest {
+        mut input,
+        thread_settings,
+        start,
+        additional_context,
+        responsesapi_client_metadata,
+        expected_execution_account,
+        ..
+    } = request;
+    let has_explicit_input = match &input {
+        SubmittedTurnInput::UserInput { content, .. } => !content.is_empty(),
+        SubmittedTurnInput::ResponseItem(ResponseItem::FunctionCallOutput {
+            call_id: None,
+            ..
+        }) => true,
+        _ => {
+            return Err(CodexErr::InvalidRequest(
+                "only user input or standalone function-call outputs can start or steer a turn"
+                    .to_string(),
+            ));
+        }
+    };
+    let can_start_root_turn = start.parent_turn_id.is_none() && start.root_turn_id.is_none();
+    let incoming_root_turn_id = start
+        .parent_turn_id
+        .as_ref()
+        .map(|_| start.root_turn_id.clone());
+    let settings = PreparedTurnInputSettings::prepare(session, thread_settings, start).await?;
+    match session
+        .steer_input(
+            &mut input,
+            additional_context.clone(),
+            /*expected_turn_id*/ None,
+            settings.required_active_final_output_json_schema(),
+            responsesapi_client_metadata.clone(),
+            incoming_root_turn_id,
+        )
+        .await
+    {
+        Ok(turn_id) => {
+            settings.apply_steered(session, submission_id).await?;
+            Ok(TurnInputSubmission::Steered { turn_id })
+        }
+        Err(NotSubmittedReason::NoActiveTurn) => {
+            let root_execution_account_admission = if can_start_root_turn
+                && matches!(
+                    &input,
+                    SubmittedTurnInput::UserInput { content, .. } if !content.is_empty()
+                )
+                && session.can_admit_root_user_turn().await
+                && session.conversation.running_state().await.is_none()
+            {
+                Some(
+                    prepare_root_execution_account_admission(session, initial_binding.clone())
+                        .await?,
+                )
+            } else {
+                None
+            };
+            let account_runtime = root_execution_account_admission
+                .as_ref()
+                .and_then(|admission| admission.turn_runtime(session));
+            let turn_context = match settings
+                .apply_started(
+                    session,
+                    submission_id.clone(),
+                    TurnStartKind::User,
+                    account_runtime,
+                )
+                .await
+            {
+                Ok(Some(turn_context)) => turn_context,
+                Ok(None) => {
+                    if let Some(admission) = root_execution_account_admission.as_ref() {
+                        session
+                            .release_idle_execution_account_reservation(&admission.reservation)
+                            .await;
+                    }
+                    return Ok(TurnInputSubmission::NotSubmitted {
+                        reason: NotSubmittedReason::PlanMode,
+                    });
+                }
+                Err(error) => {
+                    if let Some(admission) = root_execution_account_admission.as_ref() {
+                        session
+                            .release_idle_execution_account_reservation(&admission.reservation)
+                            .await;
+                    }
+                    return Err(error);
+                }
+            };
+            if let Some(admission) = root_execution_account_admission.as_ref() {
+                admission.attach_failover(turn_context.as_ref());
+            }
+            if can_start_root_turn
+                && has_explicit_input
+                && turn_context
+                    .turn_metadata_state
+                    .can_start_root_turn(&turn_context.session_source)
+            {
+                turn_context
+                    .turn_metadata_state
+                    .set_root_turn_id(submission_id.clone());
+            }
+            if let Some(responsesapi_client_metadata) = responsesapi_client_metadata {
+                turn_context
+                    .turn_metadata_state
+                    .set_responsesapi_client_metadata(responsesapi_client_metadata);
+            }
+            session
+                .maybe_emit_model_warnings_for_turn(turn_context.as_ref())
+                .await;
+            if let SubmittedTurnInput::UserInput { content, .. } = &input {
+                turn_context.session_telemetry.user_prompt(content);
+            }
+            let mut task_input = merge_additional_context_input(session, additional_context).await;
+            if has_explicit_input {
+                task_input.push(pending_turn_input(input));
+            }
+            if let Some(admission) = root_execution_account_admission {
+                if let Err(error) = admission
+                    .revalidate(session, expected_execution_account.as_ref())
+                    .await
+                {
+                    session
+                        .release_idle_execution_account_reservation(&admission.reservation)
+                        .await;
+                    return Err(error);
+                }
+                session.clear_connector_selection().await;
+                session
+                    .start_task(turn_context, task_input, RegularTask::new())
+                    .await;
+                session.finish_idle_execution_account_reservation(&admission.reservation);
+                admission.commit_cursor_after_started(session).await;
+            } else {
+                session
+                    .spawn_task(turn_context, task_input, RegularTask::new())
+                    .await;
+            }
+            Ok(TurnInputSubmission::Started {
+                turn_id: submission_id,
+            })
+        }
+        Err(reason) => Ok(TurnInputSubmission::NotSubmitted { reason }),
+    }
+}
+
+async fn start_if_idle(
+    session: &Arc<Session>,
+    request: TurnInputRequest,
+    submission_id: String,
+    kind: TurnStartKind,
+    initial_binding: ExecutionAccountBinding,
+) -> CodexResult<TurnInputSubmission> {
+    let TurnInputRequest {
+        input,
+        thread_settings,
+        start,
+        additional_context,
+        responsesapi_client_metadata,
+        expected_execution_account,
+        ..
+    } = request;
+    let has_user_input = matches!(
+        &input,
+        SubmittedTurnInput::UserInput { content, .. } if !content.is_empty()
+    );
+    let can_start_root_turn = start.parent_turn_id.is_none() && start.root_turn_id.is_none();
+    let should_select_execution_account = kind == TurnStartKind::User
+        && has_user_input
+        && can_start_root_turn
+        && session.can_admit_root_user_turn().await
+        && session.conversation.running_state().await.is_none();
+    if session.input_queue.has_trigger_turn_mailbox_items().await {
+        return Ok(TurnInputSubmission::NotSubmitted {
+            reason: NotSubmittedReason::PendingTriggerTurn,
+        });
+    }
+    // Preserve current-Plan rejection before reservation and settings errors.
+    // The commit-time decision also checks the proposed mode.
+    if kind == TurnStartKind::Automatic
+        && !kind.permits_mode(session.collaboration_mode().await.mode)
+    {
+        return Ok(TurnInputSubmission::NotSubmitted {
+            reason: NotSubmittedReason::PlanMode,
+        });
+    }
+    // Preserve the typed idle rejection before account selection; reservation rechecks this state.
+    if session.active_turn.lock().await.is_some() {
+        return Ok(TurnInputSubmission::NotSubmitted {
+            reason: NotSubmittedReason::NotIdle,
+        });
+    }
+
+    let root_execution_account_admission = if should_select_execution_account {
+        match prepare_root_execution_account_admission(session, initial_binding).await {
+            Ok(admission) => Some(admission),
+            Err(error) => return Err(error),
+        }
+    } else {
+        None
+    };
+    let turn_state = if let Some(admission) = root_execution_account_admission.as_ref() {
+        admission.reservation.turn_state()
+    } else {
+        let mut active_turn = session.active_turn.lock().await;
+        if active_turn.is_some() {
+            return Ok(TurnInputSubmission::NotSubmitted {
+                reason: NotSubmittedReason::NotIdle,
+            });
+        }
+        let active_turn = active_turn.get_or_insert_with(ActiveTurn::default);
+        Arc::clone(&active_turn.turn_state)
+    };
+
+    if session.input_queue.has_trigger_turn_mailbox_items().await {
+        if let Some(admission) = root_execution_account_admission.as_ref() {
+            session
+                .release_idle_execution_account_reservation(&admission.reservation)
+                .await;
+        } else {
+            session.clear_reserved_idle_turn(&turn_state).await;
+        }
+        session.maybe_start_turn_for_pending_work().await;
+        return Ok(TurnInputSubmission::NotSubmitted {
+            reason: NotSubmittedReason::PendingTriggerTurn,
+        });
+    }
+
+    let settings = match PreparedTurnInputSettings::prepare(session, thread_settings, start).await {
+        Ok(settings) => settings,
+        Err(error) => {
+            if let Some(admission) = root_execution_account_admission.as_ref() {
+                session
+                    .release_idle_execution_account_reservation(&admission.reservation)
+                    .await;
+            } else {
+                session.clear_reserved_idle_turn(&turn_state).await;
+            }
+            return Err(error);
+        }
+    };
+    let account_runtime = root_execution_account_admission
+        .as_ref()
+        .and_then(|admission| admission.turn_runtime(session));
+    let turn_context = match settings
+        .apply_started(session, submission_id.clone(), kind, account_runtime)
+        .await
+    {
+        Ok(Some(turn_context)) => turn_context,
+        Ok(None) => {
+            if let Some(admission) = root_execution_account_admission.as_ref() {
+                session
+                    .release_idle_execution_account_reservation(&admission.reservation)
+                    .await;
+            } else {
+                session.clear_reserved_idle_turn(&turn_state).await;
+            }
+            return Ok(TurnInputSubmission::NotSubmitted {
+                reason: NotSubmittedReason::PlanMode,
+            });
+        }
+        Err(error) => {
+            if let Some(admission) = root_execution_account_admission.as_ref() {
+                session
+                    .release_idle_execution_account_reservation(&admission.reservation)
+                    .await;
+            } else {
+                session.clear_reserved_idle_turn(&turn_state).await;
+            }
+            return Err(error);
+        }
+    };
+    if let Some(admission) = root_execution_account_admission.as_ref() {
+        admission.attach_failover(turn_context.as_ref());
+    }
+    if let Some(responsesapi_client_metadata) = responsesapi_client_metadata {
+        turn_context
+            .turn_metadata_state
+            .set_responsesapi_client_metadata(responsesapi_client_metadata);
+    }
+    if kind == TurnStartKind::User
+        && can_start_root_turn
+        && turn_context
+            .turn_metadata_state
+            .can_start_root_turn(&turn_context.session_source)
+    {
+        turn_context
+            .turn_metadata_state
+            .set_root_turn_id(submission_id.clone());
+    }
+    session
+        .maybe_emit_model_warnings_for_turn(turn_context.as_ref())
+        .await;
+
+    let mut task_input = merge_additional_context_input(session, additional_context).await;
+    match kind {
+        TurnStartKind::User => {
+            session.clear_connector_selection().await;
+            if let SubmittedTurnInput::UserInput { content, .. } = &input {
+                turn_context.session_telemetry.user_prompt(content);
+            }
+            task_input.push(pending_turn_input(input));
+        }
+        TurnStartKind::Automatic => {
+            // Empty automatic user input resumes sampling without a new message.
+            if !matches!(&input, SubmittedTurnInput::UserInput { .. }) {
+                session
+                    .input_queue
+                    .extend_pending_input_for_turn_state(
+                        turn_state.as_ref(),
+                        vec![pending_turn_input(input)],
+                    )
+                    .await;
+            }
+        }
+        TurnStartKind::Recovery => {
+            // Recovery resumes an existing turn without a new empty user message.
+        }
+    }
+    if let Some(admission) = root_execution_account_admission {
+        if let Err(error) = admission
+            .revalidate(session, expected_execution_account.as_ref())
+            .await
+        {
+            session
+                .release_idle_execution_account_reservation(&admission.reservation)
+                .await;
+            return Err(error);
+        }
+        session
+            .start_task(turn_context, task_input, RegularTask::new())
+            .await;
+        session.finish_idle_execution_account_reservation(&admission.reservation);
+        admission.commit_cursor_after_started(session).await;
+    } else {
+        session
+            .start_task(turn_context, task_input, RegularTask::new())
+            .await;
+    }
+    Ok(TurnInputSubmission::Started {
+        turn_id: submission_id,
+    })
+}
+
+async fn steer(
+    session: &Arc<Session>,
+    request: TurnInputRequest,
+    expected_turn_id: String,
+    submission_id: String,
+) -> CodexResult<TurnInputSubmission> {
+    let TurnInputRequest {
+        mut input,
+        thread_settings,
+        start,
+        additional_context,
+        responsesapi_client_metadata,
+        ..
+    } = request;
+    if !matches!(&input, SubmittedTurnInput::UserInput { .. }) {
+        return Err(CodexErr::InvalidRequest(
+            "only user input can steer a turn".to_string(),
+        ));
+    }
+    let incoming_root_turn_id = start
+        .parent_turn_id
+        .as_ref()
+        .map(|_| start.root_turn_id.clone());
+    let settings = PreparedTurnInputSettings::prepare(session, thread_settings, start).await?;
+    match session
+        .steer_input(
+            &mut input,
+            additional_context,
+            Some(expected_turn_id.as_str()),
+            settings.required_active_final_output_json_schema(),
+            responsesapi_client_metadata,
+            incoming_root_turn_id,
+        )
+        .await
+    {
+        Ok(turn_id) => {
+            settings.apply_steered(session, submission_id).await?;
+            Ok(TurnInputSubmission::Steered { turn_id })
+        }
+        Err(reason) => Ok(TurnInputSubmission::NotSubmitted { reason }),
+    }
+}
+
+impl Session {
+    pub(crate) async fn route_realtime_text_input(self: &Arc<Self>, text: String) {
+        let submission_id = Uuid::now_v7().to_string();
+        let submission = handle(
+            self,
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text,
+                text_elements: Vec::new(),
+            }])
+            .on_start(TurnStartOptions {
+                turn_trigger: Some("realtime".to_string()),
+                ..Default::default()
+            }),
+            TurnInputMode::StartOrSteer,
+            submission_id.clone(),
+        )
+        .await;
+        match submission {
+            Ok(TurnInputSubmission::Started { .. } | TurnInputSubmission::Steered { .. }) => {}
+            Ok(TurnInputSubmission::NotSubmitted { reason }) => {
+                self.send_event_raw(Event {
+                    id: submission_id,
+                    msg: EventMsg::Error(ErrorEvent {
+                        misalignment: None,
+                        message: format!("failed to submit turn input: {reason:?}"),
+                        codex_error_info: Some(CodexErrorInfo::BadRequest),
+                    }),
+                })
+                .await;
+            }
+            Err(error) => {
+                self.send_event_raw(Event {
+                    id: submission_id,
+                    msg: EventMsg::Error(error.to_error_event(/*message_prefix*/ None)),
+                })
+                .await;
+            }
+        }
+    }
+
+    async fn clear_reserved_idle_turn(&self, turn_state: &Arc<tokio::sync::Mutex<TurnState>>) {
+        let mut active_turn_guard = self.active_turn.lock().await;
+        if let Some(active_turn) = active_turn_guard.as_ref()
+            && active_turn.task.is_none()
+            && Arc::ptr_eq(&active_turn.turn_state, turn_state)
+        {
+            *active_turn_guard = None;
+        }
+    }
+
+    /// Inject additional user input or a standalone tool output into the active turn.
+    ///
+    /// Returns the active turn id when accepted.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "active turn checks and turn state updates must remain atomic"
+    )]
+    async fn steer_input(
+        &self,
+        input: &mut SubmittedTurnInput,
+        additional_context: BTreeMap<String, AdditionalContextEntry>,
+        expected_turn_id: Option<&str>,
+        required_final_output_json_schema: Option<&Value>,
+        responsesapi_client_metadata: Option<HashMap<String, String>>,
+        incoming_root_turn_id: Option<Option<String>>,
+    ) -> Result<String, NotSubmittedReason> {
+        let mut active = self.active_turn.lock().await;
+        let Some(active_turn) = active.as_mut() else {
+            return Err(NotSubmittedReason::NoActiveTurn);
+        };
+
+        let Some(active_task) = active_turn.task.as_ref() else {
+            return Err(NotSubmittedReason::NoActiveTurn);
+        };
+        let active_turn_id = &active_task.turn_context.sub_id;
+
+        if let Some(expected_turn_id) = expected_turn_id
+            && expected_turn_id != active_turn_id
+        {
+            return Err(NotSubmittedReason::ExpectedTurnMismatch {
+                expected: expected_turn_id.to_string(),
+                actual: active_turn_id.clone(),
+            });
+        }
+
+        match active_task.kind {
+            crate::state::TaskKind::Regular => {}
+            crate::state::TaskKind::Review => {
+                return Err(NotSubmittedReason::ActiveTurnNotSteerable {
+                    turn_kind: NonSteerableTurnKind::Review,
+                });
+            }
+            crate::state::TaskKind::Compact => {
+                return Err(NotSubmittedReason::ActiveTurnNotSteerable {
+                    turn_kind: NonSteerableTurnKind::Compact,
+                });
+            }
+        }
+
+        if matches!(input, SubmittedTurnInput::UserInput { content, .. } if content.is_empty()) {
+            return Err(NotSubmittedReason::EmptyInput);
+        }
+        // Compare JSON values directly instead of serialized schema text.
+        // Value equality ignores object key order while preserving array and
+        // scalar distinctions; broader JSON Schema equivalence is out of scope.
+        if let Some(required_schema) = required_final_output_json_schema
+            && active_task.turn_context.final_output_json_schema.as_ref() != Some(required_schema)
+        {
+            return Err(NotSubmittedReason::ActiveTurnOutputSchemaMismatch);
+        }
+        let mut pending_input = merge_additional_context_input(self, additional_context).await;
+
+        if let Some(responsesapi_client_metadata) = responsesapi_client_metadata {
+            active_task
+                .turn_context
+                .turn_metadata_state
+                .set_responsesapi_client_metadata(responsesapi_client_metadata);
+        }
+
+        let input = match input {
+            SubmittedTurnInput::UserInput { content, client_id } => {
+                active_task
+                    .turn_context
+                    .session_telemetry
+                    .user_prompt(content);
+                TurnInput::UserInput {
+                    content: std::mem::take(content),
+                    client_id: client_id.clone(),
+                }
+            }
+            input => pending_turn_input(input.clone()),
+        };
+        pending_input.push(input);
+        if active_task
+            .turn_context
+            .turn_metadata_state
+            .root_turn_id()
+            .is_none()
+            && let Some(Some(incoming_root_turn_id)) = incoming_root_turn_id
+        {
+            active_task
+                .turn_context
+                .turn_metadata_state
+                .set_root_turn_id(incoming_root_turn_id);
+        }
+        self.input_queue
+            .extend_pending_input_and_accept_mailbox_delivery_for_turn_state(
+                active_turn.turn_state.as_ref(),
+                pending_input,
+            )
+            .await;
+        Ok(active_turn_id.clone())
+    }
+}
+
+async fn merge_additional_context_input(
+    session: &Session,
+    additional_context: BTreeMap<String, AdditionalContextEntry>,
+) -> Vec<TurnInput> {
+    let additional_context_input = {
+        let mut state = session.state.lock().await;
+        state.additional_context.merge(additional_context)
+    };
+    additional_context_input
+        .into_iter()
+        .map(|item| session.annotate_client_response_item(item))
+        .map(TurnInput::ResponseItem)
+        .collect()
+}
+
+fn pending_turn_input(input: SubmittedTurnInput) -> TurnInput {
+    match input {
+        SubmittedTurnInput::UserInput { content, client_id } => {
+            TurnInput::UserInput { content, client_id }
+        }
+        SubmittedTurnInput::ResponseItem(mut item)
+            if matches!(
+                &item,
+                ResponseItem::FunctionCallOutput { call_id: None, .. }
+            ) =>
+        {
+            Session::assign_missing_response_item_id(&mut item);
+            TurnInput::FunctionCallOutput(item)
+        }
+        SubmittedTurnInput::ResponseItem(item) => TurnInput::ResponseItem(item.into()),
+        SubmittedTurnInput::InterAgentCommunication(communication) => {
+            TurnInput::InterAgentCommunication(communication)
+        }
+    }
+}

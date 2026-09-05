@@ -1,0 +1,85 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "LegacyAppPathString": {
+      "type": "string"
+    },
+    "PluginShareDiscoverability": {
+      "enum": [
+        "LISTED",
+        "UNLISTED",
+        "PRIVATE"
+      ],
+      "type": "string"
+    },
+    "PluginSharePrincipalType": {
+      "enum": [
+        "user",
+        "group",
+        "workspace"
+      ],
+      "type": "string"
+    },
+    "PluginShareTarget": {
+      "properties": {
+        "principalId": {
+          "type": "string"
+        },
+        "principalType": {
+          "$ref": "#/definitions/PluginSharePrincipalType"
+        },
+        "role": {
+          "$ref": "#/definitions/PluginShareTargetRole"
+        }
+      },
+      "required": [
+        "principalId",
+        "principalType",
+        "role"
+      ],
+      "type": "object"
+    },
+    "PluginShareTargetRole": {
+      "enum": [
+        "reader",
+        "editor"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "discoverability": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/PluginShareDiscoverability"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "pluginPath": {
+      "$ref": "#/definitions/LegacyAppPathString"
+    },
+    "remotePluginId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "shareTargets": {
+      "items": {
+        "$ref": "#/definitions/PluginShareTarget"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "pluginPath"
+  ],
+  "title": "PluginShareSaveParams",
+  "type": "object"
+}

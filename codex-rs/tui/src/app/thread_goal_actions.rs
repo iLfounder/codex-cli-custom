@@ -1,0 +1,614 @@
+use super::App;
+use crate::app_event::AppEvent;
+use crate::app_event::ThreadGoalSemanticSnapshot;
+use crate::app_event::ThreadGoalSetMode;
+use crate::app_server_session::AppServerSession;
+use crate::bottom_pane::SelectionAction;
+use crate::bottom_pane::SelectionItem;
+use crate::bottom_pane::SelectionViewParams;
+use crate::bottom_pane::popup_consts::standard_popup_hint_line;
+use crate::goal_display::GOAL_USAGE;
+use crate::goal_display::goal_status_label;
+use crate::goal_display::goal_usage_summary;
+use crate::goal_files;
+use crate::text_formatting::truncate_text;
+use codex_app_server_client::TypedRequestError;
+use codex_app_server_protocol::ThreadGoal;
+use codex_app_server_protocol::ThreadGoalStatus;
+use codex_protocol::ThreadId;
+
+const EPHEMERAL_THREAD_GOAL_ERROR_MESSAGE: &str = concat!(
+    "Goals need a saved session. This session is temporary.\n",
+    "Run `codex` to start a saved session, or `codex resume` / `/resume` to reopen one.",
+);
+
+impl App {
+    pub(super) async fn open_thread_goal_menu(
+        &mut self,
+        app_server: &mut AppServerSession,
+        thread_id: ThreadId,
+    ) {
+        let result = app_server.thread_goal_get(thread_id).await;
+        if self.current_displayed_thread_id() != Some(thread_id) {
+            return;
+        }
+
+        let response = match result {
+            Ok(response) => response,
+            Err(err) => {
+                self.chat_widget
+                    .add_error_message(thread_goal_error_message("read", &err));
+                return;
+            }
+        };
+
+        let Some(goal) = response.goal else {
+            self.chat_widget.add_info_message(
+                GOAL_USAGE.to_string(),
+                Some("No goal is currently set.".to_string()),
+            );
+            return;
+        };
+
+        self.chat_widget.show_goal_summary(goal);
+    }
+
+    pub(super) async fn maybe_prompt_resume_paused_goal_after_resume(
+        &mut self,
+        app_server: &mut AppServerSession,
+        thread_id: ThreadId,
+    ) {
+        if self.chat_widget.has_misalignment_policy_violation() {
+            return;
+        }
+
+        let result = app_server.thread_goal_get(thread_id).await;
+        if self.current_displayed_thread_id() != Some(thread_id) {
+            return;
+        }
+
+        let response = match result {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::warn!("failed to read thread goal after resume: {err}");
+                return;
+            }
+        };
+
+        let Some(goal) = response.goal else {
+            return;
+        };
+        if matches!(
+            goal.status,
+            ThreadGoalStatus::Paused | ThreadGoalStatus::Blocked | ThreadGoalStatus::UsageLimited
+        ) {
+            self.chat_widget
+                .show_resume_paused_goal_prompt(thread_id, goal.objective);
+        }
+    }
+
+    pub(super) async fn open_thread_goal_editor(
+        &mut self,
+        app_server: &mut AppServerSession,
+        thread_id: Option<ThreadId>,
+    ) {
+        let Some(thread_id) = thread_id else {
+            self.show_no_thread_goal_to_edit();
+            return;
+        };
+
+        let result = app_server.thread_goal_get(thread_id).await;
+        if self.current_displayed_thread_id() != Some(thread_id) {
+            return;
+        }
+
+        let response = match result {
+            Ok(response) => response,
+            Err(err) => {
+                self.chat_widget
+                    .add_error_message(thread_goal_error_message("read", &err));
+                return;
+            }
+        };
+
+        let Some(mut goal) = response.goal else {
+            self.show_no_thread_goal_to_edit();
+            return;
+        };
+        let snapshot = ThreadGoalSemanticSnapshot::from(&goal);
+
+        let codex_home = app_server.codex_home_path(&self.config.codex_home);
+        match goal_files::objective_text_for_edit(app_server, codex_home.as_ref(), &goal.objective)
+            .await
+        {
+            Ok(objective) => goal.objective = objective,
+            Err(err) => {
+                self.chat_widget.add_error_message(err.to_string());
+            }
+        }
+        if self.current_displayed_thread_id() != Some(thread_id) {
+            return;
+        }
+        self.chat_widget
+            .show_goal_edit_prompt_for_snapshot(thread_id, goal, snapshot);
+    }
+
+    pub(super) async fn set_thread_goal_draft(
+        &mut self,
+        app_server: &mut AppServerSession,
+        thread_id: ThreadId,
+        draft: goal_files::GoalDraft,
+        mode: ThreadGoalSetMode,
+    ) {
+        let codex_home = app_server.codex_home_path(&self.config.codex_home);
+        let mode = if matches!(
+            mode,
+            ThreadGoalSetMode::ConfirmIfExists | ThreadGoalSetMode::ReplaceExisting
+        ) {
+            let confirm = matches!(mode, ThreadGoalSetMode::ConfirmIfExists);
+            let result = app_server.thread_goal_get(thread_id).await;
+            if self.current_displayed_thread_id() != Some(thread_id) {
+                return;
+            }
+
+            match result {
+                Ok(response) => match response.goal.as_ref() {
+                    Some(goal) if confirm && should_confirm_before_replacing_goal(goal) => {
+                        self.show_replace_thread_goal_confirmation(
+                            thread_id,
+                            draft,
+                            ThreadGoalSemanticSnapshot::from(goal),
+                        );
+                        return;
+                    }
+                    Some(goal) => ThreadGoalSetMode::ReplaceExistingExact {
+                        snapshot: ThreadGoalSemanticSnapshot::from(goal),
+                    },
+                    None => ThreadGoalSetMode::Create {
+                        expected_revision: response.revision,
+                    },
+                },
+                Err(err) => {
+                    self.chat_widget
+                        .add_error_message(thread_goal_error_message("read", &err));
+                    return;
+                }
+            }
+        } else {
+            mode
+        };
+
+        let (objective, output_dir) = match goal_files::materialize_goal_draft(
+            app_server,
+            codex_home.as_ref(),
+            draft,
+        )
+        .await
+        {
+            Ok(materialized) => materialized,
+            Err(err) => {
+                if self.current_displayed_thread_id() == Some(thread_id) {
+                    self.chat_widget.add_error_message(err.to_string());
+                }
+                return;
+            }
+        };
+
+        let replacing_goal = matches!(mode, ThreadGoalSetMode::ReplaceExistingExact { .. });
+        let (status, token_budget) = match &mode {
+            ThreadGoalSetMode::ConfirmIfExists
+            | ThreadGoalSetMode::ReplaceExisting
+            | ThreadGoalSetMode::Create { .. }
+            | ThreadGoalSetMode::ReplaceExistingExact { .. } => (ThreadGoalStatus::Active, None),
+            ThreadGoalSetMode::UpdateExisting {
+                status,
+                token_budget,
+                ..
+            } => (*status, Some(*token_budget)),
+        };
+        let result = match mode {
+            ThreadGoalSetMode::Create { expected_revision } => app_server
+                .thread_goal_create(
+                    thread_id,
+                    expected_revision,
+                    objective,
+                    /*token_budget*/ None,
+                )
+                .await
+                .map(|response| response.goal),
+            ThreadGoalSetMode::ReplaceExistingExact { snapshot } => {
+                match refresh_thread_goal_revision(app_server, thread_id, &snapshot).await {
+                    Ok(expected_revision) => {
+                        let result = app_server
+                            .thread_goal_replace(
+                                thread_id,
+                                snapshot.goal_id.clone(),
+                                expected_revision,
+                                objective.clone(),
+                                /*token_budget*/ None,
+                            )
+                            .await
+                            .map(|response| response.goal);
+                        match result {
+                            Err(err) if is_goal_revision_conflict(&err) => {
+                                match refresh_thread_goal_revision(app_server, thread_id, &snapshot)
+                                    .await
+                                {
+                                    Ok(retry_revision) => app_server
+                                        .thread_goal_replace(
+                                            thread_id,
+                                            snapshot.goal_id,
+                                            retry_revision,
+                                            objective,
+                                            /*token_budget*/ None,
+                                        )
+                                        .await
+                                        .map(|response| response.goal),
+                                    Err(err) => Err(err),
+                                }
+                            }
+                            result => result,
+                        }
+                    }
+                    Err(err) => Err(err),
+                }
+            }
+            ThreadGoalSetMode::UpdateExisting { snapshot, .. } => {
+                match refresh_thread_goal_revision(app_server, thread_id, &snapshot).await {
+                    Ok(expected_revision) => {
+                        let result = app_server
+                            .thread_goal_set(
+                                thread_id,
+                                Some(objective.clone()),
+                                Some(status),
+                                token_budget,
+                                Some((&snapshot.goal_id, expected_revision)),
+                            )
+                            .await
+                            .map(|response| response.goal);
+                        match result {
+                            Err(err) if is_goal_revision_conflict(&err) => {
+                                match refresh_thread_goal_revision(app_server, thread_id, &snapshot)
+                                    .await
+                                {
+                                    Ok(retry_revision) => app_server
+                                        .thread_goal_set(
+                                            thread_id,
+                                            Some(objective),
+                                            Some(status),
+                                            token_budget,
+                                            Some((&snapshot.goal_id, retry_revision)),
+                                        )
+                                        .await
+                                        .map(|response| response.goal),
+                                    Err(err) => Err(err),
+                                }
+                            }
+                            result => result,
+                        }
+                    }
+                    Err(err) => Err(err),
+                }
+            }
+            ThreadGoalSetMode::ConfirmIfExists | ThreadGoalSetMode::ReplaceExisting => {
+                unreachable!("goal lookup resolves set mode")
+            }
+        };
+
+        match result {
+            Ok(response) => {
+                if self.current_displayed_thread_id() != Some(thread_id) {
+                    return;
+                }
+                self.chat_widget.add_info_message(
+                    format!("Goal {}", goal_status_label(response.status)),
+                    Some(goal_usage_summary(&response)),
+                );
+                self.chat_widget.maybe_send_next_queued_input();
+            }
+            Err(err) => {
+                cleanup_materialized_goal_files(app_server, output_dir).await;
+                if self.current_displayed_thread_id() != Some(thread_id) {
+                    return;
+                }
+                let action = if replacing_goal { "replace" } else { "set" };
+                self.chat_widget
+                    .add_error_message(thread_goal_error_message(action, &err));
+            }
+        }
+    }
+
+    pub(super) async fn set_thread_goal_status(
+        &mut self,
+        app_server: &mut AppServerSession,
+        thread_id: ThreadId,
+        status: ThreadGoalStatus,
+    ) {
+        let snapshot = app_server.thread_goal_get(thread_id).await;
+        let result = match snapshot {
+            Ok(response) => match response.goal {
+                Some(goal) => {
+                    app_server
+                        .thread_goal_set(
+                            thread_id,
+                            /*objective*/ None,
+                            Some(status),
+                            /*token_budget*/ None,
+                            Some((&goal.goal_id, goal.revision)),
+                        )
+                        .await
+                }
+                None => return,
+            },
+            Err(err) => Err(err),
+        };
+        if self.current_displayed_thread_id() != Some(thread_id) {
+            return;
+        }
+
+        match result {
+            Ok(response) => self.chat_widget.add_info_message(
+                format!("Goal {}", goal_status_label(response.goal.status)),
+                Some(goal_usage_summary(&response.goal)),
+            ),
+            Err(err) => self
+                .chat_widget
+                .add_error_message(thread_goal_error_message("update", &err)),
+        }
+    }
+
+    pub(super) async fn clear_thread_goal(
+        &mut self,
+        app_server: &mut AppServerSession,
+        thread_id: ThreadId,
+    ) {
+        let snapshot = app_server.thread_goal_get(thread_id).await;
+        let result = match snapshot {
+            Ok(response) => match response.goal {
+                Some(goal) => {
+                    app_server
+                        .thread_goal_clear(thread_id, Some((&goal.goal_id, goal.revision)))
+                        .await
+                }
+                None => {
+                    app_server
+                        .thread_goal_clear(thread_id, /*expected_goal*/ None)
+                        .await
+                }
+            },
+            Err(err) => Err(err),
+        };
+        if self.current_displayed_thread_id() != Some(thread_id) {
+            return;
+        }
+
+        match result {
+            Ok(response) => {
+                if response.cleared {
+                    self.chat_widget
+                        .add_info_message("Goal cleared".to_string(), /*hint*/ None);
+                } else {
+                    self.chat_widget.add_info_message(
+                        "No goal to clear".to_string(),
+                        Some("This thread does not currently have a goal.".to_string()),
+                    );
+                }
+            }
+            Err(err) => self
+                .chat_widget
+                .add_error_message(thread_goal_error_message("clear", &err)),
+        }
+    }
+
+    pub(super) fn show_replace_thread_goal_confirmation(
+        &mut self,
+        thread_id: ThreadId,
+        draft: goal_files::GoalDraft,
+        snapshot: ThreadGoalSemanticSnapshot,
+    ) {
+        let objective = draft.objective.clone();
+        let replace_draft = draft;
+        let replace_actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
+            tx.send(AppEvent::SetThreadGoalDraft {
+                thread_id,
+                draft: replace_draft.clone(),
+                mode: ThreadGoalSetMode::ReplaceExistingExact {
+                    snapshot: snapshot.clone(),
+                },
+            });
+        })];
+        let items = vec![
+            SelectionItem {
+                name: "Replace current goal".to_string(),
+                description: Some("Set the new objective and start it now".to_string()),
+                actions: replace_actions,
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+            SelectionItem {
+                name: "Cancel".to_string(),
+                description: Some("Keep the current goal".to_string()),
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+        ];
+        self.chat_widget.show_selection_view(SelectionViewParams {
+            title: Some("Replace goal?".to_string()),
+            subtitle: Some(format!(
+                "New objective: {}",
+                truncate_text(&objective, /*max_graphemes*/ 200)
+            )),
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            ..Default::default()
+        });
+    }
+
+    fn show_no_thread_goal_to_edit(&mut self) {
+        self.chat_widget
+            .add_error_message("No goal is currently set.".to_string());
+        self.chat_widget.add_info_message(
+            GOAL_USAGE.to_string(),
+            Some("Create a goal before editing it.".to_string()),
+        );
+    }
+}
+
+async fn refresh_thread_goal_revision(
+    app_server: &mut AppServerSession,
+    thread_id: ThreadId,
+    snapshot: &ThreadGoalSemanticSnapshot,
+) -> color_eyre::Result<i64> {
+    let Some(goal) = app_server.thread_goal_get(thread_id).await?.goal else {
+        return Err(color_eyre::eyre::eyre!("goal revision conflict"));
+    };
+    if !snapshot.matches(&goal) {
+        return Err(color_eyre::eyre::eyre!("goal revision conflict"));
+    }
+    Ok(goal.revision)
+}
+
+fn is_goal_revision_conflict(err: &color_eyre::Report) -> bool {
+    matches!(
+        err.downcast_ref::<TypedRequestError>(),
+        Some(TypedRequestError::Server { method, source })
+            if matches!(method.as_str(), "thread/goal/replace" | "thread/goal/set")
+                && source
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.get("reason"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("goal_revision_conflict")
+    )
+}
+
+async fn cleanup_materialized_goal_files(
+    app_server: &mut AppServerSession,
+    output_dir: Option<goal_files::GoalFilePath>,
+) {
+    if let Some(output_dir) = output_dir
+        && let Err(err) = app_server.fs_remove_path(&output_dir).await
+    {
+        tracing::warn!("failed to clean up materialized goal files at {output_dir}: {err}");
+    }
+}
+
+fn thread_goal_error_message(action: &str, err: &color_eyre::Report) -> String {
+    if is_ephemeral_thread_goal_error(err) {
+        EPHEMERAL_THREAD_GOAL_ERROR_MESSAGE.to_string()
+    } else {
+        format!("Failed to {action} thread goal: {err}")
+    }
+}
+
+fn is_ephemeral_thread_goal_error(err: &color_eyre::Report) -> bool {
+    err.chain().any(|cause| {
+        let message = cause.to_string();
+        message.contains("ephemeral thread does not support goals")
+            || message.contains("thread goals require a persisted thread; this thread is ephemeral")
+    })
+}
+
+fn should_confirm_before_replacing_goal(goal: &ThreadGoal) -> bool {
+    // Completed goals are terminal, so `/goal <objective>` can start a fresh goal
+    // without asking the user to confirm replacing already-finished work.
+    match goal.status {
+        ThreadGoalStatus::Complete => false,
+        ThreadGoalStatus::Active
+        | ThreadGoalStatus::Paused
+        | ThreadGoalStatus::Blocked
+        | ThreadGoalStatus::UsageLimited
+        | ThreadGoalStatus::BudgetLimited => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::history_cell::HistoryCell;
+    use pretty_assertions::assert_eq;
+    use ratatui::layout::Rect;
+
+    use super::*;
+
+    #[test]
+    fn thread_goal_error_message_explains_temporary_session() {
+        let err = color_eyre::eyre::eyre!(
+            "thread/goal/get failed: ephemeral thread does not support goals: thread-1"
+        )
+        .wrap_err("thread/goal/get failed in TUI");
+
+        assert_eq!(
+            thread_goal_error_message("read", &err),
+            EPHEMERAL_THREAD_GOAL_ERROR_MESSAGE
+        );
+    }
+
+    #[test]
+    fn thread_goal_ephemeral_error_message_renders_snapshot() {
+        let err = color_eyre::eyre::eyre!(
+            "thread/goal/get failed: ephemeral thread does not support goals: thread-1"
+        )
+        .wrap_err("thread/goal/get failed in TUI");
+        let cell = crate::history_cell::new_error_event(thread_goal_error_message("read", &err));
+        let width = 72;
+        let height = 6;
+        let backend = crate::test_backend::VT100Backend::new(width, height);
+        let mut terminal =
+            crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
+        terminal.set_viewport_area(Rect::new(0, height - 1, width, 1));
+
+        crate::insert_history::insert_history_lines(
+            &mut terminal,
+            cell.display_lines(/*width*/ width),
+        )
+        .expect("insert history lines");
+
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
+    fn thread_goal_error_message_preserves_generic_failure_context() {
+        let err =
+            color_eyre::eyre::eyre!("server disappeared").wrap_err("thread/goal/get failed in TUI");
+
+        assert_eq!(
+            thread_goal_error_message("read", &err),
+            "Failed to read thread goal: thread/goal/get failed in TUI"
+        );
+    }
+
+    #[test]
+    fn completed_goal_does_not_require_replace_confirmation() {
+        assert!(!should_confirm_before_replacing_goal(&test_goal(
+            ThreadGoalStatus::Complete
+        )));
+    }
+
+    #[test]
+    fn unfinished_goals_require_replace_confirmation() {
+        for status in [
+            ThreadGoalStatus::Active,
+            ThreadGoalStatus::Paused,
+            ThreadGoalStatus::Blocked,
+            ThreadGoalStatus::UsageLimited,
+            ThreadGoalStatus::BudgetLimited,
+        ] {
+            assert!(should_confirm_before_replacing_goal(&test_goal(status)));
+        }
+    }
+
+    fn test_goal(status: ThreadGoalStatus) -> ThreadGoal {
+        ThreadGoal {
+            thread_id: ThreadId::new().to_string(),
+            goal_id: "goal-test".to_string(),
+            revision: 1,
+            objective: "Finish the thing.".to_string(),
+            status,
+            token_budget: None,
+            tokens_used: 0,
+            time_used_seconds: 0,
+            created_at: 1_776_272_400,
+            updated_at: 1_776_272_460,
+        }
+    }
+}

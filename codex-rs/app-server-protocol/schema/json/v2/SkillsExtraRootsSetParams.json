@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "LegacyAppPathString": {
+      "type": "string"
+    }
+  },
+  "properties": {
+    "extraRoots": {
+      "items": {
+        "$ref": "#/definitions/LegacyAppPathString"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "extraRoots"
+  ],
+  "title": "SkillsExtraRootsSetParams",
+  "type": "object"
+}

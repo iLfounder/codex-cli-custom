@@ -1,0 +1,18 @@
+---
+source: tui/src/history_cell/tests.rs
+assertion_line: 711
+expression: "headers.join(\"\\n\\n\")"
+---
+╭────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v<VERSION>)                   │
+│                                            │
+│ model:     server-model   /model to change │
+│ directory: /server/project                 │
+╰────────────────────────────────────────────╯
+
+╭────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v<VERSION>)                   │
+│                                            │
+│ model:     server-model   /model to change │
+│ directory: C:\remote\project               │
+╰────────────────────────────────────────────╯

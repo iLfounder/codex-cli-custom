@@ -1,0 +1,12 @@
+---
+source: tui/src/bottom_pane/footer_box_tests.rs
+assertion_line: 301
+expression: rendered
+---
+╭──────────────────────────────────────────────────────────────────────╮
+│                                                                      │
+│ gpt-5.6-sol · high                                                C2 │
+│ N/A · 01a061dc                                              Plan Pro │
+│ Thread title is distinct · Context 42% used           Quota Week 68% │
+│                                                                      │
+╰──────────────────────────────────────────────────────────────────────╯

@@ -1,0 +1,199 @@
+//! Shared App fixtures for app submodule unit tests.
+//!
+//! This module keeps heavyweight `App` construction and config-inspection helpers available to
+//! focused sibling test modules without making `app/tests.rs` the only practical place to test
+//! app-owned behavior.
+
+use super::*;
+use crate::chatwidget::tests::make_chatwidget_manual_with_sender;
+use codex_models_manager::test_support::construct_model_info_offline_for_tests;
+use codex_models_manager::test_support::get_model_offline_for_tests;
+
+pub(super) async fn make_test_app() -> App {
+    let (app, _rx, _op_rx) = make_test_app_with_channels().await;
+    app
+}
+
+pub(super) fn test_session_runtime(thread_id: &str, revision: u64) -> SessionRuntimeSnapshot {
+    SessionRuntimeSnapshot {
+        thread_id: thread_id.to_string(),
+        state_revision: revision,
+        identity: codex_app_server_protocol::SessionRuntimeIdentity {
+            session_id: "session-1".to_string(),
+            forked_from_id: None,
+            parent_thread_id: None,
+            name: Some("focused work".to_string()),
+            source: "test".to_string(),
+            cwd: "<workspace>".to_string(),
+            git_info: None,
+            settings: None,
+        },
+        lifecycle: codex_app_server_protocol::SessionRuntimeLifecycle {
+            state: codex_app_server_protocol::SessionRuntimeLifecycleState::Idle,
+            active_turn_id: None,
+            waiting_on: Vec::new(),
+            subscriber_count: 1,
+            client_incarnations: Vec::new(),
+            last_activity_at: None,
+            unload_at: None,
+        },
+        writer: codex_app_server_protocol::SessionRuntimeWriter {
+            state: codex_app_server_protocol::SessionRuntimeWriterState::None,
+            store_id: None,
+            writer_generation: None,
+            deny_reason: None,
+        },
+        persistence: codex_app_server_protocol::SessionRuntimePersistence {
+            jsonl: None,
+            sqlite: None,
+            lag: None,
+            flush_health: codex_app_server_protocol::SessionRuntimePersistenceHealth::Unknown,
+            materialize_health: codex_app_server_protocol::SessionRuntimePersistenceHealth::Unknown,
+            flushed_at: None,
+            materialized_at: None,
+            deny_reason: None,
+        },
+        account: codex_app_server_protocol::SessionRuntimeAccountBinding {
+            current: None,
+            active_turn: None,
+            rotation: None,
+            switch_state: codex_app_server_protocol::SessionRuntimeAccountSwitchState::Stable,
+            switch_target_slot_id: None,
+            deny_reason: None,
+        },
+        actions: Vec::new(),
+        continuity: Default::default(),
+    }
+}
+
+pub(super) async fn make_test_app_with_channels() -> (
+    App,
+    tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+    tokio::sync::mpsc::UnboundedReceiver<crate::app_command::AppCommand>,
+) {
+    let (chat_widget, app_event_tx, rx, op_rx) = make_chatwidget_manual_with_sender().await;
+    let config = chat_widget.config_ref().clone();
+    let file_search = FileSearchManager::new(config.cwd.to_path_buf(), app_event_tx.clone());
+    let model = get_model_offline_for_tests(config.model.as_deref());
+    let session_telemetry = test_session_telemetry(&config, model.as_str());
+
+    let app = App {
+        model_catalog: chat_widget.model_catalog(),
+        session_telemetry,
+        app_event_tx,
+        chat_widget,
+        workspace_command_runner: None,
+        launch_cwd: config.cwd.to_path_buf(),
+        runtime_working_directory_override: None,
+        config,
+        state_db: None,
+        cli_kv_overrides: Vec::new(),
+        harness_overrides: ConfigOverrides::default(),
+        loader_overrides: LoaderOverrides::without_managed_config_for_tests(),
+        cloud_config_bundle: CloudConfigBundleLoader::default(),
+        runtime_approval_policy_override: None,
+        runtime_permission_profile_override: None,
+        file_search,
+        remote_file_search_session: None,
+        transcript_cells: Vec::new(),
+        last_rendered_history_tail: None,
+        last_thread_usage_status_cell: None,
+        pending_thread_usage_history_refresh: false,
+        overlay: None,
+        deferred_history_lines: Vec::new(),
+        has_emitted_history_lines: false,
+        transcript_reflow: TranscriptReflowState::default(),
+        initial_history_replay_buffer: None,
+        scrollback_has_older_history: false,
+        enhanced_keys_supported: false,
+        keymap: crate::keymap::RuntimeKeymap::defaults(),
+        key_chord_matcher: crate::keymap::KeyChordMatcher::default(),
+        commit_animation: None,
+        status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
+        terminal_title_invalid_items_warned: Arc::new(AtomicBool::new(false)),
+        skill_load_warnings: SkillLoadWarningState::default(),
+        backtrack: BacktrackState::default(),
+        backtrack_render_pending: false,
+        feedback: codex_feedback::CodexFeedback::new(),
+        feedback_audience: FeedbackAudience::External,
+        environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
+        app_server_target: crate::AppServerTarget::Embedded,
+        reconnect: Default::default(),
+        reconnect_state: Default::default(),
+        pending_update_action: None,
+        pending_shutdown_exit_thread_id: None,
+        pending_shutdown: None,
+        shutdown_lookup_in_flight: false,
+        shutdown_force_exit_armed: false,
+        account_slots: Vec::new(),
+        account_catalog_kind: None,
+        account_slot_capability: None,
+        account_registry_revision: 0,
+        account_inventory_epoch: None,
+        account_runtime: None,
+        account_rotation_available: false,
+        account_rotation_request_generation: 0,
+        account_request_generation: 0,
+        account_detail_slot_id: None,
+        pending_account_control: None,
+        pending_dynamic_thread_control: None,
+        plugin_command_state: plugin_commands::PluginCommandState::default(),
+        windows_sandbox: WindowsSandboxState::default(),
+        thread_event_channels: HashMap::new(),
+        temporary_structured_requests: HashMap::new(),
+        thread_event_listener_tasks: HashMap::new(),
+        agent_navigation: AgentNavigationState::default(),
+        agents_overview: Default::default(),
+        side_threads: HashMap::new(),
+        abandoned_side_threads: HashSet::new(),
+        active_thread_id: None,
+        active_thread_rx: None,
+        primary_thread_id: None,
+        last_subagent_backfill_attempt: None,
+        primary_session_configured: None,
+        pending_primary_events: VecDeque::new(),
+        pending_app_server_requests: PendingAppServerRequests::default(),
+        dynamic_tool_status_updates: tokio::sync::broadcast::channel(/*capacity*/ 64).0,
+        dynamic_tool_tasks: HashMap::new(),
+        pending_startup_thread_start: false,
+        startup_protected_input_boundary: false,
+        startup_pending_protected_request: false,
+        rate_limit_hard_stop_generation: 0,
+        rate_limit_refresh_state: Default::default(),
+        pending_plugin_enabled_writes: HashMap::new(),
+        pending_hook_enabled_writes: HashMap::new(),
+        recap: recap::RecapState::default(),
+    };
+    (app, rx, op_rx)
+}
+
+fn test_session_telemetry(config: &Config, model: &str) -> SessionTelemetry {
+    let model_info =
+        construct_model_info_offline_for_tests(model, &config.to_models_manager_config());
+    SessionTelemetry::new(
+        ThreadId::new(),
+        model,
+        model_info.slug.as_str(),
+        /*account_id*/ None,
+        /*account_email*/ None,
+        /*auth_mode*/ None,
+        "test_originator".to_string(),
+        /*log_user_prompts*/ false,
+        "test".to_string(),
+        serde_json::from_value(serde_json::json!("cli"))
+            .expect("cli session source should deserialize"),
+    )
+}
+
+pub(super) fn app_enabled_in_effective_config(config: &Config, app_id: &str) -> Option<bool> {
+    config
+        .config_layer_stack
+        .effective_config()
+        .as_table()
+        .and_then(|table| table.get("apps"))
+        .and_then(TomlValue::as_table)
+        .and_then(|apps| apps.get(app_id))
+        .and_then(TomlValue::as_table)
+        .and_then(|app| app.get("enabled"))
+        .and_then(TomlValue::as_bool)
+}

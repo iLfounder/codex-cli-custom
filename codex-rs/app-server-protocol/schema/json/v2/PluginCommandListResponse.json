@@ -1,0 +1,155 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "PluginCommand": {
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "canonicalName": {
+          "type": "string"
+        },
+        "denyReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "pluginId": {
+          "type": "string"
+        },
+        "shortName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "$ref": "#/definitions/PluginCommandTarget"
+        }
+      },
+      "required": [
+        "available",
+        "canonicalName",
+        "description",
+        "id",
+        "pluginId",
+        "target"
+      ],
+      "type": "object"
+    },
+    "PluginCommandAction": {
+      "enum": [
+        "goalGet",
+        "goalSet",
+        "goalClear"
+      ],
+      "type": "string"
+    },
+    "PluginCommandTarget": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "prompt"
+              ],
+              "title": "PromptPluginCommandTargetType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "PromptPluginCommandTarget",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "server": {
+              "type": "string"
+            },
+            "tool": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "mcpTool"
+              ],
+              "title": "McpToolPluginCommandTargetType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "server",
+            "tool",
+            "type"
+          ],
+          "title": "McpToolPluginCommandTarget",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "action": {
+              "$ref": "#/definitions/PluginCommandAction"
+            },
+            "type": {
+              "enum": [
+                "action"
+              ],
+              "title": "ActionPluginCommandTargetType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "type"
+          ],
+          "title": "ActionPluginCommandTarget",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "executable"
+              ],
+              "title": "ExecutablePluginCommandTargetType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "ExecutablePluginCommandTarget",
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "properties": {
+    "data": {
+      "items": {
+        "$ref": "#/definitions/PluginCommand"
+      },
+      "type": "array"
+    },
+    "nextCursor": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "data"
+  ],
+  "title": "PluginCommandListResponse",
+  "type": "object"
+}

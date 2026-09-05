@@ -1,0 +1,85 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ThreadAccountRotationMode": {
+      "enum": [
+        "fixed",
+        "quotaAware",
+        "roundRobin",
+        "exhaustThenNext"
+      ],
+      "type": "string"
+    },
+    "ThreadAccountRotationSnapshot": {
+      "properties": {
+        "automaticAccountSlotIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "fixedAccountSlotId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "globalProfileRevision": {
+          "description": "The current global profile revision, or `null` before global activation.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "lastCommittedAccountSlotId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/definitions/ThreadAccountRotationMode"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "source": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThreadAccountRotationSource"
+            }
+          ],
+          "default": "legacyFixed"
+        }
+      },
+      "required": [
+        "automaticAccountSlotIds",
+        "mode",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "ThreadAccountRotationSource": {
+      "enum": [
+        "legacyFixed",
+        "global",
+        "override"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "rotation": {
+      "$ref": "#/definitions/ThreadAccountRotationSnapshot"
+    }
+  },
+  "required": [
+    "rotation"
+  ],
+  "title": "ThreadAccountRotationUpdateResponse",
+  "type": "object"
+}

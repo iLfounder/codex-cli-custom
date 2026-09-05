@@ -1,0 +1,38 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "LegacyAppPathString": {
+      "type": "string"
+    }
+  },
+  "description": "Remove a file or directory tree from the host filesystem.",
+  "properties": {
+    "force": {
+      "description": "Whether missing paths should be ignored. Defaults to `true`.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "path": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/LegacyAppPathString"
+        }
+      ],
+      "description": "Absolute path to remove."
+    },
+    "recursive": {
+      "description": "Whether directory removal should recurse. Defaults to `true`.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "path"
+  ],
+  "title": "FsRemoveParams",
+  "type": "object"
+}

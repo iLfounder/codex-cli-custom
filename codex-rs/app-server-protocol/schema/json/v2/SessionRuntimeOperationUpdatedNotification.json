@@ -1,0 +1,137 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "SessionRuntimeOperation": {
+      "description": "Common operation state returned by controls and published as progress changes.",
+      "properties": {
+        "accountSlotId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "action": {
+          "$ref": "#/definitions/SessionRuntimeOperationAction"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionRuntimeOperationError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "executionGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "operationId": {
+          "type": "string"
+        },
+        "requestFingerprint": {
+          "description": "Opaque digest of the normalized action and arguments. Reusing an operation id with a different fingerprint is an invalid request rather than an idempotent retry.",
+          "type": "string"
+        },
+        "stateRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/SessionRuntimeOperationStatus"
+        },
+        "threadId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updatedAt": {
+          "description": "Unix timestamp in seconds when this operation state was produced.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "writerGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "action",
+        "operationId",
+        "requestFingerprint",
+        "status",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "SessionRuntimeOperationAction": {
+      "enum": [
+        "accountSlotLogin",
+        "threadAccountSwitch",
+        "threadRelinquish"
+      ],
+      "type": "string"
+    },
+    "SessionRuntimeOperationError": {
+      "description": "Sanitized operation failure; it never contains tokens, paths, sockets, or raw PIDs.",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "SessionRuntimeOperationStatus": {
+      "enum": [
+        "accepted",
+        "running",
+        "released",
+        "ready",
+        "failed"
+      ],
+      "type": "string"
+    }
+  },
+  "description": "Progress or terminal state for a bounded process-local operation.",
+  "properties": {
+    "instanceEpoch": {
+      "type": "string"
+    },
+    "operation": {
+      "$ref": "#/definitions/SessionRuntimeOperation"
+    },
+    "sequence": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "instanceEpoch",
+    "operation",
+    "sequence"
+  ],
+  "title": "SessionRuntimeOperationUpdatedNotification",
+  "type": "object"
+}

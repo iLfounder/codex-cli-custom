@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "LegacyAppPathString": {
+      "type": "string"
+    }
+  },
+  "properties": {
+    "cwds": {
+      "description": "Optional working directories used to discover repo marketplaces.",
+      "items": {
+        "$ref": "#/definitions/LegacyAppPathString"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "installSuggestionPluginNames": {
+      "description": "Additional uninstalled plugin names that should be returned when present locally. This is used by mention surfaces that intentionally expose install entrypoints.",
+      "items": {
+        "type": "string"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    }
+  },
+  "title": "PluginInstalledParams",
+  "type": "object"
+}

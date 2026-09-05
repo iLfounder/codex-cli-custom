@@ -1,0 +1,1761 @@
+use super::*;
+use crate::outgoing_message::OutgoingEnvelope;
+use crate::outgoing_message::OutgoingMessage;
+use crate::outgoing_message::OutgoingMessageSender;
+use base64::Engine;
+use codex_app_server_protocol::AccountSlotAction;
+use codex_app_server_protocol::AccountSlotActionAvailability;
+use codex_app_server_protocol::AccountSlotLogoutParams;
+use codex_app_server_protocol::ServerNotification;
+use codex_config::types::AuthCredentialsStoreMode;
+use codex_core::config::ConfigBuilder;
+use codex_login::AuthDotJson;
+use codex_login::AuthKeyringBackendKind;
+use codex_login::CodexAuth;
+use codex_login::TokenData;
+use codex_login::login_with_api_key;
+use codex_login::logout;
+use codex_login::save_auth;
+use codex_login::token_data::IdTokenInfo;
+use codex_protocol::auth::AuthMode;
+use pretty_assertions::assert_eq;
+use tempfile::tempdir;
+use wiremock::Mock;
+use wiremock::MockServer;
+use wiremock::ResponseTemplate;
+use wiremock::matchers::method;
+use wiremock::matchers::path;
+
+const SECOND_SLOT_ID: &str = "11111111111141118111111111111111";
+const THIRD_SLOT_ID: &str = "22222222222242228222222222222222";
+
+#[test]
+fn token_manager_base_url_uses_fixed_default_without_test_override() {
+    assert_eq!(
+        resolve_token_manager_base_url(/*test_override*/ None),
+        url::Url::parse(TOKEN_MANAGER_URL).ok()
+    );
+}
+
+#[test]
+fn token_manager_base_url_accepts_isolated_test_override() {
+    for test_override in ["http://127.0.0.1:43101/", "http://[::1]:43101/"] {
+        assert_eq!(
+            resolve_token_manager_base_url(Some(test_override)),
+            url::Url::parse(test_override).ok()
+        );
+    }
+}
+
+#[test]
+fn token_manager_base_url_rejects_invalid_or_unsafe_test_override() {
+    for test_override in [
+        "not a URL",
+        "http://192.0.2.1:43101/",
+        "https://127.0.0.1:43101/",
+        "file:///tmp/tokenmanager.sock",
+        "http://user@127.0.0.1:43101/",
+        "http://127.0.0.1:43101/snapshots",
+        "http://127.0.0.1:43101/?mode=test",
+        "http://127.0.0.1:43101/#test",
+        "http://localhost:43101/",
+    ] {
+        assert_eq!(
+            resolve_token_manager_base_url(Some(test_override)),
+            None,
+            "override should be rejected: {test_override}"
+        );
+    }
+}
+
+fn write_global_registry(user_home: &Path, entries: &[(u32, &Path)]) {
+    let config = user_home.join(".config");
+    std::fs::create_dir_all(&config).unwrap();
+    let registry = config.join("codex-accounts.tsv");
+    let contents = entries
+        .iter()
+        .map(|(number, home)| format!("{number}\t{}\n", home.display()))
+        .collect::<String>();
+    std::fs::write(&registry, contents).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&registry, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+async fn receive_inventory_revision(
+    receiver: &mut tokio::sync::mpsc::Receiver<OutgoingEnvelope>,
+) -> u64 {
+    let OutgoingEnvelope::Broadcast { message } = receiver.recv().await.unwrap() else {
+        panic!("expected broadcast account inventory notification");
+    };
+    let OutgoingMessage::AppServerNotification(envelope) = message else {
+        panic!("expected app-server notification");
+    };
+    let ServerNotification::AccountSlotInventoryChanged(notification) = envelope.notification
+    else {
+        panic!("expected account inventory notification");
+    };
+    notification.registry_revision
+}
+
+#[test]
+fn account_numbers_preserve_exact_labels_and_assign_legacy_slots_by_slot_id() {
+    let process_home = Path::new("/tmp/codex-account-number-test");
+    let slots = vec![
+        AccountSlotManifest {
+            account_slot_id: DEFAULT_SLOT_ID.to_string(),
+            label: "Default account".to_string(),
+            auth_home: process_home.to_path_buf(),
+            is_default: true,
+            status: ManifestSlotStatus::Ready,
+            attempt_generation: 0,
+            updated_at: 0,
+            error_code: None,
+        },
+        AccountSlotManifest {
+            account_slot_id: SECOND_SLOT_ID.to_string(),
+            label: "legacy".to_string(),
+            auth_home: process_home.join("accounts").join(SECOND_SLOT_ID),
+            is_default: false,
+            status: ManifestSlotStatus::Ready,
+            attempt_generation: 0,
+            updated_at: 0,
+            error_code: None,
+        },
+        AccountSlotManifest {
+            account_slot_id: THIRD_SLOT_ID.to_string(),
+            label: "Account 2".to_string(),
+            auth_home: process_home.join("accounts").join(THIRD_SLOT_ID),
+            is_default: false,
+            status: ManifestSlotStatus::Ready,
+            attempt_generation: 0,
+            updated_at: 0,
+            error_code: None,
+        },
+    ];
+    let assigned = assign_account_numbers(&slots);
+    let first = slots
+        .iter()
+        .zip(assigned)
+        .map(|(slot, number)| (slot.account_slot_id.clone(), number))
+        .collect::<std::collections::HashMap<_, _>>();
+    let reordered = vec![slots[0].clone(), slots[2].clone(), slots[1].clone()];
+    let reassigned = assign_account_numbers(&reordered);
+    let second = reordered
+        .iter()
+        .zip(reassigned)
+        .map(|(slot, number)| (slot.account_slot_id.clone(), number))
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(first, second);
+    assert_eq!(
+        first,
+        std::collections::HashMap::from([
+            (DEFAULT_SLOT_ID.to_string(), 1),
+            (SECOND_SLOT_ID.to_string(), 3),
+            (THIRD_SLOT_ID.to_string(), 2),
+        ])
+    );
+}
+
+fn persist_api_key_auth(auth_home: &Path) {
+    login_with_api_key(
+        auth_home,
+        "slot-key",
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )
+    .expect("persist slot auth");
+}
+
+fn persist_chatgpt_auth(auth_home: &Path, account_identity: &str) {
+    let encode = |value: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value);
+    let id_token = format!(
+        "{}.{}.{}",
+        encode(br#"{"alg":"none"}"#),
+        encode(br#"{"sub":"test-user"}"#),
+        encode(b"signature")
+    );
+    save_auth(
+        auth_home,
+        &AuthDotJson {
+            auth_mode: Some(AuthMode::Chatgpt),
+            openai_api_key: None,
+            tokens: Some(TokenData {
+                id_token: IdTokenInfo {
+                    raw_jwt: id_token,
+                    ..Default::default()
+                },
+                access_token: "test-access-token".to_string(),
+                refresh_token: "test-refresh-token".to_string(),
+                account_id: Some(account_identity.to_string()),
+            }),
+            last_refresh: None,
+            agent_identity: None,
+            personal_access_token: None,
+            bedrock_api_key: None,
+            bedrock_access_keys: None,
+        },
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )
+    .expect("persist ChatGPT auth");
+}
+
+fn token_manager_quota_snapshot(
+    label: &str,
+    source_ref: String,
+    utilization: f64,
+) -> global::RawSnapshot {
+    let now = chrono::Utc::now().timestamp();
+    global::RawSnapshot {
+        label: label.to_string(),
+        provider_type: "codex-chatgpt".to_string(),
+        source_ref: Some(source_ref),
+        fetched_at: now,
+        ok: false,
+        rate_limit: Some(global::RawRateLimit {
+            meters: vec![global::RawMeter {
+                id: "weekly".to_string(),
+                label: "Weekly".to_string(),
+                utilization,
+                reset_at: now + 100,
+                observed_at: now,
+                utilization_observed_at: now,
+                state: if utilization >= 1.0 {
+                    "exhausted".to_string()
+                } else {
+                    "warning".to_string()
+                },
+            }],
+            status: if utilization >= 1.0 {
+                "rejected".to_string()
+            } else {
+                "allowed_warning".to_string()
+            },
+        }),
+    }
+}
+
+async fn registry_for_home(process_home: &Path) -> AccountRegistry {
+    registry_for_home_and_store(
+        process_home,
+        Arc::new(codex_thread_store::InMemoryThreadStore::default()),
+    )
+    .await
+}
+
+async fn registry_for_home_and_store(
+    process_home: &Path,
+    thread_store: Arc<dyn codex_thread_store::ThreadStore>,
+) -> AccountRegistry {
+    login_with_api_key(
+        process_home,
+        "dummy",
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )
+    .expect("persist default auth");
+    let config = Arc::new(
+        ConfigBuilder::default()
+            .codex_home(process_home.to_path_buf())
+            .build()
+            .await
+            .expect("build config"),
+    );
+    let auth_manager = AuthManager::from_auth_for_testing_with_home(
+        CodexAuth::from_api_key("dummy"),
+        process_home.to_path_buf(),
+    );
+    let models_manager = codex_core::build_models_manager(config.as_ref(), auth_manager.clone());
+    let config_manager = ConfigManager::new(
+        process_home.to_path_buf(),
+        Vec::new(),
+        codex_config::LoaderOverrides::default(),
+        /*strict_config*/ false,
+        codex_config::CloudConfigBundleLoader::default(),
+        codex_arg0::Arg0DispatchPaths::default(),
+        Arc::new(codex_config::NoopThreadConfigLoader),
+    );
+    AccountRegistry::new(
+        config,
+        config_manager,
+        auth_manager,
+        models_manager,
+        thread_store,
+    )
+    .expect("create account registry")
+}
+
+#[tokio::test]
+async fn fresh_process_cn_binding_single_flights_initial_catalog_fetch() {
+    let process_home = tempdir().unwrap();
+    let c1_home = tempdir().unwrap();
+    let user_home = tempdir().unwrap();
+    let mut registry = registry_for_home(process_home.path()).await;
+    write_global_registry(
+        user_home.path(),
+        &[(1, c1_home.path()), (2, process_home.path())],
+    );
+    registry.global_directory_user_home = Some(user_home.path().to_path_buf());
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/snapshots"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_millis(25))
+                .set_body_json(serde_json::json!({
+                    "accounts": [{
+                        "label": "C2",
+                        "type": "codex-chatgpt",
+                        "sourceRef": "opaque",
+                        "fetchedAt": 100,
+                        "ok": true
+                    }]
+                })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let endpoint = url::Url::parse(&format!("{}/", server.uri())).unwrap();
+    registry.token_manager_client = Some(
+        global::TokenManagerClient::new(registry.config.http_client_factory(), endpoint).unwrap(),
+    );
+
+    let (first, second) = tokio::join!(
+        registry.ensure_global_catalog(),
+        registry.ensure_global_catalog()
+    );
+    assert_eq!((first.unwrap(), second.unwrap()), (1, 1));
+    assert_eq!(
+        registry.initial_binding_for_new_thread(),
+        ExecutionAccountBinding {
+            slot_id: "C2".to_string(),
+            generation: 1,
+        }
+    );
+}
+
+#[tokio::test]
+async fn registry_refresh_adds_new_account_home_without_restarting() {
+    let user_home = tempdir().unwrap();
+    let process_home = tempdir().unwrap();
+    let added_home = tempdir().unwrap();
+    let mut registry = registry_for_home(process_home.path()).await;
+    registry.global_directory_user_home = Some(user_home.path().to_path_buf());
+    write_global_registry(user_home.path(), &[(1, process_home.path())]);
+
+    assert_eq!(
+        registry.refresh_global_directory().process_account_id,
+        global::AccountId::parse("C1")
+    );
+    write_global_registry(
+        user_home.path(),
+        &[(1, process_home.path()), (2, added_home.path())],
+    );
+    let refreshed = registry.refresh_global_directory();
+
+    assert_eq!(
+        refreshed
+            .homes
+            .get(&global::AccountId::parse("C2").unwrap()),
+        Some(&std::fs::canonicalize(added_home.path()).unwrap())
+    );
+}
+
+#[tokio::test]
+async fn registry_add_remove_and_remap_emit_monotonic_inventory_notifications() {
+    let user_home = tempdir().unwrap();
+    let process_home = tempdir().unwrap();
+    let first_c2_home = tempdir().unwrap();
+    let second_c2_home = tempdir().unwrap();
+    let mut registry = registry_for_home(process_home.path()).await;
+    registry.global_directory_user_home = Some(user_home.path().to_path_buf());
+    registry.token_manager_client = None;
+    write_global_registry(user_home.path(), &[(1, process_home.path())]);
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+    let outgoing =
+        OutgoingMessageSender::new(sender, codex_analytics::AnalyticsEventsClient::disabled());
+    let listed_revision = registry
+        .list(AccountSlotListParams {
+            cursor: None,
+            limit: None,
+        })
+        .await
+        .unwrap()
+        .registry_revision;
+
+    registry.notify_global_inventory_if_changed(&outgoing).await;
+    let initial_revision = receive_inventory_revision(&mut receiver).await;
+    assert_eq!(initial_revision, listed_revision);
+
+    write_global_registry(
+        user_home.path(),
+        &[(1, process_home.path()), (2, first_c2_home.path())],
+    );
+    registry.notify_global_inventory_if_changed(&outgoing).await;
+    let added_revision = receive_inventory_revision(&mut receiver).await;
+
+    write_global_registry(
+        user_home.path(),
+        &[(1, process_home.path()), (2, second_c2_home.path())],
+    );
+    registry.notify_global_inventory_if_changed(&outgoing).await;
+    let remapped_revision = receive_inventory_revision(&mut receiver).await;
+
+    write_global_registry(user_home.path(), &[(1, process_home.path())]);
+    registry.notify_global_inventory_if_changed(&outgoing).await;
+    let removed_revision = receive_inventory_revision(&mut receiver).await;
+
+    assert_eq!(
+        (
+            added_revision,
+            remapped_revision,
+            removed_revision,
+            receiver.try_recv().is_err(),
+        ),
+        (
+            initial_revision + 1,
+            initial_revision + 2,
+            initial_revision + 3,
+            true,
+        )
+    );
+}
+
+#[tokio::test]
+async fn registered_global_inventory_survives_owner_shared_process_home() {
+    let user_home = tempdir().unwrap();
+    let process_home = user_home.path().join(".codex");
+    std::fs::create_dir(&process_home).unwrap();
+    let first_home = tempdir().unwrap();
+    let second_home = tempdir().unwrap();
+    let mut registry = registry_for_home(&process_home).await;
+    registry.global_directory_user_home = Some(user_home.path().to_path_buf());
+    write_global_registry(
+        user_home.path(),
+        &[(1, first_home.path()), (2, second_home.path())],
+    );
+    registry.global_catalog.replace(Vec::new()).unwrap();
+
+    let response = registry
+        .list(AccountSlotListParams {
+            cursor: None,
+            limit: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            response.catalog_kind,
+            response
+                .data
+                .iter()
+                .map(|slot| (slot.account_slot_id.as_str(), slot.quota.is_some()))
+                .collect::<Vec<_>>(),
+        ),
+        (
+            AccountSlotCatalogKind::Global,
+            vec![("C1", false), ("C2", false)],
+        )
+    );
+    assert_eq!(
+        registry.initial_binding_for_new_thread(),
+        ExecutionAccountBinding {
+            slot_id: "C1".to_string(),
+            generation: 1,
+        }
+    );
+    assert_eq!(
+        registry.rotation_slot_inventory().await.unwrap(),
+        vec![
+            RotationSlotIdentity {
+                account_slot_id: "C1".to_string(),
+                account_number: 1,
+            },
+            RotationSlotIdentity {
+                account_slot_id: "C2".to_string(),
+                account_number: 2,
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn registered_global_inventory_does_not_wait_for_initial_token_manager_fetch() {
+    let user_home = tempdir().unwrap();
+    let process_home = tempdir().unwrap();
+    let mut registry = registry_for_home(process_home.path()).await;
+    registry.global_directory_user_home = Some(user_home.path().to_path_buf());
+    write_global_registry(user_home.path(), &[(1, process_home.path())]);
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/snapshots"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_secs(2))
+                .set_body_json(serde_json::json!({ "accounts": [] })),
+        )
+        .mount(&server)
+        .await;
+    registry.token_manager_client = Some(
+        global::TokenManagerClient::new(
+            registry.config.http_client_factory(),
+            url::Url::parse(&format!("{}/", server.uri())).unwrap(),
+        )
+        .unwrap(),
+    );
+
+    let response = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        registry.list(AccountSlotListParams {
+            cursor: None,
+            limit: None,
+        }),
+    )
+    .await
+    .expect("registered inventory should not wait for TokenManager")
+    .unwrap();
+    assert_eq!(response.data[0].account_slot_id, "C1");
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn matching_token_manager_source_overlays_health_and_quota() {
+    let user_home = tempdir().unwrap();
+    let process_home = tempdir().unwrap();
+    let mut registry = registry_for_home(process_home.path()).await;
+    persist_chatgpt_auth(process_home.path(), "owner-one");
+    {
+        let mut state = registry.state.write().unwrap();
+        let legacy_default = state
+            .slots
+            .iter_mut()
+            .find(|slot| slot.manifest.is_default)
+            .unwrap();
+        legacy_default.manifest.status = ManifestSlotStatus::Failed;
+        legacy_default.manifest.attempt_generation = 9;
+        legacy_default.manifest.error_code = Some("staleLegacyFailure".to_string());
+    }
+    registry.global_directory_user_home = Some(user_home.path().to_path_buf());
+    write_global_registry(user_home.path(), &[(1, process_home.path())]);
+    let account_id = global::AccountId::parse("C1").unwrap();
+    let source_ref = registry
+        .global_runtime(account_id)
+        .await
+        .unwrap()
+        .source_ref
+        .clone();
+    let baseline_revision = registry
+        .list(AccountSlotListParams {
+            cursor: None,
+            limit: None,
+        })
+        .await
+        .unwrap()
+        .registry_revision;
+
+    registry
+        .global_catalog
+        .replace(vec![token_manager_quota_snapshot(
+            "C1", source_ref, /*utilization*/ 0.25,
+        )])
+        .unwrap();
+
+    let response = registry
+        .list(AccountSlotListParams {
+            cursor: None,
+            limit: None,
+        })
+        .await
+        .unwrap();
+    let slot = &response.data[0];
+    assert_eq!(response.registry_revision, baseline_revision + 1);
+    assert_eq!(slot.status, AccountSlotStatus::Ready);
+    assert_eq!(slot.health, AccountSlotHealth::Degraded);
+    assert_eq!(slot.attempt_generation, 0);
+    assert_eq!(slot.error_code, None);
+    assert_eq!(
+        slot.actions
+            .iter()
+            .find(|action| action.action == AccountSlotAction::Logout),
+        Some(&AccountSlotActionAvailability {
+            action: AccountSlotAction::Logout,
+            allowed: true,
+            deny_reason: None,
+        })
+    );
+    assert_eq!(
+        slot.quota
+            .as_ref()
+            .and_then(|quota| quota.meters.first())
+            .map(|meter| meter.remaining_percent),
+        Some(75)
+    );
+    assert!(registry.global_rate_limits("C1").await.unwrap().is_ok());
+}
+
+#[tokio::test]
+async fn mismatched_token_manager_source_cannot_impersonate_registered_slot() {
+    let user_home = tempdir().unwrap();
+    let process_home = tempdir().unwrap();
+    let second_home = tempdir().unwrap();
+    let mut registry = registry_for_home(process_home.path()).await;
+    persist_chatgpt_auth(process_home.path(), "owner-one");
+    persist_chatgpt_auth(second_home.path(), "owner-two");
+    registry.global_directory_user_home = Some(user_home.path().to_path_buf());
+    write_global_registry(
+        user_home.path(),
+        &[(1, process_home.path()), (2, second_home.path())],
+    );
+    let c2_source_ref = registry
+        .global_runtime(global::AccountId::parse("C2").unwrap())
+        .await
+        .unwrap()
+        .source_ref
+        .clone();
+    let baseline_revision = registry
+        .list(AccountSlotListParams {
+            cursor: None,
+            limit: None,
+        })
+        .await
+        .unwrap()
+        .registry_revision;
+
+    registry
+        .global_catalog
+        .replace(vec![token_manager_quota_snapshot(
+            "C1",
+            c2_source_ref,
+            /*utilization*/ 1.0,
+        )])
+        .unwrap();
+
+    let response = registry
+        .list(AccountSlotListParams {
+            cursor: None,
+            limit: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.registry_revision, baseline_revision);
+    assert_eq!(
+        response
+            .data
+            .iter()
+            .map(|slot| (
+                slot.account_slot_id.as_str(),
+                slot.status,
+                slot.health,
+                slot.quota.is_some(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                "C1",
+                AccountSlotStatus::Ready,
+                AccountSlotHealth::Healthy,
+                false,
+            ),
+            (
+                "C2",
+                AccountSlotStatus::Ready,
+                AccountSlotHealth::Healthy,
+                false,
+            ),
+        ]
+    );
+    assert!(registry.global_rate_limits("C1").await.unwrap().is_err());
+}
+
+#[tokio::test]
+async fn registered_global_inventory_has_stable_pagination_and_monotonic_revisions() {
+    let user_home = tempdir().unwrap();
+    let c1_home = tempdir().unwrap();
+    let c2_home = tempdir().unwrap();
+    let c3_home = tempdir().unwrap();
+    let c10_home = tempdir().unwrap();
+    let mut registry = registry_for_home(c2_home.path()).await;
+    registry.global_directory_user_home = Some(user_home.path().to_path_buf());
+    write_global_registry(
+        user_home.path(),
+        &[
+            (10, c10_home.path()),
+            (2, c2_home.path()),
+            (1, c1_home.path()),
+        ],
+    );
+    registry.global_catalog.replace(Vec::new()).unwrap();
+
+    let first = registry
+        .list(AccountSlotListParams {
+            cursor: None,
+            limit: Some(2),
+        })
+        .await
+        .unwrap();
+    let second = registry
+        .list(AccountSlotListParams {
+            cursor: first.next_cursor.clone(),
+            limit: Some(2),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(first.registry_revision, second.registry_revision);
+    assert_eq!(
+        first
+            .data
+            .iter()
+            .chain(&second.data)
+            .map(|slot| slot.account_slot_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["C1", "C2", "C10"]
+    );
+    assert!(second.next_cursor.is_none());
+
+    write_global_registry(
+        user_home.path(),
+        &[
+            (10, c10_home.path()),
+            (3, c3_home.path()),
+            (2, c2_home.path()),
+            (1, c1_home.path()),
+        ],
+    );
+    assert!(
+        registry
+            .list(AccountSlotListParams {
+                cursor: first.next_cursor,
+                limit: Some(2),
+            })
+            .await
+            .is_err()
+    );
+    let directory_changed = registry
+        .list(AccountSlotListParams {
+            cursor: None,
+            limit: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        directory_changed.registry_revision,
+        first.registry_revision + 1
+    );
+    let page_before_invisible_overlay = registry
+        .list(AccountSlotListParams {
+            cursor: None,
+            limit: Some(2),
+        })
+        .await
+        .unwrap();
+
+    registry
+        .global_catalog
+        .replace(vec![global::RawSnapshot {
+            label: "C1".to_string(),
+            provider_type: "codex-chatgpt".to_string(),
+            source_ref: None,
+            fetched_at: chrono::Utc::now().timestamp(),
+            ok: true,
+            rate_limit: None,
+        }])
+        .unwrap();
+    let invisible_overlay = registry
+        .list(AccountSlotListParams {
+            cursor: page_before_invisible_overlay.next_cursor,
+            limit: Some(2),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        invisible_overlay.registry_revision,
+        directory_changed.registry_revision
+    );
+}
+
+#[tokio::test]
+async fn removing_process_mapping_returns_to_legacy_catalog_domain() {
+    let user_home = tempdir().unwrap();
+    let process_home = tempdir().unwrap();
+    let mut registry = registry_for_home(process_home.path()).await;
+    registry.global_directory_user_home = Some(user_home.path().to_path_buf());
+    write_global_registry(user_home.path(), &[(1, process_home.path())]);
+    registry
+        .global_catalog
+        .replace(vec![global::RawSnapshot {
+            label: "C1".to_string(),
+            provider_type: "codex-chatgpt".to_string(),
+            source_ref: Some("source".to_string()),
+            fetched_at: chrono::Utc::now().timestamp(),
+            ok: true,
+            rate_limit: None,
+        }])
+        .unwrap();
+
+    let global = registry
+        .list(AccountSlotListParams {
+            cursor: None,
+            limit: None,
+        })
+        .await
+        .unwrap();
+    write_global_registry(user_home.path(), &[]);
+    let legacy = registry
+        .list(AccountSlotListParams {
+            cursor: None,
+            limit: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        (
+            global.catalog_kind,
+            global.data[0].account_slot_id.as_str(),
+            legacy.catalog_kind,
+            legacy.data[0].account_slot_id.as_str(),
+        ),
+        (
+            AccountSlotCatalogKind::Global,
+            "C1",
+            AccountSlotCatalogKind::Legacy,
+            DEFAULT_SLOT_ID,
+        )
+    );
+}
+
+fn manifest(process_home: &Path, revision: u64) -> AccountSlotsManifest {
+    AccountSlotsManifest {
+        schema_version: MANIFEST_SCHEMA_VERSION,
+        revision,
+        slots: vec![
+            AccountSlotManifest {
+                account_slot_id: DEFAULT_SLOT_ID.to_string(),
+                label: "Default account".to_string(),
+                auth_home: process_home.to_path_buf(),
+                is_default: true,
+                status: ManifestSlotStatus::Ready,
+                attempt_generation: 0,
+                updated_at: 10,
+                error_code: None,
+            },
+            AccountSlotManifest {
+                account_slot_id: SECOND_SLOT_ID.to_string(),
+                label: "Second account".to_string(),
+                auth_home: process_home.join(PRIVATE_HOMES_DIR).join(SECOND_SLOT_ID),
+                is_default: false,
+                status: ManifestSlotStatus::LoginRequired,
+                attempt_generation: 2,
+                updated_at: 20,
+                error_code: None,
+            },
+        ],
+    }
+}
+
+#[test]
+fn manifest_round_trips_through_atomic_replace() {
+    let process_home = tempdir().expect("temp process home");
+    let path = process_home.path().join(MANIFEST_FILE);
+    let first = manifest(process_home.path(), 1);
+    first.persist(&path).expect("persist first manifest");
+    assert_eq!(
+        AccountSlotsManifest::load(&path, process_home.path()).expect("load first manifest"),
+        Some(first)
+    );
+
+    let second = manifest(process_home.path(), 2);
+    second.persist(&path).expect("replace manifest");
+    assert_eq!(
+        AccountSlotsManifest::load(&path, process_home.path()).expect("load second manifest"),
+        Some(second)
+    );
+}
+
+#[test]
+fn manifest_rejects_non_private_secondary_home() {
+    let process_home = tempdir().expect("temp process home");
+    let outside_home = tempdir().expect("outside home");
+    let mut manifest = manifest(process_home.path(), 1);
+    manifest.slots[1].auth_home = outside_home.path().to_path_buf();
+
+    let error = manifest
+        .validate(process_home.path())
+        .expect_err("outside account home must be rejected");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn manifest_rejects_non_uuid_slot_and_lexical_path_escape() {
+    let process_home = tempdir().expect("temp process home");
+    let mut invalid_id = manifest(process_home.path(), 1);
+    invalid_id.slots[1].account_slot_id = "..".to_string();
+    invalid_id.slots[1].auth_home = process_home.path().join(PRIVATE_HOMES_DIR).join("..");
+
+    let error = invalid_id
+        .validate(process_home.path())
+        .expect_err("non-UUID slot ID must be rejected");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+
+    let mut escaped_home = manifest(process_home.path(), 1);
+    escaped_home.slots[1].auth_home = process_home
+        .path()
+        .join(PRIVATE_HOMES_DIR)
+        .join(SECOND_SLOT_ID)
+        .join("..")
+        .join("..");
+    let error = escaped_home
+        .validate(process_home.path())
+        .expect_err("lexical path escape must be rejected");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+}
+
+#[cfg(unix)]
+#[test]
+fn manifest_rejects_symlinked_private_home() {
+    use std::os::unix::fs::symlink;
+
+    let process_home = tempdir().expect("temp process home");
+    let outside_home = tempdir().expect("outside home");
+    let private_root = process_home.path().join(PRIVATE_HOMES_DIR);
+    std::fs::create_dir(&private_root).expect("create private root");
+    symlink(outside_home.path(), private_root.join(SECOND_SLOT_ID)).expect("create escaping link");
+
+    let error = manifest(process_home.path(), 1)
+        .validate(process_home.path())
+        .expect_err("symlinked private home must be rejected");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn cursor_is_bound_to_registry_revision() {
+    let encoded = encode_cursor(AccountSlotCursor {
+        revision: 7,
+        after_slot_id: SECOND_SLOT_ID.to_string(),
+    })
+    .expect("cursor should encode");
+    let decoded = decode_cursor(&encoded, 7).expect("cursor should decode");
+    assert_eq!(
+        decoded,
+        AccountSlotCursor {
+            revision: 7,
+            after_slot_id: SECOND_SLOT_ID.to_string(),
+        }
+    );
+    assert!(matches!(
+        decode_cursor(&encoded, 8),
+        Err(CursorError::Stale)
+    ));
+}
+
+#[tokio::test]
+async fn slot_snapshot_releases_registry_guard_before_capability_lookup() {
+    let process_home = tempdir().expect("temp process home");
+    let registry = registry_for_home(process_home.path()).await;
+
+    let snapshot = registry
+        .slot_snapshot(DEFAULT_SLOT_ID)
+        .await
+        .expect("default snapshot");
+
+    assert_eq!(snapshot.account_slot_id, DEFAULT_SLOT_ID);
+    assert!(snapshot.is_default);
+}
+
+#[tokio::test]
+async fn stale_completion_cannot_overwrite_finished_attempt() {
+    let process_home = tempdir().expect("temp process home");
+    let registry = registry_for_home(process_home.path()).await;
+    let prepared = registry
+        .prepare_slot_login(
+            /*requested_slot_id*/ None,
+            "operation-1".to_string(),
+            /*candidate_runtime_version*/ 1,
+        )
+        .await
+        .expect("prepare slot");
+
+    let failed = registry
+        .finish_slot_login(
+            &prepared,
+            ManifestSlotStatus::Failed,
+            Some("refreshUnavailable"),
+        )
+        .await
+        .expect("finish failed attempt");
+    let stale_ready = registry
+        .finish_slot_login(&prepared, ManifestSlotStatus::Ready, None)
+        .await
+        .expect("stale completion");
+
+    assert!(failed.is_some());
+    assert_eq!(stale_ready, None);
+    let snapshot = registry
+        .slot_snapshot(&prepared.account_slot_id)
+        .await
+        .expect("slot snapshot");
+    assert_eq!(snapshot.status, AccountSlotStatus::Failed);
+    assert_eq!(snapshot.error_code.as_deref(), Some("refreshUnavailable"));
+}
+
+#[tokio::test]
+async fn successful_terminal_claim_blocks_cancel_and_overlapping_attempt() {
+    let process_home = tempdir().expect("temp process home");
+    let registry = registry_for_home(process_home.path()).await;
+    let prepared = registry
+        .prepare_slot_login(
+            /*requested_slot_id*/ None,
+            "operation-1".to_string(),
+            /*candidate_runtime_version*/ 1,
+        )
+        .await
+        .expect("prepare slot");
+
+    assert!(prepared.try_claim_success());
+    assert!(!prepared.clone().try_claim_failure());
+    let overlapping = match registry
+        .prepare_slot_login(
+            Some(prepared.account_slot_id.clone()),
+            "operation-2".to_string(),
+            /*candidate_runtime_version*/ 1,
+        )
+        .await
+    {
+        Ok(_) => panic!("active terminal owner must block candidate reuse"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        overlapping.data,
+        Some(serde_json::json!({"reason":"accountSlotLoginBusy"}))
+    );
+
+    registry
+        .finish_slot_login(&prepared, ManifestSlotStatus::Ready, None)
+        .await
+        .expect("publish ready slot")
+        .expect("active attempt must publish");
+    assert!(!prepared.try_claim_failure());
+    let snapshot = registry
+        .slot_snapshot(&prepared.account_slot_id)
+        .await
+        .expect("slot snapshot");
+    assert_eq!(snapshot.status, AccountSlotStatus::Ready);
+}
+
+#[tokio::test]
+async fn browser_login_owner_requires_exact_release() {
+    let process_home = tempdir().expect("temp process home");
+    let registry = registry_for_home(process_home.path()).await;
+    let default = BrowserLoginOwner::Default("default-login".to_string());
+    let slot = BrowserLoginOwner::Slot("slot-login".to_string());
+
+    registry
+        .try_begin_browser_login(default.clone())
+        .await
+        .expect("first owner");
+    assert!(
+        registry
+            .try_begin_browser_login(slot.clone())
+            .await
+            .is_err()
+    );
+    registry.finish_browser_login(&slot).await;
+    assert!(
+        registry
+            .try_begin_browser_login(slot.clone())
+            .await
+            .is_err()
+    );
+    registry.finish_browser_login(&default).await;
+    registry
+        .try_begin_browser_login(slot.clone())
+        .await
+        .expect("slot after exact release");
+    registry.finish_browser_login(&slot).await;
+}
+
+#[tokio::test]
+async fn default_login_projection_uses_exact_attempt_cas_and_exposes_cancel() {
+    let process_home = tempdir().expect("temp process home");
+    let registry = registry_for_home(process_home.path()).await;
+    let (first, first_started) = registry
+        .prepare_default_login("default-login-1".to_string())
+        .await
+        .expect("prepare first default login");
+    assert_eq!(first_started.slot.active_login_operation_id, None,);
+    let first_cancelable = registry
+        .mark_login_cancelable("default", first.attempt_generation, &first.operation_id)
+        .await
+        .expect("mark first login cancelable");
+    assert_eq!(
+        first_cancelable.slot.active_login_operation_id.as_deref(),
+        Some("default-login-1")
+    );
+
+    let (second, second_started) = registry
+        .prepare_default_login("default-login-2".to_string())
+        .await
+        .expect("replace default login");
+    assert_eq!(second_started.slot.active_login_operation_id, None);
+    let second_started = registry
+        .mark_login_cancelable("default", second.attempt_generation, &second.operation_id)
+        .await
+        .expect("mark second login cancelable");
+    assert_eq!(
+        (
+            second_started.slot.active_login_operation_id.as_deref(),
+            second_started.slot.attempt_generation,
+        ),
+        (Some("default-login-2"), first.attempt_generation + 1)
+    );
+    assert_eq!(
+        registry
+            .finish_default_login(&first, true, None)
+            .await
+            .expect("ignore superseded completion"),
+        None
+    );
+
+    assert!(second.try_claim_failure());
+    let canceled = registry
+        .finish_default_login(
+            &second,
+            false,
+            Some(live_registration::ERROR_LOGIN_CANCELED),
+        )
+        .await
+        .expect("cancel default login")
+        .expect("matching attempt must publish");
+    assert_eq!(
+        (
+            canceled.slot.status,
+            canceled.slot.active_login_operation_id,
+            canceled.slot.error_code.as_deref(),
+        ),
+        (
+            AccountSlotStatus::Ready,
+            None,
+            Some(live_registration::ERROR_LOGIN_CANCELED),
+        )
+    );
+}
+
+#[tokio::test]
+async fn default_projection_refresh_preserves_active_login_cas() {
+    let process_home = tempdir().expect("temp process home");
+    let registry = registry_for_home(process_home.path()).await;
+    let (prepared, _) = registry
+        .prepare_default_login("default-login".to_string())
+        .await
+        .expect("prepare default login");
+    let started = registry
+        .mark_login_cancelable(
+            "default",
+            prepared.attempt_generation,
+            &prepared.operation_id,
+        )
+        .await
+        .expect("mark login cancelable");
+
+    let refreshed = registry
+        .refresh_default_projection()
+        .await
+        .expect("refresh default projection");
+    assert_eq!(
+        (
+            refreshed.slot.status,
+            refreshed.slot.active_login_operation_id.as_deref(),
+            refreshed.slot.attempt_generation,
+            refreshed.slot.registry_revision,
+        ),
+        (
+            AccountSlotStatus::Ready,
+            Some("default-login"),
+            prepared.attempt_generation,
+            started.slot.registry_revision + 1,
+        )
+    );
+
+    assert!(prepared.try_claim_failure());
+    let terminal = registry
+        .finish_default_login(
+            &prepared,
+            false,
+            Some(live_registration::ERROR_LOGIN_CANCELED),
+        )
+        .await
+        .expect("finish default login")
+        .expect("active login must retain its terminal CAS");
+    assert_eq!(
+        (
+            terminal.slot.status,
+            terminal.slot.active_login_operation_id,
+            terminal.slot.error_code.as_deref(),
+        ),
+        (
+            AccountSlotStatus::Ready,
+            None,
+            Some(live_registration::ERROR_LOGIN_CANCELED),
+        )
+    );
+}
+
+#[tokio::test]
+async fn committed_default_login_clears_active_projection_when_manifest_write_is_delayed() {
+    let process_home = tempdir().expect("temp process home");
+    let registry = registry_for_home(process_home.path()).await;
+    let (prepared, _) = registry
+        .prepare_default_login("default-login".to_string())
+        .await
+        .expect("prepare default login");
+    registry
+        .mark_login_cancelable(
+            DEFAULT_SLOT_ID,
+            prepared.attempt_generation,
+            &prepared.operation_id,
+        )
+        .await
+        .expect("mark login cancelable");
+    assert!(prepared.try_begin_credential_commit());
+    prepared.finish_credential_commit(true);
+
+    let manifest_path = process_home.path().join(MANIFEST_FILE);
+    std::fs::remove_file(&manifest_path).expect("remove manifest fixture");
+    std::fs::create_dir(&manifest_path).expect("block manifest replacement");
+
+    let terminal = registry
+        .finish_default_login(&prepared, true, None)
+        .await
+        .expect("committed auth must retain an in-memory terminal projection")
+        .expect("matching attempt must publish");
+    assert_eq!(
+        (
+            terminal.slot.status,
+            terminal.slot.active_login_operation_id,
+            terminal.slot.error_code,
+        ),
+        (AccountSlotStatus::Ready, None, None)
+    );
+    assert!(
+        registry
+            .state
+            .read()
+            .expect("read registry state")
+            .projection_dirty
+    );
+
+    std::fs::remove_dir(&manifest_path).expect("unblock manifest replacement");
+    registry
+        .reconcile()
+        .await
+        .expect("retry manifest projection");
+    assert!(
+        !registry
+            .state
+            .read()
+            .expect("read registry state")
+            .projection_dirty
+    );
+}
+
+#[tokio::test]
+async fn reconcile_reloads_added_and_removed_auth_once() {
+    let process_home = tempdir().expect("temp process home");
+    let slots = manifest(process_home.path(), 1);
+    let secondary_home = slots.slots[1].auth_home.clone();
+    slots
+        .persist(&process_home.path().join(MANIFEST_FILE))
+        .expect("persist manifest");
+    let registry = registry_for_home(process_home.path()).await;
+
+    let initial = registry
+        .slot_snapshot(SECOND_SLOT_ID)
+        .await
+        .expect("initial slot snapshot");
+    let auth_manager = registry
+        .state
+        .read()
+        .expect("registry state")
+        .slots
+        .iter()
+        .find(|slot| slot.manifest.account_slot_id == SECOND_SLOT_ID)
+        .and_then(|slot| slot.runtime.get())
+        .map(|runtime| Arc::clone(&runtime.auth_manager))
+        .expect("initialized slot auth manager");
+    let auth_changes = auth_manager.auth_change_receiver();
+    assert_eq!(
+        (
+            initial.status,
+            initial.registry_revision,
+            *auth_changes.borrow()
+        ),
+        (AccountSlotStatus::LoginRequired, 1, 0)
+    );
+
+    login_with_api_key(
+        &secondary_home,
+        "slot-key",
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )
+    .expect("persist secondary auth");
+    let mut state = registry.state.write().expect("registry state");
+    let slot = state
+        .slots
+        .iter_mut()
+        .find(|slot| slot.manifest.account_slot_id == SECOND_SLOT_ID)
+        .expect("secondary slot");
+    slot.active_login_operation_id = Some("active-login".to_string());
+    slot.active_login_cancelable = true;
+    drop(state);
+    registry.reconcile().await.expect("busy reconcile");
+    let busy = registry
+        .slot_snapshot(SECOND_SLOT_ID)
+        .await
+        .expect("busy slot snapshot");
+    assert_eq!(
+        (
+            busy.status,
+            busy.registry_revision,
+            busy.active_login_operation_id.as_deref(),
+            *auth_changes.borrow(),
+        ),
+        (
+            AccountSlotStatus::LoginRequired,
+            initial.registry_revision,
+            Some("active-login"),
+            0,
+        )
+    );
+    let mut state = registry.state.write().expect("registry state");
+    let slot = state
+        .slots
+        .iter_mut()
+        .find(|slot| slot.manifest.account_slot_id == SECOND_SLOT_ID)
+        .expect("secondary slot");
+    slot.active_login_operation_id = None;
+    slot.active_login_cancelable = false;
+    drop(state);
+
+    registry.reconcile().await.expect("reconcile");
+    let ready = registry
+        .slot_snapshot(SECOND_SLOT_ID)
+        .await
+        .expect("ready slot snapshot");
+    assert_eq!(
+        (
+            ready.status,
+            ready.registry_revision,
+            *auth_changes.borrow()
+        ),
+        (AccountSlotStatus::Ready, 2, 1)
+    );
+
+    registry.reconcile().await.expect("stable ready reconcile");
+    let unchanged_ready = registry
+        .slot_snapshot(SECOND_SLOT_ID)
+        .await
+        .expect("unchanged ready slot snapshot");
+    assert_eq!(unchanged_ready, ready);
+    assert_eq!(*auth_changes.borrow(), 1);
+
+    assert!(
+        logout(
+            &secondary_home,
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::default(),
+        )
+        .expect("remove secondary auth")
+    );
+    registry.reconcile().await.expect("missing auth reconcile");
+    let failed = registry
+        .slot_snapshot(SECOND_SLOT_ID)
+        .await
+        .expect("failed slot snapshot");
+    assert_eq!(
+        (
+            failed.status,
+            failed.error_code.as_deref(),
+            failed.registry_revision,
+            *auth_changes.borrow(),
+        ),
+        (AccountSlotStatus::Failed, Some("authUnavailable"), 3, 2)
+    );
+
+    registry.reconcile().await.expect("stable failed reconcile");
+    let unchanged_failed = registry
+        .slot_snapshot(SECOND_SLOT_ID)
+        .await
+        .expect("unchanged failed slot snapshot");
+    assert_eq!(unchanged_failed, failed);
+    assert_eq!(*auth_changes.borrow(), 2);
+}
+
+#[tokio::test]
+async fn secondary_logout_revokes_exact_ready_slot_and_bumps_generation() {
+    let process_home = tempdir().expect("temp process home");
+    let mut slots = manifest(process_home.path(), 7);
+    slots.slots[1].status = ManifestSlotStatus::Ready;
+    persist_api_key_auth(&slots.slots[1].auth_home);
+    slots
+        .persist(&process_home.path().join(MANIFEST_FILE))
+        .expect("persist manifest");
+    let registry = registry_for_home(process_home.path()).await;
+    let slot_auth = AuthManager::from_auth_for_testing_with_home(
+        CodexAuth::from_api_key("slot-key"),
+        slots.slots[1].auth_home.clone(),
+    );
+    let slot_models = codex_core::build_models_manager(registry.config.as_ref(), slot_auth.clone());
+    let runtime = Arc::new(AccountRuntimeBundle {
+        runtime_version: AtomicU64::new(0),
+        auth_manager: slot_auth,
+        models_manager: slot_models,
+    });
+    let installed = registry
+        .state
+        .read()
+        .expect("registry state")
+        .slots
+        .iter()
+        .find(|slot| slot.manifest.account_slot_id == SECOND_SLOT_ID)
+        .expect("secondary slot")
+        .runtime
+        .set(runtime);
+    assert!(installed.is_ok());
+    let ready = registry
+        .slot_snapshot(SECOND_SLOT_ID)
+        .await
+        .expect("ready slot snapshot");
+    assert_eq!(
+        ready
+            .actions
+            .iter()
+            .find(|action| action.action == AccountSlotAction::SwitchTo),
+        Some(&AccountSlotActionAvailability {
+            action: AccountSlotAction::SwitchTo,
+            allowed: true,
+            deny_reason: None,
+        })
+    );
+
+    let logged_out = registry
+        .logout_secondary(AccountSlotLogoutParams {
+            account_slot_id: SECOND_SLOT_ID.to_string(),
+            expected_registry_revision: 7,
+            expected_attempt_generation: 2,
+        })
+        .await
+        .expect("logout secondary slot");
+
+    assert_eq!(
+        logged_out.response.slot.status,
+        AccountSlotStatus::LoginRequired
+    );
+    assert_eq!(logged_out.response.slot.attempt_generation, 3);
+    assert_eq!(logged_out.response.slot.registry_revision, 8);
+}
+
+#[tokio::test]
+async fn secondary_logout_rejects_default_stale_and_active_login() {
+    let process_home = tempdir().expect("temp process home");
+    let registry = registry_for_home(process_home.path()).await;
+    assert!(
+        registry
+            .logout_secondary(AccountSlotLogoutParams {
+                account_slot_id: DEFAULT_SLOT_ID.to_string(),
+                expected_registry_revision: 1,
+                expected_attempt_generation: 0,
+            })
+            .await
+            .is_err()
+    );
+    let prepared = registry
+        .prepare_slot_login(
+            /*requested_slot_id*/ None,
+            "operation-1".to_string(),
+            /*candidate_runtime_version*/ 1,
+        )
+        .await
+        .expect("prepare slot");
+    let snapshot = registry
+        .slot_snapshot(&prepared.account_slot_id)
+        .await
+        .expect("slot snapshot");
+    assert!(
+        registry
+            .logout_secondary(AccountSlotLogoutParams {
+                account_slot_id: prepared.account_slot_id.clone(),
+                expected_registry_revision: snapshot.registry_revision.saturating_sub(1),
+                expected_attempt_generation: prepared.attempt_generation,
+            })
+            .await
+            .is_err()
+    );
+    let snapshot = registry
+        .slot_snapshot(&prepared.account_slot_id)
+        .await
+        .expect("refreshed slot snapshot");
+    let active = match registry
+        .logout_secondary(AccountSlotLogoutParams {
+            account_slot_id: prepared.account_slot_id,
+            expected_registry_revision: snapshot.registry_revision,
+            expected_attempt_generation: prepared.attempt_generation,
+        })
+        .await
+    {
+        Ok(_) => panic!("active login must reject logout"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        active.data,
+        Some(serde_json::json!({"reason":"accountSlotLoginBusy"}))
+    );
+}
+
+#[tokio::test]
+async fn logout_reservation_is_exact_and_allows_other_slot_mutation() {
+    let process_home = tempdir().expect("temp process home");
+    let mut slots = manifest(process_home.path(), 7);
+    slots.slots[1].status = ManifestSlotStatus::Ready;
+    persist_api_key_auth(&slots.slots[1].auth_home);
+    slots.slots.push(AccountSlotManifest {
+        account_slot_id: THIRD_SLOT_ID.to_string(),
+        label: "Third account".to_string(),
+        auth_home: process_home
+            .path()
+            .join(PRIVATE_HOMES_DIR)
+            .join(THIRD_SLOT_ID),
+        is_default: false,
+        status: ManifestSlotStatus::LoginRequired,
+        attempt_generation: 1,
+        updated_at: 30,
+        error_code: None,
+    });
+    slots
+        .persist(&process_home.path().join(MANIFEST_FILE))
+        .expect("persist manifest");
+    let registry = registry_for_home(process_home.path()).await;
+    let params = || AccountSlotLogoutParams {
+        account_slot_id: SECOND_SLOT_ID.to_string(),
+        expected_registry_revision: 7,
+        expected_attempt_generation: 2,
+    };
+
+    let first = registry
+        .reserve_secondary_logout(params())
+        .await
+        .expect("reserve first logout");
+    let duplicate = match registry.reserve_secondary_logout(params()).await {
+        Ok(_) => panic!("duplicate reservation must fail"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        duplicate.data,
+        Some(serde_json::json!({"reason":"accountSlotLogoutBusy"}))
+    );
+
+    registry
+        .clear_logout_reservation(&first)
+        .await
+        .expect("clear first reservation");
+    drop(first);
+    let second = registry
+        .reserve_secondary_logout(params())
+        .await
+        .expect("reserve second logout");
+    assert!(registry.reserve_secondary_logout(params()).await.is_err());
+
+    registry
+        .prepare_slot_login(
+            Some(THIRD_SLOT_ID.to_string()),
+            "other-slot-login".to_string(),
+            /*candidate_runtime_version*/ 1,
+        )
+        .await
+        .expect("other slot mutation proceeds");
+    assert!(
+        registry
+            .state
+            .read()
+            .expect("registry state")
+            .slots
+            .iter()
+            .find(|slot| slot.manifest.account_slot_id == SECOND_SLOT_ID)
+            .expect("secondary slot")
+            .active_logout_operation_id
+            .is_some()
+    );
+    registry
+        .clear_logout_reservation(&second)
+        .await
+        .expect("clear second reservation");
+}
+
+#[tokio::test]
+async fn logout_reservation_blocks_only_the_target_slot_resolver() {
+    let process_home = tempdir().expect("temp process home");
+    let mut slots = manifest(process_home.path(), 7);
+    slots.slots[1].status = ManifestSlotStatus::Ready;
+    persist_api_key_auth(&slots.slots[1].auth_home);
+    slots
+        .persist(&process_home.path().join(MANIFEST_FILE))
+        .expect("persist manifest");
+    let registry = registry_for_home(process_home.path()).await;
+    let slot_auth = AuthManager::from_auth_for_testing_with_home(
+        CodexAuth::from_api_key("slot-key"),
+        slots.slots[1].auth_home.clone(),
+    );
+    let slot_models = codex_core::build_models_manager(registry.config.as_ref(), slot_auth.clone());
+    let runtime = Arc::new(AccountRuntimeBundle {
+        runtime_version: AtomicU64::new(0),
+        auth_manager: slot_auth,
+        models_manager: slot_models,
+    });
+    let installed = registry
+        .state
+        .read()
+        .expect("registry state")
+        .slots
+        .iter()
+        .find(|slot| slot.manifest.account_slot_id == SECOND_SLOT_ID)
+        .expect("secondary slot")
+        .runtime
+        .set(runtime);
+    assert!(installed.is_ok());
+    let reservation = registry
+        .reserve_secondary_logout(AccountSlotLogoutParams {
+            account_slot_id: SECOND_SLOT_ID.to_string(),
+            expected_registry_revision: 7,
+            expected_attempt_generation: 2,
+        })
+        .await
+        .expect("reserve logout");
+
+    assert!(
+        registry
+            .resolve(ExecutionAccountBinding {
+                slot_id: SECOND_SLOT_ID.to_string(),
+                generation: 1,
+            })
+            .await
+            .is_err()
+    );
+    assert!(
+        registry
+            .resolve(ExecutionAccountBinding {
+                slot_id: DEFAULT_SLOT_ID.to_string(),
+                generation: 1,
+            })
+            .await
+            .is_ok()
+    );
+
+    registry
+        .clear_logout_reservation(&reservation)
+        .await
+        .expect("clear reservation");
+}
+
+#[tokio::test]
+async fn transition_resolution_holds_target_readiness_lease() {
+    let process_home = tempdir().expect("temp process home");
+    let mut slots = manifest(process_home.path(), 7);
+    slots.slots[1].status = ManifestSlotStatus::Ready;
+    persist_api_key_auth(&slots.slots[1].auth_home);
+    slots
+        .persist(&process_home.path().join(MANIFEST_FILE))
+        .expect("persist manifest");
+    let registry = registry_for_home(process_home.path()).await;
+    let slot_auth = AuthManager::from_auth_for_testing_with_home(
+        CodexAuth::from_api_key("slot-key"),
+        slots.slots[1].auth_home.clone(),
+    );
+    let slot_models = codex_core::build_models_manager(registry.config.as_ref(), slot_auth.clone());
+    let runtime = Arc::new(AccountRuntimeBundle {
+        runtime_version: AtomicU64::new(0),
+        auth_manager: slot_auth,
+        models_manager: slot_models,
+    });
+    let binding_transition = {
+        let state = registry.state.read().expect("registry state");
+        let slot = state
+            .slots
+            .iter()
+            .find(|slot| slot.manifest.account_slot_id == SECOND_SLOT_ID)
+            .expect("secondary slot");
+        assert!(slot.runtime.set(runtime).is_ok());
+        Arc::clone(&slot.binding_transition)
+    };
+
+    let transition = registry
+        .resolve_for_transition(ExecutionAccountBinding {
+            slot_id: SECOND_SLOT_ID.to_string(),
+            generation: 1,
+        })
+        .await
+        .expect("resolve transition");
+
+    assert!(Arc::clone(&binding_transition).try_lock_owned().is_err());
+    drop(transition);
+    assert!(binding_transition.try_lock_owned().is_ok());
+}
+
+#[tokio::test]
+async fn restart_resolves_runtime_home_from_durable_slot_version() {
+    let process_home = tempdir().expect("temp process home");
+    let mut slots = manifest(process_home.path(), 7);
+    slots.slots[1].status = ManifestSlotStatus::Failed;
+    slots
+        .persist(&process_home.path().join(MANIFEST_FILE))
+        .expect("persist recovery projection");
+    let thread_store: Arc<dyn codex_thread_store::ThreadStore> =
+        Arc::new(codex_thread_store::InMemoryThreadStore::default());
+    assert_eq!(
+        thread_store
+            .compare_and_swap_execution_account_slot_runtime(
+                SECOND_SLOT_ID.to_string(),
+                /*expected_runtime_version*/ 0,
+                Vec::new(),
+            )
+            .await
+            .expect("commit runtime version"),
+        Some((1, Vec::new()))
+    );
+    persist_api_key_auth(
+        &process_home
+            .path()
+            .join(PRIVATE_HOMES_DIR)
+            .join(SECOND_SLOT_ID)
+            .join("runtime-1"),
+    );
+    let registry = registry_for_home_and_store(process_home.path(), thread_store).await;
+
+    registry
+        .reconcile()
+        .await
+        .expect("reconcile durable runtime");
+
+    let state = registry.state.read().expect("registry state");
+    let slot = state
+        .slots
+        .iter()
+        .find(|slot| slot.manifest.account_slot_id == SECOND_SLOT_ID)
+        .expect("secondary slot");
+    assert_eq!(
+        (&slot.manifest.auth_home, slot.manifest.status),
+        (
+            &process_home
+                .path()
+                .join(PRIVATE_HOMES_DIR)
+                .join(SECOND_SLOT_ID)
+                .join("runtime-1"),
+            ManifestSlotStatus::Ready,
+        )
+    );
+}

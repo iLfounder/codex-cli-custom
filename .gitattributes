@@ -1,6 +1,2 @@
-custom-patches/**/*.patch text eol=lf whitespace=-blank-at-eol
-custom-patches/**/series.toml text eol=lf
-custom-patches/apply-series.sh text eol=lf
-release-manifests/codex-a/*.json text eol=lf
-release-manifests/codex-a/SHA256SUMS text eol=lf
-release-manifests/codex-a/*.py text eol=lf
+codex-rs/app-server-protocol/schema/** linguist-generated
+codex-rs/hooks/schema/generated/** linguist-generated

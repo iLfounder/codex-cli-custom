@@ -1,0 +1,35 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "LegacyAppPathString": {
+      "type": "string"
+    },
+    "WindowsSandboxSetupMode": {
+      "enum": [
+        "elevated",
+        "unelevated"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "cwd": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/LegacyAppPathString"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "mode": {
+      "$ref": "#/definitions/WindowsSandboxSetupMode"
+    }
+  },
+  "required": [
+    "mode"
+  ],
+  "title": "WindowsSandboxSetupStartParams",
+  "type": "object"
+}

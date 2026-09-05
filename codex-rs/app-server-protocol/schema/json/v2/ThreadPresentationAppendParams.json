@@ -1,0 +1,126 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ThreadPresentation": {
+      "oneOf": [
+        {
+          "properties": {
+            "body": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "card"
+              ],
+              "title": "CardThreadPresentationType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "body",
+            "id",
+            "title",
+            "type"
+          ],
+          "title": "CardThreadPresentation",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "level": {
+              "$ref": "#/definitions/ThreadPresentationNoticeLevel"
+            },
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "notice"
+              ],
+              "title": "NoticeThreadPresentationType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "level",
+            "message",
+            "type"
+          ],
+          "title": "NoticeThreadPresentation",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "current": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "id": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "total": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "progress"
+              ],
+              "title": "ProgressThreadPresentationType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "current",
+            "id",
+            "label",
+            "type"
+          ],
+          "title": "ProgressThreadPresentation",
+          "type": "object"
+        }
+      ]
+    },
+    "ThreadPresentationNoticeLevel": {
+      "enum": [
+        "info",
+        "success",
+        "warning",
+        "error"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "item": {
+      "$ref": "#/definitions/ThreadPresentation"
+    },
+    "threadId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "item",
+    "threadId"
+  ],
+  "title": "ThreadPresentationAppendParams",
+  "type": "object"
+}

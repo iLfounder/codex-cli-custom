@@ -1,0 +1,6 @@
+---
+source: tui/src/app/runtime_controls_tests.rs
+assertion_line: 100
+expression: rendered
+---
+■ Could not safely release this session: thread became busy Retry the quit shortcut after the session becomes idle.
