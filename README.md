@@ -10,6 +10,8 @@ The fork makes account selection, thread ownership, session handoff, and externa
 
 > This is an unofficial distribution. The current series targets upstream [`rust-v0.152.0`](https://github.com/openai/codex/releases/tag/rust-v0.152.0), commit `316795b3cf2a45e90d121d9f46499d4658b2645c`.
 
+The [0.153.3 U01–U21 port](custom-patches/rust-v0.153.3/README.md) is available for explicit selection. Target-Mac runtime replacement and cross-host acceptance are still pending; the default series and existing 0.152 files are unchanged.
+
 ## What the patch series adds
 
 | Logical patch | User-facing result (the complete P001–P025 feature set is retained) |

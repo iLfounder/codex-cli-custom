@@ -10,6 +10,8 @@
 
 > 공식 OpenAI 배포물이 아니다. 현재 series는 upstream [`rust-v0.152.0`](https://github.com/openai/codex/releases/tag/rust-v0.152.0), commit `316795b3cf2a45e90d121d9f46499d4658b2645c`을 대상으로 한다.
 
+[0.153.3 U01–U21 포팅 series](custom-patches/rust-v0.153.3/README.md)는 이름을 명시하여 선택할 수 있다. 대상 Mac의 실제 런타임 교체와 호스트 간 최종 검증은 아직 진행 중이며, 기본 series와 기존 0.152 파일은 변경하지 않았다.
+
 ## Patch series가 추가하는 기능
 
 | Logical patch | 사용자에게 제공되는 결과 (P001–P025의 모든 기능을 유지) |

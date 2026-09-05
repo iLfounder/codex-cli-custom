@@ -1,0 +1,1772 @@
+From 3679d7bd280470d46b8240d3ac752a0555b28957 Mon Sep 17 00:00:00 2001
+From: patch-verifier <patch-verifier@localhost>
+Date: Fri, 4 Sep 2026 03:28:38 +0900
+Subject: [PATCH] feat(tui): add declarative footer rows
+
+
+diff --git a/codex-rs/config/src/types.rs b/codex-rs/config/src/types.rs
+index 5006e841f5b12220a8cf1509ffa72f87e96385a6..89dbecf7d58345473460c0dbd413170ade08e8c5 100644
+--- a/codex-rs/config/src/types.rs
++++ b/codex-rs/config/src/types.rs
+@@ -742,6 +742,59 @@ pub enum TuiFooterLayout {
+     Compact,
+ }
+ 
++/// Display-safe values that can be placed in a declarative footer row.
++#[derive(
++    Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, JsonSchema,
++)]
++#[serde(rename_all = "snake_case")]
++pub enum TuiFooterVariable {
++    Model,
++    ReasoningEffort,
++    AccountEmail,
++    AccountPlan,
++    AccountSlot,
++    AccountSlotLabel,
++    AccountSlotHealth,
++    Quota,
++    SessionId,
++    SessionIdShort,
++    SessionName,
++    Handle,
++    ThreadId,
++    ThreadName,
++    DisplayHandle,
++    RuntimeState,
++    RotationState,
++    ContextUsage,
++}
++
++/// One ordered declarative footer row with independent left and right lanes.
++#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
++#[schemars(deny_unknown_fields)]
++pub struct TuiFooterRow {
++    #[serde(default)]
++    pub left: Vec<TuiFooterVariable>,
++
++    #[serde(default)]
++    pub right: Vec<TuiFooterVariable>,
++}
++
++/// Finite terminal-safe palette for declarative footer variables.
++#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema)]
++#[serde(rename_all = "snake_case")]
++pub enum TuiFooterColor {
++    Plain,
++    Dim,
++    Red,
++    Green,
++    Yellow,
++    Blue,
++    Magenta,
++    Cyan,
++    White,
++    Gray,
++}
++
+ /// Opt-in semantic footer presentation settings.
+ ///
+ /// The footer is disabled by default. When enabled, the composer can reserve and render up to
+@@ -772,6 +825,14 @@ pub struct TuiFooter {
+     /// accepted as an alias for callers that prefer the shorter spelling.
+     #[serde(default, rename = "adapter_ids", alias = "adapters")]
+     pub adapter_ids: Vec<String>,
++
++    /// Ordered declarative rows. When non-empty, these rows take precedence over `adapter_ids`.
++    #[serde(default)]
++    pub rows: Vec<TuiFooterRow>,
++
++    /// Optional per-variable colors used by declarative rows.
++    #[serde(default)]
++    pub colors: BTreeMap<TuiFooterVariable, TuiFooterColor>,
+ }
+ 
+ const fn default_tui_footer_max_rows() -> u16 {
+@@ -786,6 +847,8 @@ impl Default for TuiFooter {
+             border: TuiFooterBorder::default(),
+             layout: TuiFooterLayout::default(),
+             adapter_ids: Vec::new(),
++            rows: Vec::new(),
++            colors: BTreeMap::new(),
+         }
+     }
+ }
+diff --git a/codex-rs/config/src/types_tests.rs b/codex-rs/config/src/types_tests.rs
+index 01a6113e4a29472b159af194da90284bae1fa2dd..6c9f05cc31caa9d6353f9518caf672aed3a65d7d 100644
+--- a/codex-rs/config/src/types_tests.rs
++++ b/codex-rs/config/src/types_tests.rs
+@@ -10,6 +10,59 @@ fn tui_footer_defaults_to_disabled_single_borderless_row() {
+     assert_eq!(footer.border, TuiFooterBorder::None);
+     assert_eq!(footer.layout, TuiFooterLayout::Stacked);
+     assert!(footer.adapter_ids.is_empty());
++    assert!(footer.rows.is_empty());
++    assert!(footer.colors.is_empty());
++}
++
++#[test]
++fn tui_footer_parses_typed_rows_and_colors() {
++    let footer: TuiFooter = toml::from_str(
++        r#"
++rows = [
++  { left = ["model", "reasoning_effort"], right = ["account_slot"] },
++  { left = ["display_handle", "session_id_short"], right = ["account_plan"] },
++]
++
++[colors]
++model = "cyan"
++reasoning_effort = "magenta"
++account_slot = "green"
++"#,
++    )
++    .expect("typed footer should deserialize");
++
++    assert_eq!(footer.rows.len(), 2);
++    assert_eq!(
++        footer.rows[0].left,
++        vec![TuiFooterVariable::Model, TuiFooterVariable::ReasoningEffort]
++    );
++    assert_eq!(footer.rows[0].right, vec![TuiFooterVariable::AccountSlot]);
++    assert_eq!(
++        footer.rows[1].left,
++        vec![
++            TuiFooterVariable::DisplayHandle,
++            TuiFooterVariable::SessionIdShort
++        ]
++    );
++    assert_eq!(footer.rows[1].right, vec![TuiFooterVariable::AccountPlan]);
++    assert_eq!(
++        footer.colors,
++        BTreeMap::from([
++            (TuiFooterVariable::Model, TuiFooterColor::Cyan),
++            (TuiFooterVariable::ReasoningEffort, TuiFooterColor::Magenta,),
++            (TuiFooterVariable::AccountSlot, TuiFooterColor::Green),
++        ])
++    );
++}
++
++#[test]
++fn tui_footer_rejects_unknown_variables_and_colors() {
++    let unknown_variable =
++        toml::from_str::<TuiFooter>(r#"rows = [{ left = ["credential_path"] }]"#);
++    let unknown_color = toml::from_str::<TuiFooter>("[colors]\nmodel = \"ansi-31\"\n");
++
++    assert!(unknown_variable.is_err());
++    assert!(unknown_color.is_err());
+ }
+ 
+ #[test]
+diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
+index 07de8b32e50d37c55b8520794b0b836a88ea522e..fb0117b90b5155759c3d31f0d0e854bb53f9c933 100644
+--- a/codex-rs/core/config.schema.json
++++ b/codex-rs/core/config.schema.json
+@@ -3854,9 +3854,11 @@
+           "default": {
+             "adapter_ids": [],
+             "border": "none",
++            "colors": {},
+             "enabled": false,
+             "layout": "stacked",
+-            "max_rows": 1
++            "max_rows": 1,
++            "rows": []
+           },
+           "description": "Opt-in semantic contextual footer box. Disabled by default to preserve the legacy footer."
+         },
+@@ -4547,6 +4549,14 @@
+           "default": "none",
+           "description": "Border style. Defaults to `none`."
+         },
++        "colors": {
++          "additionalProperties": {
++            "$ref": "#/definitions/TuiFooterColor"
++          },
++          "default": {},
++          "description": "Optional per-variable colors used by declarative rows.",
++          "type": "object"
++        },
+         "enabled": {
+           "default": false,
+           "description": "Enable the contextual footer box. Defaults to `false`.",
+@@ -4568,6 +4578,14 @@
+           "maximum": 64.0,
+           "minimum": 1.0,
+           "type": "integer"
++        },
++        "rows": {
++          "default": [],
++          "description": "Ordered declarative rows. When non-empty, these rows take precedence over `adapter_ids`.",
++          "items": {
++            "$ref": "#/definitions/TuiFooterRow"
++          },
++          "type": "array"
+         }
+       },
+       "type": "object"
+@@ -4605,6 +4623,22 @@
+         }
+       ]
+     },
++    "TuiFooterColor": {
++      "description": "Finite terminal-safe palette for declarative footer variables.",
++      "enum": [
++        "plain",
++        "dim",
++        "red",
++        "green",
++        "yellow",
++        "blue",
++        "magenta",
++        "cyan",
++        "white",
++        "gray"
++      ],
++      "type": "string"
++    },
+     "TuiFooterLayout": {
+       "description": "Row arrangement for semantic footer contributions.",
+       "oneOf": [
+@@ -4624,6 +4658,51 @@
+         }
+       ]
+     },
++    "TuiFooterRow": {
++      "additionalProperties": false,
++      "description": "One ordered declarative footer row with independent left and right lanes.",
++      "properties": {
++        "left": {
++          "default": [],
++          "items": {
++            "$ref": "#/definitions/TuiFooterVariable"
++          },
++          "type": "array"
++        },
++        "right": {
++          "default": [],
++          "items": {
++            "$ref": "#/definitions/TuiFooterVariable"
++          },
++          "type": "array"
++        }
++      },
++      "type": "object"
++    },
++    "TuiFooterVariable": {
++      "description": "Display-safe values that can be placed in a declarative footer row.",
++      "enum": [
++        "model",
++        "reasoning_effort",
++        "account_email",
++        "account_plan",
++        "account_slot",
++        "account_slot_label",
++        "account_slot_health",
++        "quota",
++        "session_id",
++        "session_id_short",
++        "session_name",
++        "handle",
++        "thread_id",
++        "thread_name",
++        "display_handle",
++        "runtime_state",
++        "rotation_state",
++        "context_usage"
++      ],
++      "type": "string"
++    },
+     "TuiGlobalKeymap": {
+       "additionalProperties": false,
+       "description": "Global keybindings. These are used when a context does not define an override.",
+diff --git a/codex-rs/tui/src/app/account_picker_tests.rs b/codex-rs/tui/src/app/account_picker_tests.rs
+index 00304004f2773d9765a2e22a0215754376896ce8..9a11acfdb2475c3bf5205dd01007e424f45b0bf6 100644
+--- a/codex-rs/tui/src/app/account_picker_tests.rs
++++ b/codex-rs/tui/src/app/account_picker_tests.rs
+@@ -286,6 +286,7 @@ async fn fresh_slots_do_not_accept_stale_runtime_capability_or_rotation() {
+     assert_eq!(
+         crate::app::footer_projection::project_footer_runtime(
+             Some(THREAD_ID),
++            /*displayed_thread_name*/ None,
+             app.account_runtime.as_ref().map(|(_, runtime)| runtime),
+             app.account_slot_capability.as_ref(),
+             &app.account_slots,
+diff --git a/codex-rs/tui/src/app/footer_projection.rs b/codex-rs/tui/src/app/footer_projection.rs
+index 09b2bbfe06d963344753583028eac9b5f00a3ec7..d1da972e6268818a8d7a4c5e2580b3b6593f43fc 100644
+--- a/codex-rs/tui/src/app/footer_projection.rs
++++ b/codex-rs/tui/src/app/footer_projection.rs
+@@ -12,20 +12,26 @@ use codex_app_server_protocol::ThreadAccountRotationMode;
+ 
+ pub(super) fn project_footer_runtime(
+     displayed_thread_id: Option<&str>,
++    displayed_thread_name: Option<&str>,
+     runtime: Option<&SessionRuntimeSnapshot>,
+     slot_capability: Option<&AccountSlotCapability>,
+     slots: &[AccountSlotSnapshot],
+ ) -> FooterRuntimeProjection {
++    let mut projection = FooterRuntimeProjection {
++        thread_id: displayed_thread_id.map(str::to_string),
++        thread_name: displayed_thread_name.map(str::to_string),
++        ..FooterRuntimeProjection::default()
++    };
+     let Some(runtime) = runtime.filter(|runtime| {
+         displayed_thread_id.is_some_and(|thread_id| runtime.thread_id == thread_id)
+     }) else {
+-        return FooterRuntimeProjection::default();
++        return projection;
+     };
+ 
+-    let mut projection = FooterRuntimeProjection {
++    projection = FooterRuntimeProjection {
+         session_id: Some(runtime.identity.session_id.clone()),
+         thread_id: Some(runtime.thread_id.clone()),
+-        thread_name: runtime.identity.name.clone(),
++        thread_name: projection.thread_name,
+         runtime_state: Some(
+             match runtime.lifecycle.state {
+                 SessionRuntimeLifecycleState::NotLoaded => "not loaded",
+@@ -100,6 +106,34 @@ pub(super) fn project_footer_runtime(
+ }
+ 
+ impl App {
++    /// Read the visible name from the cached session that owns it.
++    ///
++    /// The nested option distinguishes a cached session with no name from a thread whose session
++    /// has not been cached yet. A busy event store returns `Err` so a transient lock cannot clear
++    /// a newer name already shown by the widget/footer.
++    fn cached_footer_thread_name(
++        &self,
++        displayed_thread_id: codex_protocol::ThreadId,
++    ) -> Result<Option<Option<String>>, ()> {
++        if let Some(session) = self
++            .primary_session_configured
++            .as_ref()
++            .filter(|session| session.thread_id == displayed_thread_id)
++        {
++            return Ok(Some(session.thread_name.clone()));
++        }
++
++        let Some(channel) = self.thread_event_channels.get(&displayed_thread_id) else {
++            return Ok(None);
++        };
++        let store = channel.store.try_lock().map_err(|_| ())?;
++        Ok(store
++            .session
++            .as_ref()
++            .filter(|session| session.thread_id == displayed_thread_id)
++            .map(|session| session.thread_name.clone()))
++    }
++
+     pub(super) fn sync_footer_runtime_projection(&mut self) {
+         let Some(displayed_thread_id) = self.current_displayed_thread_id() else {
+             self.chat_widget
+@@ -113,10 +147,20 @@ impl App {
+         &mut self,
+         displayed_thread_id: codex_protocol::ThreadId,
+     ) {
++        let cached_thread_name = match self.cached_footer_thread_name(displayed_thread_id) {
++            Ok(Some(thread_name)) => {
++                self.chat_widget
++                    .sync_cached_thread_name(displayed_thread_id, thread_name.clone());
++                thread_name
++            }
++            Ok(None) => None,
++            Err(()) => return,
++        };
+         let displayed_thread_id = displayed_thread_id.to_string();
+         let runtime = self.account_runtime.as_ref().map(|(_, runtime)| runtime);
+         let projection = project_footer_runtime(
+             Some(&displayed_thread_id),
++            cached_thread_name.as_deref(),
+             runtime,
+             self.account_slot_capability.as_ref(),
+             &self.account_slots,
+diff --git a/codex-rs/tui/src/app/footer_projection_tests.rs b/codex-rs/tui/src/app/footer_projection_tests.rs
+index 4d9670393125517360348737770b35bb468d5b11..46954cc9355c2dc6c4285da37efe15eb6560d9da 100644
+--- a/codex-rs/tui/src/app/footer_projection_tests.rs
++++ b/codex-rs/tui/src/app/footer_projection_tests.rs
+@@ -95,6 +95,7 @@ async fn accepted_c2_state_is_unchanged_by_stale_c1_events() {
+     assert!(app.handle_account_runtime_changed("epoch-a".to_string(), runtime(2, "C2")));
+     let accepted = project_footer_runtime(
+         Some(THREAD_ID),
++        Some("Current thread"),
+         app.account_runtime.as_ref().map(|(_, runtime)| runtime),
+         app.account_slot_capability.as_ref(),
+         &app.account_slots,
+@@ -105,11 +106,19 @@ async fn accepted_c2_state_is_unchanged_by_stale_c1_events() {
+             accepted.managed_slot_id.as_deref(),
+             accepted.managed_slot_health.as_deref(),
+             accepted.managed_slot_quota.as_deref(),
++            accepted.thread_name.as_deref(),
+         ),
+-        (Some("2"), Some("C2"), Some("healthy"), Some("Week 68%"))
++        (
++            Some("2"),
++            Some("C2"),
++            Some("healthy"),
++            Some("Week 68%"),
++            Some("Current thread"),
++        )
+     );
+     let mismatched = project_footer_runtime(
+         Some(THREAD_ID),
++        Some("Current thread"),
+         Some(&runtime(2, "C3")),
+         app.account_slot_capability.as_ref(),
+         &app.account_slots,
+@@ -126,6 +135,7 @@ async fn accepted_c2_state_is_unchanged_by_stale_c1_events() {
+     assert!(
+         project_footer_runtime(
+             Some(THREAD_ID),
++            Some("Current thread"),
+             app.account_runtime.as_ref().map(|(_, runtime)| runtime),
+             None,
+             &app.account_slots,
+@@ -156,6 +166,7 @@ async fn accepted_c2_state_is_unchanged_by_stale_c1_events() {
+     );
+     let after_stale = project_footer_runtime(
+         Some(THREAD_ID),
++        Some("Current thread"),
+         app.account_runtime.as_ref().map(|(_, runtime)| runtime),
+         app.account_slot_capability.as_ref(),
+         &app.account_slots,
+@@ -165,6 +176,29 @@ async fn accepted_c2_state_is_unchanged_by_stale_c1_events() {
+     assert_eq!(after_stale.managed_slot_id.as_deref(), Some("C2"));
+ }
+ 
++#[test]
++fn cached_thread_identity_projects_without_runtime_and_ignores_runtime_name() {
++    let mut stale_runtime = runtime(3, "C1");
++    stale_runtime.identity.name = Some("Stale runtime name".to_string());
++
++    let without_runtime =
++        project_footer_runtime(Some(THREAD_ID), Some("Cached rename"), None, None, &[]);
++    let with_runtime = project_footer_runtime(
++        Some(THREAD_ID),
++        Some("Cached rename"),
++        Some(&stale_runtime),
++        None,
++        &[],
++    );
++
++    assert_eq!(without_runtime.thread_id.as_deref(), Some(THREAD_ID));
++    assert_eq!(
++        without_runtime.thread_name.as_deref(),
++        Some("Cached rename")
++    );
++    assert_eq!(with_runtime.thread_name.as_deref(), Some("Cached rename"));
++}
++
+ #[tokio::test]
+ async fn widget_replacement_retains_only_the_exact_displayed_thread_runtime() {
+     let mut app = make_test_app().await;
+diff --git a/codex-rs/tui/src/app/tests.rs b/codex-rs/tui/src/app/tests.rs
+index 1308d1bfed483ea99b8d0522b8cd0753d87d91e2..f14681b98950873b3f12352dde096f1228c3acf5 100644
+--- a/codex-rs/tui/src/app/tests.rs
++++ b/codex-rs/tui/src/app/tests.rs
+@@ -36,6 +36,8 @@ mod session_summary;
+ mod startup;
+ #[path = "tests/stream_animation_tests.rs"]
+ mod stream_animation_tests;
++#[path = "tests/thread_routing_tests.rs"]
++mod thread_routing_tests;
+ #[path = "tests/thread_usage.rs"]
+ mod thread_usage;
+ #[path = "tests/turn_submission.rs"]
+diff --git a/codex-rs/tui/src/app/tests/thread_routing_tests.rs b/codex-rs/tui/src/app/tests/thread_routing_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..ee2e2bced3135cf1cbeab5c28e64ac83472567bb
+--- /dev/null
++++ b/codex-rs/tui/src/app/tests/thread_routing_tests.rs
+@@ -0,0 +1,106 @@
++//! Focused regression coverage for per-thread routing state.
++
++use super::*;
++use codex_app_server_protocol::ThreadNameUpdatedNotification;
++use pretty_assertions::assert_eq;
++
++fn thread_name_update(thread_id: ThreadId, name: &str) -> ServerNotification {
++    ServerNotification::ThreadNameUpdated(ThreadNameUpdatedNotification {
++        thread_id: thread_id.to_string(),
++        thread_name: Some(name.to_string()),
++    })
++}
++
++async fn cached_thread_name(app: &App, thread_id: ThreadId) -> Option<String> {
++    let channel = app
++        .thread_event_channels
++        .get(&thread_id)
++        .expect("thread channel");
++    let store = channel.store.lock().await;
++    store
++        .session
++        .as_ref()
++        .and_then(|session| session.thread_name.clone())
++}
++
++#[tokio::test]
++async fn active_thread_name_is_cached_when_the_notification_is_routed() -> Result<()> {
++    let mut app = make_test_app().await;
++    let thread_id = ThreadId::new();
++    let mut session = test_thread_session(thread_id, test_path_buf("/tmp/main"));
++    session.thread_name = Some("Old active name".to_string());
++    app.primary_thread_id = Some(thread_id);
++    app.primary_session_configured = Some(session.clone());
++    app.thread_event_channels.insert(
++        thread_id,
++        ThreadEventChannel::new_with_session(/*capacity*/ 4, session.clone(), Vec::new()),
++    );
++    app.active_thread_id = None;
++    app.activate_thread_channel(thread_id).await;
++    app.chat_widget.handle_thread_session(session);
++
++    app.enqueue_thread_notification(
++        thread_id,
++        thread_name_update(thread_id, "Accepted active name"),
++    )
++    .await?;
++
++    assert_eq!(
++        app.primary_session_configured
++            .as_ref()
++            .and_then(|session| session.thread_name.as_deref()),
++        Some("Accepted active name")
++    );
++    assert_eq!(
++        cached_thread_name(&app, thread_id).await.as_deref(),
++        Some("Accepted active name")
++    );
++    Ok(())
++}
++
++#[tokio::test]
++async fn inactive_thread_name_survives_switch_replay_and_footer_sync() -> Result<()> {
++    let mut app = make_test_app().await;
++    let active_thread_id = ThreadId::new();
++    app.active_thread_id = Some(active_thread_id);
++    let inactive_thread_id = ThreadId::new();
++    let mut inactive_session =
++        test_thread_session(inactive_thread_id, test_path_buf("/tmp/inactive"));
++    inactive_session.thread_name = Some("Stale cached name".to_string());
++    app.thread_event_channels.insert(
++        inactive_thread_id,
++        ThreadEventChannel::new_with_session(/*capacity*/ 4, inactive_session, Vec::new()),
++    );
++
++    app.enqueue_thread_notification(
++        inactive_thread_id,
++        thread_name_update(inactive_thread_id, "Accepted inactive name"),
++    )
++    .await?;
++    assert_eq!(
++        cached_thread_name(&app, inactive_thread_id)
++            .await
++            .as_deref(),
++        Some("Accepted inactive name")
++    );
++
++    app.active_thread_id = None;
++    let (receiver, snapshot) = app
++        .activate_thread_for_replay(inactive_thread_id)
++        .await
++        .expect("inactive thread should activate for replay");
++    app.active_thread_id = Some(inactive_thread_id);
++    app.active_thread_rx = Some(receiver);
++    app.replay_thread_snapshot(snapshot, /*resume_restored_queue*/ false);
++
++    assert_eq!(
++        app.chat_widget.thread_name().as_deref(),
++        Some("Accepted inactive name")
++    );
++    app.sync_footer_runtime_projection_for_thread(inactive_thread_id);
++    assert_eq!(
++        app.chat_widget.thread_name().as_deref(),
++        Some("Accepted inactive name")
++    );
++    Ok(())
++}
+diff --git a/codex-rs/tui/src/app/thread_routing.rs b/codex-rs/tui/src/app/thread_routing.rs
+index 145b6de889380b966e1541f2a2e3302a0e2a1ed6..0445eeb05a5f78df021c079a8ef53a76d13b43a2 100644
+--- a/codex-rs/tui/src/app/thread_routing.rs
++++ b/codex-rs/tui/src/app/thread_routing.rs
+@@ -1066,6 +1066,13 @@ impl App {
+                 .await
+                 .map_err(color_eyre::eyre::Report::msg)?;
+         }
++        if let ServerNotification::ThreadNameUpdated(update) = &notification
++            && let Ok(notification_thread_id) = ThreadId::from_string(&update.thread_id)
++            && notification_thread_id == thread_id
++        {
++            self.update_cached_thread_name(thread_id, update.thread_name.clone())
++                .await;
++        }
+         let inferred_session = if let ServerNotification::ThreadStarted(started) = &notification
+             && self.primary_session_configured.is_some()
+         {
+@@ -1800,6 +1807,11 @@ impl App {
+                         | ServerNotification::ThreadTokenUsageUpdated(_)
+                 )
+         );
++        let needs_footer_projection = matches!(
++            &event,
++            ThreadBufferedEvent::Notification(notification)
++                if matches!(notification.as_ref(), ServerNotification::ThreadNameUpdated(_))
++        );
+         match event {
+             ThreadBufferedEvent::Notification(notification) => {
+                 self.cache_collab_receiver_threads_for_notification(notification.as_ref());
+@@ -1833,9 +1845,17 @@ impl App {
+         if needs_refresh {
+             self.refresh_status_line();
+         }
++        if needs_footer_projection {
++            self.sync_footer_runtime_projection();
++        }
+     }
+ 
+     pub(super) fn handle_thread_event_replay(&mut self, event: ThreadBufferedEvent) {
++        let needs_footer_projection = matches!(
++            &event,
++            ThreadBufferedEvent::Notification(notification)
++                if matches!(notification.as_ref(), ServerNotification::ThreadNameUpdated(_))
++        );
+         match event {
+             ThreadBufferedEvent::Notification(notification) => self
+                 .chat_widget
+@@ -1859,6 +1879,9 @@ impl App {
+                 self.handle_feedback_thread_event(event);
+             }
+         }
++        if needs_footer_projection {
++            self.sync_footer_runtime_projection();
++        }
+     }
+ 
+     /// Handles an event emitted by the currently active thread.
+diff --git a/codex-rs/tui/src/app/thread_session_state.rs b/codex-rs/tui/src/app/thread_session_state.rs
+index f19900bae9446403884d66339ec53cab40618369..02b307333b5d0f88f4606256e58a040d100780bb 100644
+--- a/codex-rs/tui/src/app/thread_session_state.rs
++++ b/codex-rs/tui/src/app/thread_session_state.rs
+@@ -19,6 +19,25 @@ fn legacy_api_path(path: &impl serde::Serialize) -> LegacyAppPathString {
+ }
+ 
+ impl App {
++    pub(super) async fn update_cached_thread_name(
++        &mut self,
++        thread_id: ThreadId,
++        thread_name: Option<String>,
++    ) {
++        if let Some(session) = self.primary_session_configured.as_mut()
++            && session.thread_id == thread_id
++        {
++            session.thread_name = thread_name.clone();
++        }
++
++        if let Some(channel) = self.thread_event_channels.get(&thread_id) {
++            let mut store = channel.store.lock().await;
++            if let Some(session) = store.session.as_mut() {
++                session.thread_name = thread_name;
++            }
++        }
++    }
++
+     pub(super) async fn sync_active_thread_service_tier_to_cached_session(&mut self) {
+         let Some(active_thread_id) = self.active_thread_id else {
+             return;
+@@ -251,6 +270,84 @@ mod tests {
+         }
+     }
+ 
++    #[tokio::test]
++    async fn accepted_thread_name_updates_primary_and_event_cache_together() {
++        let mut app = make_test_app().await;
++        let thread_id = ThreadId::new();
++        let session = test_thread_session(thread_id, test_path_buf("/tmp/main"));
++        app.primary_session_configured = Some(session.clone());
++        app.thread_event_channels.insert(
++            thread_id,
++            ThreadEventChannel::new_with_session(/*capacity*/ 4, session, Vec::new()),
++        );
++
++        app.update_cached_thread_name(thread_id, Some("Renamed thread".to_string()))
++            .await;
++
++        assert_eq!(
++            app.primary_session_configured
++                .as_ref()
++                .and_then(|session| session.thread_name.as_deref()),
++            Some("Renamed thread")
++        );
++        let store = app
++            .thread_event_channels
++            .get(&thread_id)
++            .expect("thread channel")
++            .store
++            .lock()
++            .await;
++        assert_eq!(
++            store
++                .session
++                .as_ref()
++                .and_then(|session| session.thread_name.as_deref()),
++            Some("Renamed thread")
++        );
++    }
++
++    #[tokio::test]
++    async fn footer_name_sync_uses_primary_then_side_session_cache() {
++        let mut app = make_test_app().await;
++        let primary_thread_id = ThreadId::new();
++        let side_thread_id = ThreadId::new();
++        let mut primary_session =
++            test_thread_session(primary_thread_id, test_path_buf("/tmp/main"));
++        primary_session.thread_name = Some("Cached primary".to_string());
++        app.primary_thread_id = Some(primary_thread_id);
++        app.active_thread_id = Some(primary_thread_id);
++        app.primary_session_configured = Some(primary_session.clone());
++
++        let mut stale_primary_widget = primary_session;
++        stale_primary_widget.thread_name = Some("Stale widget primary".to_string());
++        app.chat_widget.handle_thread_session(stale_primary_widget);
++        app.sync_footer_runtime_projection_for_thread(primary_thread_id);
++        assert_eq!(
++            app.chat_widget.thread_name().as_deref(),
++            Some("Cached primary")
++        );
++
++        let mut side_session = test_thread_session(side_thread_id, test_path_buf("/tmp/side"));
++        side_session.thread_name = Some("Cached side".to_string());
++        app.thread_event_channels.insert(
++            side_thread_id,
++            ThreadEventChannel::new_with_session(
++                /*capacity*/ 4,
++                side_session.clone(),
++                Vec::new(),
++            ),
++        );
++        app.active_thread_id = Some(side_thread_id);
++        let mut stale_side_widget = side_session;
++        stale_side_widget.thread_name = Some("Stale widget side".to_string());
++        app.chat_widget.handle_thread_session(stale_side_widget);
++        app.sync_footer_runtime_projection_for_thread(side_thread_id);
++        assert_eq!(
++            app.chat_widget.thread_name().as_deref(),
++            Some("Cached side")
++        );
++    }
++
+     #[tokio::test]
+     async fn permission_settings_sync_updates_active_snapshot_without_rewriting_side_thread() {
+         let mut app = make_test_app().await;
+diff --git a/codex-rs/tui/src/bottom_pane/chat_composer.rs b/codex-rs/tui/src/bottom_pane/chat_composer.rs
+index 06f8324e166e2098bd62e41b5a241ba0e7b9ac9f..793051186a98a9e0302de11505ad6f978c274f96 100644
+--- a/codex-rs/tui/src/bottom_pane/chat_composer.rs
++++ b/codex-rs/tui/src/bottom_pane/chat_composer.rs
+@@ -274,6 +274,7 @@ use super::footer_box::FooterBox;
+ use super::footer_box::FooterBoxConfig;
+ use super::footer_box::FooterBoxLayout;
+ use super::footer_box::FooterSnapshot;
++use super::footer_projection::FooterLiveContext;
+ use super::footer_projection::FooterRuntimeProjection;
+ use super::mentions_v2::MentionV2Popup;
+ use super::mentions_v2::MentionV2Selection;
+@@ -1558,6 +1559,14 @@ impl ChatComposer {
+         self.footer_box.set_account(email, plan);
+     }
+ 
++    pub(crate) fn set_footer_live_context(&mut self, context: FooterLiveContext) {
++        self.footer_box.set_live_context(context);
++    }
++
++    pub(crate) fn reset_footer_thread_context(&mut self) {
++        self.footer_box.reset_thread_context();
++    }
++
+     pub(crate) fn set_remote_image_urls(&mut self, urls: Vec<String>) {
+         self.attachments
+             .set_remote_image_urls(urls, &mut self.draft.textarea);
+diff --git a/codex-rs/tui/src/bottom_pane/footer_box.rs b/codex-rs/tui/src/bottom_pane/footer_box.rs
+index 2f982bb2589c2aca21c5fcc916d3fa644b446bb0..5174edf891830ad1e2acff61c5c2ed5e2b41e85a 100644
+--- a/codex-rs/tui/src/bottom_pane/footer_box.rs
++++ b/codex-rs/tui/src/bottom_pane/footer_box.rs
+@@ -10,7 +10,10 @@ use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
+ use crate::render::renderable::Renderable;
+ use codex_config::types::TuiFooter;
+ use codex_config::types::TuiFooterBorder;
++use codex_config::types::TuiFooterColor;
+ use codex_config::types::TuiFooterLayout;
++use codex_config::types::TuiFooterRow;
++use codex_config::types::TuiFooterVariable;
+ use ratatui::buffer::Buffer;
+ use ratatui::layout::Rect;
+ use ratatui::style::Stylize;
+@@ -24,6 +27,7 @@ use ratatui::widgets::Widget;
+ use std::collections::BTreeMap;
+ use std::sync::Arc;
+ 
++use super::footer_projection::FooterLiveContext;
+ use super::footer_projection::FooterRuntimeProjection;
+ 
+ /// Adapter IDs understood by the footer registry.
+@@ -36,6 +40,7 @@ pub(crate) const THREAD_ADAPTER_ID: &str = "thread";
+ pub(crate) const RUNTIME_ADAPTER_ID: &str = "runtime";
+ pub(crate) const ROTATION_ADAPTER_ID: &str = "rotation";
+ pub(crate) const DEBUG_ADAPTER_ID: &str = "debug";
++const CONFIGURED_ADAPTER_ID: &str = "configured";
+ 
+ const DEFAULT_ADAPTER_IDS: [&str; 8] = [
+     OFFICIAL_STATUSLINE_ADAPTER_ID,
+@@ -77,6 +82,10 @@ impl FooterStatusValue {
+ /// replace the whole snapshot on [`FooterBox`] when an event updates the visible state.
+ #[derive(Clone, Debug, Default, PartialEq, Eq)]
+ pub(crate) struct FooterSnapshot {
++    /// Current ChatWidget-owned model and reasoning selections.
++    pub(crate) model: Option<String>,
++    pub(crate) reasoning_effort: Option<String>,
++
+     /// Values exposed by the existing `/statusline` implementation.
+     pub(crate) official_status: Vec<FooterStatusValue>,
+ 
+@@ -94,6 +103,7 @@ pub(crate) struct FooterSnapshot {
+     /// Generic session/thread identifiers and labels.
+     pub(crate) session_id: Option<String>,
+     pub(crate) session_name: Option<String>,
++    pub(crate) handle: Option<String>,
+     pub(crate) thread_id: Option<String>,
+     pub(crate) thread_name: Option<String>,
+ 
+@@ -101,6 +111,9 @@ pub(crate) struct FooterSnapshot {
+     pub(crate) runtime_state: Option<String>,
+     pub(crate) rotation_state: Option<String>,
+ 
++    /// Current context-window usage display value owned by ChatWidget.
++    pub(crate) context_usage: Option<String>,
++
+     /// Optional bounded text reserved for the explicit debug adapter.
+     pub(crate) debug: Option<String>,
+ }
+@@ -109,6 +122,8 @@ impl FooterSnapshot {
+     /// Return an empty snapshot.  Empty snapshots produce no semantic footer rows.
+     pub(crate) const fn new() -> Self {
+         Self {
++            model: None,
++            reasoning_effort: None,
+             official_status: Vec::new(),
+             primary_account_email: None,
+             primary_account_plan: None,
+@@ -118,10 +133,12 @@ impl FooterSnapshot {
+             managed_slot_quota: None,
+             session_id: None,
+             session_name: None,
++            handle: None,
+             thread_id: None,
+             thread_name: None,
+             runtime_state: None,
+             rotation_state: None,
++            context_usage: None,
+             debug: None,
+         }
+     }
+@@ -167,6 +184,15 @@ impl FooterSnapshot {
+         self
+     }
+ 
++    /// Set ChatWidget-owned live values without changing account or runtime projections.
++    pub(crate) fn with_live_context(mut self, context: FooterLiveContext) -> Self {
++        self.model = sanitize_optional(context.model);
++        self.reasoning_effort = sanitize_optional(context.reasoning_effort);
++        self.handle = sanitize_optional(context.handle);
++        self.context_usage = sanitize_optional(context.context_usage);
++        self
++    }
++
+     /// Set opaque managed-slot display fields.  No credential or email field is accepted.
+     pub(crate) fn with_managed_slot(
+         mut self,
+@@ -232,6 +258,8 @@ impl FooterSnapshot {
+     /// Return a sanitized copy, useful when a snapshot was assembled with struct fields directly.
+     pub(crate) fn sanitized(self) -> Self {
+         Self {
++            model: sanitize_optional(self.model),
++            reasoning_effort: sanitize_optional(self.reasoning_effort),
+             official_status: self
+                 .official_status
+                 .into_iter()
+@@ -245,10 +273,12 @@ impl FooterSnapshot {
+             managed_slot_quota: sanitize_optional(self.managed_slot_quota),
+             session_id: sanitize_optional(self.session_id),
+             session_name: sanitize_optional(self.session_name),
++            handle: sanitize_optional(self.handle),
+             thread_id: sanitize_optional(self.thread_id),
+             thread_name: sanitize_optional(self.thread_name),
+             runtime_state: sanitize_optional(self.runtime_state),
+             rotation_state: sanitize_optional(self.rotation_state),
++            context_usage: sanitize_optional(self.context_usage),
+             debug: sanitize_optional(self.debug),
+         }
+     }
+@@ -300,6 +330,28 @@ pub(crate) enum FooterTextStyle {
+     Accent,
+     Success,
+     Warning,
++    Red,
++    Blue,
++    Magenta,
++    White,
++    Gray,
++}
++
++impl From<TuiFooterColor> for FooterTextStyle {
++    fn from(value: TuiFooterColor) -> Self {
++        match value {
++            TuiFooterColor::Plain => Self::Plain,
++            TuiFooterColor::Dim => Self::Dim,
++            TuiFooterColor::Red => Self::Red,
++            TuiFooterColor::Green => Self::Success,
++            TuiFooterColor::Yellow => Self::Warning,
++            TuiFooterColor::Blue => Self::Blue,
++            TuiFooterColor::Magenta => Self::Magenta,
++            TuiFooterColor::Cyan => Self::Accent,
++            TuiFooterColor::White => Self::White,
++            TuiFooterColor::Gray => Self::Gray,
++        }
++    }
+ }
+ 
+ /// A semantic piece of footer text.
+@@ -406,20 +458,15 @@ impl FooterModel {
+ 
+ /// Border style used by the TUI renderer after converting config values into local presentation
+ /// types.
+-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+ pub(crate) enum FooterBorderStyle {
++    #[default]
+     None,
+     Plain,
+     Rounded,
+     Double,
+ }
+ 
+-impl Default for FooterBorderStyle {
+-    fn default() -> Self {
+-        Self::None
+-    }
+-}
+-
+ impl From<TuiFooterBorder> for FooterBorderStyle {
+     fn from(value: TuiFooterBorder) -> Self {
+         match value {
+@@ -431,18 +478,13 @@ impl From<TuiFooterBorder> for FooterBorderStyle {
+     }
+ }
+ 
+-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+ pub(crate) enum FooterLayoutStyle {
++    #[default]
+     Stacked,
+     Compact,
+ }
+ 
+-impl Default for FooterLayoutStyle {
+-    fn default() -> Self {
+-        Self::Stacked
+-    }
+-}
+-
+ impl From<TuiFooterLayout> for FooterLayoutStyle {
+     fn from(value: TuiFooterLayout) -> Self {
+         match value {
+@@ -460,6 +502,8 @@ pub(crate) struct FooterBoxConfig {
+     pub(crate) border: FooterBorderStyle,
+     pub(crate) layout: FooterLayoutStyle,
+     pub(crate) adapter_ids: Vec<String>,
++    pub(crate) rows: Vec<TuiFooterRow>,
++    pub(crate) colors: BTreeMap<TuiFooterVariable, TuiFooterColor>,
+ }
+ 
+ impl Default for FooterBoxConfig {
+@@ -470,6 +514,8 @@ impl Default for FooterBoxConfig {
+             border: FooterBorderStyle::None,
+             layout: FooterLayoutStyle::Stacked,
+             adapter_ids: Vec::new(),
++            rows: Vec::new(),
++            colors: BTreeMap::new(),
+         }
+     }
+ }
+@@ -482,6 +528,8 @@ impl From<&TuiFooter> for FooterBoxConfig {
+             border: value.border.into(),
+             layout: value.layout.into(),
+             adapter_ids: value.adapter_ids.clone(),
++            rows: value.rows.clone(),
++            colors: value.colors.clone(),
+         }
+     }
+ }
+@@ -571,7 +619,7 @@ impl std::fmt::Debug for FooterBox {
+ 
+ impl FooterBox {
+     pub(crate) fn new(config: FooterBoxConfig) -> Self {
+-        let adapters = adapters_for_ids(&config.adapter_ids);
++        let adapters = adapters_for_config(&config);
+         Self {
+             config,
+             snapshot: FooterSnapshot::new(),
+@@ -594,8 +642,11 @@ impl FooterBox {
+     }
+ 
+     pub(crate) fn set_config(&mut self, config: FooterBoxConfig) {
+-        if self.config.adapter_ids != config.adapter_ids {
+-            self.adapters = adapters_for_ids(&config.adapter_ids);
++        if self.config.adapter_ids != config.adapter_ids
++            || self.config.rows != config.rows
++            || self.config.colors != config.colors
++        {
++            self.adapters = adapters_for_config(&config);
+         }
+         self.config = config;
+     }
+@@ -619,6 +670,27 @@ impl FooterBox {
+         self.set_snapshot(self.snapshot.clone().with_account(email, plan));
+     }
+ 
++    /// Synchronize ChatWidget-owned live values without changing runtime/account state.
++    pub(crate) fn set_live_context(&mut self, context: FooterLiveContext) {
++        self.set_snapshot(self.snapshot.clone().with_live_context(context));
++    }
++
++    /// Clear every value owned by the previous thread while retaining global account identity.
++    pub(crate) fn reset_thread_context(&mut self) {
++        // Legacy adapters did not reset their accepted projection during SessionConfigured. Keep
++        // that path byte-for-byte compatible; declarative rows are the only consumers of the new
++        // thread-owned fields that require eager clearing during a transition.
++        if self.config.rows.is_empty() {
++            return;
++        }
++        self.snapshot = FooterSnapshot {
++            primary_account_email: self.snapshot.primary_account_email.clone(),
++            primary_account_plan: self.snapshot.primary_account_plan.clone(),
++            official_status: self.snapshot.official_status.clone(),
++            ..FooterSnapshot::new()
++        };
++    }
++
+     pub(crate) fn set_adapters(&mut self, adapters: Vec<Arc<dyn FooterAdapter>>) {
+         self.adapters = adapters;
+     }
+@@ -886,6 +958,11 @@ fn segment_span(segment: &FooterSegment) -> Span<'static> {
+         FooterTextStyle::Accent => Span::from(segment.text.clone()).cyan(),
+         FooterTextStyle::Success => Span::from(segment.text.clone()).green(),
+         FooterTextStyle::Warning => Span::from(segment.text.clone()).yellow(),
++        FooterTextStyle::Red => Span::from(segment.text.clone()).red(),
++        FooterTextStyle::Blue => Span::from(segment.text.clone()).blue(),
++        FooterTextStyle::Magenta => Span::from(segment.text.clone()).magenta(),
++        FooterTextStyle::White => Span::from(segment.text.clone()).white(),
++        FooterTextStyle::Gray => Span::from(segment.text.clone()).gray(),
+     }
+ }
+ 
+@@ -905,6 +982,16 @@ fn render_border(style: FooterBorderStyle, area: Rect, buf: &mut Buffer) {
+         .render(area, buf);
+ }
+ 
++fn adapters_for_config(config: &FooterBoxConfig) -> Vec<Arc<dyn FooterAdapter>> {
++    if !config.rows.is_empty() {
++        return vec![Arc::new(ConfiguredAdapter {
++            rows: config.rows.clone(),
++            colors: config.colors.clone(),
++        })];
++    }
++    adapters_for_ids(&config.adapter_ids)
++}
++
+ fn adapters_for_ids(ids: &[String]) -> Vec<Arc<dyn FooterAdapter>> {
+     // Keep unknown IDs out of the render path. This parser is intentionally separate from the
+     // exhaustive status-line item parser so adding a footer adapter cannot change `/statusline`
+@@ -937,6 +1024,93 @@ fn adapter_for_id(id: &str) -> Option<Arc<dyn FooterAdapter>> {
+     }
+ }
+ 
++struct ConfiguredAdapter {
++    rows: Vec<TuiFooterRow>,
++    colors: BTreeMap<TuiFooterVariable, TuiFooterColor>,
++}
++
++impl FooterAdapter for ConfiguredAdapter {
++    fn id(&self) -> &'static str {
++        CONFIGURED_ADAPTER_ID
++    }
++
++    fn contribute(&self, snapshot: &FooterSnapshot, out: &mut Vec<FooterContribution>) {
++        for (row, configured) in self.rows.iter().enumerate() {
++            for (lane, variables) in [
++                (FooterLane::Left, configured.left.as_slice()),
++                (FooterLane::Right, configured.right.as_slice()),
++            ] {
++                if variables.is_empty() {
++                    continue;
++                }
++                let segments = variables
++                    .iter()
++                    .map(|variable| {
++                        let text = configured_variable_text(*variable, snapshot);
++                        let style = self
++                            .colors
++                            .get(variable)
++                            .copied()
++                            .unwrap_or(TuiFooterColor::Plain)
++                            .into();
++                        FooterSegment::styled(text, style)
++                    })
++                    .collect();
++                out.push(FooterContribution::new(
++                    row,
++                    lane,
++                    u8::try_from(row).unwrap_or(u8::MAX),
++                    segments,
++                ));
++            }
++        }
++    }
++}
++
++fn configured_variable_text(variable: TuiFooterVariable, snapshot: &FooterSnapshot) -> String {
++    const NOT_AVAILABLE: &str = "N/A";
++
++    let value = match variable {
++        TuiFooterVariable::Model => snapshot.model.clone(),
++        TuiFooterVariable::ReasoningEffort => snapshot.reasoning_effort.clone(),
++        TuiFooterVariable::AccountEmail => snapshot
++            .primary_account_email
++            .as_ref()
++            .map(|value| format!("Account {value}")),
++        TuiFooterVariable::AccountPlan => snapshot
++            .primary_account_plan
++            .as_ref()
++            .map(|value| format!("Plan {value}")),
++        TuiFooterVariable::AccountSlot => snapshot.managed_slot_id.clone(),
++        TuiFooterVariable::AccountSlotLabel => snapshot
++            .managed_slot_label
++            .as_ref()
++            .map(|value| format!("Slot {value}")),
++        TuiFooterVariable::AccountSlotHealth => snapshot.managed_slot_health.clone(),
++        TuiFooterVariable::Quota => snapshot
++            .managed_slot_quota
++            .as_ref()
++            .map(|value| format!("Quota {value}")),
++        TuiFooterVariable::SessionId => snapshot.session_id.clone(),
++        TuiFooterVariable::SessionIdShort => snapshot
++            .session_id
++            .as_ref()
++            .map(|value| value.chars().take(8).collect()),
++        TuiFooterVariable::SessionName => snapshot.session_name.clone(),
++        TuiFooterVariable::Handle => snapshot.handle.clone(),
++        TuiFooterVariable::ThreadId => snapshot.thread_id.clone(),
++        TuiFooterVariable::ThreadName => snapshot.thread_name.clone(),
++        TuiFooterVariable::DisplayHandle => snapshot
++            .handle
++            .clone()
++            .or_else(|| snapshot.session_name.clone()),
++        TuiFooterVariable::RuntimeState => snapshot.runtime_state.clone(),
++        TuiFooterVariable::RotationState => snapshot.rotation_state.clone(),
++        TuiFooterVariable::ContextUsage => snapshot.context_usage.clone(),
++    };
++    value.unwrap_or_else(|| NOT_AVAILABLE.to_string())
++}
++
+ struct OfficialStatuslineAdapter;
+ 
+ impl FooterAdapter for OfficialStatuslineAdapter {
+diff --git a/codex-rs/tui/src/bottom_pane/footer_box_tests.rs b/codex-rs/tui/src/bottom_pane/footer_box_tests.rs
+index af9b0083f6767aba11b7eeb7e3c67fb7def94487..d8598625a589c43c26200774499c14364115eccb 100644
+--- a/codex-rs/tui/src/bottom_pane/footer_box_tests.rs
++++ b/codex-rs/tui/src/bottom_pane/footer_box_tests.rs
+@@ -48,6 +48,8 @@ fn bordered_layout_and_measurement_are_consistent() {
+         border: FooterBorderStyle::Rounded,
+         layout: FooterLayoutStyle::Stacked,
+         adapter_ids: Vec::new(),
++        rows: Vec::new(),
++        colors: BTreeMap::new(),
+     };
+     let snapshot = FooterSnapshot::new()
+         .with_official_status(vec![FooterStatusValue::new("Status", "ready").unwrap()])
+@@ -89,6 +91,8 @@ fn tiny_areas_fall_back_to_a_single_borderless_row() {
+         border: FooterBorderStyle::Double,
+         layout: FooterLayoutStyle::Stacked,
+         adapter_ids: Vec::new(),
++        rows: Vec::new(),
++        colors: BTreeMap::new(),
+     };
+     let snapshot = FooterSnapshot::new().with_account(
+         Some("user@example.test".to_string()),
+@@ -112,6 +116,8 @@ fn narrow_bordered_measurement_uses_the_same_borderless_fallback_as_layout() {
+         border: FooterBorderStyle::Rounded,
+         layout: FooterLayoutStyle::Stacked,
+         adapter_ids: Vec::new(),
++        rows: Vec::new(),
++        colors: BTreeMap::new(),
+     };
+     let snapshot = FooterSnapshot::new().with_account(
+         Some("user@example.test".to_string()),
+@@ -139,6 +145,8 @@ fn runtime_projection_preserves_existing_fields_and_renders() {
+         border: FooterBorderStyle::Rounded,
+         layout: FooterLayoutStyle::Stacked,
+         adapter_ids: DEFAULT_ADAPTER_IDS.map(str::to_string).to_vec(),
++        rows: Vec::new(),
++        colors: BTreeMap::new(),
+     };
+     let snapshot = FooterSnapshot::new()
+         .with_official_status(vec![FooterStatusValue::new("Status", "ready").unwrap()])
+@@ -187,3 +195,350 @@ fn runtime_projection_preserves_existing_fields_and_renders() {
+ 
+     insta::assert_snapshot!("visible_runtime_projection", rendered);
+ }
++
++#[test]
++fn configured_rows_preserve_lanes_order_and_source_identity() {
++    let config = FooterBoxConfig {
++        enabled: true,
++        max_rows: 3,
++        border: FooterBorderStyle::Rounded,
++        layout: FooterLayoutStyle::Stacked,
++        adapter_ids: vec!["does-not-exist".to_string()],
++        rows: vec![
++            TuiFooterRow {
++                left: vec![TuiFooterVariable::Model, TuiFooterVariable::ReasoningEffort],
++                right: vec![TuiFooterVariable::AccountSlot],
++            },
++            TuiFooterRow {
++                left: vec![
++                    TuiFooterVariable::DisplayHandle,
++                    TuiFooterVariable::SessionIdShort,
++                ],
++                right: vec![TuiFooterVariable::AccountPlan],
++            },
++            TuiFooterRow {
++                left: vec![
++                    TuiFooterVariable::ThreadName,
++                    TuiFooterVariable::ContextUsage,
++                ],
++                right: vec![TuiFooterVariable::Quota],
++            },
++        ],
++        colors: BTreeMap::from([
++            (TuiFooterVariable::Model, TuiFooterColor::Cyan),
++            (TuiFooterVariable::ReasoningEffort, TuiFooterColor::Magenta),
++            (TuiFooterVariable::AccountSlot, TuiFooterColor::Green),
++        ]),
++    };
++    let snapshot = FooterSnapshot::new()
++        .with_live_context(FooterLiveContext {
++            model: Some("gpt-5.6-sol".to_string()),
++            reasoning_effort: Some("high".to_string()),
++            handle: None,
++            context_usage: Some("Context 42% used".to_string()),
++        })
++        .with_account(
++            Some("user@example.test".to_string()),
++            Some("Pro".to_string()),
++        )
++        .with_managed_slot(
++            Some("2".to_string()),
++            Some("C2".to_string()),
++            Some("healthy".to_string()),
++            Some("Week 68%".to_string()),
++        )
++        .with_session_thread(
++            Some("01a061dc-dc83-7f43-ae26-000000000000".to_string()),
++            None,
++            Some("thread-1".to_string()),
++            Some("Thread title is distinct".to_string()),
++        );
++    let footer = FooterBox::with_snapshot(config, snapshot);
++
++    assert_eq!(
++        footer.model().rows,
++        vec![
++            FooterModelRow {
++                row: 0,
++                priority: 0,
++                left: vec![
++                    FooterSegment::styled("gpt-5.6-sol", FooterTextStyle::Accent),
++                    FooterSegment::styled("high", FooterTextStyle::Magenta),
++                ],
++                right: vec![FooterSegment::styled("C2", FooterTextStyle::Success)],
++            },
++            FooterModelRow {
++                row: 1,
++                priority: 1,
++                left: vec![FooterSegment::new("N/A"), FooterSegment::new("01a061dc"),],
++                right: vec![FooterSegment::new("Plan Pro")],
++            },
++            FooterModelRow {
++                row: 2,
++                priority: 2,
++                left: vec![
++                    FooterSegment::new("Thread title is distinct"),
++                    FooterSegment::new("Context 42% used"),
++                ],
++                right: vec![FooterSegment::new("Quota Week 68%")],
++            },
++        ]
++    );
++
++    let area = Rect::new(0, 0, 72, footer.desired_height(72));
++    let mut buffer = Buffer::empty(area);
++    footer.render(area, &mut buffer);
++    let rendered = (0..area.height)
++        .map(|y| {
++            (0..area.width)
++                .map(|x| buffer[(x, y)].symbol())
++                .collect::<String>()
++                .trim_end()
++                .to_string()
++        })
++        .collect::<Vec<_>>()
++        .join("\n");
++    insta::assert_snapshot!("configured_footer_rows", rendered);
++}
++
++#[test]
++fn display_handle_never_falls_back_to_thread_name() {
++    let mut snapshot = FooterSnapshot::new();
++    snapshot.thread_name = Some("Thread title".to_string());
++    assert_eq!(
++        configured_variable_text(TuiFooterVariable::DisplayHandle, &snapshot),
++        "N/A"
++    );
++
++    snapshot.session_name = Some("Session name".to_string());
++    assert_eq!(
++        configured_variable_text(TuiFooterVariable::DisplayHandle, &snapshot),
++        "Session name"
++    );
++
++    snapshot.handle = Some("Handle".to_string());
++    assert_eq!(
++        configured_variable_text(TuiFooterVariable::DisplayHandle, &snapshot),
++        "Handle"
++    );
++}
++
++#[test]
++fn every_configured_variable_resolves_from_its_named_snapshot_field() {
++    let snapshot = FooterSnapshot::new()
++        .with_live_context(FooterLiveContext {
++            model: Some("model-a".to_string()),
++            reasoning_effort: Some("xhigh".to_string()),
++            handle: Some("handle-a".to_string()),
++            context_usage: Some("Context 12% used".to_string()),
++        })
++        .with_account(
++            Some("account@example.test".to_string()),
++            Some("Pro".to_string()),
++        )
++        .with_managed_slot(
++            Some("2".to_string()),
++            Some("C2".to_string()),
++            Some("healthy".to_string()),
++            Some("Week 68%".to_string()),
++        )
++        .with_session_thread(
++            Some("12345678-aaaa-bbbb-cccc-dddddddddddd".to_string()),
++            Some("session-a".to_string()),
++            Some("thread-a".to_string()),
++            Some("Thread A".to_string()),
++        )
++        .with_runtime_rotation(
++            Some("active".to_string()),
++            Some("quota aware · switch stable".to_string()),
++        );
++
++    let resolved = [
++        TuiFooterVariable::Model,
++        TuiFooterVariable::ReasoningEffort,
++        TuiFooterVariable::AccountEmail,
++        TuiFooterVariable::AccountPlan,
++        TuiFooterVariable::AccountSlot,
++        TuiFooterVariable::AccountSlotLabel,
++        TuiFooterVariable::AccountSlotHealth,
++        TuiFooterVariable::Quota,
++        TuiFooterVariable::SessionId,
++        TuiFooterVariable::SessionIdShort,
++        TuiFooterVariable::SessionName,
++        TuiFooterVariable::Handle,
++        TuiFooterVariable::ThreadId,
++        TuiFooterVariable::ThreadName,
++        TuiFooterVariable::DisplayHandle,
++        TuiFooterVariable::RuntimeState,
++        TuiFooterVariable::RotationState,
++        TuiFooterVariable::ContextUsage,
++    ]
++    .map(|variable| configured_variable_text(variable, &snapshot));
++
++    assert_eq!(
++        resolved,
++        [
++            "model-a",
++            "xhigh",
++            "Account account@example.test",
++            "Plan Pro",
++            "C2",
++            "Slot 2",
++            "healthy",
++            "Quota Week 68%",
++            "12345678-aaaa-bbbb-cccc-dddddddddddd",
++            "12345678",
++            "session-a",
++            "handle-a",
++            "thread-a",
++            "Thread A",
++            "handle-a",
++            "active",
++            "quota aware · switch stable",
++            "Context 12% used",
++        ]
++    );
++}
++
++#[test]
++fn configured_palette_maps_to_finite_terminal_styles() {
++    assert_eq!(
++        [
++            TuiFooterColor::Plain,
++            TuiFooterColor::Dim,
++            TuiFooterColor::Red,
++            TuiFooterColor::Green,
++            TuiFooterColor::Yellow,
++            TuiFooterColor::Blue,
++            TuiFooterColor::Magenta,
++            TuiFooterColor::Cyan,
++            TuiFooterColor::White,
++            TuiFooterColor::Gray,
++        ]
++        .map(FooterTextStyle::from),
++        [
++            FooterTextStyle::Plain,
++            FooterTextStyle::Dim,
++            FooterTextStyle::Red,
++            FooterTextStyle::Success,
++            FooterTextStyle::Warning,
++            FooterTextStyle::Blue,
++            FooterTextStyle::Magenta,
++            FooterTextStyle::Accent,
++            FooterTextStyle::White,
++            FooterTextStyle::Gray,
++        ]
++    );
++}
++
++#[test]
++fn adapter_rebuilds_only_for_adapter_rows_or_colors() {
++    let rows = vec![TuiFooterRow {
++        left: vec![TuiFooterVariable::Model],
++        right: Vec::new(),
++    }];
++    let config = FooterBoxConfig {
++        enabled: true,
++        rows,
++        ..FooterBoxConfig::default()
++    };
++    let mut footer = FooterBox::new(config.clone());
++    let original = Arc::clone(&footer.adapters[0]);
++
++    footer.set_config(FooterBoxConfig {
++        max_rows: 3,
++        border: FooterBorderStyle::Double,
++        layout: FooterLayoutStyle::Compact,
++        ..config.clone()
++    });
++    assert!(Arc::ptr_eq(&original, &footer.adapters[0]));
++
++    footer.set_config(FooterBoxConfig {
++        colors: BTreeMap::from([(TuiFooterVariable::Model, TuiFooterColor::Cyan)]),
++        ..config
++    });
++    assert!(!Arc::ptr_eq(&original, &footer.adapters[0]));
++}
++
++#[test]
++fn thread_reset_clears_live_and_runtime_values_but_keeps_account() {
++    let mut footer = FooterBox::with_snapshot(
++        FooterBoxConfig {
++            rows: vec![TuiFooterRow {
++                left: vec![TuiFooterVariable::ThreadName],
++                right: Vec::new(),
++            }],
++            ..FooterBoxConfig::default()
++        },
++        FooterSnapshot::new()
++            .with_account(
++                Some("user@example.test".to_string()),
++                Some("Pro".to_string()),
++            )
++            .with_live_context(FooterLiveContext {
++                model: Some("old-model".to_string()),
++                reasoning_effort: Some("high".to_string()),
++                handle: Some("old-handle".to_string()),
++                context_usage: Some("Context 99% used".to_string()),
++            })
++            .with_session_thread(
++                Some("old-session".to_string()),
++                Some("old-session-name".to_string()),
++                Some("old-thread".to_string()),
++                Some("old-thread-name".to_string()),
++            )
++            .with_managed_slot(
++                Some("1".to_string()),
++                Some("C1".to_string()),
++                Some("healthy".to_string()),
++                Some("Week 50%".to_string()),
++            )
++            .with_runtime_rotation(
++                Some("active".to_string()),
++                Some("quota aware · switch stable".to_string()),
++            ),
++    );
++
++    footer.reset_thread_context();
++
++    assert_eq!(
++        footer.snapshot(),
++        &FooterSnapshot::new().with_account(
++            Some("user@example.test".to_string()),
++            Some("Pro".to_string()),
++        )
++    );
++}
++
++#[test]
++fn thread_reset_does_not_change_legacy_adapter_snapshot() {
++    let snapshot = FooterSnapshot::new()
++        .with_account(
++            Some("user@example.test".to_string()),
++            Some("Pro".to_string()),
++        )
++        .with_live_context(FooterLiveContext {
++            model: Some("old-model".to_string()),
++            reasoning_effort: Some("high".to_string()),
++            handle: Some("old-handle".to_string()),
++            context_usage: Some("Context 99% used".to_string()),
++        })
++        .with_runtime_projection(FooterRuntimeProjection {
++            managed_slot_label: Some("1".to_string()),
++            managed_slot_id: Some("C1".to_string()),
++            managed_slot_health: Some("healthy".to_string()),
++            managed_slot_quota: Some("Week 50%".to_string()),
++            session_id: Some("old-session".to_string()),
++            session_name: Some("old-session-name".to_string()),
++            thread_id: Some("old-thread".to_string()),
++            thread_name: Some("old-thread-name".to_string()),
++            runtime_state: Some("active".to_string()),
++            rotation_state: Some("quota aware · switch stable".to_string()),
++            ..FooterRuntimeProjection::default()
++        });
++    let mut footer = FooterBox::with_snapshot(FooterBoxConfig::default(), snapshot.clone());
++
++    footer.reset_thread_context();
++
++    assert_eq!(footer.snapshot(), &snapshot);
++}
+diff --git a/codex-rs/tui/src/bottom_pane/footer_projection.rs b/codex-rs/tui/src/bottom_pane/footer_projection.rs
+index 5b920fc608fb456855d832cb6aef2dacac052e1b..2415db31c1d42d3cfb78baebe9a60eebd3e334b1 100644
+--- a/codex-rs/tui/src/bottom_pane/footer_projection.rs
++++ b/codex-rs/tui/src/bottom_pane/footer_projection.rs
+@@ -14,3 +14,12 @@ pub(crate) struct FooterRuntimeProjection {
+     pub(crate) runtime_state: Option<String>,
+     pub(crate) rotation_state: Option<String>,
+ }
++
++/// ChatWidget-owned footer fields refreshed at existing model and usage commit seams.
++#[derive(Clone, Debug, Default, PartialEq, Eq)]
++pub(crate) struct FooterLiveContext {
++    pub(crate) model: Option<String>,
++    pub(crate) reasoning_effort: Option<String>,
++    pub(crate) handle: Option<String>,
++    pub(crate) context_usage: Option<String>,
++}
+diff --git a/codex-rs/tui/src/bottom_pane/mod.rs b/codex-rs/tui/src/bottom_pane/mod.rs
+index 84b50af8aea7c52d623c66aef3183b750e8a65e7..8fd6d2ae8045b5df065bbde288bf5ce9d9a7ed10 100644
+--- a/codex-rs/tui/src/bottom_pane/mod.rs
++++ b/codex-rs/tui/src/bottom_pane/mod.rs
+@@ -130,6 +130,7 @@ pub(crate) use footer::GoalStatusIndicator;
+ pub(crate) use footer::goal_status_indicator_line;
+ pub(crate) use footer_box::FooterBoxConfig;
+ pub(crate) use footer_box::FooterSnapshot;
++pub(crate) use footer_projection::FooterLiveContext;
+ pub(crate) use footer_projection::FooterRuntimeProjection;
+ pub(crate) use list_selection_view::ColumnWidthMode;
+ pub(crate) use list_selection_view::ListSelectionView;
+@@ -380,6 +381,16 @@ impl BottomPane {
+         self.request_redraw();
+     }
+ 
++    pub(crate) fn set_footer_live_context(&mut self, context: FooterLiveContext) {
++        self.composer.set_footer_live_context(context);
++        self.request_redraw();
++    }
++
++    pub(crate) fn reset_footer_thread_context(&mut self) {
++        self.composer.reset_footer_thread_context();
++        self.request_redraw();
++    }
++
+     pub fn set_skills(&mut self, skills: Option<Vec<SkillMetadata>>) {
+         self.composer.set_skill_mentions(skills);
+         self.request_redraw();
+diff --git a/codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__footer_box__tests__configured_footer_rows.snap b/codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__footer_box__tests__configured_footer_rows.snap
+new file mode 100644
+index 0000000000000000000000000000000000000000..0178ecc84eea61ec0e497f191bf333d3268f29e5
+--- /dev/null
++++ b/codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__footer_box__tests__configured_footer_rows.snap
+@@ -0,0 +1,12 @@
++---
++source: tui/src/bottom_pane/footer_box_tests.rs
++assertion_line: 301
++expression: rendered
++---
++╭──────────────────────────────────────────────────────────────────────╮
++│                                                                      │
++│ gpt-5.6-sol · high                                                C2 │
++│ N/A · 01a061dc                                              Plan Pro │
++│ Thread title is distinct · Context 42% used           Quota Week 68% │
++│                                                                      │
++╰──────────────────────────────────────────────────────────────────────╯
+diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
+index 1d287596d0c9c2e410a012f874ad93bce6698623..3efbbf70b7cf30acf051cd41dccfbdce2fa3c3de 100644
+--- a/codex-rs/tui/src/chatwidget.rs
++++ b/codex-rs/tui/src/chatwidget.rs
+@@ -282,6 +282,7 @@ use crate::bottom_pane::DOUBLE_PRESS_QUIT_SHORTCUT_ENABLED;
+ use crate::bottom_pane::ExecApprovalRequest;
+ use crate::bottom_pane::ExperimentalFeatureItem;
+ use crate::bottom_pane::ExperimentalFeaturesView;
++use crate::bottom_pane::FooterLiveContext;
+ use crate::bottom_pane::FooterRuntimeProjection;
+ use crate::bottom_pane::GoalStatusIndicator;
+ use crate::bottom_pane::HistoryEntry;
+@@ -1176,6 +1177,7 @@ impl ChatWidget {
+                 self.bottom_pane
+                     .set_context_window(/*percent*/ None, /*used_tokens*/ None);
+                 self.token_info = None;
++                self.sync_footer_live_context();
+             }
+         }
+     }
+@@ -1188,6 +1190,7 @@ impl ChatWidget {
+         let used_tokens = self.context_used_tokens(&info, percent.is_some());
+         self.bottom_pane.set_context_window(percent, used_tokens);
+         self.token_info = Some(info);
++        self.sync_footer_live_context();
+     }
+ 
+     fn context_remaining_percent(&self, info: &TokenUsageInfo) -> Option<i64> {
+@@ -1213,6 +1216,7 @@ impl ChatWidget {
+                     self.bottom_pane
+                         .set_context_window(/*percent*/ None, /*used_tokens*/ None);
+                     self.token_info = None;
++                    self.sync_footer_live_context();
+                 }
+             }
+         }
+@@ -2015,6 +2019,7 @@ impl ChatWidget {
+ 
+     pub(crate) fn clear_token_usage(&mut self) {
+         self.token_info = None;
++        self.sync_footer_live_context();
+     }
+ }
+ 
+diff --git a/codex-rs/tui/src/chatwidget/constructor.rs b/codex-rs/tui/src/chatwidget/constructor.rs
+index 587a6f5d3a4ee129175dc22e2d9a032c49389923..c9669d77985a65fa560e255f885aa91d07117e9d 100644
+--- a/codex-rs/tui/src/chatwidget/constructor.rs
++++ b/codex-rs/tui/src/chatwidget/constructor.rs
+@@ -291,6 +291,7 @@ impl ChatWidget {
+         let account_plan = account_plan.or_else(|| widget.plan_type.map(plan_type_display_name));
+         let footer_snapshot = FooterSnapshot::new().with_account(account_email, account_plan);
+         widget.bottom_pane.set_footer_snapshot(footer_snapshot);
++        widget.sync_footer_live_context();
+ 
+         widget.prefetch_rate_limits();
+         if let Some(keymap) = runtime_keymap {
+diff --git a/codex-rs/tui/src/chatwidget/session_flow.rs b/codex-rs/tui/src/chatwidget/session_flow.rs
+index a5a04c0d62f55b9a7b7e30ac2f3ff8eb450e8f7e..ce649eb9c95f874bd3f5085032ec34b236ab56c9 100644
+--- a/codex-rs/tui/src/chatwidget/session_flow.rs
++++ b/codex-rs/tui/src/chatwidget/session_flow.rs
+@@ -34,6 +34,7 @@ impl ChatWidget {
+         fork_parent_title: Option<String>,
+     ) {
+         self.transcript.reset_copy_history();
++        self.bottom_pane.reset_footer_thread_context();
+         let history_metadata = session.message_history.unwrap_or_default();
+         self.bottom_pane.set_history_metadata(
+             session.thread_id,
+@@ -151,6 +152,7 @@ impl ChatWidget {
+         self.bottom_pane
+             .set_active_reasoning_effort_baseline(effort.as_ref());
+         self.refresh_model_display();
++        self.sync_footer_live_context();
+         self.refresh_status_surfaces();
+         self.sync_service_tier_commands();
+         self.sync_personality_command_enabled();
+@@ -300,6 +302,20 @@ impl ChatWidget {
+         }
+     }
+ 
++    /// Synchronize the visible name from the App-owned cached session without emitting a rename
++    /// confirmation for a value that was already accepted.
++    pub(crate) fn sync_cached_thread_name(
++        &mut self,
++        thread_id: ThreadId,
++        thread_name: Option<String>,
++    ) {
++        if self.thread_id == Some(thread_id) && self.thread_name != thread_name {
++            self.thread_name = thread_name;
++            self.refresh_status_surfaces();
++            self.request_redraw();
++        }
++    }
++
+     pub(super) fn on_thread_name_updated(
+         &mut self,
+         thread_id: ThreadId,
+diff --git a/codex-rs/tui/src/chatwidget/settings.rs b/codex-rs/tui/src/chatwidget/settings.rs
+index 91fe6ec9c4a6274cb6b70a4fda09318f5d3565d5..25a77269c217e465ce115a5ac73dca923d39105f 100644
+--- a/codex-rs/tui/src/chatwidget/settings.rs
++++ b/codex-rs/tui/src/chatwidget/settings.rs
+@@ -471,6 +471,7 @@ impl ChatWidget {
+         self.sync_backend_banner_view();
+         self.refresh_model_display();
+         self.refresh_status_line();
++        self.sync_footer_live_context();
+     }
+ 
+     fn apply_thread_settings(&mut self, mut settings: ThreadSettings) {
+diff --git a/codex-rs/tui/src/chatwidget/status_controls.rs b/codex-rs/tui/src/chatwidget/status_controls.rs
+index 7ec9ca535c390e0cdebb1eabe4ad731533541395..22f4e49a67498ae6310f74651d91e4d44673554b 100644
+--- a/codex-rs/tui/src/chatwidget/status_controls.rs
++++ b/codex-rs/tui/src/chatwidget/status_controls.rs
+@@ -90,6 +90,23 @@ impl ChatWidget {
+         self.bottom_pane.set_footer_runtime_projection(projection);
+     }
+ 
++    /// Refresh the declarative footer values owned directly by ChatWidget.
++    pub(crate) fn sync_footer_live_context(&mut self) {
++        let context_usage = self.token_info.as_ref().and_then(|_| {
++            self.status_line_context_used_percent()
++                .map(|used| format!("Context {used}% used"))
++        });
++        let context = FooterLiveContext {
++            model: Some(self.current_model().to_string()),
++            reasoning_effort: self
++                .effective_reasoning_effort()
++                .map(|effort| effort.as_str().to_string()),
++            handle: None,
++            context_usage,
++        };
++        self.bottom_pane.set_footer_live_context(context);
++    }
++
+     /// Recomputes footer status-line content from config and current runtime state.
+     ///
+     /// This method is the status-line orchestrator: it parses configured item identifiers,

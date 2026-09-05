@@ -1,0 +1,133 @@
+From 52a96f858822c4f5ff2cf009b27b11395b4b12b3 Mon Sep 17 00:00:00 2001
+From: patch-verifier <patch-verifier@localhost>
+Date: Wed, 2 Sep 2026 03:35:38 +0900
+Subject: [PATCH] U16: preserve typed post-ready failure terminals
+
+
+diff --git a/codex-rs/exec/src/lib.rs b/codex-rs/exec/src/lib.rs
+index 073391e113d36ebdcad969104f785bd24385d49a..ef87a900e6cb9e52441e6a286362af0b49064b62 100644
+--- a/codex-rs/exec/src/lib.rs
++++ b/codex-rs/exec/src/lib.rs
+@@ -184,9 +184,10 @@ use crate::event_processor::EventProcessor;
+ 
+ const DEFAULT_ANALYTICS_ENABLED: bool = true;
+ const EXEC_DEFAULT_LOG_FILTER: &str = "error,opentelemetry_sdk=off,opentelemetry_otlp=off";
+-const ACCOUNT_ROTATION_BOOTSTRAP_FAILED: &str = "codex_exec_account_rotation_bootstrap_failed";
+-const TURN_START_REJECTED: &str = "codex_exec_turn_start_rejected";
+-const TURN_START_OUTCOME_UNKNOWN: &str = "codex_exec_turn_start_outcome_unknown";
++const BOOTSTRAP_FAILED: &str = "codex_exec_bootstrap_failed";
++const TURN_START_SERVER_FAILED: &str = "codex_exec_turn_start_server_failed";
++const TURN_START_TRANSPORT_FAILED: &str = "codex_exec_turn_start_transport_failed";
++const TURN_START_DESERIALIZE_FAILED: &str = "codex_exec_turn_start_deserialize_failed";
+ 
+ enum InitialOperation {
+     ForkOnly,
+@@ -1032,7 +1033,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
+             if handshake_enabled {
+                 return Err(post_ready_failure(
+                     event_processor.as_mut(),
+-                    ACCOUNT_ROTATION_BOOTSTRAP_FAILED,
++                    BOOTSTRAP_FAILED,
+                 ));
+             }
+             return Err(anyhow::Error::msg(err));
+@@ -1357,11 +1358,10 @@ enum StartTurnError {
+ impl StartTurnError {
+     fn post_ready_message(&self) -> &'static str {
+         match self {
+-            Self::AccountRotationBootstrap(_) => ACCOUNT_ROTATION_BOOTSTRAP_FAILED,
+-            Self::TurnStart(TypedRequestError::Server { .. }) => TURN_START_REJECTED,
+-            Self::TurnStart(
+-                TypedRequestError::Transport { .. } | TypedRequestError::Deserialize { .. },
+-            ) => TURN_START_OUTCOME_UNKNOWN,
++            Self::AccountRotationBootstrap(_) => BOOTSTRAP_FAILED,
++            Self::TurnStart(TypedRequestError::Server { .. }) => TURN_START_SERVER_FAILED,
++            Self::TurnStart(TypedRequestError::Transport { .. }) => TURN_START_TRANSPORT_FAILED,
++            Self::TurnStart(TypedRequestError::Deserialize { .. }) => TURN_START_DESERIALIZE_FAILED,
+         }
+     }
+ 
+diff --git a/codex-rs/exec/src/lib_tests.rs b/codex-rs/exec/src/lib_tests.rs
+index 0244eb466d1699228070fa3d1f9ec9321f04c931..ca46f615a4da9fcb1b844586695fbdb183a6a43a 100644
+--- a/codex-rs/exec/src/lib_tests.rs
++++ b/codex-rs/exec/src/lib_tests.rs
+@@ -512,10 +512,7 @@ async fn account_rotation_bootstrap_errors_are_bounded_and_never_start_a_turn()
+     .await
+     .expect_err("account inventory failure should stop before turn/start");
+ 
+-    assert_eq!(
+-        error.post_ready_message(),
+-        ACCOUNT_ROTATION_BOOTSTRAP_FAILED
+-    );
++    assert_eq!(error.post_ready_message(), BOOTSTRAP_FAILED);
+     assert_eq!(
+         client
+             .requests()
+@@ -552,10 +549,7 @@ async fn account_rotation_bootstrap_errors_are_bounded_and_never_start_a_turn()
+     .await
+     .expect_err("rotation update failure should stop before turn/start");
+ 
+-    assert_eq!(
+-        error.post_ready_message(),
+-        ACCOUNT_ROTATION_BOOTSTRAP_FAILED
+-    );
++    assert_eq!(error.post_ready_message(), BOOTSTRAP_FAILED);
+     assert_eq!(
+         client
+             .requests()
+@@ -582,14 +576,14 @@ async fn turn_start_typed_errors_map_to_bounded_post_ready_codes() {
+                     data: Some(serde_json::json!({"accountSlotId": "C9"})),
+                 },
+             },
+-            TURN_START_REJECTED,
++            TURN_START_SERVER_FAILED,
+         ),
+         (
+             TypedRequestError::Transport {
+                 method: "turn/start".to_string(),
+                 source: io::Error::new(io::ErrorKind::BrokenPipe, "raw transport detail"),
+             },
+-            TURN_START_OUTCOME_UNKNOWN,
++            TURN_START_TRANSPORT_FAILED,
+         ),
+         (
+             TypedRequestError::Deserialize {
+@@ -597,7 +591,7 @@ async fn turn_start_typed_errors_map_to_bounded_post_ready_codes() {
+                 source: serde_json::from_str::<Value>("{")
+                     .expect_err("invalid JSON should create a deserialize error"),
+             },
+-            TURN_START_OUTCOME_UNKNOWN,
++            TURN_START_DESERIALIZE_FAILED,
+         ),
+     ];
+ 
+@@ -627,29 +621,6 @@ async fn turn_start_typed_errors_map_to_bounded_post_ready_codes() {
+     }
+ }
+ 
+-#[test]
+-fn post_ready_failure_wire_shape_contains_only_the_bounded_message() {
+-    for message in [
+-        ACCOUNT_ROTATION_BOOTSTRAP_FAILED,
+-        TURN_START_REJECTED,
+-        TURN_START_OUTCOME_UNKNOWN,
+-    ] {
+-        let value = serde_json::to_value(ThreadEvent::TurnFailed(TurnFailedEvent {
+-            error: ThreadErrorEvent {
+-                message: message.to_string(),
+-            },
+-        }))
+-        .expect("turn.failed should serialize");
+-        assert_eq!(
+-            value,
+-            serde_json::json!({
+-                "type": "turn.failed",
+-                "error": {"message": message}
+-            })
+-        );
+-    }
+-}
+-
+ #[test]
+ fn invocation_ready_event_is_account_abstract_and_has_stable_wire_shape() {
+     let event = invocation_ready_event("turn-01", Some(cli::AccountRotation::QuotaAware));

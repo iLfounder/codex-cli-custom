@@ -1,0 +1,128 @@
+From b32ae1460c5e21c9172ec3647a2553e92b33c9bb Mon Sep 17 00:00:00 2001
+From: patch-verifier <patch-verifier@localhost>
+Date: Wed, 2 Sep 2026 21:30:34 +0900
+Subject: [PATCH] U18: preserve response stream disconnect outcome
+
+
+diff --git a/codex-rs/exec/src/event_processor_with_jsonl_output.rs b/codex-rs/exec/src/event_processor_with_jsonl_output.rs
+index 1dc2ffb40d75a2bbf96b8639b1ed79ab2cd52a51..52aaa72155ea02128bd47ed1b28e8ec2fe661c80 100644
+--- a/codex-rs/exec/src/event_processor_with_jsonl_output.rs
++++ b/codex-rs/exec/src/event_processor_with_jsonl_output.rs
+@@ -4,6 +4,7 @@ use std::path::PathBuf;
+ use std::sync::atomic::AtomicU64;
+ use std::sync::atomic::Ordering;
+ 
++use codex_app_server_protocol::CodexErrorInfo;
+ use codex_app_server_protocol::CollabAgentTool;
+ use codex_app_server_protocol::CollabAgentToolCallStatus;
+ use codex_app_server_protocol::CommandExecutionStatus;
+@@ -593,11 +594,18 @@ impl EventProcessorWithJsonOutput {
+                             .turn
+                             .error
+                             .map(|error| ThreadErrorEvent {
+-                                message: match error.additional_details {
+-                                    Some(details) if !details.is_empty() => {
+-                                        format!("{} ({details})", error.message)
++                                message: if matches!(
++                                    error.codex_error_info.as_ref(),
++                                    Some(CodexErrorInfo::ResponseStreamDisconnected { .. })
++                                ) {
++                                    "codex_exec_response_stream_disconnected".to_string()
++                                } else {
++                                    match error.additional_details {
++                                        Some(details) if !details.is_empty() => {
++                                            format!("{} ({details})", error.message)
++                                        }
++                                        _ => error.message,
+                                     }
+-                                    _ => error.message,
+                                 },
+                             })
+                             .or_else(|| self.last_critical_error.clone())
+diff --git a/codex-rs/exec/src/event_processor_with_jsonl_output_tests.rs b/codex-rs/exec/src/event_processor_with_jsonl_output_tests.rs
+index 217d208a66c8b1aba30f8e18aa87f4b7cb9e54ea..7ee1d7accbb914e87bfe50ebefc7d3275de062dd 100644
+--- a/codex-rs/exec/src/event_processor_with_jsonl_output_tests.rs
++++ b/codex-rs/exec/src/event_processor_with_jsonl_output_tests.rs
+@@ -84,6 +84,46 @@ fn failed_turn_does_not_overwrite_output_last_message_file() {
+     );
+ }
+ 
++#[test]
++fn response_stream_disconnect_turn_failure_uses_safe_code() {
++    let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
++
++    let collected = processor.collect_thread_events(ServerNotification::TurnCompleted(
++        codex_app_server_protocol::TurnCompletedNotification {
++            thread_id: "thread-1".to_string(),
++            turn: codex_app_server_protocol::Turn {
++                id: "turn-1".to_string(),
++                items_view: codex_app_server_protocol::TurnItemsView::Full,
++                items: Vec::new(),
++                status: TurnStatus::Failed,
++                error: Some(codex_app_server_protocol::TurnError {
++                    misalignment: None,
++                    message: "raw stream failure".to_string(),
++                    additional_details: Some("private transport detail".to_string()),
++                    codex_error_info: Some(CodexErrorInfo::ResponseStreamDisconnected {
++                        http_status_code: None,
++                    }),
++                }),
++                started_at: None,
++                completed_at: Some(0),
++                duration_ms: None,
++            },
++        },
++    ));
++
++    assert_eq!(
++        collected,
++        CollectedThreadEvents {
++            events: vec![ThreadEvent::TurnFailed(TurnFailedEvent {
++                error: ThreadErrorEvent {
++                    message: "codex_exec_response_stream_disconnected".to_string(),
++                },
++            })],
++            status: CodexStatus::InitiateShutdown,
++        }
++    );
++}
++
+ #[test]
+ fn runtime_warning_emits_a_non_fatal_error_item() {
+     let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
+diff --git a/codex-rs/protocol/src/error.rs b/codex-rs/protocol/src/error.rs
+index d2f279fde70ec2945e511a19b9794acca2e5faa9..f6b86060fe044f788158f40bd184c374993965cb 100644
+--- a/codex-rs/protocol/src/error.rs
++++ b/codex-rs/protocol/src/error.rs
+@@ -482,6 +482,9 @@ impl CodexErr {
+                     http_status_code: self.http_status_code_value(),
+                 }
+             }
++            CodexErrorDetails::Stream(_) => CodexErrorInfo::ResponseStreamDisconnected {
++                http_status_code: None,
++            },
+             CodexErrorDetails::RefreshTokenFailed(_) => CodexErrorInfo::Unauthorized,
+             CodexErrorDetails::SessionConfiguredNotFirstEvent
+             | CodexErrorDetails::InternalServerError
+diff --git a/codex-rs/protocol/src/error_tests.rs b/codex-rs/protocol/src/error_tests.rs
+index fa7c1470c8409977afe4a42e74457434ff897502..39ad1e40f1a8a4806002d440297a1f143e1def77 100644
+--- a/codex-rs/protocol/src/error_tests.rs
++++ b/codex-rs/protocol/src/error_tests.rs
+@@ -213,6 +213,17 @@ fn server_overloaded_maps_to_protocol() {
+     );
+ }
+ 
++#[test]
++fn stream_error_maps_to_response_stream_disconnected() {
++    let err = CodexErr::Stream("private transport detail".to_string());
++    assert_eq!(
++        err.to_codex_protocol_error(),
++        CodexErrorInfo::ResponseStreamDisconnected {
++            http_status_code: None,
++        }
++    );
++}
++
+ #[test]
+ fn sandbox_denied_uses_aggregated_output_when_stderr_empty() {
+     let output = ExecToolCallOutput {
