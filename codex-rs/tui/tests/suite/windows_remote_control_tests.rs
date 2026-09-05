@@ -6,6 +6,7 @@
 
 use super::real::loopback_url;
 use super::real::rpc;
+use super::real::validate_goal_exchanges;
 use super::*;
 use codex_app_server_client::RemoteAppServerClient;
 use codex_app_server_client::RemoteAppServerConnectArgs;
@@ -128,7 +129,16 @@ impl ControlFixture {
                     && status.completed_response_count <= status.response_count,
                 "fixture received unexpected model requests"
             );
-            if status.completed_response_count == expected {
+            let finished = if expected == 5 {
+                status
+                    .phases
+                    .last()
+                    .is_some_and(|phase| phase == "goal_complete")
+                    && status.completed_response_count == status.response_count
+            } else {
+                status.completed_response_count == expected
+            };
+            if finished {
                 return Ok(status);
             }
             ensure!(
@@ -472,20 +482,14 @@ async fn windows_real_remote_approval_blocks_mac_execution_until_one_time_accept
     terminal.write(b"y").await?;
     terminal.wait_for(&["remote smoke goal complete"]).await?;
     let completed = fixture
-        .wait_completed(/*expected*/ 5, /*maximum*/ 5)
+        .wait_completed(/*expected*/ 5, /*maximum*/ 11)
         .await?;
-    ensure!(
-        completed.response_count == 5
-            && completed.phases
-                == [
-                    "pwd",
-                    "first_turn_complete",
-                    "get_goal",
-                    "update_goal",
-                    "goal_complete"
-                ],
-        "one-time approval did not unblock the expected five-phase goal"
-    );
+    validate_goal_exchanges(
+        completed.response_count,
+        completed.completed_response_count,
+        &completed.phases,
+        &completed.turn_ids,
+    )?;
     fixture
         .wait_runtime(&thread_id, |runtime| {
             runtime["lifecycle"]["activeTurnId"].is_null()
@@ -521,6 +525,16 @@ async fn windows_real_remote_approval_blocks_mac_execution_until_one_time_accept
             .iter()
             .filter_map(|turn| turn["items"].as_array())
             .flatten()
+            .filter(|item| item["type"] == "commandExecution")
+            .count()
+            == 1,
+        "goal resync must not replay pwd"
+    );
+    ensure!(
+        turns
+            .iter()
+            .filter_map(|turn| turn["items"].as_array())
+            .flatten()
             .any(|item| {
                 item["type"] == "commandExecution"
                     && item["cwd"] == fixture.cwd
@@ -530,6 +544,14 @@ async fn windows_real_remote_approval_blocks_mac_execution_until_one_time_accept
                         .is_some_and(|output| output.lines().any(|line| line.trim() == fixture.cwd))
             }),
         "approved pwd did not execute in the actual Mac cwd"
+    );
+    let final_status = fixture.status().await?;
+    ensure!(
+        final_status.response_count == completed.response_count
+            && final_status.completed_response_count == completed.completed_response_count
+            && final_status.phases == completed.phases
+            && final_status.turn_ids == completed.turn_ids,
+        "goal completion observation issued unexpected model requests"
     );
     drop(terminal);
     fixture
