@@ -1,4 +1,4 @@
-From e9201dc57f20a443a2728f6330515e6489eebcdc Mon Sep 17 00:00:00 2001
+From a1c24e5d33a08b847a06940696a417b029a2d5bc Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Sat, 5 Sep 2026 04:27:22 +0900
 Subject: [PATCH] feat: support cross-platform remote TUI sessions
@@ -37240,6 +37240,145 @@ index d1591d285aa56734b9584976c09c7bc733c00e6a..c0f7ca80d5ecff3f9618703a70ad0177
              initial_plan_type: self.chat_widget.current_plan_type(),
              model: Some(self.chat_widget.current_model().to_string()),
              startup_tooltip_override: None,
+diff --git a/codex-rs/tui/src/app/account_controls.rs b/codex-rs/tui/src/app/account_controls.rs
+index a68a5b1695e926fa2deaa5c9b3f191e7b66482b0..04e7a076615bbb7bb128b93c087b567d2ad9802d 100644
+--- a/codex-rs/tui/src/app/account_controls.rs
++++ b/codex-rs/tui/src/app/account_controls.rs
+@@ -471,6 +471,10 @@ impl App {
+                     return;
+                 }
+                 *validation_in_flight = true;
++                // Switching validates data without reopening a dismissed picker
++                // or stacking a second picker above the still-open account list.
++                self.refresh_account_state(app_server);
++                return;
+             }
+             Some(PendingAccountControl::Logout {
+                 validation_in_flight,
+diff --git a/codex-rs/tui/src/app/account_picker_tests.rs b/codex-rs/tui/src/app/account_picker_tests.rs
+index 00304004f2773d9765a2e22a0215754376896ce8..1ab1508bc4503f6a5713b78d6fd5b91d3635ad49 100644
+--- a/codex-rs/tui/src/app/account_picker_tests.rs
++++ b/codex-rs/tui/src/app/account_picker_tests.rs
+@@ -13,6 +13,9 @@ use codex_app_server_protocol::SessionRuntimeCapability;
+ use codex_app_server_protocol::SessionRuntimeIdentity;
+ use codex_app_server_protocol::SessionRuntimeLifecycle;
+ use codex_app_server_protocol::SessionRuntimeLifecycleState;
++use codex_app_server_protocol::SessionRuntimeOperation;
++use codex_app_server_protocol::SessionRuntimeOperationAction;
++use codex_app_server_protocol::SessionRuntimeOperationStatus;
+ use codex_app_server_protocol::SessionRuntimePersistence;
+ use codex_app_server_protocol::SessionRuntimePersistenceHealth;
+ use codex_app_server_protocol::SessionRuntimeSnapshot;
+@@ -356,3 +359,109 @@ async fn rotation_is_exposed_only_with_the_matching_available_capability() {
+     assert_eq!(app.apply_account_snapshot(visible), true);
+     assert_eq!(app.account_rotation_snapshot(), Some(&rotation));
+ }
++
++enum SwitchReadyTiming {
++    BeforeEscape,
++    AfterEscape,
++}
++
++async fn account_switch_validation_preserves_picker_dismissal(timing: SwitchReadyTiming) {
++    let mut app = make_test_app().await;
++    let app_server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config))
++        .await
++        .expect("test app server");
++    display_snapshot_thread(&mut app);
++    let thread_id = ThreadId::from_string(THREAD_ID).expect("thread id");
++    let mut initial = picker_snapshot("epoch-a", THREAD_ID, 1, 1);
++    initial.slots.data = vec![listed_account("C1", 1), listed_account("C2", 2)];
++    initial.runtime.snapshot.account.current = Some(SessionRuntimeAccountRef {
++        account_slot_id: "C1".to_string(),
++        execution_generation: 1,
++    });
++    assert!(app.apply_account_snapshot(initial));
++    // Account detail acceptance leaves this parent list open.
++    app.open_account_picker(&app_server);
++    assert!(app.replace_account_picker_if_present(Some("C2")));
++    app.pending_account_control = Some(PendingAccountControl::Switch {
++        operation_id: "switch-c2".to_string(),
++        thread_id,
++        target_slot_id: "C2".to_string(),
++        instance_epoch: "epoch-a".to_string(),
++        ready_state_revision: None,
++        ready_generation: None,
++        validation_in_flight: false,
++    });
++    if matches!(timing, SwitchReadyTiming::AfterEscape) {
++        app.chat_widget
++            .handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
++        assert!(app.chat_widget.no_modal_or_popup_active());
++    }
++    // Exercise the real switch-reply -> Ready -> validation-request path.
++    app.handle_account_switch_finished(
++        &app_server,
++        "switch-c2",
++        Ok(SessionRuntimeOperation {
++            operation_id: "switch-c2".to_string(),
++            request_fingerprint: "synthetic-switch".to_string(),
++            action: SessionRuntimeOperationAction::ThreadAccountSwitch,
++            status: SessionRuntimeOperationStatus::Ready,
++            thread_id: Some(THREAD_ID.to_string()),
++            account_slot_id: Some("C2".to_string()),
++            state_revision: Some(2),
++            writer_generation: None,
++            execution_generation: Some(2),
++            error: None,
++            updated_at: 0,
++        }),
++    );
++    assert!(matches!(
++        app.pending_account_control,
++        Some(PendingAccountControl::Switch {
++            ready_state_revision: Some(2),
++            ready_generation: Some(2),
++            validation_in_flight: true,
++            ..
++        })
++    ));
++    if matches!(timing, SwitchReadyTiming::BeforeEscape) {
++        app.chat_widget
++            .handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
++    }
++    assert!(app.chat_widget.no_modal_or_popup_active());
++
++    // Deliver the authoritative reply after dismissal, without depending on
++    // transport scheduling or requiring a real account switch in this UI test.
++    let mut refreshed = picker_snapshot("epoch-a", THREAD_ID, 2, 2);
++    refreshed.slots.data = vec![listed_account("C1", 1), listed_account("C2", 2)];
++    for slot in &mut refreshed.slots.data {
++        slot.registry_revision = 2;
++    }
++    refreshed.runtime.snapshot.account.current = Some(SessionRuntimeAccountRef {
++        account_slot_id: "C2".to_string(),
++        execution_generation: 2,
++    });
++    let expected = refreshed.runtime.snapshot.clone();
++    app.handle_account_state_refreshed(
++        &app_server,
++        thread_id,
++        app.account_request_generation,
++        Ok(refreshed),
++    );
++    assert_eq!(app.account_runtime, Some(("epoch-a".to_string(), expected)));
++    assert!(app.pending_account_control.is_none());
++    assert!(app.chat_widget.no_modal_or_popup_active());
++    app_server
++        .shutdown()
++        .await
++        .expect("shutdown test app server");
++}
++
++#[tokio::test]
++async fn switch_ready_then_escape_dismisses_the_only_account_picker() {
++    account_switch_validation_preserves_picker_dismissal(SwitchReadyTiming::BeforeEscape).await;
++}
++
++#[tokio::test]
++async fn switch_ready_after_escape_does_not_reopen_the_account_picker() {
++    account_switch_validation_preserves_picker_dismissal(SwitchReadyTiming::AfterEscape).await;
++}
 diff --git a/codex-rs/tui/src/app/agents_overview.rs b/codex-rs/tui/src/app/agents_overview.rs
 index e61b914894e365a62d05fa8c5d1ca98e424a3e17..cc5494fb5ff0ae4514b44c46e3da2858568cef20 100644
 --- a/codex-rs/tui/src/app/agents_overview.rs
@@ -53743,10 +53882,10 @@ index 9fd63ed726f914c1b5fe402606f534f3414e7d87..377b136bee0b3a19acac1550e78e1ec9
 +mod windows_remote;
 diff --git a/codex-rs/tui/tests/suite/windows_remote.rs b/codex-rs/tui/tests/suite/windows_remote.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..f012237c3e71622fb2de1cb8016437d22741548b
+index 0000000000000000000000000000000000000000..cce397433a7278274afa21b638af05d36d0b3832
 --- /dev/null
 +++ b/codex-rs/tui/tests/suite/windows_remote.rs
-@@ -0,0 +1,442 @@
+@@ -0,0 +1,443 @@
 +//! Real Windows CLI/ConPTY coverage for remote authority and transport recovery.
 +//! `CARGO_BIN_EXE_codex` can select an already-built release without rebuilding it.
 +
@@ -53918,6 +54057,7 @@ index 0000000000000000000000000000000000000000..f012237c3e71622fb2de1cb8016437d2
 +    });
 +    configure(&mut config);
 +    config["projects"][local_cwd.to_string_lossy().as_ref()] = json!({"trust_level": "trusted"});
++    let config: toml::Value = serde_json::from_value(config)?;
 +    std::fs::write(codex_home.join("config.toml"), toml::to_string(&config)?)?;
 +
 +    // Do not inherit account, auth, provider, or user startup configuration.
@@ -54191,10 +54331,10 @@ index 0000000000000000000000000000000000000000..f012237c3e71622fb2de1cb8016437d2
 +}
 diff --git a/codex-rs/tui/tests/suite/windows_remote_control_tests.rs b/codex-rs/tui/tests/suite/windows_remote_control_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..464b8459b07854f285b35079823a70828d41123a
+index 0000000000000000000000000000000000000000..0f82b0b7d5b7ca9a8193dd0ae5ca49567719da1a
 --- /dev/null
 +++ b/codex-rs/tui/tests/suite/windows_remote_control_tests.rs
-@@ -0,0 +1,541 @@
+@@ -0,0 +1,563 @@
 +//! Ignored controls smoke against a fresh caller-owned Mac fixture, one scenario per run.
 +//! Select a packaged CLI with CARGO_BIN_EXE_codex and existing numeric-loopback forwards
 +//! with CODEX_REAL_REMOTE_WS/CODEX_REAL_REMOTE_FIXTURE_HTTP plus CODEX_REAL_REMOTE_CWD.
@@ -54203,6 +54343,7 @@ index 0000000000000000000000000000000000000000..464b8459b07854f285b35079823a7082
 +
 +use super::real::loopback_url;
 +use super::real::rpc;
++use super::real::validate_goal_exchanges;
 +use super::*;
 +use codex_app_server_client::RemoteAppServerClient;
 +use codex_app_server_client::RemoteAppServerConnectArgs;
@@ -54325,7 +54466,16 @@ index 0000000000000000000000000000000000000000..464b8459b07854f285b35079823a7082
 +                    && status.completed_response_count <= status.response_count,
 +                "fixture received unexpected model requests"
 +            );
-+            if status.completed_response_count == expected {
++            let finished = if expected == 5 {
++                status
++                    .phases
++                    .last()
++                    .is_some_and(|phase| phase == "goal_complete")
++                    && status.completed_response_count == status.response_count
++            } else {
++                status.completed_response_count == expected
++            };
++            if finished {
 +                return Ok(status);
 +            }
 +            ensure!(
@@ -54669,20 +54819,14 @@ index 0000000000000000000000000000000000000000..464b8459b07854f285b35079823a7082
 +    terminal.write(b"y").await?;
 +    terminal.wait_for(&["remote smoke goal complete"]).await?;
 +    let completed = fixture
-+        .wait_completed(/*expected*/ 5, /*maximum*/ 5)
++        .wait_completed(/*expected*/ 5, /*maximum*/ 11)
 +        .await?;
-+    ensure!(
-+        completed.response_count == 5
-+            && completed.phases
-+                == [
-+                    "pwd",
-+                    "first_turn_complete",
-+                    "get_goal",
-+                    "update_goal",
-+                    "goal_complete"
-+                ],
-+        "one-time approval did not unblock the expected five-phase goal"
-+    );
++    validate_goal_exchanges(
++        completed.response_count,
++        completed.completed_response_count,
++        &completed.phases,
++        &completed.turn_ids,
++    )?;
 +    fixture
 +        .wait_runtime(&thread_id, |runtime| {
 +            runtime["lifecycle"]["activeTurnId"].is_null()
@@ -54718,6 +54862,16 @@ index 0000000000000000000000000000000000000000..464b8459b07854f285b35079823a7082
 +            .iter()
 +            .filter_map(|turn| turn["items"].as_array())
 +            .flatten()
++            .filter(|item| item["type"] == "commandExecution")
++            .count()
++            == 1,
++        "goal resync must not replay pwd"
++    );
++    ensure!(
++        turns
++            .iter()
++            .filter_map(|turn| turn["items"].as_array())
++            .flatten()
 +            .any(|item| {
 +                item["type"] == "commandExecution"
 +                    && item["cwd"] == fixture.cwd
@@ -54727,6 +54881,14 @@ index 0000000000000000000000000000000000000000..464b8459b07854f285b35079823a7082
 +                        .is_some_and(|output| output.lines().any(|line| line.trim() == fixture.cwd))
 +            }),
 +        "approved pwd did not execute in the actual Mac cwd"
++    );
++    let final_status = fixture.status().await?;
++    ensure!(
++        final_status.response_count == completed.response_count
++            && final_status.completed_response_count == completed.completed_response_count
++            && final_status.phases == completed.phases
++            && final_status.turn_ids == completed.turn_ids,
++        "goal completion observation issued unexpected model requests"
 +    );
 +    drop(terminal);
 +    fixture
@@ -54738,10 +54900,10 @@ index 0000000000000000000000000000000000000000..464b8459b07854f285b35079823a7082
 +}
 diff --git a/codex-rs/tui/tests/suite/windows_remote_real_tests.rs b/codex-rs/tui/tests/suite/windows_remote_real_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..d89ce709e62cacc6457828fad6c4a58efbcb6b80
+index 0000000000000000000000000000000000000000..60a78d8fb7dcb15a4c915f1e909768bd0399f827
 --- /dev/null
 +++ b/codex-rs/tui/tests/suite/windows_remote_real_tests.rs
-@@ -0,0 +1,438 @@
+@@ -0,0 +1,472 @@
 +//! Opt-in actual Windows CLI -> test TCP gate -> existing SSH forward -> Mac runtime.
 +//! The caller owns SSH and a fresh `remote-smoke-authority.py --hold-first-response` fixture.
 +//! No SSH, remote launch, provider credentials, or package compilation belongs to this test.
@@ -54923,29 +55085,12 @@ index 0000000000000000000000000000000000000000..d89ce709e62cacc6457828fad6c4a58e
 +            "fixture refused the first-response release"
 +        );
 +        let completed = wait_fixture(&http, &status_url, /*completed*/ 5).await?;
-+        ensure!(
-+            completed.phases
-+                == [
-+                    "pwd",
-+                    "first_turn_complete",
-+                    "get_goal",
-+                    "update_goal",
-+                    "goal_complete"
-+                ],
-+            "fixture response order differs from the five-step contract"
-+        );
-+        let ids = &completed.turn_ids;
-+        ensure!(
-+            ids.len() == 5
-+                && ids
-+                    .iter()
-+                    .all(|id| id.as_ref().is_some_and(|id| !id.is_empty()))
-+                && ids[0] == ids[1]
-+                && ids[2] == ids[3]
-+                && ids[3] == ids[4]
-+                && ids[0] != ids[2],
-+            "expected one initial turn and a separate automatic goal continuation"
-+        );
++        validate_goal_exchanges(
++            completed.response_count,
++            completed.completed_response_count,
++            &completed.phases,
++            &completed.turn_ids,
++        )?;
 +        let goal = rpc(&observer, "thread/goal/get", json!({"threadId": thread_id})).await?;
 +        ensure!(
 +            goal["goal"]["status"] == "complete"
@@ -54976,6 +55121,16 @@ index 0000000000000000000000000000000000000000..d89ce709e62cacc6457828fad6c4a58e
 +                        .iter()
 +                        .filter_map(|turn| turn["items"].as_array())
 +                        .flatten()
++                        .filter(|item| item["type"] == "commandExecution")
++                        .count()
++                        == 1,
++                    "goal resync must not replay pwd"
++                );
++                ensure!(
++                    turns
++                        .iter()
++                        .filter_map(|turn| turn["items"].as_array())
++                        .flatten()
 +                        .any(|item| {
 +                            item["type"] == "commandExecution"
 +                                && item["cwd"] == cwd
@@ -54994,9 +55149,9 @@ index 0000000000000000000000000000000000000000..d89ce709e62cacc6457828fad6c4a58e
 +            );
 +            tokio::time::sleep(Duration::from_millis(/*millis*/ 25)).await;
 +        }
-+        Ok::<_, anyhow::Error>(())
++        Ok::<_, anyhow::Error>(completed)
 +    };
-+    tokio::time::timeout(Duration::from_secs(/*secs*/ 40), offline)
++    let completed = tokio::time::timeout(Duration::from_secs(/*secs*/ 40), offline)
 +        .await
 +        .context("offline continuation exceeded the recovery window")??;
 +    restore_tx
@@ -55036,7 +55191,10 @@ index 0000000000000000000000000000000000000000..d89ce709e62cacc6457828fad6c4a58e
 +    terminal.wait_for(&["Status: complete", &objective]).await?;
 +    let final_status = fixture_status(&http, &status_url).await?;
 +    ensure!(
-+        final_status.response_count == 5 && final_status.completed_response_count == 5,
++        final_status.response_count == completed.response_count
++            && final_status.completed_response_count == completed.completed_response_count
++            && final_status.phases == completed.phases
++            && final_status.turn_ids == completed.turn_ids,
 +        "navigation or recovery issued an unexpected model request"
 +    );
 +    ensure!(!proxy.0.is_finished(), "TCP proxy exited unexpectedly");
@@ -55094,7 +55252,7 @@ index 0000000000000000000000000000000000000000..d89ce709e62cacc6457828fad6c4a58e
 +    loop {
 +        let state = fixture_status(http, url).await?;
 +        ensure!(
-+            state.response_count <= 5 && state.completed_response_count <= state.response_count,
++            state.response_count <= 11 && state.completed_response_count <= state.response_count,
 +            "fixture received unexpected requests"
 +        );
 +        if completed == 0 && state.observed {
@@ -55104,7 +55262,13 @@ index 0000000000000000000000000000000000000000..d89ce709e62cacc6457828fad6c4a58e
 +            );
 +            return Ok(state);
 +        }
-+        if completed == 5 && state.completed_response_count == 5 {
++        if completed == 5
++            && state
++                .phases
++                .last()
++                .is_some_and(|phase| phase == "goal_complete")
++            && state.completed_response_count == state.response_count
++        {
 +            ensure!(state.released, "completed fixture was never released");
 +            return Ok(state);
 +        }
@@ -55114,6 +55278,38 @@ index 0000000000000000000000000000000000000000..d89ce709e62cacc6457828fad6c4a58e
 +        );
 +        tokio::time::sleep(Duration::from_millis(/*millis*/ 25)).await;
 +    }
++}
++
++// The fixture permits at most three CAS resyncs, never another command or turn.
++pub(super) fn validate_goal_exchanges(
++    response_count: usize,
++    completed_response_count: usize,
++    phases: &[String],
++    turn_ids: &[Option<String>],
++) -> Result<()> {
++    ensure!(
++        (5..=11).contains(&response_count)
++            && response_count % 2 == 1
++            && completed_response_count == response_count
++            && phases.len() == response_count
++            && phases[..4] == ["pwd", "first_turn_complete", "get_goal", "update_goal"]
++            && phases.last().is_some_and(|phase| phase == "goal_complete")
++            && phases[4..response_count - 1]
++                .chunks_exact(2)
++                .all(|pair| { pair == ["get_goal_resync", "update_goal_retry"] }),
++        "expected five goal exchanges plus bounded CAS resync pairs"
++    );
++    ensure!(
++        turn_ids.len() == response_count
++            && turn_ids
++                .iter()
++                .all(|id| id.as_ref().is_some_and(|id| !id.is_empty()))
++            && turn_ids[0] == turn_ids[1]
++            && turn_ids[2..].iter().all(|id| id == &turn_ids[2])
++            && turn_ids[0] != turn_ids[2],
++        "expected one initial turn and a separate automatic goal continuation"
++    );
++    Ok(())
 +}
 +
 +pub(super) async fn rpc(
@@ -55820,10 +56016,10 @@ index 9b408e1c7c8ac0b9f5d25697775dc9a846adeaa4..0e0ef7c8413f16862cc31a9fe1385c69
              return FormatterResult(group.name, output, 1)
 diff --git a/scripts/remote-smoke-authority.py b/scripts/remote-smoke-authority.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..4d2cc30feb33034d23891bc27bde7479bc015e69
+index 0000000000000000000000000000000000000000..8fd20cb8fbcf779b7e0d36e564124426dd0f2570
 --- /dev/null
 +++ b/scripts/remote-smoke-authority.py
-@@ -0,0 +1,748 @@
+@@ -0,0 +1,888 @@
 +#!/usr/bin/env python3
 +"""Isolated authority fixture for the remote macOS release smoke.
 +
@@ -55842,6 +56038,7 @@ index 0000000000000000000000000000000000000000..4d2cc30feb33034d23891bc27bde7479
 +import hashlib
 +import json
 +import os
++import re
 +import shutil
 +import signal
 +import socket
@@ -55867,6 +56064,8 @@ index 0000000000000000000000000000000000000000..4d2cc30feb33034d23891bc27bde7479
 +    "update_goal",
 +    "goal_complete",
 +)
++# Repeated conflicts must fail the smoke instead of hiding a resync livelock.
++MAX_GOAL_RESYNCS = 3
 +SCENARIO_SEQUENCES = {
 +    "goal": RESPONSE_SEQUENCE,
 +    "approval": RESPONSE_SEQUENCE,
@@ -55942,7 +56141,8 @@ index 0000000000000000000000000000000000000000..4d2cc30feb33034d23891bc27bde7479
 +
 +    config_dir = owner_home / ".config"
 +    private_dir(config_dir)
-+    provider_url = f"http://127.0.0.1:{responses_port}/v1"
++    chatgpt_url = f"http://127.0.0.1:{responses_port}"
++    provider_url = f"{chatgpt_url}/v1"
 +    permissions = (
 +        'approval_policy = "on-request"\n'
 +        'default_permissions = ":read-only"\n'
@@ -55954,6 +56154,7 @@ index 0000000000000000000000000000000000000000..4d2cc30feb33034d23891bc27bde7479
 +    )
 +    config = f'''model = "{MODEL_ID}"
 +model_provider = "remote-smoke"
++chatgpt_base_url = "{chatgpt_url}"
 +{permissions}cli_auth_credentials_store = "file"
 +
 +[model_providers.remote-smoke]
@@ -55980,6 +56181,7 @@ index 0000000000000000000000000000000000000000..4d2cc30feb33034d23891bc27bde7479
 +        jwt = synthetic_jwt(account_id)
 +        auth = {
 +            "auth_mode": "chatgpt",
++            "last_refresh": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
 +            "tokens": {
 +                "id_token": jwt,
 +                "access_token": jwt,
@@ -56021,15 +56223,19 @@ index 0000000000000000000000000000000000000000..4d2cc30feb33034d23891bc27bde7479
 +    }
 +
 +
-+def goal_tool_result(
-+    tool_outputs: list[dict[str, Any]], call_id: str
-+) -> dict[str, Any]:
++def tool_result_output(tool_outputs: list[dict[str, Any]], call_id: str) -> str:
 +    outputs = [
 +        item["output"] for item in tool_outputs if item.get("call_id") == call_id
 +    ]
-+    if len(outputs) != 1:
++    if len(outputs) != 1 or not isinstance(outputs[0], str):
 +        raise ValueError(f"expected one tool result for {call_id}")
-+    result = json.loads(outputs[0])
++    return outputs[0]
++
++
++def goal_tool_result(
++    tool_outputs: list[dict[str, Any]], call_id: str
++) -> dict[str, Any]:
++    result = json.loads(tool_result_output(tool_outputs, call_id))
 +    if (
 +        not isinstance(result, dict)
 +        or not isinstance(result.get("goalId"), str)
@@ -56042,16 +56248,63 @@ index 0000000000000000000000000000000000000000..4d2cc30feb33034d23891bc27bde7479
 +    return result
 +
 +
++def goal_call_ids(attempt: int) -> tuple[str, str]:
++    if attempt == 0:
++        return "remote-smoke-goal-read", "remote-smoke-goal-complete"
++    return (
++        f"remote-smoke-goal-read-resync-{attempt}",
++        f"remote-smoke-goal-complete-retry-{attempt}",
++    )
++
++
++def response_phase(
++    index: int, tool_outputs: list[dict[str, Any]], scenario: str
++) -> str:
++    sequence = SCENARIO_SEQUENCES[scenario]
++    if index < 1:
++        raise ValueError("invalid fixture exchange")
++    if scenario == "account-switch" or index <= 4:
++        if index > len(sequence):
++            raise ValueError("fixture response sequence is already complete")
++        return sequence[index - 1]
++    if index > 5 + 2 * MAX_GOAL_RESYNCS:
++        raise ValueError("goal resync limit exceeded")
++    if index % 2 == 0:
++        return "update_goal_retry"
++    attempt = (index - 5) // 2
++    read_id, update_id = goal_call_ids(attempt)
++    previous = goal_tool_result(tool_outputs, read_id)
++    output = tool_result_output(tool_outputs, update_id)
++    conflict = re.fullmatch(
++        r"goal revision conflict; call get_goal to resync "
++        r'\(current_goal_id=Some\(("[^"\\]+")\), current_revision=([0-9]+)\)',
++        output,
++    )
++    if conflict is not None:
++        if (
++            attempt >= MAX_GOAL_RESYNCS
++            or json.loads(conflict[1]) != previous["goalId"]
++            or int(conflict[2]) <= previous["revision"]
++        ):
++            raise ValueError("unexpected goal revision conflict")
++        return "get_goal_resync"
++    completed = goal_tool_result(tool_outputs, update_id)
++    if (
++        completed["goalId"] != previous["goalId"]
++        or completed["goal"].get("status") != "complete"
++        or completed["revision"] <= previous["revision"]
++    ):
++        raise ValueError("expected successful update_goal before final response")
++    return "goal_complete"
++
++
 +def response_events(
 +    index: int,
 +    tool_outputs: list[dict[str, Any]],
 +    *,
 +    scenario: str = "goal",
 +) -> list[dict[str, Any]]:
-+    sequence = SCENARIO_SEQUENCES[scenario]
-+    if not 1 <= index <= len(sequence):
-+        raise ValueError("fixture response sequence is already complete")
-+    phase = sequence[index - 1]
++    phase = response_phase(index, tool_outputs, scenario)
 +    if phase == "first_turn_complete" and not any(
 +        item.get("call_id") == "remote-smoke-pwd" for item in tool_outputs
 +    ):
@@ -56080,12 +56333,23 @@ index 0000000000000000000000000000000000000000..4d2cc30feb33034d23891bc27bde7479
 +                },
 +            }
 +        )
-+    elif phase in {"get_goal", "update_goal"}:
++    elif phase in {"get_goal", "update_goal", "get_goal_resync", "update_goal_retry"}:
 +        arguments: dict[str, Any] = {}
-+        if phase == "update_goal":
-+            goal = goal_tool_result(tool_outputs, "remote-smoke-goal-read")
-+            if goal["goal"].get("status") != "active":
++        updating = phase in {"update_goal", "update_goal_retry"}
++        attempt = (index - 4) // 2 if updating else (index - 3) // 2
++        read_id, update_id = goal_call_ids(attempt)
++        if updating:
++            goal = goal_tool_result(tool_outputs, read_id)
++            original = goal_tool_result(tool_outputs, "remote-smoke-goal-read")
++            if (
++                goal["goal"].get("status") != "active"
++                or goal["goalId"] != original["goalId"]
++            ):
 +                raise ValueError("expected an active goal before update_goal")
++            if attempt:
++                previous = goal_tool_result(tool_outputs, goal_call_ids(attempt - 1)[0])
++                if goal["revision"] <= previous["revision"]:
++                    raise ValueError("resync must return a newer goal revision")
 +            arguments = {
 +                "expected_goal_id": goal["goalId"],
 +                "expected_revision": goal["revision"],
@@ -56096,23 +56360,13 @@ index 0000000000000000000000000000000000000000..4d2cc30feb33034d23891bc27bde7479
 +                "type": "response.output_item.done",
 +                "item": {
 +                    "type": "function_call",
-+                    "call_id": (
-+                        "remote-smoke-goal-read"
-+                        if phase == "get_goal"
-+                        else "remote-smoke-goal-complete"
-+                    ),
-+                    "name": phase,
++                    "call_id": update_id if updating else read_id,
++                    "name": "update_goal" if updating else "get_goal",
 +                    "arguments": json.dumps(arguments),
 +                },
 +            }
 +        )
 +    else:
-+        if phase == "goal_complete":
-+            goal = goal_tool_result(tool_outputs, "remote-smoke-goal-complete")
-+            if goal["goal"].get("status") != "complete":
-+                raise ValueError(
-+                    "expected successful update_goal before final response"
-+                )
 +        text = (
 +            "remote smoke first turn complete"
 +            if phase == "first_turn_complete"
@@ -56182,7 +56436,6 @@ index 0000000000000000000000000000000000000000..4d2cc30feb33034d23891bc27bde7479
 +    ) -> None:
 +        self.scenario = scenario
 +        self.accounts = scenario_accounts(scenario)
-+        self.response_sequence = SCENARIO_SEQUENCES[scenario]
 +        if source_refs is None:
 +            source_refs = {ACCOUNT_LABEL: source_ref}
 +        if set(source_refs) != set(self.accounts):
@@ -56251,21 +56504,40 @@ index 0000000000000000000000000000000000000000..4d2cc30feb33034d23891bc27bde7479
 +                        nested = None
 +                if turn_id is None and isinstance(nested, dict):
 +                    turn_id = nested.get("turn_id") or nested.get("turnId")
++            tool_outputs = find_tool_outputs(body.get("input", []))
++            try:
++                phase = response_phase(index, tool_outputs, self.scenario)
++            except (ValueError, TypeError, KeyError):
++                phase = "unexpected"
 +            self.records.append(
 +                {
 +                    "exchange": index,
-+                    "phase": (
-+                        self.response_sequence[index - 1]
-+                        if index <= len(self.response_sequence)
-+                        else "unexpected"
-+                    ),
++                    "phase": phase,
 +                    "response_id": f"remote-smoke-response-{index}",
 +                    "turn_id": turn_id,
 +                    "account_slot": account_slot,
++                    # Record comparisons only, never header or credential values.
++                    "auth_diagnostics": {
++                        "authorization_present": bool(headers.get("Authorization")),
++                        "account_header_present": bool(
++                            headers.get("ChatGPT-Account-Id")
++                        ),
++                        "matching_auth_slots": [
++                            label
++                            for label, account_id in self.accounts.items()
++                            if headers.get("Authorization")
++                            == f"Bearer {synthetic_jwt(account_id)}"
++                        ],
++                        "matching_account_slots": [
++                            label
++                            for label, account_id in self.accounts.items()
++                            if headers.get("ChatGPT-Account-Id") == account_id
++                        ],
++                    }
++                    if self.scenario == "account-switch"
++                    else None,
 +                    "tool_outputs": (
-+                        []
-+                        if self.scenario == "account-switch"
-+                        else find_tool_outputs(body.get("input", []))
++                        [] if self.scenario == "account-switch" else tool_outputs
 +                    ),
 +                }
 +            )
@@ -56295,6 +56567,30 @@ index 0000000000000000000000000000000000000000..4d2cc30feb33034d23891bc27bde7479
 +            self.wfile.write(payload)
 +
 +        def do_GET(self) -> None:  # noqa: N802
++            path = self.path.partition("?")[0].rstrip("/")
++            if role == "responses" and path in {
++                "/connectors/directory/list",
++                "/connectors/directory/list_workspace",
++            }:
++                self.send_json({"apps": [], "nextToken": None})
++                return
++            if role == "responses" and path == "/api/codex/ps/mcp":
++                # This empty Apps mock is stateless and has no server-initiated SSE stream.
++                self.send_error(HTTPStatus.METHOD_NOT_ALLOWED)
++                return
++            if (
++                role == "responses"
++                and path == "/.well-known/oauth-authorization-server/mcp"
++            ):
++                base_url = f"http://127.0.0.1:{self.server.server_address[1]}"
++                self.send_json(
++                    {
++                        "authorization_endpoint": f"{base_url}/oauth/authorize",
++                        "token_endpoint": f"{base_url}/oauth/token",
++                        "scopes_supported": [""],
++                    }
++                )
++                return
 +            if role == "responses" and self.path == "/fixture/first-request":
 +                with state.lock:
 +                    status = {
@@ -56348,7 +56644,9 @@ index 0000000000000000000000000000000000000000..4d2cc30feb33034d23891bc27bde7479
 +                state.first_response_release.set()
 +                self.send_json({"released": True})
 +                return
-+            if role != "responses" or not self.path.rstrip("/").endswith("/responses"):
++            path = self.path.partition("?")[0].rstrip("/")
++            is_apps_mcp = path == "/api/codex/ps/mcp"
++            if role != "responses" or not (is_apps_mcp or path.endswith("/responses")):
 +                self.send_error(HTTPStatus.NOT_FOUND)
 +                return
 +            try:
@@ -56360,6 +56658,44 @@ index 0000000000000000000000000000000000000000..4d2cc30feb33034d23891bc27bde7479
 +                    raise ValueError("request body must be an object")
 +            except (ValueError, json.JSONDecodeError):
 +                self.send_error(HTTPStatus.BAD_REQUEST)
++                return
++            if is_apps_mcp:
++                method = body.get("method")
++                if method == "notifications/initialized":
++                    self.send_response(HTTPStatus.ACCEPTED)
++                    self.send_header("Content-Length", "0")
++                    self.end_headers()
++                    return
++                if method == "initialize":
++                    params = body.get("params", {})
++                    if not isinstance(params, dict):
++                        self.send_error(HTTPStatus.BAD_REQUEST)
++                        return
++                    result = {
++                        "protocolVersion": params.get("protocolVersion", "2025-06-18"),
++                        "capabilities": {"tools": {}},
++                        "serverInfo": {"name": "remote-smoke-apps", "version": "1.0.0"},
++                    }
++                elif method == "tools/list":
++                    result = {"tools": []}
++                elif method == "resources/list":
++                    result = {"resources": []}
++                elif method == "resources/templates/list":
++                    result = {"resourceTemplates": []}
++                elif method == "ping":
++                    result = {}
++                else:
++                    self.send_json(
++                        {
++                            "jsonrpc": "2.0",
++                            "id": body.get("id"),
++                            "error": {"code": -32601, "message": "method not found"},
++                        }
++                    )
++                    return
++                self.send_json(
++                    {"jsonrpc": "2.0", "id": body.get("id"), "result": result}
++                )
 +                return
 +            try:
 +                index = state.record_response_request(body, self.headers)

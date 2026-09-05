@@ -1,7 +1,7 @@
 schema_version = 1
 applies_to = "rust-v0.153.3"
 base_commit = "b1a547b1f73ce86205d9222ac19cff334b3b7a2e"
-final_tree = "5328dc836cfeaa2658e938e02b0d6552e37ab4d0"
+final_tree = "eccd8fb041e83ceb6090144c6561adc4d35863b8"
 
 [[patches]]
 number = "U01"
@@ -101,9 +101,9 @@ sha256 = "431ba5217fe8b785edb3fb282d9524604fd171ba0e1202b5f0467f3c84e5ffed"
 [[patches]]
 number = "U20"
 file = "0020-U20-enable-cross-OS-remote-TUI.patch"
-sha256 = "b5bea09469c3be84bd8d077051dfa02cc3e242dc3ae1dc83aab3d403b8369efe"
+sha256 = "eff95f3e4adad36a2442edcc6d7a177ca20fa50d2e93e0240b0e71a52fb5f9f1"
 
 [[patches]]
 number = "U21"
 file = "0021-U21-add-declarative-footer-layout.patch"
-sha256 = "c4ce86fec530263cf94aac35c20b05728ffeac1e434ec34c835f5393c6dc4476"
+sha256 = "4e59a92694f0a413cdd6201fa62744037f061aee8d72b3a72a7e5d3e7ff66392"

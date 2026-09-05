@@ -1,4 +1,4 @@
-From 3679d7bd280470d46b8240d3ac752a0555b28957 Mon Sep 17 00:00:00 2001
+From df16f0bff41f02c89aa86f6392594c343bbc7602 Mon Sep 17 00:00:00 2001
 From: patch-verifier <patch-verifier@localhost>
 Date: Fri, 4 Sep 2026 03:28:38 +0900
 Subject: [PATCH] feat(tui): add declarative footer rows
@@ -279,10 +279,10 @@ index 07de8b32e50d37c55b8520794b0b836a88ea522e..fb0117b90b5155759c3d31f0d0e854bb
        "additionalProperties": false,
        "description": "Global keybindings. These are used when a context does not define an override.",
 diff --git a/codex-rs/tui/src/app/account_picker_tests.rs b/codex-rs/tui/src/app/account_picker_tests.rs
-index 00304004f2773d9765a2e22a0215754376896ce8..9a11acfdb2475c3bf5205dd01007e424f45b0bf6 100644
+index 1ab1508bc4503f6a5713b78d6fd5b91d3635ad49..ccd748e35a161eb27eec3029aba5dffd8989e287 100644
 --- a/codex-rs/tui/src/app/account_picker_tests.rs
 +++ b/codex-rs/tui/src/app/account_picker_tests.rs
-@@ -286,6 +286,7 @@ async fn fresh_slots_do_not_accept_stale_runtime_capability_or_rotation() {
+@@ -289,6 +289,7 @@ async fn fresh_slots_do_not_accept_stale_runtime_capability_or_rotation() {
      assert_eq!(
          crate::app::footer_projection::project_footer_runtime(
              Some(THREAD_ID),
