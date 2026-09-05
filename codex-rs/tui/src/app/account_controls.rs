@@ -471,6 +471,10 @@ impl App {
                     return;
                 }
                 *validation_in_flight = true;
+                // Switching validates data without reopening a dismissed picker
+                // or stacking a second picker above the still-open account list.
+                self.refresh_account_state(app_server);
+                return;
             }
             Some(PendingAccountControl::Logout {
                 validation_in_flight,

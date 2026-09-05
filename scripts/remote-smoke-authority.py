@@ -16,6 +16,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -41,6 +42,8 @@ RESPONSE_SEQUENCE = (
     "update_goal",
     "goal_complete",
 )
+# Repeated conflicts must fail the smoke instead of hiding a resync livelock.
+MAX_GOAL_RESYNCS = 3
 SCENARIO_SEQUENCES = {
     "goal": RESPONSE_SEQUENCE,
     "approval": RESPONSE_SEQUENCE,
@@ -116,7 +119,8 @@ def prepare_owner_home(
 
     config_dir = owner_home / ".config"
     private_dir(config_dir)
-    provider_url = f"http://127.0.0.1:{responses_port}/v1"
+    chatgpt_url = f"http://127.0.0.1:{responses_port}"
+    provider_url = f"{chatgpt_url}/v1"
     permissions = (
         'approval_policy = "on-request"\n'
         'default_permissions = ":read-only"\n'
@@ -128,6 +132,7 @@ def prepare_owner_home(
     )
     config = f'''model = "{MODEL_ID}"
 model_provider = "remote-smoke"
+chatgpt_base_url = "{chatgpt_url}"
 {permissions}cli_auth_credentials_store = "file"
 
 [model_providers.remote-smoke]
@@ -154,6 +159,7 @@ requires_openai_auth = true
         jwt = synthetic_jwt(account_id)
         auth = {
             "auth_mode": "chatgpt",
+            "last_refresh": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "tokens": {
                 "id_token": jwt,
                 "access_token": jwt,
@@ -195,15 +201,19 @@ requires_openai_auth = true
     }
 
 
-def goal_tool_result(
-    tool_outputs: list[dict[str, Any]], call_id: str
-) -> dict[str, Any]:
+def tool_result_output(tool_outputs: list[dict[str, Any]], call_id: str) -> str:
     outputs = [
         item["output"] for item in tool_outputs if item.get("call_id") == call_id
     ]
-    if len(outputs) != 1:
+    if len(outputs) != 1 or not isinstance(outputs[0], str):
         raise ValueError(f"expected one tool result for {call_id}")
-    result = json.loads(outputs[0])
+    return outputs[0]
+
+
+def goal_tool_result(
+    tool_outputs: list[dict[str, Any]], call_id: str
+) -> dict[str, Any]:
+    result = json.loads(tool_result_output(tool_outputs, call_id))
     if (
         not isinstance(result, dict)
         or not isinstance(result.get("goalId"), str)
@@ -216,16 +226,63 @@ def goal_tool_result(
     return result
 
 
+def goal_call_ids(attempt: int) -> tuple[str, str]:
+    if attempt == 0:
+        return "remote-smoke-goal-read", "remote-smoke-goal-complete"
+    return (
+        f"remote-smoke-goal-read-resync-{attempt}",
+        f"remote-smoke-goal-complete-retry-{attempt}",
+    )
+
+
+def response_phase(
+    index: int, tool_outputs: list[dict[str, Any]], scenario: str
+) -> str:
+    sequence = SCENARIO_SEQUENCES[scenario]
+    if index < 1:
+        raise ValueError("invalid fixture exchange")
+    if scenario == "account-switch" or index <= 4:
+        if index > len(sequence):
+            raise ValueError("fixture response sequence is already complete")
+        return sequence[index - 1]
+    if index > 5 + 2 * MAX_GOAL_RESYNCS:
+        raise ValueError("goal resync limit exceeded")
+    if index % 2 == 0:
+        return "update_goal_retry"
+    attempt = (index - 5) // 2
+    read_id, update_id = goal_call_ids(attempt)
+    previous = goal_tool_result(tool_outputs, read_id)
+    output = tool_result_output(tool_outputs, update_id)
+    conflict = re.fullmatch(
+        r"goal revision conflict; call get_goal to resync "
+        r'\(current_goal_id=Some\(("[^"\\]+")\), current_revision=([0-9]+)\)',
+        output,
+    )
+    if conflict is not None:
+        if (
+            attempt >= MAX_GOAL_RESYNCS
+            or json.loads(conflict[1]) != previous["goalId"]
+            or int(conflict[2]) <= previous["revision"]
+        ):
+            raise ValueError("unexpected goal revision conflict")
+        return "get_goal_resync"
+    completed = goal_tool_result(tool_outputs, update_id)
+    if (
+        completed["goalId"] != previous["goalId"]
+        or completed["goal"].get("status") != "complete"
+        or completed["revision"] <= previous["revision"]
+    ):
+        raise ValueError("expected successful update_goal before final response")
+    return "goal_complete"
+
+
 def response_events(
     index: int,
     tool_outputs: list[dict[str, Any]],
     *,
     scenario: str = "goal",
 ) -> list[dict[str, Any]]:
-    sequence = SCENARIO_SEQUENCES[scenario]
-    if not 1 <= index <= len(sequence):
-        raise ValueError("fixture response sequence is already complete")
-    phase = sequence[index - 1]
+    phase = response_phase(index, tool_outputs, scenario)
     if phase == "first_turn_complete" and not any(
         item.get("call_id") == "remote-smoke-pwd" for item in tool_outputs
     ):
@@ -254,12 +311,23 @@ def response_events(
                 },
             }
         )
-    elif phase in {"get_goal", "update_goal"}:
+    elif phase in {"get_goal", "update_goal", "get_goal_resync", "update_goal_retry"}:
         arguments: dict[str, Any] = {}
-        if phase == "update_goal":
-            goal = goal_tool_result(tool_outputs, "remote-smoke-goal-read")
-            if goal["goal"].get("status") != "active":
+        updating = phase in {"update_goal", "update_goal_retry"}
+        attempt = (index - 4) // 2 if updating else (index - 3) // 2
+        read_id, update_id = goal_call_ids(attempt)
+        if updating:
+            goal = goal_tool_result(tool_outputs, read_id)
+            original = goal_tool_result(tool_outputs, "remote-smoke-goal-read")
+            if (
+                goal["goal"].get("status") != "active"
+                or goal["goalId"] != original["goalId"]
+            ):
                 raise ValueError("expected an active goal before update_goal")
+            if attempt:
+                previous = goal_tool_result(tool_outputs, goal_call_ids(attempt - 1)[0])
+                if goal["revision"] <= previous["revision"]:
+                    raise ValueError("resync must return a newer goal revision")
             arguments = {
                 "expected_goal_id": goal["goalId"],
                 "expected_revision": goal["revision"],
@@ -270,23 +338,13 @@ def response_events(
                 "type": "response.output_item.done",
                 "item": {
                     "type": "function_call",
-                    "call_id": (
-                        "remote-smoke-goal-read"
-                        if phase == "get_goal"
-                        else "remote-smoke-goal-complete"
-                    ),
-                    "name": phase,
+                    "call_id": update_id if updating else read_id,
+                    "name": "update_goal" if updating else "get_goal",
                     "arguments": json.dumps(arguments),
                 },
             }
         )
     else:
-        if phase == "goal_complete":
-            goal = goal_tool_result(tool_outputs, "remote-smoke-goal-complete")
-            if goal["goal"].get("status") != "complete":
-                raise ValueError(
-                    "expected successful update_goal before final response"
-                )
         text = (
             "remote smoke first turn complete"
             if phase == "first_turn_complete"
@@ -356,7 +414,6 @@ class FixtureState:
     ) -> None:
         self.scenario = scenario
         self.accounts = scenario_accounts(scenario)
-        self.response_sequence = SCENARIO_SEQUENCES[scenario]
         if source_refs is None:
             source_refs = {ACCOUNT_LABEL: source_ref}
         if set(source_refs) != set(self.accounts):
@@ -425,21 +482,40 @@ class FixtureState:
                         nested = None
                 if turn_id is None and isinstance(nested, dict):
                     turn_id = nested.get("turn_id") or nested.get("turnId")
+            tool_outputs = find_tool_outputs(body.get("input", []))
+            try:
+                phase = response_phase(index, tool_outputs, self.scenario)
+            except (ValueError, TypeError, KeyError):
+                phase = "unexpected"
             self.records.append(
                 {
                     "exchange": index,
-                    "phase": (
-                        self.response_sequence[index - 1]
-                        if index <= len(self.response_sequence)
-                        else "unexpected"
-                    ),
+                    "phase": phase,
                     "response_id": f"remote-smoke-response-{index}",
                     "turn_id": turn_id,
                     "account_slot": account_slot,
+                    # Record comparisons only, never header or credential values.
+                    "auth_diagnostics": {
+                        "authorization_present": bool(headers.get("Authorization")),
+                        "account_header_present": bool(
+                            headers.get("ChatGPT-Account-Id")
+                        ),
+                        "matching_auth_slots": [
+                            label
+                            for label, account_id in self.accounts.items()
+                            if headers.get("Authorization")
+                            == f"Bearer {synthetic_jwt(account_id)}"
+                        ],
+                        "matching_account_slots": [
+                            label
+                            for label, account_id in self.accounts.items()
+                            if headers.get("ChatGPT-Account-Id") == account_id
+                        ],
+                    }
+                    if self.scenario == "account-switch"
+                    else None,
                     "tool_outputs": (
-                        []
-                        if self.scenario == "account-switch"
-                        else find_tool_outputs(body.get("input", []))
+                        [] if self.scenario == "account-switch" else tool_outputs
                     ),
                 }
             )
@@ -469,6 +545,30 @@ def handler_for(state: FixtureState, role: str) -> type[BaseHTTPRequestHandler]:
             self.wfile.write(payload)
 
         def do_GET(self) -> None:  # noqa: N802
+            path = self.path.partition("?")[0].rstrip("/")
+            if role == "responses" and path in {
+                "/connectors/directory/list",
+                "/connectors/directory/list_workspace",
+            }:
+                self.send_json({"apps": [], "nextToken": None})
+                return
+            if role == "responses" and path == "/api/codex/ps/mcp":
+                # This empty Apps mock is stateless and has no server-initiated SSE stream.
+                self.send_error(HTTPStatus.METHOD_NOT_ALLOWED)
+                return
+            if (
+                role == "responses"
+                and path == "/.well-known/oauth-authorization-server/mcp"
+            ):
+                base_url = f"http://127.0.0.1:{self.server.server_address[1]}"
+                self.send_json(
+                    {
+                        "authorization_endpoint": f"{base_url}/oauth/authorize",
+                        "token_endpoint": f"{base_url}/oauth/token",
+                        "scopes_supported": [""],
+                    }
+                )
+                return
             if role == "responses" and self.path == "/fixture/first-request":
                 with state.lock:
                     status = {
@@ -522,7 +622,9 @@ def handler_for(state: FixtureState, role: str) -> type[BaseHTTPRequestHandler]:
                 state.first_response_release.set()
                 self.send_json({"released": True})
                 return
-            if role != "responses" or not self.path.rstrip("/").endswith("/responses"):
+            path = self.path.partition("?")[0].rstrip("/")
+            is_apps_mcp = path == "/api/codex/ps/mcp"
+            if role != "responses" or not (is_apps_mcp or path.endswith("/responses")):
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
             try:
@@ -534,6 +636,44 @@ def handler_for(state: FixtureState, role: str) -> type[BaseHTTPRequestHandler]:
                     raise ValueError("request body must be an object")
             except (ValueError, json.JSONDecodeError):
                 self.send_error(HTTPStatus.BAD_REQUEST)
+                return
+            if is_apps_mcp:
+                method = body.get("method")
+                if method == "notifications/initialized":
+                    self.send_response(HTTPStatus.ACCEPTED)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                if method == "initialize":
+                    params = body.get("params", {})
+                    if not isinstance(params, dict):
+                        self.send_error(HTTPStatus.BAD_REQUEST)
+                        return
+                    result = {
+                        "protocolVersion": params.get("protocolVersion", "2025-06-18"),
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "remote-smoke-apps", "version": "1.0.0"},
+                    }
+                elif method == "tools/list":
+                    result = {"tools": []}
+                elif method == "resources/list":
+                    result = {"resources": []}
+                elif method == "resources/templates/list":
+                    result = {"resourceTemplates": []}
+                elif method == "ping":
+                    result = {}
+                else:
+                    self.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": body.get("id"),
+                            "error": {"code": -32601, "message": "method not found"},
+                        }
+                    )
+                    return
+                self.send_json(
+                    {"jsonrpc": "2.0", "id": body.get("id"), "result": result}
+                )
                 return
             try:
                 index = state.record_response_request(body, self.headers)
