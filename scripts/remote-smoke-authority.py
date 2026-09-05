@@ -31,25 +31,44 @@ from typing import Any
 
 ACCOUNT_ID = "smoke-chatgpt-account"
 ACCOUNT_LABEL = "C1"
+SECOND_ACCOUNT_ID = "smoke-chatgpt-account-2"
 MODEL_ID = "remote-smoke-model"
 SOURCE_REF_CONTEXT = b"llm-bridge.subscription-source-ref/v1\0codex-cli\0"
 RESPONSE_SEQUENCE = (
-    "pwd", "first_turn_complete", "get_goal", "update_goal", "goal_complete"
+    "pwd",
+    "first_turn_complete",
+    "get_goal",
+    "update_goal",
+    "goal_complete",
 )
+SCENARIO_SEQUENCES = {
+    "goal": RESPONSE_SEQUENCE,
+    "approval": RESPONSE_SEQUENCE,
+    "account-switch": ("account_c1_complete", "account_c2_complete"),
+}
+
+
+def scenario_accounts(scenario: str) -> dict[str, str]:
+    if scenario not in SCENARIO_SEQUENCES:
+        raise ValueError("unknown fixture scenario")
+    accounts = {ACCOUNT_LABEL: ACCOUNT_ID}
+    if scenario == "account-switch":
+        accounts["C2"] = SECOND_ACCOUNT_ID
+    return accounts
 
 
 def _b64url(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
 
 
-def synthetic_jwt() -> str:
+def synthetic_jwt(account_id: str = ACCOUNT_ID) -> str:
     header = _b64url(
         json.dumps({"alg": "none", "typ": "JWT"}, separators=(",", ":")).encode()
     )
     claims = {
         "email": "remote-smoke@example.invalid",
         "https://api.openai.com/auth": {
-            "chatgpt_account_id": ACCOUNT_ID,
+            "chatgpt_account_id": account_id,
             "chatgpt_plan_type": "pro",
             "chatgpt_user_id": "remote-smoke-user",
         },
@@ -58,10 +77,10 @@ def synthetic_jwt() -> str:
     return f"{header}.{payload}.{_b64url(b'synthetic-signature')}"
 
 
-def subscription_source_ref(canonical_home: Path) -> str:
+def subscription_source_ref(canonical_home: Path, account_id: str = ACCOUNT_ID) -> str:
     digest = hashlib.sha256()
     digest.update(SOURCE_REF_CONTEXT)
-    digest.update(ACCOUNT_ID.encode())
+    digest.update(account_id.encode())
     digest.update(b"\0")
     digest.update(str(canonical_home).encode("utf-8"))
     return "subscription-source-v1:" + _b64url(digest.digest())
@@ -78,8 +97,16 @@ def private_write(path: Path, data: str) -> None:
 
 
 def prepare_owner_home(
-    owner_home: Path, responses_port: int, primary: Path | None
-) -> dict[str, str]:
+    owner_home: Path,
+    responses_port: int,
+    primary: Path | None,
+    *,
+    scenario: str = "goal",
+    code_mode_host: Path | None = None,
+) -> dict[str, Any]:
+    accounts = scenario_accounts(scenario)
+    if code_mode_host is not None and primary is None:
+        raise ValueError("code-mode host binary requires a primary binary")
     if owner_home.exists() and any(owner_home.iterdir()):
         raise ValueError(f"owner home must be new or empty: {owner_home}")
     private_dir(owner_home)
@@ -89,27 +116,19 @@ def prepare_owner_home(
 
     config_dir = owner_home / ".config"
     private_dir(config_dir)
-    private_write(config_dir / "codex-accounts.tsv", f"1\t{canonical_home}\n")
-
-    jwt = synthetic_jwt()
-    auth = {
-        "auth_mode": "chatgpt",
-        "tokens": {
-            "id_token": jwt,
-            "access_token": jwt,
-            "refresh_token": "synthetic-refresh-not-a-secret",
-            "account_id": ACCOUNT_ID,
-        },
-    }
-    private_write(account_home / "auth.json", json.dumps(auth, separators=(",", ":")))
-
     provider_url = f"http://127.0.0.1:{responses_port}/v1"
+    permissions = (
+        'approval_policy = "on-request"\n'
+        'default_permissions = ":read-only"\n'
+        'approvals_reviewer = "user"\n'
+        if scenario == "approval"
+        else 'approval_policy = "never"\n'
+        'sandbox_mode = "danger-full-access"\n'
+        'default_permissions = ":danger-full-access"\n'
+    )
     config = f'''model = "{MODEL_ID}"
 model_provider = "remote-smoke"
-approval_policy = "never"
-sandbox_mode = "danger-full-access"
-default_permissions = ":danger-full-access"
-cli_auth_credentials_store = "file"
+{permissions}cli_auth_credentials_store = "file"
 
 [model_providers.remote-smoke]
 name = "Remote smoke fixture"
@@ -119,13 +138,42 @@ request_max_retries = 0
 stream_max_retries = 0
 requires_openai_auth = true
 '''
-    private_write(account_home / "config.toml", config)
+    if scenario == "account-switch":
+        config = (
+            'model_context_window = 100000\nmodel_reasoning_effort = "medium"\n'
+            + config
+        )
+    catalog_rows = []
+    source_refs = {}
+    for label, account_id in accounts.items():
+        home = owner_home / ".codex" / f"account{label[1:]}"
+        private_dir(home)
+        home = home.resolve(strict=True)
+        catalog_rows.append(f"{label[1:]}\t{home}\n")
+        source_refs[label] = subscription_source_ref(home, account_id)
+        jwt = synthetic_jwt(account_id)
+        auth = {
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": jwt,
+                "access_token": jwt,
+                "refresh_token": "synthetic-refresh-not-a-secret",
+                "account_id": account_id,
+            },
+        }
+        private_write(home / "auth.json", json.dumps(auth, separators=(",", ":")))
+        private_write(home / "config.toml", config)
+    private_write(config_dir / "codex-accounts.tsv", "".join(catalog_rows))
 
     installed_primary = account_home / "packages" / "standalone" / "current" / "codex"
     if primary is not None:
         private_dir(installed_primary.parent)
         shutil.copyfile(primary, installed_primary)
         installed_primary.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+    installed_host = installed_primary.with_name("codex-code-mode-host")
+    if code_mode_host is not None:
+        shutil.copyfile(code_mode_host, installed_host)
+        installed_host.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
 
     control_dir = owner_home / ".tokenmanager" / "control"
     private_dir(control_dir)
@@ -137,14 +185,22 @@ requires_openai_auth = true
         "primary_binary": str(installed_primary),
         "control_socket": str(control_dir / "tokenmanager.sock"),
         "records_file": str(records_file),
-        "source_ref": subscription_source_ref(canonical_home),
+        "source_ref": source_refs[ACCOUNT_LABEL],
+        "source_refs": source_refs,
+        "scenario": scenario,
+        "account_slots": list(accounts),
+        "code_mode_host_binary": str(installed_host)
+        if code_mode_host is not None
+        else None,
     }
 
 
 def goal_tool_result(
     tool_outputs: list[dict[str, Any]], call_id: str
 ) -> dict[str, Any]:
-    outputs = [item["output"] for item in tool_outputs if item.get("call_id") == call_id]
+    outputs = [
+        item["output"] for item in tool_outputs if item.get("call_id") == call_id
+    ]
     if len(outputs) != 1:
         raise ValueError(f"expected one tool result for {call_id}")
     result = json.loads(outputs[0])
@@ -161,11 +217,15 @@ def goal_tool_result(
 
 
 def response_events(
-    index: int, tool_outputs: list[dict[str, Any]]
+    index: int,
+    tool_outputs: list[dict[str, Any]],
+    *,
+    scenario: str = "goal",
 ) -> list[dict[str, Any]]:
-    if not 1 <= index <= len(RESPONSE_SEQUENCE):
+    sequence = SCENARIO_SEQUENCES[scenario]
+    if not 1 <= index <= len(sequence):
         raise ValueError("fixture response sequence is already complete")
-    phase = RESPONSE_SEQUENCE[index - 1]
+    phase = sequence[index - 1]
     if phase == "first_turn_complete" and not any(
         item.get("call_id") == "remote-smoke-pwd" for item in tool_outputs
     ):
@@ -175,6 +235,14 @@ def response_events(
         {"type": "response.created", "response": {"id": response_id}}
     ]
     if phase == "pwd":
+        arguments = {"cmd": "pwd", "yield_time_ms": 10000}
+        if scenario == "approval":
+            arguments.update(
+                {
+                    "sandbox_permissions": "require_escalated",
+                    "justification": "Isolated approval smoke",
+                }
+            )
         events.append(
             {
                 "type": "response.output_item.done",
@@ -182,7 +250,7 @@ def response_events(
                     "type": "function_call",
                     "call_id": "remote-smoke-pwd",
                     "name": "exec_command",
-                    "arguments": json.dumps({"cmd": "pwd", "yield_time_ms": 10000}),
+                    "arguments": json.dumps(arguments),
                 },
             }
         )
@@ -216,12 +284,16 @@ def response_events(
         if phase == "goal_complete":
             goal = goal_tool_result(tool_outputs, "remote-smoke-goal-complete")
             if goal["goal"].get("status") != "complete":
-                raise ValueError("expected successful update_goal before final response")
+                raise ValueError(
+                    "expected successful update_goal before final response"
+                )
         text = (
             "remote smoke first turn complete"
             if phase == "first_turn_complete"
             else "remote smoke goal complete"
         )
+        if scenario == "account-switch":
+            text = f"remote smoke account C{index} complete"
         events.append(
             {
                 "type": "response.output_item.done",
@@ -274,8 +346,23 @@ def find_tool_outputs(value: Any) -> list[dict[str, Any]]:
 
 class FixtureState:
     def __init__(
-        self, source_ref: str, records_file: Path, *, hold_first_response: bool = False
+        self,
+        source_ref: str,
+        records_file: Path,
+        *,
+        hold_first_response: bool = False,
+        scenario: str = "goal",
+        source_refs: dict[str, str] | None = None,
     ) -> None:
+        self.scenario = scenario
+        self.accounts = scenario_accounts(scenario)
+        self.response_sequence = SCENARIO_SEQUENCES[scenario]
+        if source_refs is None:
+            source_refs = {ACCOUNT_LABEL: source_ref}
+        if set(source_refs) != set(self.accounts):
+            raise ValueError(
+                "fixture account source references do not match the scenario"
+            )
         now = int(time.time())
         self.snapshot = {
             "label": ACCOUNT_LABEL,
@@ -298,9 +385,14 @@ class FixtureState:
                 ],
             },
         }
+        self.snapshots = [
+            {**self.snapshot, "label": label, "sourceRef": source_refs[label]}
+            for label in self.accounts
+        ]
         self.records_file = records_file
         self.records: list[dict[str, Any]] = []
         self.response_count = 0
+        self.completed_response_count = 0
         self.lock = threading.Lock()
         self.first_request_observed = threading.Event()
         self.first_response_release = threading.Event()
@@ -311,6 +403,16 @@ class FixtureState:
         with self.lock:
             self.response_count += 1
             index = self.response_count
+            account_slot = None
+            if self.scenario == "account-switch":
+                for label, account_id in self.accounts.items():
+                    if (
+                        headers.get("ChatGPT-Account-Id") == account_id
+                        and headers.get("Authorization")
+                        == f"Bearer {synthetic_jwt(account_id)}"
+                    ):
+                        account_slot = label
+                        break
             turn_id = headers.get("x-codex-turn-id")
             metadata = body.get("client_metadata") or body.get("metadata")
             if turn_id is None and isinstance(metadata, dict):
@@ -327,18 +429,27 @@ class FixtureState:
                 {
                     "exchange": index,
                     "phase": (
-                        RESPONSE_SEQUENCE[index - 1]
-                        if index <= len(RESPONSE_SEQUENCE)
+                        self.response_sequence[index - 1]
+                        if index <= len(self.response_sequence)
                         else "unexpected"
                     ),
                     "response_id": f"remote-smoke-response-{index}",
                     "turn_id": turn_id,
-                    "tool_outputs": find_tool_outputs(body.get("input", [])),
+                    "account_slot": account_slot,
+                    "tool_outputs": (
+                        []
+                        if self.scenario == "account-switch"
+                        else find_tool_outputs(body.get("input", []))
+                    ),
                 }
             )
             private_write(self.records_file, json.dumps(self.records, indent=2) + "\n")
             if index == 1:
                 self.first_request_observed.set()
+            if self.scenario == "account-switch" and (
+                index > len(self.accounts) or account_slot != f"C{index}"
+            ):
+                raise ValueError("request account did not match the fixture sequence")
             return index
 
 
@@ -359,22 +470,31 @@ def handler_for(state: FixtureState, role: str) -> type[BaseHTTPRequestHandler]:
 
         def do_GET(self) -> None:  # noqa: N802
             if role == "responses" and self.path == "/fixture/first-request":
-                self.send_json(
-                    {
+                with state.lock:
+                    status = {
+                        "scenario": state.scenario,
+                        "available_account_slots": list(state.accounts),
                         "observed": state.first_request_observed.is_set(),
                         "released": state.first_response_release.is_set(),
+                        "response_count": state.response_count,
+                        "completed_response_count": state.completed_response_count,
+                        "phases": [record["phase"] for record in state.records],
+                        "turn_ids": [record["turn_id"] for record in state.records],
+                        "account_slots": [
+                            record["account_slot"] for record in state.records
+                        ],
                     }
-                )
+                self.send_json(status)
                 return
             if role != "token" or self.path not in {"/snapshots", "/events"}:
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
             if self.path == "/snapshots":
-                self.send_json({"accounts": [state.snapshot]})
+                self.send_json({"accounts": state.snapshots})
                 return
             first = (
                 "event: initial\ndata: "
-                + json.dumps([state.snapshot], separators=(",", ":"))
+                + json.dumps(state.snapshots, separators=(",", ":"))
                 + "\n\n"
             )
             self.send_response(HTTPStatus.OK)
@@ -415,10 +535,12 @@ def handler_for(state: FixtureState, role: str) -> type[BaseHTTPRequestHandler]:
             except (ValueError, json.JSONDecodeError):
                 self.send_error(HTTPStatus.BAD_REQUEST)
                 return
-            index = state.record_response_request(body, self.headers)
             try:
+                index = state.record_response_request(body, self.headers)
                 events = response_events(
-                    index, find_tool_outputs(body.get("input", []))
+                    index,
+                    find_tool_outputs(body.get("input", [])),
+                    scenario=state.scenario,
                 )
             except (ValueError, TypeError, KeyError):
                 self.send_error(
@@ -442,13 +564,21 @@ def handler_for(state: FixtureState, role: str) -> type[BaseHTTPRequestHandler]:
             self.end_headers()
             self.wfile.write(payload)
 
+            # Count only a validated fixture sequence whose SSE was fully sent.
+            self.wfile.flush()
+            with state.lock:
+                state.completed_response_count += 1
+
     return Handler
 
 
 class ControlServer(threading.Thread):
-    def __init__(self, socket_path: Path) -> None:
+    def __init__(
+        self, socket_path: Path, account_labels: tuple[str, ...] = (ACCOUNT_LABEL,)
+    ) -> None:
         super().__init__(name="remote-smoke-control", daemon=True)
         self.socket_path = socket_path
+        self.account_labels = account_labels
         self.stop_event = threading.Event()
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.listener.bind(str(socket_path))
@@ -467,6 +597,7 @@ class ControlServer(threading.Thread):
             with connection:
                 stream = connection.makefile("rwb")
                 generation = 1
+                account_label = None
                 expected = [
                     ("lifecycle/begin", "active"),
                     ("lifecycle/forceRefresh", "refreshed"),
@@ -478,9 +609,12 @@ class ControlServer(threading.Thread):
                         request = json.loads(line)
                     except json.JSONDecodeError:
                         break
+                    if account_label is None:
+                        account_label = request.get("accountId")
                     valid = (
                         request.get("method") == expected_method
-                        and request.get("accountId") == ACCOUNT_LABEL
+                        and account_label in self.account_labels
+                        and request.get("accountId") == account_label
                     )
                     response = {
                         "ok": valid,
@@ -513,6 +647,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--owner-home", type=Path)
     parser.add_argument("--primary-binary", type=Path)
+    parser.add_argument("--code-mode-host-binary", type=Path)
+    parser.add_argument("--scenario", choices=tuple(SCENARIO_SEQUENCES), default="goal")
     parser.add_argument("--token-manager-port", type=int, default=0)
     parser.add_argument("--responses-port", type=int, default=0)
     parser.add_argument("--ready-file", type=Path)
@@ -530,6 +666,11 @@ def main() -> int:
     args = parse_args()
     if args.primary_binary is not None and not args.primary_binary.is_file():
         raise SystemExit(f"primary binary does not exist: {args.primary_binary}")
+    if args.code_mode_host_binary is not None:
+        if args.primary_binary is None:
+            raise SystemExit("--code-mode-host-binary requires --primary-binary")
+        if not args.code_mode_host_binary.is_file():
+            raise SystemExit("code-mode host binary does not exist")
 
     owner_home = (
         args.owner_home or Path(tempfile.mkdtemp(prefix="codex-remote-smoke-"))
@@ -538,17 +679,25 @@ def main() -> int:
     probe = loopback_server(args.responses_port, BaseHTTPRequestHandler)
     responses_port = probe.server_address[1]
     probe.server_close()
-    prepared = prepare_owner_home(owner_home, responses_port, args.primary_binary)
+    prepared = prepare_owner_home(
+        owner_home,
+        responses_port,
+        args.primary_binary,
+        scenario=args.scenario,
+        code_mode_host=args.code_mode_host_binary,
+    )
     state = FixtureState(
         prepared["source_ref"],
         Path(prepared["records_file"]),
         hold_first_response=args.hold_first_response,
+        scenario=args.scenario,
+        source_refs=prepared["source_refs"],
     )
     responses = loopback_server(responses_port, handler_for(state, "responses"))
     token_manager = loopback_server(
         args.token_manager_port, handler_for(state, "token")
     )
-    control = ControlServer(Path(prepared["control_socket"]))
+    control = ControlServer(Path(prepared["control_socket"]), tuple(state.accounts))
 
     ready = {
         **prepared,
