@@ -2,10 +2,12 @@
 """Format repository sources or check that they are already formatted."""
 
 import argparse
+import json
 import os
 import shlex
 import subprocess
 import sys
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 class Command:
     args: tuple[str, ...]
     cwd: Path = REPO_ROOT
+    lf_input_files: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -41,11 +44,47 @@ def just_formatter_group(*, check: bool) -> FormatterGroup:
 
 
 def rust_formatter_group(*, check: bool) -> FormatterGroup:
-    args = ["cargo", "fmt", "--", "--config", "imports_granularity=Item"]
+    rustfmt_args = ["--", "--config", "imports_granularity=Item"]
     if check:
-        args.append("--check")
-    command = Command(tuple(args), REPO_ROOT / "codex-rs")
-    return FormatterGroup("Rust", (command,))
+        rustfmt_args.append("--check")
+    cwd = REPO_ROOT / "codex-rs"
+    if os.name != "nt":
+        return FormatterGroup("Rust", (Command(("cargo", "fmt", *rustfmt_args), cwd),))
+
+    metadata = json.loads(
+        subprocess.check_output(
+            ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
+            cwd=cwd,
+        )
+    )
+    members = set(metadata["workspace_members"])
+    commands: list[Command] = []
+    packages: list[str] = []
+    target_size = 0
+    for package in metadata["packages"]:
+        if package["id"] not in members:
+            continue
+        # cargo fmt expands package names into absolute rustfmt target paths. Keep
+        # those paths below half of Windows' 32767 UTF-16 command-line limit,
+        # leaving room for the executable, edition and other rustfmt arguments.
+        package_size = sum(
+            len(subprocess.list2cmdline([target["src_path"]]).encode("utf-16-le")) // 2
+            + 1
+            for target in package["targets"]
+        )
+        if packages and target_size + package_size > 16000:
+            commands.append(
+                Command(("cargo", "fmt", "--package", *packages, *rustfmt_args), cwd)
+            )
+            packages = []
+            target_size = 0
+        packages.append(package["name"])
+        target_size += package_size
+    if packages:
+        commands.append(
+            Command(("cargo", "fmt", "--package", *packages, *rustfmt_args), cwd)
+        )
+    return FormatterGroup("Rust", tuple(commands))
 
 
 def buildifier_formatter_group(*, check: bool) -> FormatterGroup:
@@ -77,7 +116,15 @@ def buildifier_formatter_group(*, check: bool) -> FormatterGroup:
         "-lint=off",
         *buildifier_files,
     ]
-    return FormatterGroup("Bazel/Starlark", (Command(tuple(buildifier_args)),))
+    return FormatterGroup(
+        "Bazel/Starlark",
+        (
+            Command(
+                tuple(buildifier_args),
+                lf_input_files=tuple(buildifier_files) if os.name == "nt" else (),
+            ),
+        ),
+    )
 
 
 def python_sdk_formatter_group(*, check: bool) -> FormatterGroup:
@@ -133,18 +180,51 @@ def formatter_groups(*, check: bool) -> tuple[FormatterGroup, ...]:
     )
 
 
+def run_buildifier_command(command: Command) -> subprocess.CompletedProcess[str]:
+    # CRLF inside Starlark triple-quoted strings is otherwise rewritten into
+    # literal \\r escapes. Normalize disposable inputs, including in check mode.
+    with tempfile.TemporaryDirectory(prefix="codex-buildifier-") as temporary:
+        scratch = Path(temporary)
+        inputs: list[tuple[Path, Path, bytes]] = []
+        for name in command.lf_input_files:
+            source = command.cwd / name
+            normalized = source.read_bytes().replace(b"\r\n", b"\n")
+            target = scratch / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(normalized)
+            inputs.append((source, target, normalized))
+        # Keep relative file arguments short and preserve their names/types.
+        process = subprocess.run(
+            command.args,
+            cwd=scratch,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+        if process.returncode == 0 and "-mode=fix" in command.args:
+            for source, target, normalized in inputs:
+                formatted = target.read_bytes()
+                if formatted != normalized:
+                    source.write_bytes(formatted)
+        return process
+
+
 def run_formatter_group(group: FormatterGroup) -> FormatterResult:
     """Run one formatter group sequentially and return its buffered output."""
     for command in group.commands:
         try:
-            process = subprocess.run(
-                command.args,
-                cwd=command.cwd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                check=False,
-            )
+            if command.lf_input_files:
+                process = run_buildifier_command(command)
+            else:
+                process = subprocess.run(
+                    command.args,
+                    cwd=command.cwd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    check=False,
+                )
         except OSError as error:
             output = f"$ {shlex.join(command.args)}\n{error}\n"
             return FormatterResult(group.name, output, 1)
